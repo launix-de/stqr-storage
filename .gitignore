@@ -1,0 +1,8 @@
+*.test
+*.out
+*.vol
+coverage/
+.tmp/
+
+# Runtime volume files, never library source.
+/volumes/
