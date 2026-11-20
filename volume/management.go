@@ -43,11 +43,9 @@ func (v *Volume) Describe() Description {
 }
 func (v *Volume) Size() uint64 { v.mu.RLock(); defer v.mu.RUnlock(); return v.sb.Identity.Size }
 
-// SyncThrough is a local flush barrier for a known object version. Replicated
+// syncThroughLocked is a local flush barrier for a known object version. Replicated
 // barriers require the server to invoke it on every required replica.
-func (v *Volume) SyncThrough(k Key, version uint64) error {
-	v.mu.Lock()
-	defer v.mu.Unlock()
+func (v *Volume) syncThroughLocked(k Key, version uint64) error {
 	if e := v.check(false); e != nil {
 		return e
 	}

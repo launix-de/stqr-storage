@@ -534,17 +534,6 @@ func (v *Volume) SetCacheLimits(entries int, bytes uint64) {
 	v.cache = newCache(entries, bytes)
 }
 
-// CopyTo streams a logical object's payload without a whole-object buffer.
-// For a locked sequence of metadata reads and multiple transfers, use Open.
-func (v *Volume) CopyTo(k Key, offset, length uint64, dst io.Writer) (uint64, error) {
-	h, e := v.Open(false)
-	if e != nil {
-		return 0, e
-	}
-	defer h.Close()
-	return h.CopyTo(k, offset, length, dst)
-}
-
 func (v *Volume) copyToLocked(k Key, offset, length uint64, dst io.Writer) (uint64, error) {
 	if e := v.check(false); e != nil {
 		return 0, e

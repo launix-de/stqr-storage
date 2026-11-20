@@ -12,14 +12,12 @@ import (
 // its callbacks may reenter the destination Volume while Restore holds its lock.
 type ExtentSource func(yield func(offset uint64, data io.Reader, length uint64) error) error
 
-// Restore atomically installs a trusted migration/recovery snapshot in a volume
+// restoreLocked atomically installs a trusted migration/recovery snapshot in a volume
 // which may already contain unrelated objects. It preserves the supplied logical
 // version and tombstone. The server must validate source ownership/epoch before
 // calling; this storage primitive does not grant cluster authority. Older/equal
 // existing versions are rejected; a nonzero retry ID makes repeats idempotent.
-func (v *Volume) Restore(k Key, info Info, source ExtentSource, opts Options) error {
-	v.mu.Lock()
-	defer v.mu.Unlock()
+func (v *Volume) restoreLocked(k Key, info Info, source ExtentSource, opts Options) error {
 	if e := v.check(true); e != nil {
 		return e
 	}
@@ -108,11 +106,9 @@ type RequestRecord struct {
 	Result      Result
 }
 
-// RestoreRequest imports original client retry state after its object snapshot.
+// restoreRequestLocked imports original client retry state after its object snapshot.
 // Trusted server code must transfer this before activating target ownership.
-func (v *Volume) RestoreRequest(x RequestRecord) error {
-	v.mu.Lock()
-	defer v.mu.Unlock()
+func (v *Volume) restoreRequestLocked(x RequestRecord) error {
 	if e := v.check(true); e != nil {
 		return e
 	}
@@ -138,11 +134,9 @@ func (v *Volume) RestoreRequest(x RequestRecord) error {
 	return v.commitWithReserve(r, v.sb, false)
 }
 
-// ScanRequests streams retained retry records for migration. fn must not reenter
-// this volume; it runs under its read lock. Entries are ordered by RequestID.
-func (v *Volume) ScanRequests(fn func(RequestRecord) error) error {
-	v.mu.RLock()
-	defer v.mu.RUnlock()
+// scanRequestsLocked streams retained retry records for migration under a read
+// or write lease. fn must not reenter this volume. Entries are ordered by RequestID.
+func (v *Volume) scanRequestsLocked(fn func(RequestRecord) error) error {
 	if e := v.check(false); e != nil {
 		return e
 	}
@@ -156,14 +150,4 @@ func (v *Volume) ScanRequests(fn func(RequestRecord) error) error {
 		}
 		return fn(RequestRecord{ID: r.Request, Key: r.Key, Fingerprint: r.Fingerprint, Result: r.Result})
 	})
-}
-
-// Repair replaces a damaged object's physical data with a trusted replica of
-// the same version. It requires that version still be current, preserves retry
-// history and logical version, and is not a client mutation or an owner change.
-func (v *Volume) Repair(k Key, info Info, source ExtentSource, opts Options) error {
-	version := info.Version
-	opts.ExpectedVersion = &version
-	opts.restoreSameVersion = true
-	return v.Restore(k, info, source, opts)
 }

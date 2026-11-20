@@ -109,14 +109,6 @@ func (v *Volume) statLocked(k Key) (Info, error) {
 	return o.Info, nil
 }
 
-// ReadAt reads a bounded range. Sparse bytes are synthesized as zero. At/after
-// EOF it returns io.EOF; callers wanting a clipped slice may use GetRange.
-func (v *Volume) ReadAt(k Key, dst []byte, offset uint64) (int, error) {
-	v.mu.RLock()
-	defer v.mu.RUnlock()
-	return v.readAtLocked(k, dst, offset)
-}
-
 func (v *Volume) readAtLocked(k Key, dst []byte, offset uint64) (int, error) {
 	if e := v.check(false); e != nil {
 		return 0, e
@@ -143,9 +135,7 @@ func (v *Volume) readAtLocked(k Key, dst []byte, offset uint64) (int, error) {
 	}
 	return int(n), nil
 }
-func (v *Volume) GetRange(k Key, offset, length uint64) ([]byte, Info, error) {
-	v.mu.RLock()
-	defer v.mu.RUnlock()
+func (v *Volume) getRangeLocked(k Key, offset, length uint64) ([]byte, Info, error) {
 	if e := v.check(false); e != nil {
 		return nil, Info{}, e
 	}
@@ -168,12 +158,7 @@ func (v *Volume) GetRange(k Key, offset, length uint64) ([]byte, Info, error) {
 	return out, o.Info, e
 }
 
-// Get is a convenience for small objects. Large objects use CopyTo/ReadAt; the
-// buffer limit does not limit logical object size or sparse offsets.
-func (v *Volume) Get(k Key) ([]byte, Info, error) { return v.GetRange(k, 0, ^uint64(0)) }
-func (v *Volume) Extents(k Key) ([]Extent, error) {
-	v.mu.RLock()
-	defer v.mu.RUnlock()
+func (v *Volume) extentsLocked(k Key) ([]Extent, error) {
 	if e := v.check(false); e != nil {
 		return nil, e
 	}
@@ -265,47 +250,6 @@ func fingerprint(op uint8, k Key, offset, length uint64, opts Options, expected 
 	h.Write(expected)
 	return h
 }
-func (v *Volume) Put(k Key, data []byte, opts Options) (Info, error) {
-	r, e := v.mutate(opPut, k, 0, uint64(len(data)), bytes.NewReader(data), nil, opts)
-	return r.Info, e
-}
-func (v *Volume) PutReader(k Key, data io.Reader, length uint64, opts Options) (Info, error) {
-	r, e := v.mutate(opPut, k, 0, length, data, nil, opts)
-	return r.Info, e
-}
-func (v *Volume) PutRange(k Key, offset uint64, data []byte, opts Options) (Info, error) {
-	r, e := v.mutate(opPutRange, k, offset, uint64(len(data)), bytes.NewReader(data), nil, opts)
-	return r.Info, e
-}
-func (v *Volume) PutRangeReader(k Key, offset uint64, data io.Reader, length uint64, opts Options) (Info, error) {
-	r, e := v.mutate(opPutRange, k, offset, length, data, nil, opts)
-	return r.Info, e
-}
-func (v *Volume) Append(k Key, data []byte, opts Options) (Result, error) {
-	return v.mutate(opAppend, k, 0, uint64(len(data)), bytes.NewReader(data), nil, opts)
-}
-func (v *Volume) AppendReader(k Key, data io.Reader, length uint64, opts Options) (Result, error) {
-	return v.mutate(opAppend, k, 0, length, data, nil, opts)
-}
-func (v *Volume) Trunc(k Key, length uint64, opts Options) (Info, error) {
-	r, e := v.mutate(opTrunc, k, 0, length, nil, nil, opts)
-	return r.Info, e
-}
-func (v *Volume) Delete(k Key, opts Options) error {
-	_, e := v.mutate(opDelete, k, 0, 0, nil, nil, opts)
-	return e
-}
-
-// CAS compares and replaces an equal-length range. With WholeObject and an
-// ExpectedVersion (or CreateOnly), it atomically replaces the entire object.
-func (v *Volume) CAS(k Key, offset uint64, expected, replacement []byte, opts Options) (Info, error) {
-	if e := validateCAS(offset, expected, replacement, opts); e != nil {
-		return Info{}, e
-	}
-	r, e := v.mutate(opCAS, k, offset, uint64(len(replacement)), bytes.NewReader(replacement), expected, opts)
-	return r.Info, e
-}
-
 func validateCAS(offset uint64, expected, replacement []byte, opts Options) error {
 	if len(replacement) > 1<<20 || len(expected) > 1<<20 {
 		return ErrRange
@@ -319,14 +263,8 @@ func validateCAS(offset uint64, expected, replacement []byte, opts Options) erro
 	return nil
 }
 
-func (v *Volume) mutate(op uint8, k Key, offset, length uint64, src io.Reader, expected []byte, opts Options) (Result, error) {
-	v.mu.Lock()
-	defer v.mu.Unlock()
-	return v.mutateWithRetryLocked(op, k, offset, length, src, expected, opts)
-}
-
-// mutateWithRetryLocked requires the volume's exclusive lock, also when reached
-// through a write handle. Keep validation, compaction and retry identical.
+// mutateWithRetryLocked requires a write handle's exclusive volume lock. All
+// mutations share validation, compaction and retry handling here.
 func (v *Volume) mutateWithRetryLocked(op uint8, k Key, offset, length uint64, src io.Reader, expected []byte, opts Options) (Result, error) {
 	if e := v.check(true); e != nil {
 		return Result{}, e
@@ -496,20 +434,16 @@ func int64min(n uint64) int64 {
 	return int64(n)
 }
 
-// OperationStatus returns a stored successful result, if its RequestID has not
+// operationStatusLocked returns a stored successful result, if its RequestID has not
 // been explicitly forgotten. Absence is not a proof that an operation never ran.
-func (v *Volume) OperationStatus(id ID) (Result, bool, error) {
-	v.mu.RLock()
-	defer v.mu.RUnlock()
+func (v *Volume) operationStatusLocked(id ID) (Result, bool, error) {
 	if e := v.check(false); e != nil {
 		return Result{}, false, e
 	}
 	d, ok, e := v.loadDedupe(id)
 	return d.Result, ok, e
 }
-func (v *Volume) ForgetRequest(id ID) error {
-	v.mu.Lock()
-	defer v.mu.Unlock()
+func (v *Volume) forgetRequestLocked(id ID) error {
 	if e := v.check(true); e != nil {
 		return e
 	}

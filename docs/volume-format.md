@@ -31,8 +31,10 @@ operations on different volumes, callers must establish a consistent lock order.
 The server is responsible for cluster ownership, replication, bucket access and
 quotas across volumes. `Bind` persists/checks the node/cluster identity.
 
-`Stat` is an independent general metadata query. To build response headers and
-stream the matching version, acquire a session with `Volume.Open(write bool)`:
+`Volume.Stat` is an independent general metadata query. All other object access
+is exclusively through a handle from `Volume.Open(write bool)`; there is no
+second, automatically locking object API on `Volume`. Use a read session to
+build response headers and stream the matching version:
 
 ```go
 h, err := v.Open(false) // true acquires the exclusive write lock
@@ -71,17 +73,21 @@ lock synchronously and exactly once, including repeated/concurrent closes.
 The Go runtime does **not** guarantee cleanup execution or timing, particularly
 before process exit: `defer h.Close()` is part of the caller's contract.
 
-- Objects: `Put`, `PutReader`, `PutRange`, `PutRangeReader`, `Append`,
-  `AppendReader`, `Trunc`, `Delete`, `CAS`, `Stat`, `Get`, `GetRange`, `ReadAt`.
-- Streaming/layout: `CopyTo`, `Extents`, hash-ordered `Scan`, `Recompress`.
-- Recovery/migration: `Checkpoint`, `Compact`, `Scrub`, `Export`, `Import`,
-  `Restore`, `Repair`, `ScanRequests`, `RestoreRequest`.
-- Retry: `OperationStatus`, `ForgetRequest`. Nonzero RequestIDs persist until
-  explicitly forgotten; zero opts out of deduplication. Inputs and options must
-  remain unchanged until their call returns.
-- Management: `Identity`, `Name`, `Header`, `Size`, `State`, `SetState`, `Describe`,
-  `Stats`, `IOStats`, `SetCacheLimits`, `SetGuaranteedReserve`, `Sync`,
-  `SyncThrough`, `Detach`, `Close`.
+- Both handle modes: `Stat`, `Get`, `GetRange`, `ReadAt`, `CopyTo`, `Extents`,
+  hash-ordered `Scan`, `OperationStatus`, `ScanRequests`, `Close`.
+- Write handles additionally: `Put`, `PutReader`, `PutRange`, `PutRangeReader`,
+  `Append`, `AppendReader`, `Trunc`, `Delete`, `CAS`, `Recompress`, `Restore`,
+  `Repair`, `RestoreRequest`, `ForgetRequest`, `SyncThrough`. The flush barrier
+  also needs a write handle because a failed sync fences the volume.
+- Volume management and maintenance, called outside handle sessions: `Open`,
+  standalone `Stat`, `Identity`, `Name`, `Header`, `Size`, `State`, `SetState`,
+  `Describe`, `Stats`, `IOStats`, `SetCacheLimits`, `SetGuaranteedReserve`, `Sync`,
+  `Bind`, `VerifyIdentity`, `Checkpoint`, `Compact`, `Scrub`, `Export`, `Import`,
+  `Detach`, `Close`. These operate on the volume itself and manage their own
+  locking. Volume `Close` closes the backend; handle `Close` ends only its session.
+
+Nonzero RequestIDs persist until explicitly forgotten; zero opts out of
+deduplication. Inputs and options must remain unchanged until their call returns.
 
 `Get`/`GetRange` cap convenience allocations at 16 MiB. `ReadAt`/`CopyTo` and
 reader-based writes support larger objects without whole-object payload buffers.

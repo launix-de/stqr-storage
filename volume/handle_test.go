@@ -25,7 +25,7 @@ func TestHandleMetadataAndRepeatedCopy(t *testing.T) {
 	v, _ := memoryVolume(t, 4<<20)
 	k := testKey(1)
 	data := bytes.Repeat([]byte("original"), BlockSize/4)
-	want, e := v.Put(k, data, Options{Compression: Codec(LZ4)})
+	want, e := testPut(v, k, data, Options{Compression: Codec(LZ4)})
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -44,7 +44,7 @@ func TestHandleMetadataAndRepeatedCopy(t *testing.T) {
 	}
 	writerDone := make(chan error, 1)
 	go func() {
-		_, e := v.Put(k, []byte("new"), Options{})
+		_, e := testPut(v, k, []byte("new"), Options{})
 		writerDone <- e
 	}()
 	for _, offset := range []uint64{0, BlockSize - 3, uint64(len(data)) - 2} {
@@ -89,7 +89,7 @@ func (f handleWriter) Write(b []byte) (int, error) { return f(b) }
 func TestHandleCopyFailuresKeepSessionOpen(t *testing.T) {
 	v, _ := memoryVolume(t, 1<<20)
 	k := testKey(1)
-	v.Put(k, []byte("abc"), Options{})
+	testPut(v, k, []byte("abc"), Options{})
 	h := mustOpenHandle(t, v, false)
 	wantErr := errors.New("writer failed")
 	if n, e := h.CopyTo(k, 0, 3, handleWriter(func([]byte) (int, error) { return 1, wantErr })); n != 1 || e != wantErr {
@@ -196,6 +196,12 @@ func TestReadHandleRejectsWrites(t *testing.T) {
 		func() error { _, e := h.Trunc(k, 0, Options{}); return e },
 		func() error { return h.Delete(k, Options{}) },
 		func() error { _, e := h.CAS(k, 0, nil, nil, Options{}); return e },
+		func() error { return h.ForgetRequest(testID(1)) },
+		func() error { return h.Recompress(k, Gzip) },
+		func() error { return h.Restore(k, Info{}, nil, Options{}) },
+		func() error { return h.Repair(k, Info{}, nil, Options{}) },
+		func() error { return h.RestoreRequest(RequestRecord{}) },
+		func() error { return h.SyncThrough(k, 1) },
 	}
 	for i, op := range ops {
 		if e := op(); e != ErrReadOnly {
@@ -204,10 +210,79 @@ func TestReadHandleRejectsWrites(t *testing.T) {
 	}
 }
 
+func TestHandleMigrationSession(t *testing.T) {
+	source, _ := memoryVolume(t, 2<<20)
+	target, _ := memoryVolume(t, 2<<20)
+	k, id := testKey(1), testID(17)
+	src := mustOpenHandle(t, source, true)
+	want, e := src.PutRange(k, 1<<30, []byte("data"), Options{RequestID: id})
+	if e != nil {
+		t.Fatal(e)
+	}
+	src.Close()
+	src = mustOpenHandle(t, source, false)
+	dst := mustOpenHandle(t, target, true)
+	info, e := src.Stat(k)
+	if e != nil || info != want {
+		t.Fatalf("source stat: %+v %v", info, e)
+	}
+	extents, e := src.Extents(k)
+	if e != nil || len(extents) != 2 || !extents[0].Zero {
+		t.Fatalf("sparse extents: %+v %v", extents, e)
+	}
+	input := func(yield func(uint64, io.Reader, uint64) error) error {
+		data, gotInfo, e := src.GetRange(k, extents[1].Offset, extents[1].Length)
+		if e != nil || gotInfo != info {
+			return errors.New("source changed during migration")
+		}
+		return yield(extents[1].Offset, bytes.NewReader(data), uint64(len(data)))
+	}
+	if e = dst.Restore(k, info, input, Options{}); e != nil {
+		t.Fatal(e)
+	}
+	if e = src.ScanRequests(func(x RequestRecord) error { return dst.RestoreRequest(x) }); e != nil {
+		t.Fatal(e)
+	}
+	if e = dst.Recompress(k, Gzip); e != nil {
+		t.Fatal(e)
+	}
+	if e = dst.SyncThrough(k, want.Version); e != nil {
+		t.Fatal(e)
+	}
+	if _, found, e := dst.OperationStatus(id); e != nil || !found {
+		t.Fatalf("migrated retry: %v %v", found, e)
+	}
+	if e = dst.ForgetRequest(id); e != nil {
+		t.Fatal(e)
+	}
+	if _, found, e := dst.OperationStatus(id); e != nil || found {
+		t.Fatalf("forgotten retry: %v %v", found, e)
+	}
+	visits := 0
+	if e = dst.Scan(k.Bucket, ObjectID{}, ObjectID{}, func(key Key, got Info) error {
+		visits++
+		if key != k || got.Version != info.Version || got.Compression != Gzip {
+			return errors.New("incorrect migrated object")
+		}
+		return nil
+	}); e != nil || visits != 1 {
+		t.Fatalf("scan: %d %v", visits, e)
+	}
+	// Whole-object convenience reads still enforce the buffer bound for sparse
+	// objects; the range API stays usable in the very same session.
+	if _, _, e := dst.Get(k); e != ErrRange {
+		t.Fatalf("large Get: %v", e)
+	}
+	data, finalInfo, e := dst.GetRange(k, 1<<30, 4)
+	if e != nil || string(data) != "data" || finalInfo.Version != info.Version {
+		t.Fatalf("migrated range: %q %+v %v", data, finalInfo, e)
+	}
+}
+
 func TestHandleCloseWaitsForCopy(t *testing.T) {
 	v, _ := memoryVolume(t, 1<<20)
 	k := testKey(1)
-	v.Put(k, []byte("abc"), Options{})
+	testPut(v, k, []byte("abc"), Options{})
 	h := mustOpenHandle(t, v, true)
 	entered, finish := make(chan struct{}), make(chan struct{})
 	var once sync.Once
@@ -295,7 +370,7 @@ func copyAndAbandon(v *Volume, dst io.Writer) error {
 
 func TestHandleAliveThroughoutCopy(t *testing.T) {
 	v, _ := memoryVolume(t, 1<<20)
-	v.Put(testKey(1), []byte("abc"), Options{})
+	testPut(v, testKey(1), []byte("abc"), Options{})
 	entered, finish := make(chan struct{}), make(chan struct{})
 	var once sync.Once
 	unblock := func() { once.Do(func() { close(finish) }) }

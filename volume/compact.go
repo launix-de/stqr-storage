@@ -219,11 +219,9 @@ func (v *Volume) Scrub() error {
 	return nil
 }
 
-// Scan visits the hash-ordered bucket interval [start,end); end==zero means the
-// end of the hash space. fn must not reenter Volume (its read lock is held).
-func (v *Volume) Scan(bucket ID, start, end ObjectID, fn func(Key, Info) error) error {
-	v.mu.RLock()
-	defer v.mu.RUnlock()
+// scanLocked visits the hash-ordered bucket interval [start,end); end==zero means
+// the end of hash space. The caller holds a read or write lease.
+func (v *Volume) scanLocked(bucket ID, start, end ObjectID, fn func(Key, Info) error) error {
 	if e := v.check(false); e != nil {
 		return e
 	}
@@ -246,11 +244,9 @@ func (v *Volume) Scan(bucket ID, start, end ObjectID, fn func(Key, Info) error) 
 	})
 }
 
-// Recompress changes physical representation while preserving logical versions,
+// recompressLocked changes physical representation while preserving logical versions,
 // sparse holes, append offsets, and all retained RequestID results.
-func (v *Volume) Recompress(k Key, codec Compression) error {
-	v.mu.Lock()
-	defer v.mu.Unlock()
+func (v *Volume) recompressLocked(k Key, codec Compression) error {
 	if e := v.check(true); e != nil {
 		return e
 	}

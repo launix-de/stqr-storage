@@ -26,7 +26,7 @@ func TestLifecycleBindingCheckpointAndScan(t *testing.T) {
 		t.Fatal(e)
 	}
 	for i := uint64(0); i < 8; i++ {
-		if _, e := v.Put(testKey(i), []byte("payload"), Options{RequestID: testID(i + 20)}); e != nil {
+		if _, e := testPut(v, testKey(i), []byte("payload"), Options{RequestID: testID(i + 20)}); e != nil {
 			t.Fatal(e)
 		}
 	}
@@ -38,30 +38,30 @@ func TestLifecycleBindingCheckpointAndScan(t *testing.T) {
 	}
 	v = reopen(t, v, d)
 	var keys []Key
-	if e := v.Scan(testKey(0).Bucket, testKey(2).Object, testKey(6).Object, func(k Key, i Info) error { keys = append(keys, k); return nil }); e != nil || len(keys) != 4 {
+	if e := testScan(v, testKey(0).Bucket, testKey(2).Object, testKey(6).Object, func(k Key, i Info) error { keys = append(keys, k); return nil }); e != nil || len(keys) != 4 {
 		t.Fatalf("scan %+v %v", keys, e)
 	}
-	if e := v.SyncThrough(testKey(2), 1); e != nil {
+	if e := testSyncThrough(v, testKey(2), 1); e != nil {
 		t.Fatal(e)
 	}
-	if e := v.SyncThrough(testKey(2), 2); !errors.Is(e, ErrPrecondition) {
+	if e := testSyncThrough(v, testKey(2), 2); !errors.Is(e, ErrPrecondition) {
 		t.Fatal(e)
 	}
 	if e := v.Sync(); e != nil {
 		t.Fatal(e)
 	}
-	if e := v.ForgetRequest(testID(22)); e != nil {
+	if e := testForgetRequest(v, testID(22)); e != nil {
 		t.Fatal(e)
 	}
 	v = reopen(t, v, d)
-	if _, ok, e := v.OperationStatus(testID(22)); e != nil || ok {
+	if _, ok, e := testOperationStatus(v, testID(22)); e != nil || ok {
 		t.Fatalf("forgotten %v %v", ok, e)
 	}
 	if e := v.Compact(); e != nil {
 		t.Fatal(e)
 	}
 	v = reopen(t, v, d)
-	if _, ok, e := v.OperationStatus(testID(22)); e != nil || ok {
+	if _, ok, e := testOperationStatus(v, testID(22)); e != nil || ok {
 		t.Fatalf("forgotten after GC %v %v", ok, e)
 	}
 	desc := v.Describe()
@@ -82,14 +82,14 @@ func TestLifecycleBindingCheckpointAndScan(t *testing.T) {
 		t.Fatal(e)
 	}
 	for i := uint64(0); i < 8; i++ {
-		if e = v.Delete(testKey(i), Options{}); e != nil {
+		if e = testDelete(v, testKey(i), Options{}); e != nil {
 			t.Fatal(e)
 		}
 	}
 	if e = v.SetState(Draining); e != nil {
 		t.Fatal(e)
 	}
-	if _, e = v.Put(testKey(1), nil, Options{}); !errors.Is(e, ErrDraining) {
+	if _, e = testPut(v, testKey(1), nil, Options{}); !errors.Is(e, ErrDraining) {
 		t.Fatal(e)
 	}
 	if e = v.Detach(); e != nil {
@@ -130,7 +130,7 @@ func TestConstructorFormatsExistingAndRAMStartsEmpty(t *testing.T) {
 	if e != nil {
 		t.Fatal(e)
 	}
-	if _, e = m.Put(testKey(1), []byte("volatile"), Options{}); e != nil {
+	if _, e = testPut(m, testKey(1), []byte("volatile"), Options{}); e != nil {
 		t.Fatal(e)
 	}
 	m.Close()
@@ -155,20 +155,20 @@ func TestPhysicalReserveAndFullVolume(t *testing.T) {
 	if e := v.SetGuaranteedReserve(free - PageSize); e != nil {
 		t.Fatal(e)
 	}
-	if _, e := v.Put(testKey(1), bytes.Repeat([]byte{1}, PageSize), Options{}); !errors.Is(e, ErrFull) {
+	if _, e := testPut(v, testKey(1), bytes.Repeat([]byte{1}, PageSize), Options{}); !errors.Is(e, ErrFull) {
 		t.Fatalf("reserve consumed: %v", e)
 	}
 	if _, e := v.Stat(testKey(1)); !errors.Is(e, ErrNotFound) {
 		t.Fatal(e)
 	}
-	if _, e := v.Put(testKey(1), bytes.Repeat([]byte{1}, PageSize), Options{UseGuaranteed: true}); e != nil {
+	if _, e := testPut(v, testKey(1), bytes.Repeat([]byte{1}, PageSize), Options{UseGuaranteed: true}); e != nil {
 		t.Fatal(e)
 	}
 	if e := v.SetGuaranteedReserve(0); e != nil {
 		t.Fatal(e)
 	}
 	for i := 0; i < 200; i++ {
-		_, e := v.Put(testKey(2), bytes.Repeat([]byte{byte(i)}, 7000), Options{})
+		_, e := testPut(v, testKey(2), bytes.Repeat([]byte{byte(i)}, 7000), Options{})
 		if e != nil {
 			t.Fatalf("churn %d: %v", i, e)
 		}
@@ -190,7 +190,7 @@ func TestPhysicalReserveAndFullVolume(t *testing.T) {
 		t.Fatal(v.Stats())
 	}
 	for i := uint64(10); ; i++ {
-		_, e := v.Put(testKey(i), bytes.Repeat([]byte{byte(i)}, 8000), Options{})
+		_, e := testPut(v, testKey(i), bytes.Repeat([]byte{byte(i)}, 8000), Options{})
 		if errors.Is(e, ErrFull) {
 			break
 		}
@@ -210,14 +210,14 @@ func TestExplicitRequestDedupeOnFullVolume(t *testing.T) {
 	k := testKey(1)
 	id := testID(1)
 	data := bytes.Repeat([]byte{1}, 4096)
-	info, e := v.Put(k, data, Options{RequestID: id})
+	info, e := testPut(v, k, data, Options{RequestID: id})
 	if e != nil {
 		t.Fatal(e)
 	}
 	if e = v.SetGuaranteedReserve(v.Stats().AdmissionFreePhysical); e != nil {
 		t.Fatal(e)
 	}
-	again, e := v.PutReader(k, bytes.NewReader(data), uint64(len(data)), Options{RequestID: id})
+	again, e := testPutReader(v, k, bytes.NewReader(data), uint64(len(data)), Options{RequestID: id})
 	if e != nil || again != info {
 		t.Fatalf("retry needs new storage %+v %v", again, e)
 	}
@@ -225,10 +225,10 @@ func TestExplicitRequestDedupeOnFullVolume(t *testing.T) {
 func TestStreamVariants(t *testing.T) {
 	v, _ := memoryVolume(t, 2<<20)
 	k := testKey(1)
-	if _, e := v.PutRangeReader(k, 5, bytes.NewBufferString("abc"), 3, Options{}); e != nil {
+	if _, e := testPutRangeReader(v, k, 5, bytes.NewBufferString("abc"), 3, Options{}); e != nil {
 		t.Fatal(e)
 	}
-	if _, e := v.AppendReader(k, bytes.NewBufferString("de"), 2, Options{}); e != nil {
+	if _, e := testAppendReader(v, k, bytes.NewBufferString("de"), 2, Options{}); e != nil {
 		t.Fatal(e)
 	}
 	mustGet(t, v, k, append(make([]byte, 5), []byte("abcde")...))
@@ -237,10 +237,10 @@ func TestStreamVariants(t *testing.T) {
 func TestPhysicalIOCounters(t *testing.T) {
 	v, _ := memoryVolume(t, 2<<20)
 	before := v.IOStats()
-	if _, e := v.Append(testKey(1), []byte("ten-bytes!"), Options{}); e != nil {
+	if _, e := testAppend(v, testKey(1), []byte("ten-bytes!"), Options{}); e != nil {
 		t.Fatal(e)
 	}
-	if _, _, e := v.Get(testKey(1)); e != nil {
+	if _, _, e := testGet(v, testKey(1)); e != nil {
 		t.Fatal(e)
 	}
 	after := v.Stats().IO

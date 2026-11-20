@@ -76,12 +76,12 @@ func TestCrashAtEveryCommitStep(t *testing.T) {
 					t.Fatal(e)
 				}
 				k := testKey(1)
-				if _, e = v.Append(k, []byte("confirmed-"), Options{RequestID: testID(1)}); e != nil {
+				if _, e = testAppend(v, k, []byte("confirmed-"), Options{RequestID: testID(1)}); e != nil {
 					t.Fatal(e)
 				}
 				if indexBoundary {
 					for i := uint64(2); i < 64; i++ {
-						if _, e = v.Put(testKey(i), []byte("confirmed"), Options{}); e != nil {
+						if _, e = testPut(v, testKey(i), []byte("confirmed"), Options{}); e != nil {
 							t.Fatal(e)
 						}
 					}
@@ -96,7 +96,7 @@ func TestCrashAtEveryCommitStep(t *testing.T) {
 					d.fail = fail
 					d.writeThrough = writeThrough
 					d.persistFailedSync = persistSync
-					_, opErr := w.Append(k, []byte("new"), Options{RequestID: testID(1000)})
+					_, opErr := testAppend(w, k, []byte("new"), Options{RequestID: testID(1000)})
 					if opErr != nil {
 						seenFailures++
 						if !errors.Is(opErr, ErrRecovery) {
@@ -108,11 +108,11 @@ func TestCrashAtEveryCommitStep(t *testing.T) {
 					if e != nil {
 						t.Fatalf("index=%v through=%v sync=%v step=%d reopen: %v", indexBoundary, writeThrough, persistSync, fail, e)
 					}
-					got, _, e := recovered.Get(k)
+					got, _, e := testGet(recovered, k)
 					if e != nil || (!bytes.Equal(got, []byte("confirmed-")) && !bytes.Equal(got, []byte("confirmed-new"))) {
 						t.Fatalf("step %d: corrupt result %q %v", fail, got, e)
 					}
-					if _, e = recovered.Append(k, []byte("new"), Options{RequestID: testID(1000)}); e != nil {
+					if _, e = testAppend(recovered, k, []byte("new"), Options{RequestID: testID(1000)}); e != nil {
 						t.Fatalf("step %d retry %v", fail, e)
 					}
 					mustGet(t, recovered, k, []byte("confirmed-new"))
@@ -137,7 +137,7 @@ func TestCrashDuringCompaction(t *testing.T) {
 		t.Fatal(e)
 	}
 	for i := uint64(0); i < 6; i++ {
-		if _, e = v.Put(testKey(i), bytes.Repeat([]byte{byte(i)}, 9000), Options{RequestID: testID(i + 1)}); e != nil {
+		if _, e = testPut(v, testKey(i), bytes.Repeat([]byte{byte(i)}, 9000), Options{RequestID: testID(i + 1)}); e != nil {
 			t.Fatal(e)
 		}
 	}
@@ -158,7 +158,7 @@ func TestCrashDuringCompaction(t *testing.T) {
 		}
 		for i := uint64(0); i < 6; i++ {
 			mustGet(t, r, testKey(i), bytes.Repeat([]byte{byte(i)}, 9000))
-			if _, ok, e := r.OperationStatus(testID(i + 1)); e != nil || !ok {
+			if _, ok, e := testOperationStatus(r, testID(i+1)); e != nil || !ok {
 				t.Fatalf("step %d lost retry %d: %v", step, i, e)
 			}
 		}
@@ -174,7 +174,7 @@ func TestCommittedCorruptionIsNotSilentlyTruncated(t *testing.T) {
 	if e != nil {
 		t.Fatal(e)
 	}
-	if _, e = v.Put(testKey(1), []byte("good"), Options{}); e != nil {
+	if _, e = testPut(v, testKey(1), []byte("good"), Options{}); e != nil {
 		t.Fatal(e)
 	}
 	s := v.Header()
@@ -190,7 +190,7 @@ func TestPayloadCorruptionScrub(t *testing.T) {
 	if e != nil {
 		t.Fatal(e)
 	}
-	if _, e = v.Put(testKey(1), []byte("payload"), Options{}); e != nil {
+	if _, e = testPut(v, testKey(1), []byte("payload"), Options{}); e != nil {
 		t.Fatal(e)
 	}
 	o, e := v.loadObject(testKey(1))
@@ -209,7 +209,7 @@ func TestScrubDoesNotTrustCachedMetadata(t *testing.T) {
 	if e != nil {
 		t.Fatal(e)
 	}
-	if _, e = v.Put(testKey(1), []byte("good"), Options{}); e != nil {
+	if _, e = testPut(v, testKey(1), []byte("good"), Options{}); e != nil {
 		t.Fatal(e)
 	}
 	mustGet(t, v, testKey(1), []byte("good"))

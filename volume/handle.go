@@ -12,9 +12,11 @@ import (
 // Use defer h.Close() immediately after a successful Open. CopyTo may be called
 // repeatedly and does not close the handle, including on errors or panics.
 //
-// Handle methods serialize with each other and Close. While holding a handle,
-// use its methods rather than reentering Volume methods (which acquire the same
-// lock). Writer/reader callbacks must not reenter the handle or its volume.
+// Object operations are exposed only on Handle; Volume provides management,
+// Open and the standalone Stat query. Handle methods serialize with each other
+// and Close. Callbacks must not reenter the handle or its volume. Volume's
+// management methods and standalone Stat acquire locks and must be called
+// outside a handle session.
 // A write handle excludes all other volume access; a read handle excludes writes.
 // Multiple mutations under a write handle are individually committed, not one
 // transaction. AddCleanup is only a fallback for abandoned handles: the runtime
@@ -117,6 +119,8 @@ func (h *Handle) CopyTo(k Key, offset, length uint64, dst io.Writer) (uint64, er
 	})
 }
 
+// ReadAt reads a bounded range, synthesizing sparse zeros. A partial read at EOF
+// returns io.EOF. It does not change the handle's lock lifetime.
 func (h *Handle) ReadAt(k Key, dst []byte, offset uint64) (int, error) {
 	return withHandle(h, false, func(v *Volume) (int, error) { return v.readAtLocked(k, dst, offset) })
 }
@@ -163,10 +167,107 @@ func (h *Handle) Delete(k Key, opts Options) error {
 	return e
 }
 
+// CAS compares and replaces an equal-length range. With WholeObject and an
+// ExpectedVersion (or CreateOnly), it replaces the entire object conditionally.
 func (h *Handle) CAS(k Key, offset uint64, expected, replacement []byte, opts Options) (Info, error) {
-	if e := validateCAS(offset, expected, replacement, opts); e != nil {
-		return Info{}, e
-	}
-	r, e := h.mutate(opCAS, k, offset, uint64(len(replacement)), bytes.NewReader(replacement), expected, opts)
+	r, e := withHandle(h, true, func(v *Volume) (Result, error) {
+		if e := validateCAS(offset, expected, replacement, opts); e != nil {
+			return Result{}, e
+		}
+		return v.mutateWithRetryLocked(opCAS, k, offset, uint64(len(replacement)), bytes.NewReader(replacement), expected, opts)
+	})
 	return r.Info, e
+}
+
+func (h *Handle) do(write bool, f func(*Volume) error) error {
+	_, e := withHandle(h, write, func(v *Volume) (struct{}, error) {
+		return struct{}{}, f(v)
+	})
+	return e
+}
+
+// Get is a convenience for small objects. Large objects use CopyTo/ReadAt; the
+// buffer limit does not limit logical object size or sparse offsets.
+func (h *Handle) Get(k Key) ([]byte, Info, error) { return h.GetRange(k, 0, ^uint64(0)) }
+
+// GetRange returns at most MaxBufferedRead bytes, clipping at EOF.
+func (h *Handle) GetRange(k Key, offset, length uint64) ([]byte, Info, error) {
+	type readResult struct {
+		data []byte
+		info Info
+	}
+	r, e := withHandle(h, false, func(v *Volume) (readResult, error) {
+		data, info, e := v.getRangeLocked(k, offset, length)
+		return readResult{data, info}, e
+	})
+	return r.data, r.info, e
+}
+
+// Extents returns logical data and sparse intervals, without backend offsets.
+func (h *Handle) Extents(k Key) ([]Extent, error) {
+	return withHandle(h, false, func(v *Volume) ([]Extent, error) { return v.extentsLocked(k) })
+}
+
+// Scan visits the hash-ordered interval [start,end) in a bucket; zero end means
+// the end of hash space. fn must not reenter this handle or volume.
+func (h *Handle) Scan(bucket ID, start, end ObjectID, fn func(Key, Info) error) error {
+	return h.do(false, func(v *Volume) error { return v.scanLocked(bucket, start, end, fn) })
+}
+
+// OperationStatus returns a retained successful result. Absence is not proof
+// that an operation never ran.
+func (h *Handle) OperationStatus(id ID) (Result, bool, error) {
+	type status struct {
+		result Result
+		found  bool
+	}
+	r, e := withHandle(h, false, func(v *Volume) (status, error) {
+		result, found, e := v.operationStatusLocked(id)
+		return status{result, found}, e
+	})
+	return r.result, r.found, e
+}
+
+func (h *Handle) ForgetRequest(id ID) error {
+	return h.do(true, func(v *Volume) error { return v.forgetRequestLocked(id) })
+}
+
+// Recompress changes physical encoding, preserving logical versions and retries.
+func (h *Handle) Recompress(k Key, codec Compression) error {
+	return h.do(true, func(v *Volume) error { return v.recompressLocked(k, codec) })
+}
+
+// Restore installs a trusted object snapshot while preserving version/tombstone.
+// The server must validate source ownership and epoch before calling. Older or
+// equal existing versions are rejected; a retry ID makes repeats idempotent.
+// Neither source nor its callbacks may reenter the handle or destination volume.
+func (h *Handle) Restore(k Key, info Info, source ExtentSource, opts Options) error {
+	return h.do(true, func(v *Volume) error { return v.restoreLocked(k, info, source, opts) })
+}
+
+// Repair replaces damaged physical data using a trusted replica of the current
+// logical version. It preserves the version and retained retry history.
+func (h *Handle) Repair(k Key, info Info, source ExtentSource, opts Options) error {
+	version := info.Version
+	opts.ExpectedVersion = &version
+	opts.restoreSameVersion = true
+	return h.Restore(k, info, source, opts)
+}
+
+// ScanRequests streams retry records in RequestID order. fn must not reenter
+// the handle or volume.
+func (h *Handle) ScanRequests(fn func(RequestRecord) error) error {
+	return h.do(false, func(v *Volume) error { return v.scanRequestsLocked(fn) })
+}
+
+// RestoreRequest imports original retry state before activating target ownership.
+func (h *Handle) RestoreRequest(x RequestRecord) error {
+	return h.do(true, func(v *Volume) error { return v.restoreRequestLocked(x) })
+}
+
+// SyncThrough flushes a known object version locally. It requires a write
+// handle because a failed flush fences the volume. Replicated barriers are the
+// server's responsibility.
+func (h *Handle) SyncThrough(k Key, version uint64) error {
+	return h.do(true, func(v *Volume) error { return v.syncThroughLocked(k, version) })
 }

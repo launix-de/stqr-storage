@@ -13,17 +13,17 @@ func TestExportImportTranscodesSparseAndRetry(t *testing.T) {
 	dst, d := memoryVolume(t, 8<<20)
 	k := testKey(1)
 	id := testID(500)
-	if _, e := src.PutRange(k, 1<<40, []byte("far"), Options{Compression: Codec(LZ4)}); e != nil {
+	if _, e := testPutRange(src, k, 1<<40, []byte("far"), Options{Compression: Codec(LZ4)}); e != nil {
 		t.Fatal(e)
 	}
-	a, e := src.Append(k, []byte("!"), Options{RequestID: id})
+	a, e := testAppend(src, k, []byte("!"), Options{RequestID: id})
 	if e != nil {
 		t.Fatal(e)
 	}
-	if _, e = src.Put(testKey(2), []byte("deleted"), Options{}); e != nil {
+	if _, e = testPut(src, testKey(2), []byte("deleted"), Options{}); e != nil {
 		t.Fatal(e)
 	}
-	if e = src.Delete(testKey(2), Options{}); e != nil {
+	if e = testDelete(src, testKey(2), Options{}); e != nil {
 		t.Fatal(e)
 	}
 	var buf bytes.Buffer
@@ -37,11 +37,11 @@ func TestExportImportTranscodesSparseAndRetry(t *testing.T) {
 		t.Fatal(e)
 	}
 	dst = reopen(t, dst, d)
-	b, info, e := dst.GetRange(k, 1<<40, 4)
+	b, info, e := testGetRange(dst, k, 1<<40, 4)
 	if e != nil || string(b) != "far!" || info.Compression != Gzip || info.Version != a.Info.Version {
 		t.Fatalf("%q %+v %v", b, info, e)
 	}
-	retry, e := dst.Append(k, []byte("!"), Options{RequestID: id})
+	retry, e := testAppend(dst, k, []byte("!"), Options{RequestID: id})
 	if e != nil || retry != a {
 		t.Fatalf("%+v %v", retry, e)
 	}
@@ -69,7 +69,7 @@ func TestImportMalformedDoesNotPublish(t *testing.T) {
 	if _, e := v.Stat(testKey(1)); !errors.Is(e, ErrNotFound) {
 		t.Fatalf("partial import visible %v", e)
 	}
-	if _, e := v.Put(testKey(1), []byte("after"), Options{}); e != nil {
+	if _, e := testPut(v, testKey(1), []byte("after"), Options{}); e != nil {
 		t.Fatal(e)
 	}
 	mustGet(t, v, testKey(1), []byte("after"))
@@ -80,11 +80,11 @@ func TestRestoreIntoPopulatedVolumePreservesVersionAndRetries(t *testing.T) {
 	target, d := memoryVolume(t, 4<<20)
 	k := testKey(1)
 	originalID := testID(23)
-	a, e := source.Append(k, []byte("data"), Options{RequestID: originalID})
+	a, e := testAppend(source, k, []byte("data"), Options{RequestID: originalID})
 	if e != nil {
 		t.Fatal(e)
 	}
-	if _, e = target.Put(testKey(2), []byte("unrelated"), Options{}); e != nil {
+	if _, e = testPut(target, testKey(2), []byte("unrelated"), Options{}); e != nil {
 		t.Fatal(e)
 	}
 	input := func(yield func(uint64, io.Reader, uint64) error) error {
@@ -93,23 +93,23 @@ func TestRestoreIntoPopulatedVolumePreservesVersionAndRetries(t *testing.T) {
 	info := a.Info
 	info.Compression = LZ4
 	opts := Options{RequestID: testID(24)}
-	if e = target.Restore(k, info, input, opts); e != nil {
+	if e = testRestore(target, k, info, input, opts); e != nil {
 		t.Fatal(e)
 	}
-	if e = target.Restore(k, info, input, opts); e != nil {
+	if e = testRestore(target, k, info, input, opts); e != nil {
 		t.Fatal(e)
 	}
-	if e = source.ScanRequests(func(r RequestRecord) error { return target.RestoreRequest(r) }); e != nil {
+	if e = testScanRequests(source, func(r RequestRecord) error { return testRestoreRequest(target, r) }); e != nil {
 		t.Fatal(e)
 	}
 	target = reopen(t, target, d)
-	again, e := target.Append(k, []byte("data"), Options{RequestID: originalID})
+	again, e := testAppend(target, k, []byte("data"), Options{RequestID: originalID})
 	if e != nil || again != a {
 		t.Fatalf("%+v %v", again, e)
 	}
 	mustGet(t, target, k, []byte("data"))
 	mustGet(t, target, testKey(2), []byte("unrelated"))
-	if e = target.Restore(k, info, input, Options{}); !errors.Is(e, ErrPrecondition) {
+	if e = testRestore(target, k, info, input, Options{}); !errors.Is(e, ErrPrecondition) {
 		t.Fatal(e)
 	}
 }
@@ -122,7 +122,7 @@ func TestRepairRetainsLogicalVersionAndRetry(t *testing.T) {
 	}
 	key := testKey(1)
 	id := testID(5)
-	info, e := v.Put(key, []byte("correct"), Options{RequestID: id})
+	info, e := testPut(v, key, []byte("correct"), Options{RequestID: id})
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -137,14 +137,14 @@ func TestRepairRetainsLogicalVersionAndRetry(t *testing.T) {
 	source := func(yield func(uint64, io.Reader, uint64) error) error {
 		return yield(0, bytes.NewBufferString("correct"), 7)
 	}
-	if e = v.Repair(key, info, source, Options{}); e != nil {
+	if e = testRepair(v, key, info, source, Options{}); e != nil {
 		t.Fatal(e)
 	}
 	mustGet(t, v, key, []byte("correct"))
 	if e = v.Scrub(); e != nil {
 		t.Fatal(e)
 	}
-	again, e := v.Put(key, []byte("correct"), Options{RequestID: id})
+	again, e := testPut(v, key, []byte("correct"), Options{RequestID: id})
 	if e != nil || again != info {
 		t.Fatalf("retry %+v %v", again, e)
 	}

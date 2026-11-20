@@ -38,7 +38,7 @@ func TestAlignedDeviceIO(t *testing.T) {
 		t.Fatal(e)
 	}
 	for i := uint64(0); i < 100; i++ {
-		if _, e = v.Append(testKey(i%4), []byte("ten-bytes!"), Options{}); e != nil {
+		if _, e = testAppend(v, testKey(i%4), []byte("ten-bytes!"), Options{}); e != nil {
 			t.Fatal(e)
 		}
 	}
@@ -114,7 +114,7 @@ func TestFutureFormatIsNotReformatted(t *testing.T) {
 func TestReformatDoesNotReuseOldArenaPages(t *testing.T) {
 	v, d := memoryVolume(t, 4<<20)
 	for i := 0; i < 40; i++ {
-		if _, e := v.Append(testKey(1), []byte("old-data"), Options{}); e != nil {
+		if _, e := testAppend(v, testKey(1), []byte("old-data"), Options{}); e != nil {
 			t.Fatal(e)
 		}
 	}
@@ -122,11 +122,11 @@ func TestReformatDoesNotReuseOldArenaPages(t *testing.T) {
 	if e != nil {
 		t.Fatal(e)
 	}
-	if _, e = v.Append(testKey(1), []byte("fresh"), Options{}); e != nil {
+	if _, e = testAppend(v, testKey(1), []byte("fresh"), Options{}); e != nil {
 		t.Fatal(e)
 	}
 	for i := 0; i < 100; i++ {
-		if _, e = v.Trunc(testKey(2), uint64(i), Options{}); e != nil {
+		if _, e = testTrunc(v, testKey(2), uint64(i), Options{}); e != nil {
 			t.Fatal(e)
 		}
 	}
@@ -137,16 +137,16 @@ func TestReformatDoesNotReuseOldArenaPages(t *testing.T) {
 func TestInvalidOperationsLeaveStateUnchanged(t *testing.T) {
 	v, _ := memoryVolume(t, 2<<20)
 	k := testKey(1)
-	if _, e := v.Put(k, []byte("valid"), Options{}); e != nil {
+	if _, e := testPut(v, k, []byte("valid"), Options{}); e != nil {
 		t.Fatal(e)
 	}
-	if _, e := v.PutRange(k, ^uint64(0), []byte("bad"), Options{}); !errors.Is(e, ErrRange) {
+	if _, e := testPutRange(v, k, ^uint64(0), []byte("bad"), Options{}); !errors.Is(e, ErrRange) {
 		t.Fatal(e)
 	}
-	if _, e := v.CAS(k, 0, []byte("a"), []byte("long"), Options{}); !errors.Is(e, ErrRange) {
+	if _, e := testCAS(v, k, 0, []byte("a"), []byte("long"), Options{}); !errors.Is(e, ErrRange) {
 		t.Fatal(e)
 	}
-	if _, e := v.Put(k, nil, Options{Compression: Codec(Compression(255))}); !errors.Is(e, ErrRange) {
+	if _, e := testPut(v, k, nil, Options{Compression: Codec(Compression(255))}); !errors.Is(e, ErrRange) {
 		t.Fatal(e)
 	}
 	mustGet(t, v, k, []byte("valid"))
@@ -156,13 +156,13 @@ func TestInvalidOperationsLeaveStateUnchanged(t *testing.T) {
 	if e := v.SetGuaranteedReserve(^uint64(0)); !errors.Is(e, ErrFull) {
 		t.Fatal(e)
 	}
-	if e := v.ForgetRequest(ID{}); !errors.Is(e, ErrRange) {
+	if e := testForgetRequest(v, ID{}); !errors.Is(e, ErrRange) {
 		t.Fatal(e)
 	}
 	if e := v.Close(); e != nil {
 		t.Fatal(e)
 	}
-	if _, e := v.Put(k, nil, Options{}); !errors.Is(e, ErrClosed) {
+	if _, e := testPut(v, k, nil, Options{}); !errors.Is(e, ErrClosed) {
 		t.Fatal(e)
 	}
 }

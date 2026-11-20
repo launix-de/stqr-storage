@@ -34,7 +34,7 @@ func memoryVolume(t *testing.T, size int64) (*Volume, *MemoryIO) {
 }
 func mustGet(t *testing.T, v *Volume, k Key, want []byte) {
 	t.Helper()
-	got, _, e := v.Get(k)
+	got, _, e := testGet(v, k)
 	if e != nil || !bytes.Equal(got, want) {
 		t.Fatalf("Get(%x): got %q, error %v, want %q", k.Object[24:], got, e, want)
 	}
@@ -51,36 +51,36 @@ func reopen(t *testing.T, v *Volume, d VolumeIO) *Volume {
 func TestObjectLifecycleAndRecovery(t *testing.T) {
 	v, d := memoryVolume(t, 4<<20)
 	k := testKey(1)
-	a, e := v.Append(k, []byte("abc"), Options{RequestID: testID(1)})
+	a, e := testAppend(v, k, []byte("abc"), Options{RequestID: testID(1)})
 	if e != nil || a.Offset != 0 || a.Info.Length != 3 {
 		t.Fatalf("append %+v %v", a, e)
 	}
-	b, e := v.Append(k, []byte("de"), Options{RequestID: testID(2)})
+	b, e := testAppend(v, k, []byte("de"), Options{RequestID: testID(2)})
 	if e != nil || b.Offset != 3 {
 		t.Fatalf("append %+v %v", b, e)
 	}
 	mustGet(t, v, k, []byte("abcde"))
 	v = reopen(t, v, d)
 	mustGet(t, v, k, []byte("abcde"))
-	again, e := v.Append(k, []byte("de"), Options{RequestID: testID(2)})
+	again, e := testAppend(v, k, []byte("de"), Options{RequestID: testID(2)})
 	if e != nil || again != b {
 		t.Fatalf("retry: %+v %v", again, e)
 	}
-	if _, e = v.Append(k, []byte("different"), Options{RequestID: testID(2)}); !errors.Is(e, ErrRequestID) {
+	if _, e = testAppend(v, k, []byte("different"), Options{RequestID: testID(2)}); !errors.Is(e, ErrRequestID) {
 		t.Fatalf("conflicting ID: %v", e)
 	}
-	if _, e = v.PutRange(k, 1, []byte("XY"), Options{}); e != nil {
+	if _, e = testPutRange(v, k, 1, []byte("XY"), Options{}); e != nil {
 		t.Fatal(e)
 	}
 	mustGet(t, v, k, []byte("aXYde"))
-	if _, e = v.Trunc(k, 2, Options{}); e != nil {
+	if _, e = testTrunc(v, k, 2, Options{}); e != nil {
 		t.Fatal(e)
 	}
-	if _, e = v.Append(k, []byte("!"), Options{}); e != nil {
+	if _, e = testAppend(v, k, []byte("!"), Options{}); e != nil {
 		t.Fatal(e)
 	}
 	mustGet(t, v, k, []byte("aX!"))
-	if e = v.Delete(k, Options{RequestID: testID(3)}); e != nil {
+	if e = testDelete(v, k, Options{RequestID: testID(3)}); e != nil {
 		t.Fatal(e)
 	}
 	if _, e = v.Stat(k); !errors.Is(e, ErrNotFound) {
@@ -90,10 +90,10 @@ func TestObjectLifecycleAndRecovery(t *testing.T) {
 	if _, e = v.Stat(k); !errors.Is(e, ErrNotFound) {
 		t.Fatal(e)
 	}
-	if _, e = v.Put(k, []byte("new"), Options{}); e != nil {
+	if _, e = testPut(v, k, []byte("new"), Options{}); e != nil {
 		t.Fatal(e)
 	}
-	if e = v.Delete(k, Options{RequestID: testID(3)}); e != nil {
+	if e = testDelete(v, k, Options{RequestID: testID(3)}); e != nil {
 		t.Fatal(e)
 	}
 	mustGet(t, v, k, []byte("new"))
@@ -105,36 +105,36 @@ func TestSparseAndPartialBlocks(t *testing.T) {
 	v, d := memoryVolume(t, 4<<20)
 	k := testKey(1)
 	const hole = uint64(1) << 42
-	if _, e := v.PutRange(k, hole, []byte("tail"), Options{}); e != nil {
+	if _, e := testPutRange(v, k, hole, []byte("tail"), Options{}); e != nil {
 		t.Fatal(e)
 	}
 	st := v.Stats()
 	if st.AllocatedPhysical > 64<<10 || st.LogicalBytes != hole+4 {
 		t.Fatalf("sparse stats %+v", st)
 	}
-	b, info, e := v.GetRange(k, hole-2, 6)
+	b, info, e := testGetRange(v, k, hole-2, 6)
 	if e != nil || !bytes.Equal(b, []byte{0, 0, 't', 'a', 'i', 'l'}) || info.Length != hole+4 {
 		t.Fatalf("%q %+v %v", b, info, e)
 	}
-	if _, e = v.Trunc(k, hole+100, Options{}); e != nil {
+	if _, e = testTrunc(v, k, hole+100, Options{}); e != nil {
 		t.Fatal(e)
 	}
 	v = reopen(t, v, d)
-	b, _, e = v.GetRange(k, hole+2, 6)
+	b, _, e = testGetRange(v, k, hole+2, 6)
 	if e != nil || !bytes.Equal(b, []byte{'i', 'l', 0, 0, 0, 0}) {
 		t.Fatalf("%v %v", b, e)
 	}
-	ext, e := v.Extents(k)
+	ext, e := testExtents(v, k)
 	if e != nil || len(ext) != 3 || !ext[0].Zero || !ext[2].Zero {
 		t.Fatalf("%+v %v", ext, e)
 	}
-	if _, e = v.Trunc(k, hole+2, Options{}); e != nil {
+	if _, e = testTrunc(v, k, hole+2, Options{}); e != nil {
 		t.Fatal(e)
 	}
-	if _, e = v.Trunc(k, hole+6, Options{}); e != nil {
+	if _, e = testTrunc(v, k, hole+6, Options{}); e != nil {
 		t.Fatal(e)
 	}
-	b, _, e = v.GetRange(k, hole, 6)
+	b, _, e = testGetRange(v, k, hole, 6)
 	if e != nil || !bytes.Equal(b, []byte{'t', 'a', 0, 0, 0, 0}) {
 		t.Fatalf("%v %v", b, e)
 	}
@@ -142,7 +142,7 @@ func TestSparseAndPartialBlocks(t *testing.T) {
 		t.Fatal(e)
 	}
 	v = reopen(t, v, d)
-	b, _, e = v.GetRange(k, hole, 6)
+	b, _, e = testGetRange(v, k, hole, 6)
 	if e != nil || !bytes.Equal(b, []byte{'t', 'a', 0, 0, 0, 0}) {
 		t.Fatalf("after GC: %v %v", b, e)
 	}
@@ -153,16 +153,16 @@ func TestCodecsRangesAndRecompress(t *testing.T) {
 			v, d := memoryVolume(t, 8<<20)
 			k := testKey(1)
 			want := bytes.Repeat([]byte("abcdef"), 24000)
-			info, e := v.Put(k, want, Options{Compression: Codec(c)})
+			info, e := testPut(v, k, want, Options{Compression: Codec(c)})
 			if e != nil {
 				t.Fatal(e)
 			}
 			change := []byte("OVERLAPPING")
-			if _, e = v.PutRange(k, BlockSize-4, change, Options{}); e != nil {
+			if _, e = testPutRange(v, k, BlockSize-4, change, Options{}); e != nil {
 				t.Fatal(e)
 			}
 			copy(want[BlockSize-4:], change)
-			if _, e = v.Append(k, []byte("end"), Options{}); e != nil {
+			if _, e = testAppend(v, k, []byte("end"), Options{}); e != nil {
 				t.Fatal(e)
 			}
 			want = append(want, []byte("end")...)
@@ -174,7 +174,7 @@ func TestCodecsRangesAndRecompress(t *testing.T) {
 			if c == Gzip {
 				target = Raw
 			}
-			if e = v.Recompress(k, target); e != nil {
+			if e = testRecompress(v, k, target); e != nil {
 				t.Fatal(e)
 			}
 			after, _ := v.Stat(k)
@@ -196,26 +196,26 @@ func TestCodecsRangesAndRecompress(t *testing.T) {
 func TestCASAndPreconditions(t *testing.T) {
 	v, _ := memoryVolume(t, 4<<20)
 	k := testKey(1)
-	info, e := v.Put(k, []byte("abcd"), Options{})
+	info, e := testPut(v, k, []byte("abcd"), Options{})
 	if e != nil {
 		t.Fatal(e)
 	}
-	if _, e = v.CAS(k, 1, []byte("bc"), []byte("XY"), Options{}); e != nil {
+	if _, e = testCAS(v, k, 1, []byte("bc"), []byte("XY"), Options{}); e != nil {
 		t.Fatal(e)
 	}
 	mustGet(t, v, k, []byte("aXYd"))
-	if _, e = v.CAS(k, 1, []byte("bc"), []byte("ZZ"), Options{}); !errors.Is(e, ErrPrecondition) {
+	if _, e = testCAS(v, k, 1, []byte("bc"), []byte("ZZ"), Options{}); !errors.Is(e, ErrPrecondition) {
 		t.Fatal(e)
 	}
-	if _, e = v.Put(k, []byte("stale"), Options{ExpectedVersion: &info.Version}); !errors.Is(e, ErrPrecondition) {
+	if _, e = testPut(v, k, []byte("stale"), Options{ExpectedVersion: &info.Version}); !errors.Is(e, ErrPrecondition) {
 		t.Fatal(e)
 	}
 	info, _ = v.Stat(k)
-	if _, e = v.CAS(k, 0, nil, []byte("replacement"), Options{WholeObject: true, ExpectedVersion: &info.Version}); e != nil {
+	if _, e = testCAS(v, k, 0, nil, []byte("replacement"), Options{WholeObject: true, ExpectedVersion: &info.Version}); e != nil {
 		t.Fatal(e)
 	}
 	mustGet(t, v, k, []byte("replacement"))
-	if _, e = v.CAS(testKey(2), 0, nil, []byte("created"), Options{WholeObject: true, CreateOnly: true}); e != nil {
+	if _, e = testCAS(v, testKey(2), 0, nil, []byte("created"), Options{WholeObject: true, CreateOnly: true}); e != nil {
 		t.Fatal(e)
 	}
 	mustGet(t, v, testKey(2), []byte("created"))
@@ -224,7 +224,7 @@ func TestIndexSpillAndCompaction(t *testing.T) {
 	v, d := memoryVolume(t, 16<<20)
 	v.SetCacheLimits(2, 512)
 	for i := 0; i < 900; i++ {
-		if _, e := v.Put(testKey(uint64(i)), []byte(fmt.Sprintf("object-%d", i)), Options{}); e != nil {
+		if _, e := testPut(v, testKey(uint64(i)), []byte(fmt.Sprintf("object-%d", i)), Options{}); e != nil {
 			t.Fatalf("put %d: %v", i, e)
 		}
 	}
@@ -255,7 +255,7 @@ func TestConcurrentAppendAndReaders(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			r, e := v.Append(k, []byte{byte(i)}, Options{RequestID: testID(uint64(i + 1))})
+			r, e := testAppend(v, k, []byte{byte(i)}, Options{RequestID: testID(uint64(i + 1))})
 			if e == nil {
 				if _, dup := offsets.LoadOrStore(r.Offset, true); dup {
 					e = fmt.Errorf("duplicate offset %d", r.Offset)
@@ -287,7 +287,7 @@ func TestFileConstructorsAndExclusiveLock(t *testing.T) {
 	if _, e = New(path, 0, HDD); e == nil {
 		t.Fatal("double open allowed")
 	}
-	if _, e = v.Put(testKey(1), []byte("persist"), Options{}); e != nil {
+	if _, e = testPut(v, testKey(1), []byte("persist"), Options{}); e != nil {
 		t.Fatal(e)
 	}
 	if e = v.Close(); e != nil {
@@ -314,26 +314,26 @@ func TestRandomModel(t *testing.T) {
 		var e error
 		switch rng.Intn(5) {
 		case 0:
-			_, e = v.Put(k, data, Options{})
+			_, e = testPut(v, k, data, Options{})
 			model[k] = append([]byte{}, data...)
 		case 1:
-			_, e = v.Append(k, data, Options{})
+			_, e = testAppend(v, k, data, Options{})
 			model[k] = append(old, data...)
 		case 2:
 			n := rng.Intn(80)
-			_, e = v.Trunc(k, uint64(n), Options{})
+			_, e = testTrunc(v, k, uint64(n), Options{})
 			b := make([]byte, n)
 			copy(b, old)
 			model[k] = b
 		case 3:
 			off := rng.Intn(80)
-			_, e = v.PutRange(k, uint64(off), data, Options{})
+			_, e = testPutRange(v, k, uint64(off), data, Options{})
 			b := make([]byte, max(len(old), off+len(data)))
 			copy(b, old)
 			copy(b[off:], data)
 			model[k] = b
 		case 4:
-			e = v.Delete(k, Options{})
+			e = testDelete(v, k, Options{})
 			delete(model, k)
 		}
 		_ = exists
@@ -357,20 +357,20 @@ func TestStreamingAndEOF(t *testing.T) {
 	v, _ := memoryVolume(t, 4<<20)
 	k := testKey(1)
 	data := bytes.Repeat([]byte("data"), 50000)
-	if _, e := v.PutReader(k, bytes.NewReader(data), uint64(len(data)), Options{}); e != nil {
+	if _, e := testPutReader(v, k, bytes.NewReader(data), uint64(len(data)), Options{}); e != nil {
 		t.Fatal(e)
 	}
 	var out bytes.Buffer
-	n, e := v.CopyTo(k, 0, uint64(len(data)), &out)
+	n, e := testCopyTo(v, k, 0, uint64(len(data)), &out)
 	if e != nil || n != uint64(len(data)) || !bytes.Equal(data, out.Bytes()) {
 		t.Fatalf("copy %d %v", n, e)
 	}
 	b := make([]byte, 3)
-	if n, e := v.ReadAt(k, b, uint64(len(data)-1)); n != 1 || e != io.EOF {
+	if n, e := testReadAt(v, k, b, uint64(len(data)-1)); n != 1 || e != io.EOF {
 		t.Fatalf("%d %v", n, e)
 	}
 	before, _ := v.Stat(k)
-	if _, e = v.PutReader(k, bytes.NewReader([]byte("short")), 100, Options{}); e == nil {
+	if _, e = testPutReader(v, k, bytes.NewReader([]byte("short")), 100, Options{}); e == nil {
 		t.Fatal("short accepted")
 	}
 	after, _ := v.Stat(k)
