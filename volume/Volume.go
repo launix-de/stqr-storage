@@ -19,6 +19,9 @@ import (
 //   - Volume is I/O-bound, not a lock-free data structure. All public operations
 //     use its RWMutex: readers may run concurrently; mutation, GC, and close are
 //     exclusive. This is also the contract for parallel server/WebSocket calls.
+//     Open returns a handle retaining that lock across multiple operations until
+//     Handle.Close. Use defer Close; CopyTo does not release the handle. Never
+//     reenter Volume methods while holding a handle. Neither type may be copied.
 //   - Payloads are accessed in bounded blocks, never through a mandatory mmap.
 //     Metadata uses a bounded RAM cache and immutable sorted on-volume index
 //     runs. Neither opening nor looking up many objects requires a full RAM
@@ -531,11 +534,18 @@ func (v *Volume) SetCacheLimits(entries int, bytes uint64) {
 	v.cache = newCache(entries, bytes)
 }
 
-// recordReader streams a logical object's payload without a whole-object buffer.
-// The volume's read lock is held for the entire CopyTo call, including dst.Write.
+// CopyTo streams a logical object's payload without a whole-object buffer.
+// For a locked sequence of metadata reads and multiple transfers, use Open.
 func (v *Volume) CopyTo(k Key, offset, length uint64, dst io.Writer) (uint64, error) {
-	v.mu.RLock()
-	defer v.mu.RUnlock()
+	h, e := v.Open(false)
+	if e != nil {
+		return 0, e
+	}
+	defer h.Close()
+	return h.CopyTo(k, offset, length, dst)
+}
+
+func (v *Volume) copyToLocked(k Key, offset, length uint64, dst io.Writer) (uint64, error) {
 	if e := v.check(false); e != nil {
 		return 0, e
 	}

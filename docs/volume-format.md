@@ -3,6 +3,7 @@
 The implementation is the Go package `github.com/launix-de/stqr-storage/volume`.
 There are no UI handlers, CLI commands, or networking code. Runtime files live in
 ignored `volumes/`; that is a different directory from library source `volume/`.
+The library requires Go 1.24 or later for `runtime.AddCleanup`.
 
 ## Software contract and API
 
@@ -29,6 +30,46 @@ writers invoked under a lock must not reenter the same volume. When composing
 operations on different volumes, callers must establish a consistent lock order.
 The server is responsible for cluster ownership, replication, bucket access and
 quotas across volumes. `Bind` persists/checks the node/cluster identity.
+
+`Stat` is an independent general metadata query. To build response headers and
+stream the matching version, acquire a session with `Volume.Open(write bool)`:
+
+```go
+h, err := v.Open(false) // true acquires the exclusive write lock
+if err != nil {
+    return err
+}
+defer h.Close()
+info, err := h.Stat(key)
+if err != nil {
+    return err
+}
+_, err = h.CopyTo(key, 0, info.Length, dst)
+return err
+```
+
+`Handle.CopyTo` may be called repeatedly (also for multiple ranges/objects), and
+never closes the handle, even on errors or panics. Only `Handle.Close` ends the
+session. A read session allows other readers and prevents writes/GC/volume close;
+a write session excludes them all and also exposes `Put`/`PutReader`,
+`PutRange`/`PutRangeReader`, `Append`/`AppendReader`, `Trunc`, `Delete` and `CAS`.
+Both modes expose `Stat`, `ReadAt` and `CopyTo`. Read-handle mutations return
+`ErrReadOnly`; operations after close return `ErrClosed`. Separate writes remain
+separate durable commits, not a multi-operation transaction.
+
+The lock, backend and lease remain private. Handle methods serialize concurrent
+use and close; close waits for an active transfer. Do not copy a handle or call
+ordinary volume methods while it is open; use handle methods to avoid recursive
+locking. Callbacks must not reenter either the handle or its volume.
+The injected writer prepares the interface for future direct I/O transfers;
+current transfers still verify/decompress bounded blocks.
+
+`runtime.AddCleanup` releases the lock for a collected, abandoned handle as a
+fallback. Its independent lease does not retain the handle; `runtime.KeepAlive`
+protects active operations. Explicit close cancels the cleanup and releases the
+lock synchronously and exactly once, including repeated/concurrent closes.
+The Go runtime does **not** guarantee cleanup execution or timing, particularly
+before process exit: `defer h.Close()` is part of the caller's contract.
 
 - Objects: `Put`, `PutReader`, `PutRange`, `PutRangeReader`, `Append`,
   `AppendReader`, `Trunc`, `Delete`, `CAS`, `Stat`, `Get`, `GetRange`, `ReadAt`.

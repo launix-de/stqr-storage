@@ -86,9 +86,16 @@ func (v *Volume) readObject(o *object, dst []byte, offset uint64) error {
 	}
 	return nil
 }
+
+// Stat returns general object information. For metadata and payload protected by
+// the same lock, use Open(false), Handle.Stat and Handle.CopyTo, then Close.
 func (v *Volume) Stat(k Key) (Info, error) {
 	v.mu.RLock()
 	defer v.mu.RUnlock()
+	return v.statLocked(k)
+}
+
+func (v *Volume) statLocked(k Key) (Info, error) {
 	if e := v.check(false); e != nil {
 		return Info{}, e
 	}
@@ -107,6 +114,10 @@ func (v *Volume) Stat(k Key) (Info, error) {
 func (v *Volume) ReadAt(k Key, dst []byte, offset uint64) (int, error) {
 	v.mu.RLock()
 	defer v.mu.RUnlock()
+	return v.readAtLocked(k, dst, offset)
+}
+
+func (v *Volume) readAtLocked(k Key, dst []byte, offset uint64) (int, error) {
 	if e := v.check(false); e != nil {
 		return 0, e
 	}
@@ -288,22 +299,35 @@ func (v *Volume) Delete(k Key, opts Options) error {
 // CAS compares and replaces an equal-length range. With WholeObject and an
 // ExpectedVersion (or CreateOnly), it atomically replaces the entire object.
 func (v *Volume) CAS(k Key, offset uint64, expected, replacement []byte, opts Options) (Info, error) {
-	if len(replacement) > 1<<20 || len(expected) > 1<<20 {
-		return Info{}, ErrRange
-	}
-	if !opts.WholeObject && len(expected) != len(replacement) {
-		return Info{}, ErrRange
-	}
-	if opts.WholeObject && (offset != 0 || (!opts.CreateOnly && opts.ExpectedVersion == nil)) {
-		return Info{}, ErrRange
+	if e := validateCAS(offset, expected, replacement, opts); e != nil {
+		return Info{}, e
 	}
 	r, e := v.mutate(opCAS, k, offset, uint64(len(replacement)), bytes.NewReader(replacement), expected, opts)
 	return r.Info, e
 }
 
+func validateCAS(offset uint64, expected, replacement []byte, opts Options) error {
+	if len(replacement) > 1<<20 || len(expected) > 1<<20 {
+		return ErrRange
+	}
+	if !opts.WholeObject && len(expected) != len(replacement) {
+		return ErrRange
+	}
+	if opts.WholeObject && (offset != 0 || (!opts.CreateOnly && opts.ExpectedVersion == nil)) {
+		return ErrRange
+	}
+	return nil
+}
+
 func (v *Volume) mutate(op uint8, k Key, offset, length uint64, src io.Reader, expected []byte, opts Options) (Result, error) {
 	v.mu.Lock()
 	defer v.mu.Unlock()
+	return v.mutateWithRetryLocked(op, k, offset, length, src, expected, opts)
+}
+
+// mutateWithRetryLocked requires the volume's exclusive lock, also when reached
+// through a write handle. Keep validation, compaction and retry identical.
+func (v *Volume) mutateWithRetryLocked(op uint8, k Key, offset, length uint64, src io.Reader, expected []byte, opts Options) (Result, error) {
 	if e := v.check(true); e != nil {
 		return Result{}, e
 	}

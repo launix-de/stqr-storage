@@ -28,6 +28,7 @@ var (
 	ErrIdentity     = errors.New("volumes: identity mismatch")
 	ErrFull         = errors.New("volumes: insufficient physical storage")
 	ErrClosed       = errors.New("volumes: closed")
+	ErrReadOnly     = errors.New("volumes: read-only handle")
 	ErrRecovery     = errors.New("volumes: reopen required after I/O failure")
 	ErrNotFound     = errors.New("volumes: object not found")
 	ErrPrecondition = errors.New("volumes: precondition failed")
