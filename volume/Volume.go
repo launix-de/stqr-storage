@@ -208,7 +208,7 @@ func Open(dev VolumeIO, o OpenOptions) (*Volume, error) {
 	if e != nil {
 		return nil, e
 	}
-	if uint64(size) != s.Identity.Size {
+	if size < 0 || uint64(size) < s.Identity.Size {
 		return nil, ErrIdentity
 	}
 	if (o.ClusterID != (ID{}) && o.ClusterID != s.Identity.ClusterID) || (o.NodeID != (ID{}) && o.NodeID != s.Identity.NodeID) || (o.VolumeID != (ID{}) && o.VolumeID != s.Identity.VolumeID) {

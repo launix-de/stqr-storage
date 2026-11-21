@@ -58,8 +58,15 @@ func (v *Volume) Compact() error {
 	return v.compactLocked()
 }
 func (v *Volume) compactLocked() error {
+	return v.rewriteLocked(v.sb.Identity.Size, 1-v.sb.Bank)
+}
+
+// rewriteLocked builds a complete immutable image in a disjoint destination
+// bank. The caller must prove disjointness before changing size or bank layout.
+func (v *Volume) rewriteLocked(size uint64, bank uint8) error {
 	s := v.sb
-	s.Bank = 1 - s.Bank
+	s.Identity.Size = size
+	s.Bank = bank
 	s.Generation++
 	s.BankEpoch = s.Generation
 	s.JournalBytes = 0

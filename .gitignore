@@ -6,3 +6,8 @@ coverage/
 
 # Runtime volume files, never library source.
 /volumes/
+
+# Local daemon executable and bootstrap credentials.
+/stqr
+/stqr.yaml
+/stqr.yaml.lock

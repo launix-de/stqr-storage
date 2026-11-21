@@ -1,0 +1,277 @@
+// SPDX-License-Identifier: GPL-3.0-only
+package server
+
+import (
+	"encoding/json"
+	"math"
+
+	"github.com/launix-de/stqr-storage/client"
+)
+
+func encodeAck(op Operation) []byte {
+	e := client.Encoder{}
+	id, _ := parseID(op.ID)
+	e.ID(client.ID(id))
+	state := uint8(0)
+	switch op.State {
+	case "running":
+		state = 1
+	case "fulfilled":
+		state = 2
+	case "failed":
+		state = 3
+	}
+	e.U8(state)
+	e.Bool(op.VolumeID != "")
+	if op.VolumeID != "" {
+		vid, _ := parseID(op.VolumeID)
+		e.ID(client.ID(vid))
+	}
+	return e.B
+}
+func jsonText(v any) []byte {
+	b, _ := json.Marshal(v)
+	e := client.Encoder{}
+	e.Text(string(b))
+	return e.B
+}
+
+// Normal bucket connections can negotiate and use only object/routing messages.
+// This gate is shared by HTTP and WebSocket, not claimed by a client enum.
+func (s *Server) dispatchAs(m client.Message, ws *wsSession, p principal) ([]byte, int) {
+	if p.User.Role != "ADMIN" && m.Opcode != client.Hello && m.Opcode != client.Ping && !(m.Opcode >= 0x0100 && m.Opcode <= 0x0114) {
+		return client.ResponseBody(403, nil, "administrator required"), 403
+	}
+	return s.dispatch(m, ws)
+}
+func (s *Server) dispatch(m client.Message, ws *wsSession) ([]byte, int) {
+	result, status, err := s.execute(m, ws)
+	if err != nil {
+		status = statusOf(err)
+		return client.ResponseBody(status, nil, err.Error()), status
+	}
+	if m.Opcode == client.StatsGet {
+		e := client.Encoder{}
+		e.V(uint64(status))
+		h := client.Encoder{}
+		h.V(1)
+		h.V(9)
+		h.Blob([]byte{0})
+		e.Blob(h.B)
+		e.B = append(e.B, result...)
+		return e.B, status
+	}
+	return client.ResponseBody(status, result, ""), status
+}
+func (s *Server) execute(m client.Message, ws *wsSession) ([]byte, int, error) {
+	d := client.Decoder{B: m.Body}
+	guard := func() error {
+		if e := d.Done(); e != nil {
+			return fail(400, e.Error())
+		}
+		return nil
+	}
+	switch m.Opcode {
+	case client.Hello:
+		min, max := d.U16(), d.U16()
+		d.U64()
+		d.Text()
+		if e := guard(); e != nil {
+			return nil, 0, e
+		}
+		if min > 1 || max < 1 {
+			return nil, 0, fail(400, "no compatible protocol version")
+		}
+		s.mu.RLock()
+		c := s.cfg
+		s.mu.RUnlock()
+		e := client.Encoder{}
+		e.U16(1)
+		e.U64(0)
+		node, _ := parseID(c.Node.ID)
+		cluster, _ := parseID(c.ClusterID)
+		e.ID(client.ID(node))
+		e.ID(client.ID(cluster))
+		e.U64(1)
+		e.U64(c.Generation)
+		return e.B, 200, nil
+	case client.Ping:
+		n := d.U64()
+		if e := guard(); e != nil {
+			return nil, 0, e
+		}
+		e := client.Encoder{}
+		e.U64(n)
+		return e.B, 200, nil
+	case client.StatsGet:
+		f := client.DecodeStatsFilter(&d)
+		if e := guard(); e != nil {
+			return nil, 0, e
+		}
+		return client.EncodeStats(s.CollectStats(f)), 200, nil
+	case client.StatsSubscribe:
+		sub := d.ID()
+		f := client.DecodeStatsFilter(&d)
+		interval := d.U32()
+		if e := guard(); e != nil {
+			return nil, 0, e
+		}
+		if ws == nil {
+			return nil, 0, fail(400, "statistics pushes require WebSocket")
+		}
+		if interval != 3000 {
+			return nil, 0, fail(400, "this implementation supports a 3000 ms statistics interval")
+		}
+		if sub == (client.ID{}) {
+			return nil, 0, fail(400, "subscription ID cannot be zero")
+		}
+		ws.subscribe(sub, f)
+		e := client.Encoder{}
+		e.ID(sub)
+		return e.B, 200, nil
+	case client.StatsUnsubscribe:
+		sub := d.ID()
+		if e := guard(); e != nil {
+			return nil, 0, e
+		}
+		if ws != nil {
+			ws.unsubscribe(sub)
+		}
+		return nil, 200, nil
+	case client.VolumeAdd:
+		name := d.Text()
+		source := d.U8()
+		path := d.Text()
+		class := d.U8()
+		size := d.U64()
+		if e := guard(); e != nil {
+			return nil, 0, e
+		}
+		if size > math.MaxInt64 || class > 2 {
+			return nil, 0, fail(400, "invalid volume size/class")
+		}
+		op, e := s.AddVolume(m.ID.String(), AddVolumeRequest{Name: name, Source: source, Path: path, Class: []string{"hdd", "ssd", "ram"}[class], SizeBytes: int64(size)})
+		if e != nil {
+			return nil, 0, e
+		}
+		if op.State == "failed" {
+			return nil, 0, fail(op.Status, op.Detail)
+		}
+		return encodeAck(op), op.Status, nil
+	case client.VolumeRescan:
+		id := d.ID()
+		if e := guard(); e != nil {
+			return nil, 0, e
+		}
+		op, e := s.RescanVolume(m.ID.String(), id.String())
+		if e != nil {
+			return nil, 0, e
+		}
+		if op.State == "failed" {
+			return nil, 0, fail(op.Status, op.Detail)
+		}
+		return encodeAck(op), op.Status, nil
+	case client.VolumeRemove:
+		id := d.ID()
+		if e := guard(); e != nil {
+			return nil, 0, e
+		}
+		op, e := s.RemoveVolume(m.ID.String(), id.String())
+		if e != nil {
+			return nil, 0, e
+		}
+		if op.State == "failed" {
+			return nil, 0, fail(op.Status, op.Detail)
+		}
+		return encodeAck(op), op.Status, nil
+	case client.AdminOperationStatus:
+		id := d.ID()
+		if e := guard(); e != nil {
+			return nil, 0, e
+		}
+		op, e := s.operation(id.String())
+		if e != nil {
+			return nil, 0, e
+		}
+		out := client.Encoder{B: encodeAck(op)}
+		out.V(uint64(op.Status))
+		out.Text(op.Detail)
+		return out.B, 200, nil
+	case client.NodeConfigGet:
+		if e := guard(); e != nil {
+			return nil, 0, e
+		}
+		return jsonText(s.configView()), 200, nil
+	case client.NodeConfigSet:
+		raw := d.Text()
+		if e := guard(); e != nil {
+			return nil, 0, e
+		}
+		var patch map[string]json.RawMessage
+		if e := json.Unmarshal([]byte(raw), &patch); e != nil || len(patch) == 0 || len(patch) > 32 {
+			return nil, 0, fail(400, "expected a nonempty configuration field object")
+		}
+		if e := s.updateConfig(patch); e != nil {
+			return nil, 0, e
+		}
+		return jsonText(s.configView()), 200, nil
+	case client.VolumeGrowInfo:
+		id := d.ID()
+		if e := guard(); e != nil {
+			return nil, 0, e
+		}
+		info, e := s.growthInfo(id.String())
+		if e != nil {
+			return nil, 0, e
+		}
+		out := client.Encoder{}
+		out.U8(info.Kind)
+		out.U64(info.Current)
+		out.U64(info.Available)
+		out.U64(info.Maximum)
+		return out.B, 200, nil
+	case client.VolumeGrow:
+		id := d.ID()
+		size := d.U64()
+		if e := guard(); e != nil {
+			return nil, 0, e
+		}
+		if size > math.MaxInt64 {
+			return nil, 0, fail(400, "invalid volume size")
+		}
+		op, e := s.GrowVolume(m.ID.String(), id.String(), int64(size))
+		if e != nil {
+			return nil, 0, e
+		}
+		if op.State == "failed" {
+			return nil, 0, fail(op.Status, op.Detail)
+		}
+		return encodeAck(op), op.Status, nil
+	case client.VolumeCapacityGet:
+		if e := guard(); e != nil {
+			return nil, 0, e
+		}
+		capacity, e := s.volumeCapacity()
+		if e != nil {
+			return nil, 0, e
+		}
+		out := client.Encoder{}
+		out.U64(capacity.FileAvailable)
+		out.U64(capacity.RAMAvailable)
+		out.U64(capacity.RAMLimit)
+		return out.B, 200, nil
+	case client.VolumeCandidates:
+		if e := guard(); e != nil {
+			return nil, 0, e
+		}
+		v, e := s.candidates()
+		if e != nil {
+			return nil, 0, e
+		}
+		return jsonText(v), 200, nil
+	default:
+		// TODO(multinode): NODE_HELLO, control/placement, replica and migration
+		// dispatchers. Unsupported messages never receive a fabricated success ACK.
+		return nil, 0, fail(501, "message is not implemented in the single-node administration stage")
+	}
+}

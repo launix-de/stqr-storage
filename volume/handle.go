@@ -3,6 +3,7 @@ package volume
 
 import (
 	"bytes"
+	"errors"
 	"io"
 	"runtime"
 	"sync"
@@ -270,4 +271,47 @@ func (h *Handle) RestoreRequest(x RequestRecord) error {
 // server's responsibility.
 func (h *Handle) SyncThrough(k Key, version uint64) error {
 	return h.do(true, func(v *Volume) error { return v.syncThroughLocked(k, version) })
+}
+
+// ObjectRecord is logical migration metadata, including retained tombstones.
+type ObjectRecord struct {
+	Key  Key
+	Info Info
+}
+
+// ScanObjects returns at most limit records strictly after the optional cursor,
+// ordered by (bucket, object). Unlike client-facing Scan, it includes tombstones
+// and all buckets. It supports bounded-memory local evacuation/recovery. It does
+// not grant placement authority. limit must be 1..4096; an empty page ends a scan.
+func (h *Handle) ScanObjects(after *Key, limit int) ([]ObjectRecord, error) {
+	return withHandle(h, false, func(v *Volume) ([]ObjectRecord, error) {
+		if limit < 1 || limit > 4096 {
+			return nil, ErrRange
+		}
+		out := make([]ObjectRecord, 0, limit)
+		stop := errors.New("scan page complete")
+		var cursor indexKey
+		if after != nil {
+			cursor = objectKey(*after)
+		}
+		e := v.walkIndex(func(x indexEntry) error {
+			if x.Key[0] != 0 || (after != nil && !lessKey(cursor, x.Key)) {
+				return nil
+			}
+			k := x.Key.object()
+			o, e := v.loadObject(k)
+			if e != nil {
+				return e
+			}
+			out = append(out, ObjectRecord{Key: k, Info: o.Info})
+			if len(out) == limit {
+				return stop
+			}
+			return nil
+		})
+		if e == stop {
+			e = nil
+		}
+		return out, e
+	})
 }

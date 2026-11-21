@@ -1,0 +1,344 @@
+// SPDX-License-Identifier: GPL-3.0-only
+package client
+
+import (
+	"context"
+	"encoding/base64"
+	"errors"
+	"fmt"
+	"io"
+	"net"
+	"net/http"
+	"net/url"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/gorilla/websocket"
+)
+
+// Client is an authenticated connection to exactly one bucket. Object methods
+// cannot switch buckets, resolve bucket names, administer the cluster or fetch
+// cluster statistics. IDs are native 256-bit object addresses, never rehashed.
+// It is safe to call methods concurrently; Close is idempotent.
+type Client struct {
+	endpoint, username, password string
+	bucket                       BucketID
+	mu                           sync.Mutex
+	transport                    *objectTransport
+	dialGate                     chan struct{}
+	closed                       bool
+	closeOnce                    sync.Once
+	life                         context.Context
+	cancel                       context.CancelFunc
+	done                         chan struct{}
+}
+
+// Dial establishes the bucket connection. All four connection parameters are
+// mandatory. ctx controls establishment; individual operations take their own
+// contexts. There is no TLS or implicit HTTP redirect/credential forwarding.
+func Dial(ctx context.Context, rawURL, username, password string, bucket BucketID) (*Client, error) {
+	if e := ctx.Err(); e != nil {
+		return nil, e
+	}
+	u, e := url.Parse(rawURL)
+	if e != nil || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || u.Scheme != "http" && u.Scheme != "ws" || u.Path != "" && u.Path != "/" && u.Path != "/api/ws" {
+		return nil, errors.New("client: URL must be http://host:port or ws://host:port/api/ws without embedded credentials")
+	}
+	if username == "" || strings.Contains(username, ":") || password == "" || bucket == (BucketID{}) {
+		return nil, errors.New("client: URL, username, password and a nonzero bucket ID are required")
+	}
+	u.Scheme = "ws"
+	u.Path = "/api/ws"
+	life, cancel := context.WithCancel(context.Background())
+	c := &Client{endpoint: u.String(), username: username, password: password, bucket: bucket, done: make(chan struct{}), dialGate: make(chan struct{}, 1), life: life, cancel: cancel}
+	t, e := c.connect(ctx)
+	if e != nil {
+		cancel()
+		return nil, e
+	}
+	c.transport = t
+	return c, nil
+}
+func (c *Client) connect(ctx context.Context) (*objectTransport, error) {
+	merged, cancel := context.WithCancel(ctx)
+	stop := context.AfterFunc(c.life, cancel)
+	defer stop()
+	defer cancel()
+	ctx = merged
+	headers := http.Header{}
+	headers.Set("Authorization", "Basic "+base64.StdEncoding.EncodeToString([]byte(c.username+":"+c.password)))
+	dialer := websocket.Dialer{Subprotocols: []string{"stqr.v1"}, EnableCompression: false, HandshakeTimeout: 0}
+	var stopSocket func() bool
+	defer func() {
+		if stopSocket != nil {
+			stopSocket()
+		}
+	}()
+	// Cancel an HTTP upgrade waiting for response headers as well as TCP dial.
+	// Stop this hook before ownership passes to the long-lived transport.
+	dialer.NetDialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
+		conn, e := (&net.Dialer{}).DialContext(ctx, network, address)
+		if e == nil {
+			stopSocket = context.AfterFunc(ctx, func() { conn.Close() })
+		}
+		return conn, e
+	}
+	conn, response, e := dialer.DialContext(ctx, c.endpoint, headers)
+	if e != nil {
+		if response != nil {
+			response.Body.Close()
+			return nil, &StatusError{Status: response.StatusCode, Message: "connection rejected"}
+		}
+		return nil, e
+	}
+	if conn.Subprotocol() != "stqr.v1" {
+		conn.Close()
+		return nil, ErrProtocol
+	}
+	t := newObjectTransport(conn)
+	hello := Encoder{}
+	hello.U16(1)
+	hello.U16(1)
+	hello.U64(0)
+	hello.Text("stqr-go")
+	r, e := t.roundTrip(ctx, Message{Kind: Request, Opcode: Hello, ID: NewRequestID(), Body: hello.B}, false, nil)
+	if e == nil {
+		d := Decoder{B: r.result}
+		version := d.U16()
+		d.U64()
+		d.ID()
+		d.ID()
+		d.U64()
+		d.U64()
+		if d.Done() != nil || version != 1 {
+			e = ErrProtocol
+		}
+	}
+	r.close()
+	if e == nil {
+		e = ctx.Err()
+	}
+	if e != nil {
+		t.fail(e)
+		t.workers.Wait()
+		return nil, e
+	}
+	return t, nil
+}
+func (c *Client) Close() error {
+	if c == nil {
+		return nil
+	}
+	c.closeOnce.Do(func() {
+		if c.cancel != nil {
+			c.cancel()
+		}
+		if c.done != nil {
+			close(c.done)
+		}
+		c.mu.Lock()
+		c.closed = true
+		t := c.transport
+		c.mu.Unlock()
+		if t != nil {
+			t.fail(ErrClosed)
+			t.workers.Wait()
+		}
+	})
+	return nil
+}
+func (c *Client) activeTransport() (*objectTransport, error) {
+	if c == nil {
+		return nil, ErrClosed
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.closed || c.done == nil {
+		return nil, ErrClosed
+	}
+	select {
+	case <-c.done:
+		return nil, ErrClosed
+	default:
+	}
+	if c.transport != nil {
+		select {
+		case <-c.transport.done:
+		default:
+			return c.transport, nil
+		}
+	}
+	return nil, nil
+}
+func (c *Client) connection(ctx context.Context) (*objectTransport, error) {
+	if t, e := c.activeTransport(); t != nil || e != nil {
+		return t, e
+	}
+	// A caller must be able to cancel while another caller is reconnecting. Never
+	// hold the state mutex across dial/HELLO; the gate is context-aware.
+	select {
+	case c.dialGate <- struct{}{}:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-c.done:
+		return nil, ErrClosed
+	}
+	defer func() { <-c.dialGate }()
+	if t, e := c.activeTransport(); t != nil || e != nil {
+		return t, e
+	}
+	t, e := c.connect(ctx)
+	if e != nil {
+		return nil, e
+	}
+	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		t.fail(ErrClosed)
+		t.workers.Wait()
+		return nil, ErrClosed
+	}
+	select {
+	case <-c.done:
+		c.mu.Unlock()
+		t.fail(ErrClosed)
+		t.workers.Wait()
+		return nil, ErrClosed
+	default:
+	}
+	c.transport = t
+	c.mu.Unlock()
+	return t, nil
+}
+func (c *Client) ready(ctx context.Context) error {
+	if e := ctx.Err(); e != nil {
+		return e
+	}
+	if c == nil {
+		return ErrClosed
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.closed || c.done == nil {
+		return ErrClosed
+	}
+	select {
+	case <-c.done:
+		return ErrClosed
+	default:
+	}
+	return nil
+}
+func (c *Client) do(ctx context.Context, opcode uint16, body []byte, id RequestID, mutation bool, upload uploadFunc) (wireReply, error) {
+	if e := c.ready(ctx); e != nil {
+		return wireReply{}, e
+	}
+	if id == (RequestID{}) {
+		id = NewRequestID()
+	}
+	m := Message{Kind: Request, Opcode: opcode, ID: id, Body: body}
+	backoff := 100 * time.Millisecond
+	for {
+		t, e := c.connection(ctx)
+		if e == nil {
+			r, er := t.roundTrip(ctx, m, mutation, upload)
+			if er == nil {
+				return r, nil
+			}
+			e = er
+			var status *StatusError
+			if errors.As(e, &status) || errors.Is(e, ErrWouldBlock) || errors.Is(e, ErrProtocol) {
+				return wireReply{}, e
+			}
+		}
+		if ctx.Err() != nil {
+			if mutation {
+				return wireReply{}, &UnknownOutcomeError{RequestID: id, Cause: ctx.Err()}
+			}
+			return wireReply{}, ctx.Err()
+		}
+		if errors.Is(e, ErrClosed) {
+			select {
+			case <-c.done:
+				return wireReply{}, ErrClosed
+			default:
+			}
+		}
+		var local *uploadError
+		if errors.As(e, &local) {
+			if mutation {
+				return wireReply{}, &UnknownOutcomeError{RequestID: id, Cause: local.Cause}
+			}
+			return wireReply{}, local.Cause
+		}
+		var status *StatusError
+		if errors.As(e, &status) {
+			return wireReply{}, e
+		}
+		var network net.Error
+		var closed *websocket.CloseError
+		if !errors.As(e, &network) && !errors.As(e, &closed) && !errors.Is(e, io.EOF) && !errors.Is(e, ErrClosed) && !errors.Is(e, websocket.ErrCloseSent) {
+			return wireReply{}, e
+		}
+		// A broken transport is not a failed node or a failed mutation. Reconnect
+		// and resend identical logical input under the same persistent request ID.
+		timer := time.NewTimer(backoff)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			if mutation {
+				return wireReply{}, &UnknownOutcomeError{RequestID: id, Cause: ctx.Err()}
+			}
+			return wireReply{}, ctx.Err()
+		case <-c.done:
+			timer.Stop()
+			return wireReply{}, ErrClosed
+		case <-timer.C:
+		}
+		backoff = min(3*time.Second, backoff*2)
+	}
+}
+
+// StatusError retains the original protocol status and optional follow headers.
+// A 301 is not followed blindly. TODO(multinode): validate/apply bucket-specific
+// map segments and select authenticated destinations before routing there.
+type StatusError struct {
+	Status    int
+	Message   string
+	RequestID RequestID
+	Headers   map[uint64][]byte
+}
+
+func (e *StatusError) Error() string {
+	return fmt.Sprintf("client: status %d: %s", e.Status, e.Message)
+}
+func (e *StatusError) Is(target error) bool {
+	switch e.Status {
+	case 404:
+		return target == ErrNotFound
+	case 412:
+		return target == ErrPrecondition
+	case 507:
+		return target == ErrFull
+	case 501:
+		return target == ErrNotImplemented
+	case 401, 403:
+		return target == ErrUnauthorized
+	case 301, 302:
+		return target == ErrRedirect
+	}
+	return false
+}
+
+// UnknownOutcomeError means cancellation/disconnection cannot prove a mutation
+// absent. Retry with RequestID unchanged; never manufacture a new logical write.
+type UnknownOutcomeError struct {
+	RequestID RequestID
+	Cause     error
+}
+
+func (e *UnknownOutcomeError) Error() string {
+	return fmt.Sprintf("client: outcome unknown for %s: %v", e.RequestID, e.Cause)
+}
+func (e *UnknownOutcomeError) Unwrap() error { return e.Cause }

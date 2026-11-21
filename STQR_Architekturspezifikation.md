@@ -319,11 +319,20 @@ bucket:
 
 ### 5.7 System-Bucket und Accountdaten
 
+**Katalog und Bootstrap (zunächst Spezifikation, noch kein Bucket-Management im aktuellen Volume-Auftrag):**
+
+- Im replizierten System-Bucket liegt je Bucket ein eigenes Objekt mit dessen vollständiger versionierter Konfiguration. Accounts/Userliste liegen in weiteren normalen Systemobjekten; Passwortdaten darin sind gesalzene Verifier.
+- Ein separates Bucketlisten-Objekt enthält ausschließlich die **sortierten 256-Bit-Objekthashes** der Bucket-Konfigurationsobjekte, keine eingebetteten Konfigurationen. Die Sortierung ist lexikographisch über die 32 Hashbytes; Duplikate sind ungültig.
+- Der System-Bucket und der Einstiegspunkt des Bucketlisten-Objekts benötigen feste, versionsgebundene IDs, damit der Katalog ohne bereits geladenen Katalog gefunden werden kann. Beim neuen Cluster zuerst das Konfigurationsobjekt des System-Buckets schreiben, danach die initiale Liste mit dessen Hash veröffentlichen. Neue Bucket-Konfigurationen werden vor dem Eintrag in die Liste persistiert; der Katalogwechsel muss atomar und wiederanlauffähig sein. Die genaue Mehr-Objekt-Recovery wird vor Implementierung des Bucket-Managements präzisiert.
+- Beim Wiederanlauf vorhandene Liste und referenzierte Konfigurationen validieren; ein fehlender/beschädigter Katalog eines bestehenden Clusters darf keinen stillen Neu-Bootstrap auslösen. Multinode übernimmt diese Objekte per EVERYWHERE-Replikation vor Aktivierung eines beitretenden Mitglieds.
+- Das automatisch angelegte **Admin-Volume ist ein dynamisch wachsendes Datei-Volume**, keine fest begrenzte Systempartition. Es startet standardmäßig bei **1M** und hält unter anderem Accounts und später den Bucketkatalog. Die konfigurierte Größe ist nur eine Anfangsgröße; notwendiges Wachstum erfolgt automatisch, begrenzt durch den tatsächlich verfügbaren physischen Platz. Automatisches Dateiwachstum ist für Blockdevices nicht zulässig.
+
+
 - Ein reservierter **persistenter System-Bucket** mit stabiler Bucket-ID hält Usernamen, Passwortverifier, zusätzliche Adminaccounts, Rollen und ACL-Objekte als normale STQR-Objekte. Platzierung ist **EVERYWHERE**, Standardstrategie HDD mit erlaubtem SSD-Fallback, Kompression raw. Er wird automatisch angelegt und darf nicht auf RAM/CACHE umgestellt oder von normalen Clients gelesen/verändert werden.
 - Der erste Clusterstart erzeugt Cluster-Token und initiales Admin-Passwort und speichert beides im Klartext in der lokalen Config. Der erste Admin erhält zusätzlich einen verifierbasierten Accountdatensatz im System-Bucket; weitere User-/Admin-Passwörter werden ausschließlich als gesalzene Passwortverifier dort abgelegt, keine Klartextkopien dieser Passwörter in Node-Configs.
 - Auth- und Adminhandler benutzen intern normale Objektoperationen auf diesen Systemobjekten, nicht eine zusätzliche Userdatenbank neben dem Store. Kontrollentscheidungen können Objektversionen/Digests referenzieren; sie ersetzen nicht den System-Bucket als autoritative Ablage. Ein gültiges lokales System-Replikat erlaubt Authentifizierung auch bei fehlendem Primary.
 - Der Cluster-Token aus der lokalen Config ermöglicht Node-Authentifizierung vor Übernahme der System-Bucket-Kopie; weitere Userauthentifizierung wird erst nach synchronisierter Übernahme freigeschaltet. Jede beitretende Node muss den System-Bucket erhalten. Die Bootstrap-Kopie ist eine ausdrückliche Ausnahme von „neue Nodes erst im nächsten regulären Storage-Placement“; andere EVERYWHERE-Buckets müssen spätestens vor ihrer Aktivierung auf dem neuen Mitglied nachgezogen sein.
-- Der Daemon nutzt dafür ein geeignetes vorhandenes persistentes Volume. Ist noch keines konfiguriert, erzeugt und formatiert er automatisch ein kleines System-Volume im Datenverzeichnis und nimmt es sichtbar in Config/Stats auf. Kein zusätzlicher init-/Format-Schritt; die genaue Startgröße bleibt konfigurierbar. Wiederanlauf nutzt dessen bestehenden Header und überschreibt keine beschädigten Accountdaten blind.
+- Der Daemon erzeugt dafür automatisch ein eigenes **dynamisch wachsendes Admin-Dateivolume** in `VOLUMES_DIR/admin` und nimmt es sichtbar in Config/Stats auf. `system_volume_bytes` ist ausschließlich eine konfigurierbare Anfangsgröße, keine Obergrenze. Kein zusätzlicher init-/Format-Schritt. Wiederanlauf nutzt dessen bestehenden Header und überschreibt keine beschädigten Accountdaten blind; ein Blockdevice ersetzt dieses automatisch wachsende Datei-Volume nicht.
 - Nach Accountänderung werden die neuen Systemobjekt-Versionen auf alle erforderlichen Kopien übernommen, bevor der gemeinsame neue Auth-/ACL-Stand aktiv wird. Hashing, Sperren und Credential-Rotation gelten unabhängig davon, dass das lokale Bootstrap-Secret bewusst im Klartext vorliegt.
 
 ---
@@ -567,6 +576,11 @@ Persistente Volume-Klassen sind `hdd` und `ssd`; daneben verwaltet der Daemon fl
 
 ### 8.2.1 Anlegen im Dashboard und Library-Verwaltung
 
+- **Größenwahl:** Der Slider verwendet feste diskrete Stufen `1M, 2M, …, 9M, 10M, 20M, …, 90M, 100M, 200M, …`, entsprechend auch K/G/T/P. K/M/G/T/P stehen für 1024er-Potenzen. Seine Position ist ein Stufenindex; Ziehen verändert niemals die Skala/Obergrenze. Texteingabe und Slider sind in beide Richtungen gebunden, das Größenfeld zeigt kompakte Einheiten. Auch eine gültige individuelle Texteingabe bekommt eine exakte Sliderposition. Minimum bleibt 256K; als letzter Punkt ist die exakte auf Volume-Seitengröße abgerundete Obergrenze erreichbar.
+- Bei neuen Datei-Volumes ist die Obergrenze der aktuell für den Benutzer verfügbare Platz auf dem Dateisystem von `VOLUMES_DIR` (`Statfs.Bavail`, wie `df`, keine für root reservierten Blöcke). Bei RAM gilt `MemAvailable`; ein ausdrücklich positiv konfiguriertes RAM-Budget begrenzt zusätzlich den noch nicht vergebenen Anteil. `ram_bytes=0` nutzt automatisch den verfügbaren System-RAM. Der Daemon liefert diese Werte über `VOLUME_CAPACITY_GET` und prüft sie beim Anlegen erneut; Überschreitung gibt 507. Blockdevices nutzen stets die vollständige vorhandene Größe und haben keinen Größenregler. Bestehende Datei-Volumes sind ebenfalls nicht über diesen Regler veränderbar.
+
+- **Kapazitätsänderungen:** Reguläre Dateien und RAM-Volumes können über die explizite Library-Verwaltungsoperation `Volume.Grow(sizeBytes)` wachsen; das Admin-Dateivolume verwendet dies automatisch bei Platzbedarf. Keine implizite Vergrößerung normaler bestehender Dateien beim Hinzufügen und kein Truncate/Grow für Raw-Blockdevices. Nach einer externen Vergrößerung (z. B. eines LVM-LV) liest `VOLUME_RESCAN` die aktuelle Kernel-Kapazität des bereits eingebundenen Devices erneut und übernimmt zusätzlichen Platz durch `Volume.Rescan()` ins Volume-Layout. Das Dashboard bietet für jedes aktive Volume **Vergrößern**. Datei- und RAM-Volumes verwenden die gleichen abgestuften, bidirektional gebundenen Größenregler: Minimum ist die bisherige Größe, Maximum **bisherige Größe + aktuell freier Platz** (Dateisystem bzw. RAM, zusätzlich begrenzt durch ein konfiguriertes RAM-Budget). Die Grenzen werden bei der Durchführung erneut geprüft. Blockdevices haben keinen Regler; sie übernehmen stets die volle aktuelle physische Device-Größe. Nur das Admin-Dateivolume wächst automatisch; normale Volumes wachsen ausschließlich auf ausdrückliche Anforderung. Es gibt keinen Schalter für automatisches Wachstum normaler Dateien. Sie ändert weder die LV-Größe selbst noch die Partitionstabelle; Schrumpfen wird abgewiesen. Header/Index/Daten werden crashsicher auf das neue Layout übertragen, bevor die neue nutzbare Kapazität veröffentlicht wird. Ein größerer Backend-Umfang allein ändert beim Open noch nicht die committed Volume-Kapazität.
+
 - Ein Admin darf im Dashboard jederzeit neue Volumes anlegen, einen **Namen** vergeben und die Größe per Schieberegler oder Eingabe aus Zahl und Einheit wählen, z. B. `50M`/`50m`. Die Umrechnung der UI-Eingabe in Bytes ist Aufgabe der späteren Dashboard-/Server-Schicht; die Volume-Library nimmt ausschließlich Bytegrößen entgegen. Speicherklasse HDD/SSD/RAM ist in der UI einstellbar; bei Blockdevices soll sie soweit möglich über Linux-Geräteinformationen automatisch vorbelegt und vom Admin korrigierbar sein.
 - `VOLUMES_DIR` ist das Datenverzeichnis, Standard **`volumes/`** relativ zum Arbeitsverzeichnis. Es wird angelegt und vollständig in `.gitignore` ausgeschlossen. Go-Library-Quellcode liegt deshalb im separaten **`volume/`**-Package, nicht im ignorierten Verzeichnis.
 - Datei-Volumes liegen unter `VOLUMES_DIR/<name>`. Zulässig sind einfache Dateinamen ohne Pfadtraversal; keine implizite Dateiendung. Existiert die Datei noch nicht, wird sie in gewünschter Größe angelegt und formatiert. Existierende Dateien werden nicht still vergrößert/verkleinert; gültige Header werden geöffnet, ein ausdrücklich hinzugefügtes unformatiertes Ziel kann gemäß §8.2 formatiert werden.
@@ -726,7 +740,7 @@ Der initiale `volume`-Stand implementiert das Format in [docs/volume-format.md](
 
 **Aktuelle Reserveentscheidung zur Review:** Zwei Bänke; eine Bank (ungefähr die Hälfte des Volumeplatzes) bleibt für crash-sichere Compaction frei. Diese Reserve wird ausdrücklich in physischer Admission/Stats berücksichtigt. Das ist ein konservativer erster Collector, keine behauptete optimale Kapazitätseffizienz oder erreichte 99-%-Nutzlastfüllung. Segmentweise GC mit kleinerer Reserve bleibt eine spätere Format-/Messoptimierung. Für Raw-Devices werden logische Sektorgrößen unterstützt, die 4096 teilen; größere inkompatible Sektoren werden explizit abgelehnt.
 
-Objekt-Restore in belegte Zielvolumes, Übernahme von Request-ID-Ergebnissen und gleichversionige Reparatur sind Library-Primitiven; Quorum, Ownership-/Subscription-Handoff und Replikationsentscheidungen bleiben Serverarbeit. Aktueller Auftrag und Abnahme betreffen ausschließlich Library und Tests, keine Dashboard-/CLI-Implementierung. Nach den Prüfungen folgt die angekündigte Review-Runde.
+Objekt-Restore in belegte Zielvolumes, Übernahme von Request-ID-Ergebnissen und gleichversionige Reparatur sind Library-Primitiven; Quorum, Ownership-/Subscription-Handoff und Replikationsentscheidungen bleiben Serverarbeit. Der aktuelle Folgeauftrag erweitert dies um einen Single-Node-Daemon mit Volume-Dashboard, Authentifizierung, Config-Pflege und Original-WebSocket-Nachrichten. Bucketkatalog/-Verwaltung und Multinode bleiben vorerst Spezifikation bzw. markierte Erweiterungspunkte. Commit und Push folgen erst nach der angekündigten UI-/Volume-Management-Prüfung durch den Nutzer.
 
 ---
 
@@ -736,19 +750,19 @@ Objekt-Restore in belegte Zielvolumes, Übernahme von Request-ID-Ergebnissen und
 
 ```go
 type ObjectStore interface {
-    Get(ctx context.Context, bucket BucketID, key []byte) ([]byte, ObjectInfo, error)
-    GetRange(ctx context.Context, bucket BucketID, key []byte, offset, length uint64) ([]byte, ObjectInfo, error)
-    Put(ctx context.Context, bucket BucketID, key, data []byte, opt PutOptions) (ObjectInfo, error)
-    PutRange(ctx context.Context, bucket BucketID, key []byte, offset uint64, data []byte, opt PutOptions) (ObjectInfo, error)
-    Delete(ctx context.Context, bucket BucketID, key []byte, opt DeleteOptions) error
-    Append(ctx context.Context, bucket BucketID, key, data []byte, opt AppendOptions) (AppendResult, error)
-    Trunc(ctx context.Context, bucket BucketID, key []byte, length uint64, opt TruncOptions) (ObjectInfo, error)
-    CAS(ctx context.Context, bucket BucketID, key []byte, offset uint64, expected, replacement []byte, opt CASOptions) (ObjectInfo, error)
-    Stat(ctx context.Context, bucket BucketID, key []byte) (ObjectInfo, error)
+    Get(ctx context.Context, object ObjectID) ([]byte, ObjectInfo, error)
+    GetRange(ctx context.Context, object ObjectID, offset, length uint64) ([]byte, ObjectInfo, error)
+    Put(ctx context.Context, object ObjectID, data []byte, opt PutOptions) (ObjectInfo, error)
+    PutRange(ctx context.Context, object ObjectID, offset uint64, data []byte, opt PutOptions) (ObjectInfo, error)
+    Delete(ctx context.Context, object ObjectID, opt DeleteOptions) error
+    Append(ctx context.Context, object ObjectID, data []byte, opt AppendOptions) (AppendResult, error)
+    Trunc(ctx context.Context, object ObjectID, length uint64, opt TruncOptions) (ObjectInfo, error)
+    CAS(ctx context.Context, object ObjectID, offset uint64, expected, replacement []byte, opt CASOptions) (ObjectInfo, error)
+    Stat(ctx context.Context, object ObjectID) (ObjectInfo, error)
 }
 ```
 
-`GET_RANGE`, `PUT_RANGE` und `TRUNC` gehören zur nativen Basis-API. Die dargestellten Byte-Slice-Methoden sind Komfortfunktionen für in den Arbeitsspeicher passende Transfers; vollständige und ranged Reads/Writes benötigen außerdem Streaming-Varianten mit `io.Reader`/`io.Writer`. Objektgröße und Transfergröße dürfen keine vollständige Pufferung des Objekts erzwingen. Endliche Integer-/Adressräume und explizite Frame-/Ressourcenlimits bleiben technische Grenzen, aber es gibt **kein internes festes Objektgrößenlimit**.
+Die Verbindung ist bereits im Konstruktor an genau eine Bucket-ID gebunden; einzelne Operationen erhalten keine Bucket-ID und bieten keine Bucket-/Node-/Adminverwaltung. Objekt-IDs werden direkt verwendet, ohne erneutes Hashen. `GET_RANGE`, `PUT_RANGE` und `TRUNC` gehören zur nativen Basis-API. Die dargestellten Byte-Slice-Methoden sind Komfortfunktionen für in den Arbeitsspeicher passende Transfers; vollständige und ranged Reads/Writes benötigen außerdem Streaming-Varianten mit `io.Reader`/`io.Writer`. Objektgröße und Transfergröße dürfen keine vollständige Pufferung des Objekts erzwingen. Endliche Integer-/Adressräume und explizite Frame-/Ressourcenlimits bleiben technische Grenzen, aber es gibt **kein internes festes Objektgrößenlimit**.
 
 CAS gehört bereits zur Basis-API (§10.6). SUBSCRIBE/UNSUBSCRIBE sind für eine spätere Protokollversion reserviert (§10.7). Listing und sonstige Frontend-Metadatenindizes entstehen ausschließlich aus normalen Objekten in den jeweiligen Client-Libs. Die noch offenen API-Randfälle sind in §20.2 aufgeführt.
 
@@ -759,7 +773,7 @@ CAS gehört bereits zur Basis-API (§10.6). SUBSCRIBE/UNSUBSCRIBE sind für eine
 - Der Return-Wert enthält mindestens **Anfangsoffset, neue logische Länge und Objektsequenz/Commit-Index**.
 - Nach `SUCCESS` sind die angehängten Bytes einschließlich notwendiger Metadaten entsprechend der Bucket-Strategie gesichert: HDD/SSD **dauerhaft**, RAM solange mindestens eine gültige Kopie in einem laufenden Prozess erhalten bleibt. Der Retry-/Runtime-Vertrag gilt gemäß §8.1.1.
 - Ein `GET` nach bestätigtem Append von einer gültigen autoritativen oder Replica-Readquelle sieht den gesamten bestätigten Präfix; jeder Read-Cache muss dieselbe Konsistenzgarantie erfüllen oder darf dafür nicht verwendet werden.
-- Für `APPEND` ist die Linearizability **pro Objekt** erforderlich; höhere Anwendungsschichten verantworten bei Bedarf Multi-Object-/TX-Transaktionen.
+- Mutationen einschließlich `APPEND` werden **pro Objekt am Primary atomar und total geordnet** ausgeführt. Replica-Reads sind nicht allgemein linearizierbar: Während einer laufenden Mutation dürfen verschiedene Replikate unterschiedliche lokal committed Versionen liefern; beim Replikawechsel sind dann auch Versionsrückschritte möglich. Liveness und lesbare Hot Objects haben Vorrang vor einer global synchronisierten Read-Sicht. Strengere Sichtbarkeit koordinieren Anwendungen bei Bedarf selbst, etwa durch MOSI mit Freigabe des M-Locks erst nach erfolgreichem Storage-Commit; Multi-Object-/TX-Transaktionen bleiben Aufgabe höherer Schichten.
 - `APPEND` mit leerem Payload ändert ein vorhandenes Objekt nicht; bei fehlendem Objekt wird ein leeres Objekt angelegt. Es ist kein Ersatz für einen expliziten Sync-Barrier-Befehl.
 - Optionaler `expected_length`/`expected_version` erlaubt bedingte Appends; Objektsequenz und version bezeichnen hier denselben monotonen Objektversionsstand; Konflikte geben `PRECONDITION_FAILED` zurück.
 - Ein einzelner Append hält die Transport-/Request-Ressourcenlimits ein und kann über mehrere Frames gestreamt werden; lange Logs bestehen intern aus mehreren Append-Records bzw. Extents. Es gibt kein internes festes Limit der logischen Objektgröße; die Beispiel-Workloads mit 2–250 KiB und die 1-MiB-Objekte der Frontends begrenzen die native API nicht.
@@ -839,7 +853,7 @@ Der Ablauf gilt für alle v1-Strategien: HDD/SSD flushen Daten und Commitbelege 
 1. Primary serialisiert/prüft Precondition/CAS, reserviert physischen Platz und ordnet eine Range-Replikationssequenz zu. `REPLICA_PREPARE` verteilt dieselbe Mutation/Request-ID; große Payloads werden per Transfer gestreamt.
 2. Jede erforderliche Replica inklusive Primary flusht Stagingdaten und Recovery-/Dedupe-Information und pusht READY. Unbestätigte vorbereitete Records sind nicht lesbar.
 3. Nach ALL-READY schreibt der Primary seine Commitentscheidung und verteilt COMMIT mit den Belegen. Alle Replikate flushen Commitstand und pushen COMMITTED. Ein COMMIT darf nicht nachträglich ABORT werden; ABORT ist nur vor persistenter Commitentscheidung zulässig.
-4. Erst nach ALL-COMMITTED publiziert der Primary den Index-/Versionsstand und liefert den Q-Erfolg. Replica-Reads dürfen keinen nur vorbereiteten Stand bedienen. Jede Replica hält eine lesbare, atomar veröffentlichte Commit-Sicht; der Primary darf einen Erfolg erst bestätigen, wenn diese bestätigte Version auf allen erforderlichen Replikaten lesbar ist.
+4. Jede Replica veröffentlicht nach lokal wirksamem COMMIT ihre neue Version atomar, bevor sie COMMITTED meldet. Bis dahin bleiben Reads auf ihrer vorherigen committed Version möglich; PREPARE oder das Warten auf andere Replikate errichtet keine Read-Sperre. Replica-Reads benötigen keine Primary-Validierung oder globale Read-Freigabebarriere und dürfen keinen nur vorbereiteten Stand bedienen. Erst nach ALL-COMMITTED publiziert der Primary den Index-/Versionsstand und liefert den Q-Erfolg; zu diesem Zeitpunkt muss die bestätigte Version auf allen erforderlichen Replikaten lesbar sein. Eine spätere geordnete Mutation darf sie ersetzen. Bereits laufende Reads dürfen ihren zuvor aufgenommenen konsistenten Snapshot beenden.
 5. Nach Crash werden vorbereitete/committete Sequenzen und Originalantworten abgeglichen. Unbestätigte Operationen dürfen ein unknown Outcome haben; bestätigte niemals verschwinden oder doppelt wirken. Fehlt eine erforderliche Replica, wartet der Abschluss bis Reconnect oder explizitem administrativem Membership-/Policywechsel. Ein solcher Wechsel kann keine verlorenen Bytes rekonstruieren.
 
 ### 11.2 Erasure Coding (Roadmap)
@@ -1211,6 +1225,16 @@ ADMIN oder ausdrücklich ADMIN_READ für reine Leseoperationen. `C` bedeutet glo
 | 0x2017 | SCRUB_START / Q/F / L | `volume:ID` => `ack:AdminAck` |
 | 0x2018 | AUDIT_GET / Q | `after_sequence:u64,limit:u32` => `entries:Vec(AuditEntry)` |
 | 0x2019 | ADMIN_OPERATION_STATUS / Q | `operation:ID` => `ack:AdminAck,status:V,detail:Text` |
+| 0x201a | NODE_CONFIG_GET / Q / L | leer => `config_json:Text` (versionierte lokale Feldansicht ohne Secrets, aktiver Listener/Volumes-Pfad und restart_required) |
+| 0x201b | NODE_CONFIG_SET / Q / L | `field_patch_json:Text` (typisiertes JSON-Objekt einzelner erlaubter Felder) => `config_json:Text`; Validierung/atomare Config-Persistenz; Identitäten/verwaltete Volume-Liste nicht überschreibbar |
+| 0x201c | VOLUME_CANDIDATES / Q / L | leer => `candidates_json:Text` (JSON der Library-Structs aus §8.2.2) |
+| 0x201d | VOLUME_RESCAN / Q/F / L,G | `volume:ID` => `ack:AdminAck`; vorhandenes Backend neu auf Kapazität prüfen und zusätzlich nutzbaren Platz übernehmen, kein Resize des Devices selbst |
+| 0x201f | VOLUME_GROW_INFO / Q / L | `volume:ID` => `kind:u8,current:u64,available:u64,maximum:u64`; kind 0 Datei, 1 Blockdevice, 2 RAM; Größen in Bytes; Datei/RAM maximal current+available (auf Seiten abgerundet, int64-Grenze), Blockdevice volle physische Größe |
+| 0x2020 | VOLUME_GROW / Q / L,G | `volume:ID,size_bytes:u64` => `ack:AdminAck`; Datei/RAM explizite Zielgröße, Blockdevice size_bytes=0 übernimmt volle physische Größe; niemals schrumpfen, bei Platzmangel 507 |
+| 0x201e | VOLUME_CAPACITY_GET / Q / L | leer => `filesystem_available:u64,ram_available:u64,ram_limit:u64`; Available-Wert für das aktive Volume-Verzeichnis, verfügbarer System-RAM und wirksame RAM-Grenze nach optionalem Budget |
+
+Der erste Single-Node-Dashboard-Stand verwendet bereits diese Nachrichten, VOLUME_ADD/REMOVE und STATS_SUBSCRIBE/SNAPSHOT/UNSUBSCRIBE über binäre `stqr.v1`-WebSockets. Quelle bei VOLUME_ADD: `0 FILE,1 BLOCKDEVICE,2 RAM`. Empfang, Dispatch und Senden haben getrennte begrenzte Queues; Antworten werden korreliert, Telemetrie darf nur als vollständiger neuer Snapshot einen älteren ersetzen. Der CLI-Einstieg sammelt `--config`, `--port`, `--listen`, `--connect`, `--name`, `--advertise`, `--data-dir`, `--volumes-dir`, `--ram-bytes`, `--ramcache-bytes`, `--system-volume-bytes` und `--allow-subnet`. Standardport 7419, Standardzugriff nur IPv4-/IPv6-Loopback, erweiterbar auf explizite CIDRs. Listener/Verzeichnisse/RAM-Budget benötigen nach Config-Änderung einen Neustart; Name/Advertise/Subnetze gelten unmittelbar. Konfigurierte Peers oder `--connect` erhalten bis zur Join-Implementierung einen ausdrücklichen Nicht-implementiert-Fehler statt eines neu erzeugten Clusters.
+
 
 ```text
 AdminImage = membership:Membership,control:ControlWire,policies:Vec(Policy),
@@ -1293,18 +1317,20 @@ Die Clients besitzen eine segmentierte adaptive Map und lernen über 301/Map-Pat
 ### 14.2 Go-SDK
 
 ```go
-cli, err := client.Dial(ctx, client.Config{
-    Peers: []string{"http://192.0.2.10:7419"},
-    Username: "app-user", Password: credential,
-})
-// Fehlerbehandlung ausgelassen
-b := cli.Bucket("application-data")
-info, err := b.Put(ctx, []byte("column/key"), payload, client.PutOptions{})
-app, err := b.Append(ctx, []byte("txlog/0001"), logRecord,
+conn, err := client.Dial(ctx, "http://192.0.2.10:7419",
+    "app-user", credential, bucketID)
+// Fehlerbehandlung ausgelassen; bucketID ist eine bekannte 128-Bit-ID.
+defer conn.Close()
+info, err := conn.Put(ctx, objectID, payload, client.PutOptions{})
+app, err := conn.Append(ctx, logObjectID, logRecord,
     client.AppendOptions{RequestID: client.NewRequestID()})
 ```
 
-Das SDK übersetzt optionale Keys in OIDs, bietet aber auch direkte OID-Methoden. Connection-Reuse, Futures/Goroutines, begrenzte Transferqueues, Streaming und Request-ID-Retry sind gemeinsam implementiert. Ein Peer-Ausfall löst Warten/Reconnect aus; nur der aufrufende Context kann den lokalen Aufruf abbrechen. GET/PUT-Callbacks für spätere SUBSCRIBE-Updates sind vorbereitet, Capability muss vor Nutzung ausgehandelt werden.
+**URL, Username, Passwort und Bucket-ID sind Pflichtparameter des Konstruktors.** Die erzeugte Verbindung kann ausschließlich Objekte innerhalb dieses einen Buckets lesen/schreiben: `Get`, `GetRange`, `Put`, `PutRange`, `Append`, `Trunc`, `Delete`, `Stat`, `CAS` und deren nötige `io.Reader`-/`io.Writer`-Varianten. `Close` beendet sie. Keine globale Multi-Bucket-Verbindung, kein `Bucket(name)`-/`BucketByID`-Umschalten, keine zweite `GetObject(bucket, ...)`-API und keine Admin-/Statistikfunktionen am öffentlichen Verbindungsobjekt. Eine andere Bucket-ID erfordert eine andere Verbindung. Der FUSE-/S3-/Blockdevice-Layer erhält eine bereits gebundene Objektschnittstelle und speichert eigene Metadaten in diesem Bucket. Benutzerzugangsdaten erlauben keine Administration.
+
+Native 256-Bit-Objekt-IDs werden unverändert übertragen. Eine fachliche Namens-/Key-Abbildung ist Aufgabe des Frontends, keine zusätzliche Server-Namespace- oder SDK-Bucketauflösung. Routing/partielle Maps, Verbindungswiederverwendung, korrelierte Requests, endliche Sende-/Empfangsbudgets, Streaming und Request-ID-Retry bleiben interne Protokollaufgaben. Ein Peer-Ausfall löst keine Membership-Änderung aus; nur der aufrufende Context beendet wartende Aufrufe. Nach unbekanntem Mutationsergebnis wird dieselbe Request-ID weiterverwendet. Ein Redirect darf Zugangsdaten nicht ungeprüft an beliebige HTTP-Ziele weiterreichen.
+
+Der aktuelle Single-Node-Transport kann bereits HELLO, Objekt-Wireformate, Chunk-/Digest-geprüfte Transfers und Reconnect/Retry. Der Daemon implementiert in diesem Volume-Abnahmeschritt noch keine Bucketverwaltung bzw. native Objekt-Dispatcher: entsprechende Requests erhalten ausdrücklich 501. Multinode-Map-Patches, Ownership-/Runtime-Lernen und Replica-Routing bleiben markierte Erweiterungspunkte statt erfundener Erfolgs-ACKs.
 
 ### 14.3 C-/Rust-Anbindung und Blockdevice-Library
 
@@ -1398,7 +1424,7 @@ Dashboard-JS-Wrapper erzeugen binäre Nachrichten nach §13.7. Skripte verwenden
 
 ## 17. Go-Projektstruktur und Entwicklungsregeln
 
-Aktueller Implementierungsauftrag: nur Libraries/Unit-Tests und der Struct Volume, keine UI/CLI. Der spätere Gesamtaufbau sieht ein Daemon-Binary im Root und **maximal drei Library-Packages**: `volume`, `server`, `client`. Keine `pkg/`-/`internal/`-Hierarchie mit einem Package pro Einzelkomponente, kein separates CLI/Agent/Dashboard-Binary.
+Aktueller Implementierungsauftrag: Volume-Library plus Single-Node-Daemon, integriertes Admin-Dashboard und Tests; kein separates Admin-CLI. Der Gesamtaufbau sieht ein Daemon-Binary `stqr` im Root und **maximal drei Library-Packages**: `volume`, `server`, `client`. Keine `pkg/`-/`internal/`-Hierarchie mit einem Package pro Einzelkomponente, kein separates CLI/Agent/Dashboard-Binary.
 
 ```text
 stqr/
@@ -1537,7 +1563,7 @@ Mit künstlich kleinen Volumes (z. B. **4, 8, 16, 32 und 64 MiB**) und determini
 - Migration großer Range-Anzahl bei intermittierenden Schreiblastspitzen.
 - Rolling Upgrade/Format-Version-Mismatch.
 - Scrub und Rebuild nach gezielten Datenfehlern.
-- Konsistenzmodell mit History-Checker (z. B. linearisierbare Objekt-/Append-Operationen) prüfen.
+- Konsistenzmodell mit History-Checker prüfen: totale Mutationsordnung pro Objekt, atomare lokale Read-Snapshots und Sichtbarkeit bestätigter Writes auf allen erforderlichen Replikaten für danach beginnende Reads. Während laufender Mutationen sind unterschiedliche Replica-Versionen und Versionsrückschritte beim Replikawechsel zulässig. Verzögerte PREPARE-/COMMIT-Zustellung darf Reads des letzten lokal committed Stands nicht bis zum Write-Abschluss blockieren.
 
 ---
 
@@ -1589,7 +1615,7 @@ Hier stehen nur noch nicht entschiedene Details. Bereits geklärt sind: Intranet
 
 - Zuerst reproduzierbare Stresstests/Messungen konkurrierender Koordinatorangebote und Statistikeinsendungen; **erst danach** Race-Algorithmus und vorläufige Wahl-/Konfliktnachrichten finalisieren. Keine exklusive Grant-/ABORT-Lösung ist vorgegeben. Danach Eindeutigkeit, Bindung, Crash-/Reconnect-Verhalten und Membership-Übergänge verifizieren.
 - Exakte On-Disk-Record-/Index-/Checkpoint-Kodierung, Prüfsummen, Segmentgrößen, Sparse-Extent-Index, Block-COW-/Redo für Append-Arenen und Codecprofile (`raw/gzip/lz4/xz`) einschließlich Metadaten-/Speicheraufschlägen.
-- Commit-/Read-Freigabe und Recovery unbestätigter Replica-Tails so präzisieren, dass Replica-Reads bei fehlendem Primary erlaubt bleiben, aber keine nur vorbereiteten oder zurückgenommenen Versionen als bestätigt gelten. Ein Transportfehler allein beweist keinen Prozessausfall; ALL-Write-/Fencing-Regeln bleiben erhalten.
+- Recovery unbestätigter Replica-Tails präzisieren: Reads bleiben ohne Primary und ohne Warten auf laufende Mutationen auf dem letzten lokal committed Stand möglich (§11.1.1); nur vorbereitete Versionen sind unsichtbar, verbindliche COMMITs werden nicht zurückgenommen. Unterschiedliche Replica-Sichten während eines laufenden Writes sind erlaubt. Ein Transportfehler allein beweist keinen Prozessausfall; ALL-Write-/Fencing-Regeln bleiben erhalten.
 - Dedupe-Retention, explizite Clientfreigabe und Verhalten nach Ablauf, DELETE/Neuanlage/TRUNC. Request-IDs und ihr Zweck sind §10.3 erläutert. RAM hält Dedupe in lebenden Replikaten; nach Verlust aller Kopien gilt der Runtime-Reset-Vertrag.
 
 ### 20.2 API-Randfälle und Ressourcen

@@ -70,7 +70,7 @@ func CreateFile(path string, size int64) (*FileIO, error) {
 func (f *FileIO) ReadAt(p []byte, off int64) (int, error)  { return f.file.ReadAt(p, off) }
 func (f *FileIO) WriteAt(p []byte, off int64) (int, error) { return f.file.WriteAt(p, off) }
 func (f *FileIO) Sync() error                              { return f.file.Sync() }
-func (f *FileIO) Size() (int64, error)                     { return f.size, nil }
+func (f *FileIO) Size() (int64, error)                     { return fileSize(f.file) }
 func (f *FileIO) Close() error                             { f.once.Do(func() { f.closeErr = f.file.Close() }); return f.closeErr }
 
 // MemoryIO is a bounded, sparse RAM device. Closing it discards every page.
@@ -161,5 +161,22 @@ func (m *MemoryIO) Close() error {
 	defer m.mu.Unlock()
 	m.closed = true
 	m.pages = nil
+	return nil
+}
+
+// grow changes only the bounded RAM address space. Existing sparse pages remain
+// intact; the owning Volume rewrites/publishes its layout while holding its lock.
+func (m *MemoryIO) grow(size int64) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.closed {
+		return ErrClosed
+	}
+	if size < MinVolumeSize || size%PageSize != 0 {
+		return ErrRange
+	}
+	if size > m.size {
+		m.size = size
+	}
 	return nil
 }

@@ -73,7 +73,7 @@ lock synchronously and exactly once, including repeated/concurrent closes.
 The Go runtime does **not** guarantee cleanup execution or timing, particularly
 before process exit: `defer h.Close()` is part of the caller's contract.
 
-- Both handle modes: `Stat`, `Get`, `GetRange`, `ReadAt`, `CopyTo`, `Extents`,
+- Both handle modes: `Stat`, `Get`, `GetRange`, `ReadAt`, `CopyTo`, `Extents`, `ScanObjects`,
   hash-ordered `Scan`, `OperationStatus`, `ScanRequests`, `Close`.
 - Write handles additionally: `Put`, `PutReader`, `PutRange`, `PutRangeReader`,
   `Append`, `AppendReader`, `Trunc`, `Delete`, `CAS`, `Recompress`, `Restore`,
@@ -82,7 +82,7 @@ before process exit: `defer h.Close()` is part of the caller's contract.
 - Volume management and maintenance, called outside handle sessions: `Open`,
   standalone `Stat`, `Identity`, `Name`, `Header`, `Size`, `State`, `SetState`,
   `Describe`, `Stats`, `IOStats`, `SetCacheLimits`, `SetGuaranteedReserve`, `Sync`,
-  `Bind`, `VerifyIdentity`, `Checkpoint`, `Compact`, `Scrub`, `Export`, `Import`,
+  `Bind`, `VerifyIdentity`, `Grow`, `Rescan`, `Checkpoint`, `Compact`, `Scrub`, `Export`, `Import`,
   `Detach`, `Close`. These operate on the volume itself and manage their own
   locking. Volume `Close` closes the backend; handle `Close` ends only its session.
 
@@ -192,3 +192,25 @@ parsers have fuzz targets. Real raw-device writes, actual controller power-loss
 behavior, SMART integration and performance/space-efficiency claims require
 separate hardware testing/review. There is intentionally no project README or
 benchmark claim yet.
+
+## Explicit growth and capacity rescan
+
+`Volume.Grow(sizeBytes)` grows regular files and RAM volumes, never raw devices. RAM growth extends
+the sparse address space and preserves existing objects and retry records.
+`Volume.Rescan()` re-queries backing capacity (`BLKGETSIZE64` for Linux block
+nodes) after external enlargement and adopts only additional space. Open accepts
+larger backing storage while keeping the old committed capacity; truncated
+backends are rejected. Both operations run outside handle sessions.
+
+For any positive growth, new bank 1 starts at or beyond the end of old bank 0.
+If old bank 1 is active, first perform a normal crash-safe compaction into old
+bank 0. Then rewrite all live objects, tombstones and retry records into new
+bank 1 with the larger bank geometry, sync it and publish the alternate root.
+The latest committed source bank/root never overlaps staging writes. A crash can
+leave either the old or new committed capacity; versions, identity and data stay
+intact. No on-disk format revision is needed. Auto-growing admin files use this
+operation; blockdevices require explicit rescan and are never truncated.
+
+`Handle.ScanObjects(after, limit)` is a bounded cursor scan over all buckets,
+including tombstones. It returns logical keys/Info only, with limit 1..4096, and
+supports server-side local evacuation without loading the whole index in RAM.

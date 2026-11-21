@@ -1,0 +1,135 @@
+// SPDX-License-Identifier: GPL-3.0-only
+package server
+
+import (
+	"os"
+	"sort"
+	"strconv"
+	"strings"
+	"syscall"
+	"time"
+
+	"github.com/launix-de/stqr-storage/client"
+)
+
+// CollectStats is the single collector for the dashboard and future generation
+// builder. TODO(multinode): push these exact bytes as STATS_FRAGMENT; aggregate
+// peer snapshots by Node/BootID/Sequence without inferring membership failures.
+func (s *Server) CollectStats(filter client.StatsFilter) client.StatsSnapshot {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	node, _ := parseID(s.cfg.Node.ID)
+	snap := client.StatsSnapshot{Schema: 1, Node: client.ID(node), BootID: s.boot, Sequence: s.sequence.Add(1), CapturedUnixNS: uint64(time.Now().UnixNano()), WindowNS: uint64(3 * time.Second), MembershipEpoch: 1, Generation: s.cfg.Generation, MapRevision: s.cfg.Generation, Volumes: []client.VolumeStats{}, Buckets: []client.BucketStats{}, Ranges: []client.RangeStats{}}
+	snap.IO = s.retiredIO
+	var usage syscall.Rusage
+	if syscall.Getrusage(syscall.RUSAGE_SELF, &usage) == nil {
+		snap.CPUTimeNS = uint64(usage.Utime.Nano() + usage.Stime.Nano())
+	}
+	if b, e := os.ReadFile("/proc/self/statm"); e == nil {
+		f := strings.Fields(string(b))
+		if len(f) > 1 {
+			pages, _ := strconv.ParseUint(f[1], 10, 64)
+			snap.ResidentBytes = pages * uint64(os.Getpagesize())
+		}
+	}
+	if !matches(filter.Nodes, snap.Node) {
+		return snap
+	}
+	for _, m := range s.volumes {
+		v := m.store.Stats()
+		id := client.ID(v.Identity.VolumeID)
+		io := client.IOStats{PhysicalReadBytes: v.IO.ReadBytes, PhysicalWriteBytes: v.IO.WriteBytes, Errors: v.IO.Errors, Flushes: v.IO.SyncOps, FlushNS: v.IO.SyncNanoseconds}
+		state := uint8(m.store.State())
+		health := uint8(0)
+		if state == 4 {
+			health = 2
+		}
+		if matches(filter.Volumes, id) {
+			snap.Volumes = append(snap.Volumes, client.VolumeStats{ID: id, Path: m.config.Path, Class: uint8(v.Identity.Class), State: state, CapacityPhysical: v.CapacityPhysical, AllocatedPhysical: v.AllocatedPhysical, ReclaimablePhysical: v.ReclaimablePhysical, PayloadPhysical: v.DataPhysical, MetadataPhysical: v.MetadataPhysical, ArenaUnusedPhysical: v.ArenaUnusedPhysical, GuaranteedRemainingPhysical: v.GuaranteedRemainingPhysical, InFlightReservedPhysical: v.InFlightReservedPhysical, OperatingReservePhysical: v.OperatingReservePhysical, AdmissionFreePhysical: v.AdmissionFreePhysical, Health: health, IO: io})
+		}
+		snap.IO.PhysicalReadBytes += io.PhysicalReadBytes
+		snap.IO.PhysicalWriteBytes += io.PhysicalWriteBytes
+		snap.IO.Errors += io.Errors
+		snap.IO.Flushes += io.Flushes
+		snap.IO.FlushNS += io.FlushNS
+		if state == 2 {
+			snap.NeedRebuild = true
+			snap.ReasonBits |= 1 << 3
+		}
+	}
+	sort.Slice(snap.Volumes, func(i, j int) bool { return snap.Volumes[i].ID.String() < snap.Volumes[j].ID.String() })
+	return snap
+}
+func matches(ids []client.ID, id client.ID) bool {
+	if len(ids) == 0 {
+		return true
+	}
+	for _, x := range ids {
+		if x == id {
+			return true
+		}
+	}
+	return false
+}
+func filterSnapshot(snap client.StatsSnapshot, f client.StatsFilter) client.StatsSnapshot {
+	out := snap
+	out.Volumes = []client.VolumeStats{}
+	out.Buckets = []client.BucketStats{}
+	out.Ranges = []client.RangeStats{}
+	if !matches(f.Nodes, snap.Node) {
+		return out
+	}
+	for _, v := range snap.Volumes {
+		if matches(f.Volumes, v.ID) {
+			out.Volumes = append(out.Volumes, v)
+		}
+	}
+	for _, b := range snap.Buckets {
+		if matches(f.Buckets, b.ID) {
+			out.Buckets = append(out.Buckets, b)
+		}
+	}
+	if f.IncludeRanges {
+		for _, r := range snap.Ranges {
+			if matches(f.Buckets, r.Bucket) && matches(f.Volumes, r.Volume) {
+				out.Ranges = append(out.Ranges, r)
+			}
+		}
+	}
+	return out
+}
+func (s *Server) publishStats() {
+	snap := s.CollectStats(client.StatsFilter{})
+	s.latest.Store(&snap)
+	s.wsMu.Lock()
+	sockets := make([]*wsSession, 0, len(s.sockets))
+	for ws := range s.sockets {
+		sockets = append(sockets, ws)
+	}
+	s.wsMu.Unlock()
+	for _, ws := range sockets {
+		ws.pushStats(snap)
+	}
+}
+func (s *Server) statsLoop() {
+	defer s.workers.Done()
+	ticker := time.NewTicker(3 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-s.ctx.Done():
+			return
+		case <-s.statsWake:
+			s.publishStats()
+		case <-ticker.C:
+			s.publishStats()
+		}
+	}
+}
+
+func (s *Server) notifyStats() {
+	select {
+	case s.statsWake <- struct{}{}:
+	default:
+	}
+}
