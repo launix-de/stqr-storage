@@ -100,9 +100,12 @@ server; use it on loopback or an appropriately protected network.
 
 The module reads and writes the normal Go/FUSE filesystem format: `STFS` inodes,
 `STDR` directories, `STIX` immutable segment indexes and `STFT`/`STFL` namespace
-intents. No import/conversion is needed between normal FUSE and kernel mounts.
+intents. No import/conversion is needed between upgraded normal FUSE and kernel mounts.
+STFS v5 adds node types, link counts and xattrs: **upgrade all clients before
+writing v5 metadata**. See the [format and semantics guide](filesystem-posix.md).
 
-Implemented operations include regular files, directories, lookup/readdir,
+Implemented operations include regular files, directories, symlinks, hardlinks,
+FIFO/Unix-socket nodes, user/trusted xattrs, lookup/readdir,
 read/write, atomic per-chunk append, truncate, sparse spans, chmod/chown,
 explicit timestamp changes, fsync, unlink, rmdir and rename with replacement,
 `NOREPLACE` or `EXCHANGE`. Cross-directory rename/rmdir use durable multi-inode
@@ -133,9 +136,9 @@ through the same mount invalidates its cached file pages.
 
 ## Current boundaries
 
-- **This is not yet a complete developer-home filesystem.** Symlinks, hardlinks,
-  special inode types/Unix-socket filesystem nodes, xattrs/ACLs and shared writable
-  mmap still need implementation and application compatibility testing. Keep a
+- **This is not yet a complete developer-home filesystem.** Shared writable mmap,
+  POSIX ACLs and application compatibility testing remain. User/trusted xattrs
+  work; security/capability xattrs and device nodes are not implemented. Keep a
   real home on its existing filesystem while evaluating this client.
 - Native overlay buckets require lower/upper handling and are currently rejected
   by the kernel client. Use `stqr-fuse` for overlays.
@@ -194,6 +197,7 @@ needs builtin virtio PCI/network, IPv4, devtmpfs, SHA-1 and SHA-256 support.
 Tests include an existing Go filesystem, a kernel-initialized filesystem,
 readonly-only server grants, interrupted intent recovery, concurrent append
 through independent mounts, readonly mmap, sparse 1-TiB logical files,
-permissions, open-unlink, rename flags, rmdir, remount and clean module unload.
+permissions, symlink/hardlink/xattr interoperability, local sockets/FIFOs,
+open-unlink, rename flags, rmdir, remount and clean module unload.
 After the VM exits, the Go client reads the kernel-written data and its fsck
 validates and cleans the published object graph.

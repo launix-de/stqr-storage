@@ -4,6 +4,8 @@
 #include <linux/ktime.h>
 #include <linux/overflow.h>
 #include <linux/sort.h>
+#include <linux/xattr.h>
+static bool valid_name(const char *);
 const stqr_object_id ks_root_id = {{0x3f, 0xda, 0xbc, 0x50, 0xba, 0xc2, 0xa0, 0xe8,
 				    0x3a, 0x0a, 0x4b, 0x32, 0x46, 0xca, 0x79, 0xbe,
 				    0x13, 0x7a, 0x00, 0x19, 0x40, 0x39, 0x44, 0x2a,
@@ -75,7 +77,7 @@ static int decode_node(const void *p, size_t n, struct ks_node *node)
 		return -EUCLEAN;
 	take(&d, 4);
 	version = readnum(&d, 2);
-	if (version < 1 || version > 4)
+	if (version < 1 || version > 5)
 		return -EOPNOTSUPP;
 	node->kind = readnum(&d, 1);
 	node->mode = readnum(&d, 4);
@@ -108,21 +110,64 @@ static int decode_node(const void *p, size_t n, struct ks_node *node)
 		if (length)
 			return -EOPNOTSUPP;
 	}
-	if (version == 4) {
+	if (version >= 4) {
 		node->atime = readnum(&d, 8);
 		node->ctime = readnum(&d, 8);
 	} else
 		node->atime = node->ctime = node->mtime;
-	if (done(&d) || (node->kind != 1 && node->kind != 2) ||
+	node->links = 1;
+	if (version == 5) {
+		size_t start = d.pos, previous_length = 0;
+		const u8 *previous = NULL;
+		unsigned count, at;
+		node->links = readnum(&d, 4);
+		start = d.pos;
+		count = readnum(&d, 4);
+		if (count > 128)
+			return -EUCLEAN;
+		for (at = 0; at < count; at++) {
+			char name[256];
+			const u8 *key;
+			size_t key_length, value_length;
+			int cmp;
+			key = readblob(&d, &key_length);
+			if (d.err || !key_length || key_length > 255 || memchr(key, 0, key_length))
+				return -EUCLEAN;
+			memcpy(name, key, key_length);
+			name[key_length] = 0;
+			if (!valid_name(name) || !strchr(name, '.') || name[0] == '.' ||
+			    name[key_length - 1] == '.')
+				return -EUCLEAN;
+			cmp =
+			    previous ? memcmp(previous, key, min(previous_length, key_length)) : -1;
+			if (cmp > 0 || (!cmp && previous_length >= key_length))
+				return -EUCLEAN;
+			readblob(&d, &value_length);
+			if (d.err || value_length > 65536 || d.pos - start > 262144)
+				return -EUCLEAN;
+			previous = key;
+			previous_length = key_length;
+		}
+		node->xattrs = d.p + start;
+		node->xattrs_size = d.pos - start;
+	}
+	if (version == 5 && node->kind == 2 && !node->removed && !node->links)
+		return -EUCLEAN;
+	if (done(&d) || node->kind < 1 || node->kind > 5 || (node->kind > 2 && version < 5) ||
 	    (node->removed && node->kind != 2) || (node->mode & ~07777U) || node->size > S64_MAX ||
 	    node->atime > S64_MAX || node->mtime > S64_MAX || node->ctime > S64_MAX)
+		return -EUCLEAN;
+	if (node->kind == 3 && (node->depth || !node->size || node->size > 4095 ||
+				memchr(node->inline_data, 0, node->size)))
+		return -EUCLEAN;
+	if ((node->kind == 4 || node->kind == 5) && node->size)
 		return -EUCLEAN;
 	return 0;
 }
 static void encode_node(struct buf *b, const struct ks_node *node)
 {
 	put(b, "STFS", 4);
-	number(b, 4, 2);
+	number(b, 5, 2);
 	number(b, node->kind, 1);
 	number(b, node->mode, 4);
 	number(b, node->uid, 4);
@@ -139,6 +184,11 @@ static void encode_node(struct buf *b, const struct ks_node *node)
 	blob(b, NULL, 0);
 	number(b, node->atime, 8);
 	number(b, node->ctime, 8);
+	number(b, node->removed ? 0 : node->links, 4);
+	if (node->xattrs)
+		put(b, node->xattrs, node->xattrs_size);
+	else
+		number(b, 0, 4);
 }
 void ks_snapshot_free(struct ks_snapshot *s)
 {
@@ -868,6 +918,16 @@ static int directory_image(struct ks_fs *f, struct ks_node *node, struct ks_entr
 			   struct buf *content)
 {
 	size_t i;
+	node->links = 2;
+	for (i = 0; i < n; i++) {
+		struct ks_snapshot child;
+		int err = ks_snapshot(f, e[i].id, &child);
+		if (err)
+			return err;
+		if (child.node.kind == 2)
+			node->links++;
+		ks_snapshot_free(&child);
+	}
 	sort(e, n, sizeof(*e), entry_cmp, NULL);
 	put(content, "STDR\1\0", 6);
 	number(content, n, 8);
@@ -882,7 +942,7 @@ static int directory_image(struct ks_fs *f, struct ks_node *node, struct ks_entr
 }
 int ks_initialize(struct ks_fs *f, u32 uid, u32 gid)
 {
-	struct ks_node node = {.kind = 2, .mode = 0755, .uid = uid, .gid = gid};
+	struct ks_node node = {.kind = 2, .mode = 0755, .uid = uid, .gid = gid, .links = 2};
 	struct buf content = {0}, raw = {0};
 	int err;
 	node.atime = node.mtime = node.ctime = ktime_get_real_ns();
@@ -899,11 +959,18 @@ int ks_initialize(struct ks_fs *f, u32 uid, u32 gid)
 int ks_create(struct ks_fs *f, stqr_object_id parent, const char *name, unsigned mode, u32 uid,
 	      u32 gid, bool dir, stqr_object_id *created)
 {
+	return ks_newnode(f, parent, name, mode, uid, gid, dir ? 2 : 1, NULL, created);
+}
+int ks_newnode(struct ks_fs *f, stqr_object_id parent, const char *name, unsigned mode, u32 uid,
+	       u32 gid, unsigned kind, const char *target, stqr_object_id *created)
+{
 	unsigned attempt;
 	int err;
 	bool made = false;
 	if (f->readonly)
 		return -EROFS;
+	if (kind < 1 || kind > 5 || (kind == 3 && (!target || !*target || strlen(target) > 4095)))
+		return -EINVAL;
 	if (!valid_name(name))
 		return -EINVAL;
 	for (attempt = 0; attempt < 128; attempt++) {
@@ -920,15 +987,22 @@ int ks_create(struct ks_fs *f, stqr_object_id parent, const char *name, unsigned
 		if (!err && find_entry(entries, n, name) >= 0)
 			err = -EEXIST;
 		if (!err && !made) {
-			struct ks_node child = {
-			    .kind = dir ? 2 : 1, .mode = mode & 07777, .uid = uid, .gid = gid};
+			struct ks_node child = {.kind = kind,
+						.mode = mode & 07777,
+						.uid = uid,
+						.gid = gid,
+						.links = kind == 2 ? 2 : 1};
 			struct buf raw = {0}, child_content = {0};
 			child.mtime = child.atime = child.ctime = ktime_get_real_ns();
-			if (dir) {
+			if (kind == 2) {
 				put(&child_content, "STDR\1\0", 6);
 				number(&child_content, 0, 8);
 				child.inline_data = child_content.p;
 				child.size = child_content.n;
+			}
+			if (kind == 3) {
+				child.inline_data = (const u8 *)target;
+				child.size = strlen(target);
 			}
 			encode_node(&raw, &child);
 			err = raw.err ? raw.err : immutable(f, raw.p, raw.n, created);
@@ -1031,21 +1105,28 @@ int ks_remove(struct ks_fs *f, stqr_object_id parent, const char *name, bool dir
 			n--;
 			err = directory_image(f, &next, entries, n, &content);
 		}
-		if (!err && dir) {
+		if (!err) {
 			struct ks_node removed = child.node;
-			removed.removed = true;
+			if (dir)
+				removed.removed = true;
+			else if (!removed.links)
+				err = -EAGAIN;
+			else {
+				removed.links--;
+				removed.ctime = ktime_get_real_ns();
+			}
 			members = sq_alloc(2 * sizeof(*members));
 			if (!members)
 				err = -ENOMEM;
 			else {
-				err = member_set(&members[0], &old, &next);
+				if (!err)
+					err = member_set(&members[0], &old, &next);
 				if (!err)
 					err = member_set(&members[1], &child, &removed);
 				if (!err)
 					err = transact(f, members, 2);
 			}
-		} else if (!err)
-			err = node_cas(f, &old, &next);
+		}
 		if (members) {
 			member_free(&members[0]);
 			member_free(&members[1]);
@@ -1175,7 +1256,7 @@ int ks_rename(struct ks_fs *f, stqr_object_id from, const char *name, stqr_objec
 		if (!err && bi >= 0 && eqid(source->id, dest->id))
 			noop = true;
 		if (!err && !noop && !(flags & RENAME_EXCHANGE) && bi >= 0) {
-			if (source->node.kind != dest->node.kind)
+			if ((source->node.kind == 2) != (dest->node.kind == 2))
 				err = source->node.kind == 2 ? -ENOTDIR : -EISDIR;
 			else if (dest->node.kind == 2) {
 				err = ks_directory(f, &dest->node, &children, &nc);
@@ -1217,11 +1298,17 @@ int ks_rename(struct ks_fs *f, stqr_object_id from, const char *name, stqr_objec
 				if (!err)
 					err = member_set(&m[count++], b, &bn);
 			}
-			if (!err && !(flags & RENAME_EXCHANGE) && dest->raw &&
-			    dest->node.kind == 2) {
+			if (!err && !(flags & RENAME_EXCHANGE) && dest->raw) {
 				struct ks_node removed = dest->node;
-				removed.removed = true;
-				err = member_set(&m[count++], dest, &removed);
+				if (removed.kind == 2)
+					removed.removed = true;
+				else if (!removed.links)
+					err = -EAGAIN;
+				else
+					removed.links--;
+				removed.ctime = ktime_get_real_ns();
+				if (!err)
+					err = member_set(&m[count++], dest, &removed);
 			}
 			if (!err && !same && source->node.kind == 2)
 				err = guard_path(f, to, source->id, m, &count, to_path, to_length);
@@ -1245,6 +1332,244 @@ int ks_rename(struct ks_fs *f, stqr_object_id from, const char *name, stqr_objec
 		sq_free(children);
 		drop(&ac);
 		drop(&bc);
+		if (err != -EAGAIN)
+			return err;
+	}
+	return -EAGAIN;
+}
+
+int ks_link(struct ks_fs *f, stqr_object_id parent, const char *name, stqr_object_id target)
+{
+	unsigned attempt;
+	if (f->readonly)
+		return -EROFS;
+	if (!valid_name(name))
+		return -EINVAL;
+	for (attempt = 0; attempt < 128; attempt++) {
+		struct ks_snapshot p = {0}, child = {0};
+		struct ks_entry *entries = NULL;
+		struct member *m = sq_alloc(2 * sizeof(*m));
+		struct buf content = {0};
+		struct ks_node next, linked;
+		size_t n;
+		int err;
+		if (!m)
+			return -ENOMEM;
+		err = ks_snapshot(f, parent, &p);
+		if (!err)
+			err = ks_directory(f, &p.node, &entries, &n);
+		if (!err && find_entry(entries, n, name) >= 0)
+			err = -EEXIST;
+		if (!err)
+			err = ks_snapshot(f, target, &child);
+		if (!err && child.node.kind == 2)
+			err = -EPERM;
+		if (!err && !child.node.links)
+			err = -ENOENT;
+		if (!err && child.node.links == U32_MAX)
+			err = -EMLINK;
+		if (!err) {
+			next = p.node;
+			linked = child.node;
+			linked.links++;
+			linked.ctime = ktime_get_real_ns();
+			entries[n].id = target;
+			strscpy(entries[n++].name, name, 256);
+			err = directory_image(f, &next, entries, n, &content);
+			if (!err)
+				err = member_set(m, &p, &next);
+			if (!err)
+				err = member_set(m + 1, &child, &linked);
+			if (!err)
+				err = transact(f, m, 2);
+		}
+		member_free(m);
+		member_free(m + 1);
+		sq_free(m);
+		sq_free(entries);
+		drop(&content);
+		ks_snapshot_free(&p);
+		ks_snapshot_free(&child);
+		if (err != -EAGAIN)
+			return err;
+	}
+	return -EAGAIN;
+}
+static int xattr_name(const char *name)
+{
+	size_t length = strlen(name);
+	if (!valid_name(name) || !strchr(name, '.') || name[0] == '.' || name[length - 1] == '.')
+		return -EINVAL;
+	if (strncmp(name, "user.", 5) && strncmp(name, "trusted.", 8))
+		return -EOPNOTSUPP;
+	return 0;
+}
+int ks_getxattr(struct ks_fs *f, stqr_object_id id, const char *name, void *buffer, size_t size)
+{
+	struct ks_snapshot s;
+	struct buf d = {0};
+	unsigned n, at;
+	int err = xattr_name(name);
+	if (err)
+		return err;
+	err = ks_snapshot(f, id, &s);
+	if (err)
+		return err;
+	d.p = (u8 *)s.node.xattrs;
+	d.n = s.node.xattrs_size;
+	if (!d.p) {
+		err = -ENODATA;
+		goto out;
+	}
+	n = readnum(&d, 4);
+	err = -ENODATA;
+	for (at = 0; at < n; at++) {
+		const u8 *key, *value;
+		size_t kn, vn;
+		key = readblob(&d, &kn);
+		value = readblob(&d, &vn);
+		if (kn == strlen(name) && !memcmp(key, name, kn)) {
+			if (buffer && size < vn)
+				err = -ERANGE;
+			else {
+				if (buffer && vn)
+					memcpy(buffer, value, vn);
+				err = vn;
+			}
+			break;
+		}
+	}
+out:
+	ks_snapshot_free(&s);
+	return err;
+}
+int ks_listxattr(struct ks_fs *f, stqr_object_id id, char *buffer, size_t size, bool trusted)
+{
+	struct ks_snapshot s;
+	struct buf d = {0};
+	unsigned n, at;
+	size_t total = 0;
+	int err;
+	err = ks_snapshot(f, id, &s);
+	if (err)
+		return err;
+	d.p = (u8 *)s.node.xattrs;
+	d.n = s.node.xattrs_size;
+	if (!d.p) {
+		ks_snapshot_free(&s);
+		return 0;
+	}
+	n = readnum(&d, 4);
+	for (at = 0; at < n; at++) {
+		const u8 *key;
+		size_t kn, vn;
+		key = readblob(&d, &kn);
+		readblob(&d, &vn);
+		if (!trusted && kn >= 8 && !memcmp(key, "trusted.", 8))
+			continue;
+		if (buffer && total + kn + 1 > size) {
+			err = -ERANGE;
+			goto out;
+		}
+		if (buffer) {
+			memcpy(buffer + total, key, kn);
+			buffer[total + kn] = 0;
+		}
+		total += kn + 1;
+	}
+	err = total;
+out:
+	ks_snapshot_free(&s);
+	return err;
+}
+int ks_setxattr(struct ks_fs *f, stqr_object_id id, const char *name, const void *value,
+		size_t size, int flags)
+{
+	unsigned attempt;
+	int err = xattr_name(name);
+	if (err)
+		return err;
+	if (f->readonly)
+		return -EROFS;
+	if (size > 65536)
+		return -E2BIG;
+	if (flags & ~(XATTR_CREATE | XATTR_REPLACE) || flags == (XATTR_CREATE | XATTR_REPLACE))
+		return -EINVAL;
+	for (attempt = 0; attempt < 128; attempt++) {
+		struct ks_snapshot s;
+		struct ks_node next;
+		struct buf old = {0}, attrs = {0};
+		unsigned count = 0, at;
+		bool exists = false, inserted = false;
+		err = ks_snapshot(f, id, &s);
+		if (err)
+			return err;
+		if (s.node.kind != 1 && s.node.kind != 2) {
+			ks_snapshot_free(&s);
+			return -EPERM;
+		}
+		old.p = (u8 *)s.node.xattrs;
+		old.n = s.node.xattrs_size;
+		if (old.p)
+			count = readnum(&old, 4);
+		for (at = 0; at < count; at++) {
+			const u8 *key;
+			size_t kn, vn;
+			key = readblob(&old, &kn);
+			readblob(&old, &vn);
+			if (kn == strlen(name) && !memcmp(key, name, kn))
+				exists = true;
+		}
+		if (exists && (flags & XATTR_CREATE))
+			err = -EEXIST;
+		if (!exists && (!value || (flags & XATTR_REPLACE)))
+			err = -ENODATA;
+		if (!err) {
+			unsigned next_count = count + (exists ? (value ? 0 : -1) : 1);
+			if (next_count > 128)
+				err = -ENOSPC;
+			number(&attrs, next_count, 4);
+			old.pos = old.p ? 4 : 0;
+			for (at = 0; !err && at < count; at++) {
+				const u8 *key, *ovalue;
+				size_t kn, vn;
+				char key_name[256];
+				int cmp;
+				key = readblob(&old, &kn);
+				ovalue = readblob(&old, &vn);
+				memcpy(key_name, key, kn);
+				key_name[kn] = 0;
+				cmp = strcmp(name, key_name);
+				if (!inserted && cmp <= 0) {
+					if (value) {
+						blob(&attrs, name, strlen(name));
+						blob(&attrs, value, size);
+					}
+					inserted = true;
+				}
+				if (cmp) {
+					blob(&attrs, key, kn);
+					blob(&attrs, ovalue, vn);
+				}
+			}
+			if (!inserted && value) {
+				blob(&attrs, name, strlen(name));
+				blob(&attrs, value, size);
+			}
+			if (attrs.err)
+				err = attrs.err;
+			else if (attrs.n > 262144)
+				err = -ENOSPC;
+			if (!err) {
+				next = s.node;
+				next.xattrs = attrs.p;
+				next.xattrs_size = attrs.n;
+				next.ctime = ktime_get_real_ns();
+				err = node_cas(f, &s, &next);
+			}
+		}
+		drop(&attrs);
+		ks_snapshot_free(&s);
 		if (err != -EAGAIN)
 			return err;
 	}

@@ -128,6 +128,16 @@ func checkFilesystem(ctx context.Context, store fsCheckStore) (FSCheckResult, er
 	if err := mark.inode(ctx, FilesystemRootID(), true); err != nil {
 		return result, fmt.Errorf("fsck validation; nothing deleted: %w", err)
 	}
+	for id, record := range mark.links {
+		refs := mark.references[id]
+		if record.kind == fsDirectory {
+			if refs != 1 {
+				return result, fmt.Errorf("directory has multiple parents: %w", ErrFSFormat)
+			}
+		} else if refs != uint64(record.count) {
+			return result, fmt.Errorf("inode %s link count does not match namespace; nothing deleted: %w", id, ErrFSFormat)
+		}
+	}
 	return filesystemSweep(ctx, store, inventory, mark.roles)
 }
 
@@ -159,7 +169,7 @@ func filesystemInventory(ctx context.Context, store fsCheckStore) (map[ObjectID]
 	return inventory, nil
 }
 func newFSCheckMarker(store fsCheckStore, inventory map[ObjectID]ObjectInfo) *fsCheckMarker {
-	return &fsCheckMarker{store: store, inventory: inventory, roles: map[ObjectID]uint8{}, indexes: map[ObjectID]fsCheckIndex{}, visiting: map[ObjectID]bool{}, lowerSources: map[ObjectID]fsCheckLower{}}
+	return &fsCheckMarker{references: map[ObjectID]uint64{}, links: map[ObjectID]fsCheckLinks{}, store: store, inventory: inventory, roles: map[ObjectID]uint8{}, indexes: map[ObjectID]fsCheckIndex{}, visiting: map[ObjectID]bool{}, lowerSources: map[ObjectID]fsCheckLower{}}
 }
 func filesystemSweep(ctx context.Context, store fsCheckStore, inventory map[ObjectID]ObjectInfo, roles map[ObjectID]uint8) (FSCheckResult, error) {
 	result := FSCheckResult{Scanned: uint64(len(inventory)), Reachable: uint64(len(roles))}
@@ -194,7 +204,13 @@ type fsCheckIndex struct {
 	length uint64
 	depth  uint8
 }
+type fsCheckLinks struct {
+	kind  uint8
+	count uint32
+}
 type fsCheckMarker struct {
+	references   map[ObjectID]uint64
+	links        map[ObjectID]fsCheckLinks
 	store        fsCheckStore
 	inventory    map[ObjectID]ObjectInfo
 	roles        map[ObjectID]uint8
@@ -224,6 +240,11 @@ func (m *fsCheckMarker) object(ctx context.Context, id ObjectID, role uint8) ([]
 }
 
 func (m *fsCheckMarker) inode(ctx context.Context, id ObjectID, root bool) error {
+	if m.references == nil {
+		m.references = map[ObjectID]uint64{}
+		m.links = map[ObjectID]fsCheckLinks{}
+	}
+	m.references[id]++
 	if len(m.visiting) >= 1024 {
 		return fmt.Errorf("directory nesting exceeds fsck limit: %w", ErrFSFormat)
 	}
@@ -241,6 +262,7 @@ func (m *fsCheckMarker) inode(ctx context.Context, id ObjectID, root bool) error
 	if err != nil {
 		return err
 	}
+	m.links[id] = fsCheckLinks{kind: node.kind, count: fsLinks(node)}
 	if root && node.kind != fsDirectory {
 		return ErrFSFormat
 	}

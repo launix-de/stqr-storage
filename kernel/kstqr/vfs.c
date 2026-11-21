@@ -12,6 +12,7 @@
 #include <linux/seq_file.h>
 #include <linux/statfs.h>
 #include <linux/uio.h>
+#include <linux/xattr.h>
 #include <net/net_namespace.h>
 #define KS_MAGIC 0x53545152
 struct ks_context {
@@ -20,7 +21,8 @@ struct ks_context {
 	unsigned timeout;
 	bool create, readonly;
 };
-static const struct inode_operations ks_dir_ops, ks_file_ops;
+static const struct inode_operations ks_dir_ops, ks_file_ops, ks_symlink_ops;
+static const struct xattr_handler *const ks_xattrs[];
 static const struct file_operations ks_dir_fops, ks_file_fops;
 static const struct address_space_operations ks_aops;
 static unsigned enter_fs(struct ks_fs *f)
@@ -34,9 +36,29 @@ static void leave_fs(struct ks_fs *f, unsigned flags)
 	mutex_unlock(&f->mutex);
 	memalloc_nofs_restore(flags);
 }
+static umode_t node_mode(const struct ks_node *n)
+{
+	unsigned type = S_IFREG;
+	switch (n->kind) {
+	case 2:
+		type = S_IFDIR;
+		break;
+	case 3:
+		type = S_IFLNK;
+		break;
+	case 4:
+		type = S_IFIFO;
+		break;
+	case 5:
+		type = S_IFSOCK;
+		break;
+	}
+	return type | n->mode;
+}
 static void update_inode(struct inode *i, const struct ks_node *n)
 {
-	i->i_mode = (n->kind == 2 ? S_IFDIR : S_IFREG) | n->mode;
+	i->i_mode = node_mode(n);
+	set_nlink(i, n->removed ? 0 : n->links);
 	i_uid_write(i, n->uid);
 	i_gid_write(i, n->gid);
 	i_size_write(i, n->size);
@@ -63,10 +85,13 @@ static struct inode *get_inode(struct super_block *sb, stqr_object_id id, const 
 		return ERR_PTR(-ENOMEM);
 	if (inode_state_read_once(i) & I_NEW) {
 		i->i_ino = !memcmp(id.bytes, ks_root_id.bytes, 32) ? 1 : get_next_ino();
-		i->i_op = n->kind == 2 ? &ks_dir_ops : &ks_file_ops;
+		i->i_op = n->kind == 2	 ? &ks_dir_ops
+			  : n->kind == 3 ? &ks_symlink_ops
+					 : &ks_file_ops;
 		i->i_fop = n->kind == 2 ? &ks_dir_fops : &ks_file_fops;
 		i->i_mapping->a_ops = &ks_aops;
-		set_nlink(i, n->kind == 2 ? 2 : 1);
+		if (n->kind == 4 || n->kind == 5)
+			init_special_inode(i, node_mode(n), 0);
 		update_inode(i, n);
 		unlock_new_inode(i);
 	} else
@@ -157,7 +182,7 @@ static int ks_iterate(struct file *file, struct dir_context *ctx)
 				break;
 			}
 			if (!dir_emit(ctx, entries[k].name, strlen(entries[k].name), ci->i_ino,
-				      S_ISDIR(ci->i_mode) ? DT_DIR : DT_REG)) {
+				      (ci->i_mode & S_IFMT) >> 12)) {
 				iput(ci);
 				break;
 			}
@@ -170,7 +195,7 @@ static int ks_iterate(struct file *file, struct dir_context *ctx)
 	return err;
 }
 static int create_common(struct mnt_idmap *idmap, struct inode *parent, struct dentry *d,
-			 umode_t mode, bool dir)
+			 umode_t mode, unsigned kind, const char *target)
 {
 	struct ks_fs *f = parent->i_sb->s_fs_info;
 	stqr_object_id id;
@@ -184,11 +209,11 @@ static int create_common(struct mnt_idmap *idmap, struct inode *parent, struct d
 		return -EOPNOTSUPP;
 	if (parent->i_mode & S_ISGID) {
 		gid = i_gid_read(parent);
-		if (dir)
+		if (kind == 2)
 			mode |= S_ISGID;
 	}
 	saved = enter_fs(f);
-	err = ks_create(f, KS_I(parent)->id, d->d_name.name, mode, uid, gid, dir, &id);
+	err = ks_newnode(f, KS_I(parent)->id, d->d_name.name, mode, uid, gid, kind, target, &id);
 	if (!err) {
 		err = ks_snapshot(f, id, &s);
 		if (!err) {
@@ -209,13 +234,89 @@ static int ks_create_file(struct mnt_idmap *idmap, struct inode *parent, struct 
 			  umode_t mode, bool excl)
 {
 	(void)excl;
-	return create_common(idmap, parent, d, mode, false);
+	return create_common(idmap, parent, d, mode, 1, NULL);
 }
 static struct dentry *ks_mkdir(struct mnt_idmap *idmap, struct inode *parent, struct dentry *d,
 			       umode_t mode)
 {
-	int err = create_common(idmap, parent, d, mode, true);
+	int err = create_common(idmap, parent, d, mode, 2, NULL);
 	return err ? ERR_PTR(err) : NULL;
+}
+static int ks_symlink(struct mnt_idmap *idmap, struct inode *parent, struct dentry *d,
+		      const char *target)
+{
+	return create_common(idmap, parent, d, 0777, 3, target);
+}
+static int ks_mknod(struct mnt_idmap *idmap, struct inode *parent, struct dentry *d, umode_t mode,
+		    dev_t dev)
+{
+	unsigned kind;
+	switch (mode & S_IFMT) {
+	case S_IFREG:
+		kind = 1;
+		break;
+	case S_IFIFO:
+		kind = 4;
+		break;
+	case S_IFSOCK:
+		kind = 5;
+		break;
+	default:
+		return -EOPNOTSUPP;
+	}
+	if (dev)
+		return -EOPNOTSUPP;
+	return create_common(idmap, parent, d, mode, kind, NULL);
+}
+static int ks_link_vfs(struct dentry *old, struct inode *parent, struct dentry *d)
+{
+	struct ks_fs *f = parent->i_sb->s_fs_info;
+	struct ks_snapshot s;
+	struct inode *i;
+	unsigned saved = enter_fs(f);
+	int err = ks_link(f, KS_I(parent)->id, d->d_name.name, KS_I(d_inode(old))->id);
+	if (!err) {
+		err = ks_snapshot(f, KS_I(d_inode(old))->id, &s);
+		if (!err) {
+			i = get_inode(parent->i_sb, s.id, &s.node);
+			ks_snapshot_free(&s);
+			if (IS_ERR(i))
+				err = PTR_ERR(i);
+			else
+				d_instantiate(d, i);
+		}
+		if (!err)
+			refresh_inode(parent);
+	}
+	leave_fs(f, saved);
+	return err;
+}
+static const char *ks_get_link(struct dentry *d, struct inode *i, struct delayed_call *done)
+{
+	struct ks_fs *f = i->i_sb->s_fs_info;
+	struct ks_snapshot s;
+	unsigned saved;
+	int err;
+	char *target = NULL;
+	if (!d)
+		return ERR_PTR(-ECHILD);
+	saved = enter_fs(f);
+	err = ks_snapshot(f, KS_I(i)->id, &s);
+	if (!err) {
+		if (s.node.kind != 3)
+			err = -EINVAL;
+		else {
+			target = kmemdup_nul(s.node.inline_data, s.node.size, GFP_NOFS);
+			if (!target)
+				err = -ENOMEM;
+		}
+		ks_snapshot_free(&s);
+	}
+	leave_fs(f, saved);
+	if (err)
+		return ERR_PTR(err);
+	set_delayed_call(done, kfree_link, target);
+	return target;
 }
 static int remove_common(struct inode *parent, struct dentry *d, bool dir)
 {
@@ -223,7 +324,7 @@ static int remove_common(struct inode *parent, struct dentry *d, bool dir)
 	unsigned saved = enter_fs(f);
 	int err = ks_remove(f, KS_I(parent)->id, d->d_name.name, dir);
 	if (!err) {
-		clear_nlink(d_inode(d));
+		refresh_inode(d_inode(d));
 		refresh_inode(parent);
 	}
 	leave_fs(f, saved);
@@ -283,7 +384,7 @@ static int ks_rename_vfs(struct mnt_idmap *idmap, struct inode *old, struct dent
 			paths, from_length, paths + 1024, to_length);
 	if (!err) {
 		if (!(flags & RENAME_EXCHANGE) && d_inode(nd))
-			clear_nlink(d_inode(nd));
+			refresh_inode(d_inode(nd));
 		refresh_inode(old);
 		if (new != old)
 			refresh_inode(new);
@@ -474,10 +575,61 @@ static const struct file_operations ks_dir_fops = {
     .iterate_shared = ks_iterate,
     .fsync = ks_fsync,
 };
-static const struct inode_operations ks_file_ops = {.getattr = ks_getattr,
-						    .setattr = ks_setattr_vfs};
+static int ks_xattr_get(const struct xattr_handler *handler, struct dentry *d, struct inode *i,
+			const char *name, void *buffer, size_t size)
+{
+	struct ks_fs *f = i->i_sb->s_fs_info;
+	unsigned saved;
+	int err;
+	(void)d;
+	if (handler->flags && !capable(CAP_SYS_ADMIN))
+		return -ENODATA;
+	saved = enter_fs(f);
+	err = ks_getxattr(f, KS_I(i)->id, xattr_full_name(handler, name), buffer, size);
+	leave_fs(f, saved);
+	return err;
+}
+static int ks_xattr_set(const struct xattr_handler *handler, struct mnt_idmap *idmap,
+			struct dentry *d, struct inode *i, const char *name, const void *value,
+			size_t size, int flags)
+{
+	struct ks_fs *f = i->i_sb->s_fs_info;
+	unsigned saved;
+	int err;
+	(void)d;
+	if (idmap != &nop_mnt_idmap)
+		return -EOPNOTSUPP;
+	if (handler->flags && !capable(CAP_SYS_ADMIN))
+		return -EPERM;
+	saved = enter_fs(f);
+	err = ks_setxattr(f, KS_I(i)->id, xattr_full_name(handler, name), value, size, flags);
+	if (!err)
+		refresh_inode(i);
+	leave_fs(f, saved);
+	return err;
+}
+static ssize_t ks_listxattr_vfs(struct dentry *d, char *buffer, size_t size)
+{
+	struct inode *i = d_inode(d);
+	struct ks_fs *f = i->i_sb->s_fs_info;
+	unsigned saved = enter_fs(f);
+	int err = ks_listxattr(f, KS_I(i)->id, buffer, size, capable(CAP_SYS_ADMIN));
+	leave_fs(f, saved);
+	return err;
+}
+static const struct xattr_handler ks_user_xattr = {
+    .prefix = "user.", .get = ks_xattr_get, .set = ks_xattr_set};
+static const struct xattr_handler ks_trusted_xattr = {
+    .prefix = "trusted.", .flags = 1, .get = ks_xattr_get, .set = ks_xattr_set};
+static const struct xattr_handler *const ks_xattrs[] = {&ks_user_xattr, &ks_trusted_xattr, NULL};
+static const struct inode_operations ks_file_ops = {
+    .getattr = ks_getattr, .setattr = ks_setattr_vfs, .listxattr = ks_listxattr_vfs};
 static const struct inode_operations ks_dir_ops = {
     .lookup = ks_lookup,
+    .symlink = ks_symlink,
+    .link = ks_link_vfs,
+    .mknod = ks_mknod,
+    .listxattr = ks_listxattr_vfs,
     .create = ks_create_file,
     .mkdir = ks_mkdir,
     .unlink = ks_unlink,
@@ -486,6 +638,10 @@ static const struct inode_operations ks_dir_ops = {
     .getattr = ks_getattr,
     .setattr = ks_setattr_vfs,
 };
+static const struct inode_operations ks_symlink_ops = {.get_link = ks_get_link,
+						       .getattr = ks_getattr,
+						       .setattr = ks_setattr_vfs,
+						       .listxattr = ks_listxattr_vfs};
 static struct inode *ks_alloc_inode(struct super_block *sb)
 {
 	struct ks_inode *i = kzalloc(sizeof(*i), GFP_KERNEL);
@@ -566,6 +722,7 @@ static int ks_fill_super(struct super_block *sb, struct fs_context *fc)
 		kfree(f);
 		return -ENOMEM;
 	}
+	sb->s_xattr = ks_xattrs;
 	sb->s_fs_info = f;
 	sb->s_op = &ks_super_ops;
 	sb->s_blocksize = PAGE_SIZE;

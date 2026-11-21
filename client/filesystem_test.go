@@ -414,6 +414,8 @@ func TestFilesystemMalformedAndCanceled(t *testing.T) {
 }
 func FuzzFilesystemDecoders(f *testing.F) {
 	f.Add(encodeFSNode(fsNode{kind: fsFile, mode: 0644}))
+	f.Add(encodeFSNode(fsNode{kind: fsSymlink, mode: 0777, extended: true, links: 2, blob: fsBlob{length: 6, inline: []byte("../foo")}, xattrs: map[string][]byte{"user.binary": {0, 0xff, 42}, "user.empty": {}}}))
+	f.Add(encodeFSNode(fsNode{kind: fsSocket, mode: 0600, extended: true, links: 1}))
 	dir, _ := encodeFSDirectory([]FSEntry{{Name: "test", ID: ObjectID{1}}})
 	f.Add(dir)
 	f.Add(encodeFSIndex([]fsSegment{{length: 4, id: ObjectID{1}}}))

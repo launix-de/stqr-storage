@@ -9,6 +9,9 @@ struct ks_node {
 	unsigned kind, mode, uid, gid, depth;
 	u64 size, mtime, atime, ctime;
 	bool removed;
+	u32 links;
+	const u8 *xattrs;
+	size_t xattrs_size;
 	stqr_object_id root;
 	const u8 *inline_data;
 };
@@ -46,6 +49,12 @@ int ks_read(struct ks_fs *, const struct ks_node *, void *, size_t, u64);
 int ks_directory(struct ks_fs *, const struct ks_node *, struct ks_entry **, size_t *);
 int ks_create(struct ks_fs *, stqr_object_id, const char *, unsigned, u32, u32, bool,
 	      stqr_object_id *);
+int ks_newnode(struct ks_fs *, stqr_object_id, const char *, unsigned, u32, u32, unsigned,
+	       const char *, stqr_object_id *);
+int ks_link(struct ks_fs *, stqr_object_id, const char *, stqr_object_id);
+int ks_getxattr(struct ks_fs *, stqr_object_id, const char *, void *, size_t);
+int ks_listxattr(struct ks_fs *, stqr_object_id, char *, size_t, bool);
+int ks_setxattr(struct ks_fs *, stqr_object_id, const char *, const void *, size_t, int);
 int ks_remove(struct ks_fs *, stqr_object_id, const char *, bool);
 int ks_rename(struct ks_fs *, stqr_object_id, const char *, stqr_object_id, const char *, unsigned,
 	      const stqr_object_id *, size_t, const stqr_object_id *, size_t);

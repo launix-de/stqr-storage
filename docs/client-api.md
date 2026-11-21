@@ -286,3 +286,12 @@ mmap, LOCK_EX, touch, whiteouts, remount and overlay fsck. With a freshly built
 binary, `STQR_FUSE_BINARY=/absolute/path/stqr-fuse` runs those mounts through the
 actual CLI and its separate readonly endpoint/credentials. All fixtures use
 temporary volumes/buckets; they do not use the developer's `fuse` bucket.
+
+## Linux application inode features
+
+Normal filesystem views expose `Symlink`/`Readlink`, `Link`, `Mknod` for regular
+files/FIFOs/Unix sockets, and `GetXattr`, `SetXattr`, `ListXattr`, `RemoveXattr`.
+`FSInfo.Kind` distinguishes node types, and `FSInfo.Nlink` reports link counts.
+The FUSE adapter implements the corresponding Linux operations. These changes
+use STFS v5 and require upgrading every client accessing a bucket; see the
+[shared format and semantics guide](filesystem-posix.md) before deploying them.

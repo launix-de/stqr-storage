@@ -100,7 +100,28 @@ func TestKSTQRVirtualMachine(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	malformed := []byte("STFS\x04\x00")
+	bad := client.Encoder{B: []byte("STFS")}
+	bad.U16(5)
+	bad.U8(2)
+	bad.U32(0755)
+	bad.U32(0)
+	bad.U32(0)
+	bad.U64(1)
+	bad.U64(14)
+	bad.U8(0)
+	dir := client.Encoder{B: []byte("STDR")}
+	dir.U16(1)
+	dir.U64(0)
+	bad.Blob(dir.B)
+	bad.Bool(false)
+	bad.Text("")
+	bad.U64(1)
+	bad.U64(1)
+	bad.U32(0)
+	bad.U32(0)
+	// A live directory with zero links is corrupt; --init must not repair it
+	// by silently overwriting the existing root.
+	malformed := bad.B
 	if _, err = corruptConn.Put(ctx, client.FilesystemRootID(), malformed, client.PutOptions{RequestID: client.NewRequestID()}); err != nil {
 		t.Fatal(err)
 	}
@@ -114,6 +135,15 @@ func TestKSTQRVirtualMachine(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err = fs.WriteAt(ctx, file.ID, []byte("hello from Go"), 0); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = fs.Link(ctx, client.FilesystemRootID(), "go-alias", file.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = fs.Symlink(ctx, client.FilesystemRootID(), "go-link", "go.txt", 0, 0); err != nil {
+		t.Fatal(err)
+	}
+	if err = fs.SetXattr(ctx, file.ID, "user.from-go", []byte("Go metadata"), 0); err != nil {
 		t.Fatal(err)
 	}
 	// Leave a valid interrupted multi-inode operation for the kernel to read
@@ -266,6 +296,19 @@ poweroff -f
 	n, err := fs.ReadAt(ctx, kernel, data, 0)
 	if err != nil || n != 16 || string(data) != "written by kstqr" {
 		t.Fatalf("Go read: %q %d %v", data, n, err)
+	}
+	link, err := fs.Lookup(ctx, client.FilesystemRootID(), "kernel-link")
+	if err != nil || link.Kind != client.FSSymlink {
+		t.Fatal(link, err)
+	}
+	if target, err := fs.Readlink(ctx, link.ID); err != nil || string(target) != "kernel.txt" {
+		t.Fatal(string(target), err)
+	}
+	if value, err := fs.GetXattr(ctx, file.ID, "user.kernel"); err != nil || string(value) != "kernel metadata" {
+		t.Fatal(string(value), err)
+	}
+	if info, err := fs.Stat(ctx, file.ID); err != nil || info.Nlink != 2 {
+		t.Fatal(info, err)
 	}
 	initialized, err := client.Dial(ctx, host.URL, admin.Username, admin.Password, client.ID(empty.ID()))
 	if err != nil {
