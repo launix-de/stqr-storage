@@ -7,7 +7,7 @@ import (
 	"os"
 )
 
-// Compression staging is bounded in RAM. Only transient encoded input spills
+// Compression and redo staging are bounded in RAM. Transient input spills
 // to a 0600 temporary file; committed objects always live in the volume format.
 type encodedSpool struct {
 	memory []byte

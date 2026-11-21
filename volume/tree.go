@@ -118,7 +118,12 @@ func (v *Volume) node(off uint64) (treeNode, error) {
 	return n, e
 }
 func (t *transaction) node(off uint64) (treeNode, error) {
-	if b := t.pages[off]; b != nil {
+	_, spilled := t.spilled[off]
+	if t.pages[off] != nil || spilled {
+		b, e := t.page(off)
+		if e != nil {
+			return treeNode{}, e
+		}
 		return decodeNode(b, t.sb.Identity.VolumeID)
 	}
 	n, e := t.v.node(off)

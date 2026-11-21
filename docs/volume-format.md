@@ -126,8 +126,9 @@ an index entry and descriptor, but no payload allocation.
 
 A normal descriptor has a 40-byte header and 64 bytes per physical/logical span.
 An ordinary PUT needs one span (104 descriptor bytes). Sparse PUT_RANGE/TRUNC
-represent zero intervals implicitly; their actual nonzero ranges are packed
-into a single allocation, rather than materializing holes.
+represent zero intervals implicitly. PUT_RANGE preserves existing allocations
+and only allocates payload for newly written holes/extensions. A noncontiguous
+result uses the segment directory; holes are never materialized as zero bytes.
 
 The first APPEND keeps a PUT's existing data in place and switches the layout
 flag. Segment lists use linked 512-byte blocks with seven entries each. List
@@ -137,8 +138,8 @@ an existing tail for small writes. Only the changed descriptor/list block and
 tail page are updated; the full directory/list is not copied per append. A full
 PUT replaces the segment representation again and releases the old arenas/list.
 
-Compression chunks (up to 1 MiB) are positions **inside** the one allocation,
-not independently allocated extents. Raw 1-MiB PUTs are one uninterrupted payload
+For complete PUT, compression chunks (up to 1 MiB) are positions **inside**
+the one allocation. Raw 1-MiB PUTs are one uninterrupted payload
 range, with their checksum in the descriptor. Larger raw PUTs have a separate
 small checksum array. Compressed containers hold a compact chunk table so
 ranged reads need only decode affected chunks. Incompressible chunks use raw
@@ -146,6 +147,37 @@ encoding. Hot APPEND arenas store raw bytes for efficient small updates; explici
 recompression can compress them without changing the logical object version.
 Compression staging uses at most 4 MiB of RAM before spilling transient encoded
 input to a temporary file. Committed data always lives in the volume.
+
+### In-place ranged updates
+
+PUT_RANGE and range CAS overwrite RAW data at the existing physical address,
+retaining the allocation and all unrelated spans. Only addressed payload pages,
+the affected checksums and object/request metadata enter redo. RAW checksums
+cover at most 1 MiB, so a partial update verifies/recalculates that bounded block;
+it does not read the whole native object or rewrite its untouched bytes.
+
+On the first partial write to a packed compressed span, the chunk table is
+replaced by individually owned chunk descriptors. Unchanged encoded chunks
+remain at exactly their old addresses; table bytes/padding are returned to the
+free tree. Only affected chunks are decoded/reencoded. If their encoded result
+fits, it overwrites in place and frees any unused tail. Growth relocates only
+that chunk. A subsequent full PUT restores the compact contiguous layout.
+
+A 64-byte span uses byte 61 as the standalone-chunk flag (0 legacy packed/raw,
+1 standalone; bytes 62–63 remain zero). For standalone chunks, `Checksums` holds
+decoded length in its high u32 and encoded CRC32C in its low u32, rather than a
+checksum-array pointer. `CRC` remains the decoded checksum, `Skip` the visible
+logical offset. Existing format-2 objects remain readable; older pre-release
+binaries do not understand the standalone representation and must not be used
+to downgrade modified volumes.
+
+Large ranged writes spill dirty page images and redo assembly after about
+4 MiB to temporary files. Recovery validates the complete journal digest before
+applying any image and also uses bounded payload buffers. A large atomic range
+still needs transient on-volume journal space for its changed pages, not a second
+copy of the whole object. Read handles and the private write lock provide local
+isolation; no historical payload versions are retained for readers. Full PUT and
+TRUNC currently retain their separate rebuild paths.
 
 ### Page-sized B+-trees
 

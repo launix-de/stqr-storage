@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"errors"
+	"io"
 	"sort"
 )
 
@@ -16,12 +17,59 @@ type transaction struct {
 	v                      *Volume
 	sb                     Superblock
 	pages                  map[uint64][]byte
+	spilled                map[uint64]int64
+	spool                  *encodedSpool
 	busy, pending, retired []allocation
 	reusable               allocation
 }
 
 func (v *Volume) transaction() *transaction {
 	return &transaction{v: v, sb: v.sb, pages: map[uint64][]byte{}}
+}
+
+// Large in-place writes retain dirty page images in a bounded temporary spool,
+// rather than keeping a second object-sized payload in the Go heap.
+func (t *transaction) close() {
+	if t.spool != nil {
+		t.spool.Close()
+		t.spool = nil
+	}
+}
+func (t *transaction) page(off uint64) ([]byte, error) {
+	if b := t.pages[off]; b != nil {
+		return b, nil
+	}
+	if at, ok := t.spilled[off]; ok {
+		b := make([]byte, PageSize)
+		_, e := t.spool.ReadAt(b, at)
+		return b, e
+	}
+	return t.v.readPage(off)
+}
+func (t *transaction) spillPages() error {
+	if len(t.pages) <= 1024 {
+		return nil
+	}
+	if t.spool == nil {
+		t.spool = &encodedSpool{}
+		t.spilled = map[uint64]int64{}
+	}
+	for off, b := range t.pages {
+		at, ok := t.spilled[off]
+		if ok {
+			if _, e := t.spool.WriteAt(b, at); e != nil {
+				return e
+			}
+		} else {
+			at = t.spool.size
+			if _, e := t.spool.Write(b); e != nil {
+				return e
+			}
+			t.spilled[off] = at
+		}
+		delete(t.pages, off)
+	}
+	return nil
 }
 func overlap(a, b allocation) bool { return a.off < b.off+b.n && b.off < a.off+a.n }
 func (t *transaction) candidate(start, length, n, alignment uint64) (uint64, bool) {
@@ -278,7 +326,7 @@ func (t *transaction) writeBytes(off uint64, b []byte) error {
 		p := t.pages[page]
 		if p == nil {
 			var e error
-			p, e = t.v.readPage(page)
+			p, e = t.page(page)
 			if e != nil {
 				return e
 			}
@@ -297,7 +345,7 @@ func (t *transaction) patch(off uint64, b []byte) error {
 		p := t.pages[page]
 		if p == nil {
 			var e error
-			p, e = t.v.readPage(page)
+			p, e = t.page(page)
 			if e != nil {
 				return e
 			}
@@ -309,9 +357,10 @@ func (t *transaction) patch(off uint64, b []byte) error {
 		off += uint64(n)
 		b = b[n:]
 	}
-	return nil
+	return t.spillPages()
 }
 func (t *transaction) commit(useGuaranteed bool) error {
+	defer t.close()
 	if e := t.finalize(); e != nil {
 		return e
 	}
@@ -324,8 +373,19 @@ func (t *transaction) commit(useGuaranteed bool) error {
 	if e != nil {
 		return e
 	}
-	offsets := make([]uint64, 0, len(t.pages))
-	for off, page := range t.pages {
+	all := make(map[uint64]bool, len(t.pages)+len(t.spilled))
+	for off := range t.pages {
+		all[off] = true
+	}
+	for off := range t.spilled {
+		all[off] = true
+	}
+	offsets := make([]uint64, 0, len(all))
+	for off := range all {
+		page, err := t.page(off)
+		if err != nil {
+			return err
+		}
 		// An entirely free old page contains no confirmed neighbor. Stage it
 		// directly; only updates to occupied/shared pages need redo images.
 		span, ok, err := treeNeighbor(t.v.node, t.v.sb.FreeRoot, spaceKey(off), false)
@@ -342,40 +402,71 @@ func (t *transaction) commit(useGuaranteed bool) error {
 		offsets = append(offsets, off)
 	}
 	sort.Slice(offsets, func(i, j int) bool { return offsets[i] < offsets[j] })
-	var payload bytes.Buffer
-	payload.Write(header)
+	payload := &encodedSpool{}
+	defer payload.Close()
+	digest := sha256.New()
+	writer := io.MultiWriter(payload, digest)
+	if _, e = writer.Write(header); e != nil {
+		return e
+	}
 	var n [8]byte
 	diskOrder.PutUint64(n[:], uint64(len(offsets)))
-	payload.Write(n[:])
+	if _, e = writer.Write(n[:]); e != nil {
+		return e
+	}
 	for _, off := range offsets {
 		diskOrder.PutUint64(n[:], off)
-		payload.Write(n[:])
-		payload.Write(t.pages[off])
+		if _, e = writer.Write(n[:]); e != nil {
+			return e
+		}
+		page, err := t.page(off)
+		if err != nil {
+			return err
+		}
+		if _, e = writer.Write(page); e != nil {
+			return e
+		}
 	}
-	data := payload.Bytes()
-	count := (len(data) + PageSize - 17) / (PageSize - 16)
+	count := (payload.size + PageSize - 17) / (PageSize - 16)
 	logPages := make([]uint64, count)
-	for i := range logPages {
+	for i := 0; i < len(logPages); {
 		if i < scratchPages {
 			logPages[i] = uint64(4*PageSize + i*PageSize)
-		} else {
-			_, _, off, err := t.findSpace(PageSize, PageSize, false)
-			if err != nil {
+			i++
+			continue
+		}
+		// Claim temporary WAL space in runs, avoiding a growing busy-list lookup for
+		// every page of a large range write. Fragmented volumes fall back to smaller runs.
+		run := len(logPages) - i
+		var off uint64
+		for {
+			_, _, chosen, err := t.findSpace(uint64(run)*PageSize, PageSize, false)
+			if err == nil {
+				off = chosen
+				break
+			}
+			if err != ErrFull || run == 1 {
 				return err
 			}
-			logPages[i] = off
-			t.busy = append(t.busy, allocation{off, PageSize, false})
+			run = (run + 1) / 2
 		}
+		t.busy = append(t.busy, allocation{off, uint64(run) * PageSize, false})
+		for j := 0; j < run; j++ {
+			logPages[i+j] = off + uint64(j)*PageSize
+		}
+		i += run
 	}
 	for i, off := range logPages {
 		p := make([]byte, PageSize)
 		if i+1 < len(logPages) {
 			diskOrder.PutUint64(p, logPages[i+1])
 		}
-		from := i * (PageSize - 16)
-		end := min(from+PageSize-16, len(data))
-		diskOrder.PutUint32(p[8:], uint32(end-from))
-		copy(p[16:], data[from:end])
+		from := int64(i) * (PageSize - 16)
+		size := min(int64(PageSize-16), payload.size-from)
+		diskOrder.PutUint32(p[8:], uint32(size))
+		if _, e = payload.ReadAt(p[16:16+size], from); e != nil {
+			return e
+		}
 		diskOrder.PutUint32(p[12:], checksum(p[16:]))
 		if e = t.v.write(p, off); e != nil {
 			return e
@@ -388,9 +479,8 @@ func (t *transaction) commit(useGuaranteed bool) error {
 	copy(anchor, "STQRCMT2")
 	diskOrder.PutUint64(anchor[8:], t.sb.Generation)
 	diskOrder.PutUint64(anchor[16:], logPages[0])
-	diskOrder.PutUint64(anchor[24:], uint64(len(data)))
-	digest := sha256.Sum256(data)
-	copy(anchor[32:64], digest[:])
+	diskOrder.PutUint64(anchor[24:], uint64(payload.size))
+	copy(anchor[32:64], digest.Sum(nil))
 	copy(anchor[64:80], t.sb.Identity.VolumeID[:])
 	diskOrder.PutUint32(anchor[PageSize-4:], checksum(anchor[:PageSize-4]))
 	if e = t.v.write(anchor, uint64(2+int(t.sb.Generation%2))*PageSize); e != nil {
@@ -400,7 +490,11 @@ func (t *transaction) commit(useGuaranteed bool) error {
 		return e
 	}
 	for _, off := range offsets {
-		if e = t.v.write(t.pages[off][:min(uint64(PageSize), t.sb.Identity.Size-off)], off); e != nil {
+		page, err := t.page(off)
+		if err != nil {
+			return err
+		}
+		if e = t.v.write(page[:min(uint64(PageSize), t.sb.Identity.Size-off)], off); e != nil {
 			return e
 		}
 	}
@@ -414,7 +508,11 @@ func (t *transaction) commit(useGuaranteed bool) error {
 		return e
 	}
 	t.v.sb = t.sb
-	for off, b := range t.pages {
+	for off := range all {
+		b, err := t.page(off)
+		if err != nil {
+			return err
+		}
 		if string(b[:4]) == "BPT2" {
 			n, err := decodeNode(b, t.sb.Identity.VolumeID)
 			if err == nil {
@@ -449,10 +547,12 @@ func recoverWAL(dev VolumeIO, s Superblock) (Superblock, error) {
 	if length > uint64(size)*2 || length < PageSize+8 {
 		return s, ErrCorrupt
 	}
-	var payload bytes.Buffer
+	payload := &encodedSpool{}
+	defer payload.Close()
+	digest := sha256.New()
 	off := diskOrder.Uint64(anchor[16:])
 	seen := map[uint64]bool{}
-	for uint64(payload.Len()) < length {
+	for uint64(payload.size) < length {
 		if off < PageSize*4 || off%PageSize != 0 || off+PageSize > uint64(size) || seen[off] {
 			return s, ErrCorrupt
 		}
@@ -462,33 +562,48 @@ func recoverWAL(dev VolumeIO, s Superblock) (Superblock, error) {
 			return s, e
 		}
 		used := diskOrder.Uint32(p[8:])
-		if used > PageSize-16 || used == 0 || uint64(used) > length-uint64(payload.Len()) || checksum(p[16:]) != diskOrder.Uint32(p[12:]) {
+		if used > PageSize-16 || used == 0 || uint64(used) > length-uint64(payload.size) || checksum(p[16:]) != diskOrder.Uint32(p[12:]) {
 			return s, ErrCorrupt
 		}
-		payload.Write(p[16 : 16+used])
+		if _, e = io.MultiWriter(payload, digest).Write(p[16 : 16+used]); e != nil {
+			return s, e
+		}
 		off = diskOrder.Uint64(p)
 	}
-	data := payload.Bytes()
-	sum := sha256.Sum256(data)
-	if !bytes.Equal(sum[:], anchor[32:64]) {
+	if !bytes.Equal(digest.Sum(nil), anchor[32:64]) {
 		return s, ErrCorrupt
 	}
-	next, e := DecodeSuperblock(data[:PageSize])
+	header := make([]byte, PageSize)
+	if _, e = payload.ReadAt(header, 0); e != nil {
+		return s, e
+	}
+	next, e := DecodeSuperblock(header)
 	if e != nil || next.Generation != gen || next.Identity.VolumeID != s.Identity.VolumeID || next.Identity.Size > uint64(size) {
 		return s, ErrCorrupt
 	}
-	count := diskOrder.Uint64(data[PageSize:])
-	if count > (uint64(len(data))-PageSize-8)/(PageSize+8) || uint64(len(data)) != PageSize+8+count*(PageSize+8) {
+	var n [8]byte
+	if _, e = payload.ReadAt(n[:], PageSize); e != nil {
+		return s, e
+	}
+	count := diskOrder.Uint64(n[:])
+	if count > (uint64(payload.size)-PageSize-8)/(PageSize+8) || uint64(payload.size) != PageSize+8+count*(PageSize+8) {
 		return s, ErrCorrupt
 	}
-	at := PageSize + 8
+	at := int64(PageSize + 8)
+	page := make([]byte, PageSize)
 	for i := uint64(0); i < count; i++ {
-		pos := diskOrder.Uint64(data[at:])
+		if _, e = payload.ReadAt(n[:], at); e != nil {
+			return s, e
+		}
+		pos := diskOrder.Uint64(n[:])
 		at += 8
 		if pos < treeStart || pos%PageSize != 0 || pos >= next.Identity.Size || seen[pos] {
 			return s, ErrCorrupt
 		}
-		if e = writeFullAt(dev, data[at:at+int(min(uint64(PageSize), next.Identity.Size-pos))], pos); e != nil {
+		if _, e = payload.ReadAt(page, at); e != nil {
+			return s, e
+		}
+		if e = writeFullAt(dev, page[:min(uint64(PageSize), next.Identity.Size-pos)], pos); e != nil {
 			return s, e
 		}
 		at += PageSize
@@ -496,7 +611,7 @@ func recoverWAL(dev VolumeIO, s Superblock) (Superblock, error) {
 	if e = dev.Sync(); e != nil {
 		return s, e
 	}
-	if e = writeFullAt(dev, data[:PageSize], gen%2*PageSize); e != nil {
+	if e = writeFullAt(dev, header, gen%2*PageSize); e != nil {
 		return s, e
 	}
 	if e = dev.Sync(); e != nil {

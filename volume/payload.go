@@ -17,6 +17,9 @@ func encodeSpan(b []byte, s dataSpan) {
 	}
 	diskOrder.PutUint32(b[56:], s.CRC)
 	b[60] = byte(s.Codec)
+	if s.Direct {
+		b[61] = 1
+	}
 }
 func decodeSpan(b []byte) dataSpan {
 	var s dataSpan
@@ -25,6 +28,10 @@ func decodeSpan(b []byte) dataSpan {
 	}
 	s.CRC = diskOrder.Uint32(b[56:])
 	s.Codec = Compression(b[60])
+	s.Direct = b[61] == 1
+	if b[61] > 1 || b[62] != 0 || b[63] != 0 {
+		s.Codec = 255
+	}
 	return s
 }
 func cloneObject(o *object) *object {
@@ -235,7 +242,7 @@ func (t *transaction) readBytes(dst []byte, off uint64) error {
 		b := t.pages[page]
 		if b == nil {
 			var e error
-			b, e = t.v.readPage(page)
+			b, e = t.page(page)
 			if e != nil {
 				return e
 			}
@@ -249,14 +256,14 @@ func (t *transaction) readBytes(dst []byte, off uint64) error {
 	return nil
 }
 func checksumsSize(s dataSpan) uint64 {
-	if s.Checksums == 0 {
+	if s.Direct || s.Checksums == 0 {
 		return 0
 	}
 	return (s.Skip + s.Length + BlockSize - 1) / BlockSize * 4
 }
 func releaseSpan(t *transaction, s dataSpan) {
 	t.release(s.Location, s.Capacity, false)
-	if s.Checksums != 0 {
+	if !s.Direct && s.Checksums != 0 {
 		t.release(s.Checksums, checksumsSize(s), true)
 	}
 }
@@ -388,6 +395,14 @@ func (t *transaction) storePacked(pieces []payloadPiece, codec Compression) ([]d
 func (v *Volume) readSpan(s dataSpan, dst []byte, offset uint64) error {
 	if offset > s.Length || uint64(len(dst)) > s.Length-offset {
 		return ErrRange
+	}
+	if s.Direct {
+		raw, e := v.directChunk(s)
+		if e != nil {
+			return e
+		}
+		copy(dst, raw[s.Skip+offset:])
+		return nil
 	}
 	position := s.Skip + offset
 	for len(dst) > 0 {

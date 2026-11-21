@@ -173,9 +173,12 @@ type object struct {
 	Base, Size                    uint64 // packed descriptor's location and encoded length
 }
 type dataSpan struct {
+	// Direct is a standalone encoded chunk. Checksums packs decoded length
+	// (high u32) and encoded CRC32C (low u32), not a metadata pointer.
 	Offset, Length, Location, Stored, Capacity, Checksums uint64
 	Skip                                                  uint64
 	Codec                                                 Compression
+	Direct                                                bool
 	CRC                                                   uint32
 }
 type dedupe struct {

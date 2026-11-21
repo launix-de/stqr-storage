@@ -9,7 +9,6 @@ import (
 	"hash"
 	"hash/crc32"
 	"io"
-	"sort"
 )
 
 const MaxBufferedRead = 16 << 20
@@ -387,6 +386,7 @@ func (v *Volume) mutateWithRetryLocked(op uint8, k Key, offset, length uint64, s
 		version = o.Info.Version
 	}
 	t := v.transaction()
+	defer t.close()
 	reader := src
 	if payload && length > 0 {
 		reader = io.TeeReader(src, h)
@@ -400,6 +400,10 @@ func (v *Volume) mutateWithRetryLocked(op uint8, k Key, offset, length uint64, s
 			}
 		}
 		o.dirtyUntil = len(o.Spans)
+	} else if op == opPutRange || op == opCAS && !opts.WholeObject {
+		if e = t.writeRange(o, offset, length, reader, codec); e != nil {
+			return Result{}, e
+		}
 	} else {
 		var pieces []payloadPiece
 		if replace {
@@ -411,12 +415,6 @@ func (v *Volume) mutateWithRetryLocked(op uint8, k Key, offset, length uint64, s
 			o.Segmented = false
 		} else if op == opTrunc {
 			pieces = oldPieces(v, old, newLength, 0, 0)
-		} else {
-			pieces = oldPieces(v, old, newLength, offset, end)
-			if length > 0 {
-				pieces = append(pieces, payloadPiece{offset, length, reader})
-			}
-			sort.Slice(pieces, func(i, j int) bool { return pieces[i].offset < pieces[j].offset })
 		}
 		spans, e := t.storePacked(pieces, codec)
 		if e != nil {
@@ -471,7 +469,7 @@ func arenaAfter(total uint64, old, next *object) uint64 {
 func (t *transaction) appendPayload(o *object, offset uint64, src io.Reader, length uint64) error {
 	if len(o.Spans) > 0 {
 		last := &o.Spans[len(o.Spans)-1]
-		if last.Codec == Raw && last.Skip == 0 && last.Offset+last.Length == offset && length <= last.Capacity-last.Stored {
+		if !last.Direct && last.Codec == Raw && last.Skip == 0 && last.Offset+last.Length == offset && length <= last.Capacity-last.Stored {
 			// Continue the stored CRC with only the new bytes. Reading the old
 			// arena would turn each tiny append into an ever larger read.
 			oldLength := last.Length
