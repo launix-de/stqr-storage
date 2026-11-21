@@ -83,3 +83,6 @@ framing, object RPCs and chunk validation without OS networking or allocator cal
 that same core with kernel socket/crypto/memory functions; OpenSSL and libc are
 not dependencies of the core. Neither environment requires a resident client
 helper process.
+
+The standalone Linux adapter is now implemented in [kernel/kstqr](../../kernel/kstqr/README.md).
+See the [kernel client guide](../../docs/kstqr.md) for mounting and VM tests.

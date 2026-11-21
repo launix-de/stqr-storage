@@ -1,0 +1,749 @@
+// SPDX-License-Identifier: GPL-3.0-only
+#include "kstqr.h"
+#include "port.h"
+#include <linux/fs_context.h>
+#include <linux/fs_parser.h>
+#include <linux/hex.h>
+#include <linux/module.h>
+#include <linux/namei.h>
+#include <linux/nsproxy.h>
+#include <linux/pagemap.h>
+#include <linux/sched/mm.h>
+#include <linux/seq_file.h>
+#include <linux/statfs.h>
+#include <linux/uio.h>
+#include <net/net_namespace.h>
+#define KS_MAGIC 0x53545152
+struct ks_context {
+	char *url, *username, *password;
+	stqr_id bucket;
+	unsigned timeout;
+	bool create, readonly;
+};
+static const struct inode_operations ks_dir_ops, ks_file_ops;
+static const struct file_operations ks_dir_fops, ks_file_fops;
+static const struct address_space_operations ks_aops;
+static unsigned enter_fs(struct ks_fs *f)
+{
+	unsigned flags = memalloc_nofs_save();
+	mutex_lock(&f->mutex);
+	return flags;
+}
+static void leave_fs(struct ks_fs *f, unsigned flags)
+{
+	mutex_unlock(&f->mutex);
+	memalloc_nofs_restore(flags);
+}
+static void update_inode(struct inode *i, const struct ks_node *n)
+{
+	i->i_mode = (n->kind == 2 ? S_IFDIR : S_IFREG) | n->mode;
+	i_uid_write(i, n->uid);
+	i_gid_write(i, n->gid);
+	i_size_write(i, n->size);
+	inode_set_mtime_to_ts(i, ns_to_timespec64(n->mtime));
+	inode_set_atime_to_ts(i, ns_to_timespec64(n->atime));
+	inode_set_ctime_to_ts(i, ns_to_timespec64(n->ctime));
+	i->i_blocks = DIV_ROUND_UP_ULL(n->size, 512);
+}
+static int inode_match(struct inode *i, void *data) { return !memcmp(KS_I(i)->id.bytes, data, 32); }
+static int inode_set(struct inode *i, void *data)
+{
+	memcpy(KS_I(i)->id.bytes, data, 32);
+	return 0;
+}
+static struct inode *get_inode(struct super_block *sb, stqr_object_id id, const struct ks_node *n)
+{
+	struct inode *i;
+	unsigned long hash = 0;
+	unsigned k;
+	for (k = 0; k < 32; k++)
+		hash = hash * 31 + id.bytes[k];
+	i = iget5_locked(sb, hash, inode_match, inode_set, id.bytes);
+	if (!i)
+		return ERR_PTR(-ENOMEM);
+	if (inode_state_read_once(i) & I_NEW) {
+		i->i_ino = !memcmp(id.bytes, ks_root_id.bytes, 32) ? 1 : get_next_ino();
+		i->i_op = n->kind == 2 ? &ks_dir_ops : &ks_file_ops;
+		i->i_fop = n->kind == 2 ? &ks_dir_fops : &ks_file_fops;
+		i->i_mapping->a_ops = &ks_aops;
+		set_nlink(i, n->kind == 2 ? 2 : 1);
+		update_inode(i, n);
+		unlock_new_inode(i);
+	} else
+		update_inode(i, n);
+	return i;
+}
+static int refresh_inode(struct inode *i)
+{
+	struct ks_snapshot s;
+	int err = ks_snapshot(i->i_sb->s_fs_info, KS_I(i)->id, &s);
+	if (!err) {
+		update_inode(i, &s.node);
+		ks_snapshot_free(&s);
+	}
+	return err;
+}
+static struct dentry *ks_lookup(struct inode *parent, struct dentry *d, unsigned flags)
+{
+	struct ks_fs *f = parent->i_sb->s_fs_info;
+	struct ks_snapshot s = {0}, child = {0};
+	struct ks_entry *entries = NULL;
+	struct inode *i = NULL;
+	size_t n, k;
+	unsigned saved = enter_fs(f);
+	int err;
+	(void)flags;
+	err = ks_snapshot(f, KS_I(parent)->id, &s);
+	if (!err)
+		err = ks_directory(f, &s.node, &entries, &n);
+	if (!err)
+		for (k = 0; k < n; k++)
+			if (!strcmp(entries[k].name, d->d_name.name)) {
+				err = ks_snapshot(f, entries[k].id, &child);
+				if (!err && child.node.removed)
+					err = -ENOENT;
+				if (!err) {
+					i = get_inode(parent->i_sb, entries[k].id, &child.node);
+					if (IS_ERR(i)) {
+						err = PTR_ERR(i);
+						i = NULL;
+					}
+				}
+				break;
+			}
+	ks_snapshot_free(&s);
+	ks_snapshot_free(&child);
+	sq_free(entries);
+	leave_fs(f, saved);
+	if (err)
+		return ERR_PTR(err);
+	return d_splice_alias(i, d);
+}
+static int ks_revalidate(struct inode *parent, const struct qstr *name, struct dentry *d,
+			 unsigned flags)
+{
+	(void)d;
+	(void)parent;
+	(void)name;
+	return flags & LOOKUP_RCU ? -ECHILD : 0;
+}
+static const struct dentry_operations ks_dentry_ops = {.d_revalidate = ks_revalidate};
+static int ks_iterate(struct file *file, struct dir_context *ctx)
+{
+	struct inode *i = file_inode(file);
+	struct ks_fs *f = i->i_sb->s_fs_info;
+	struct ks_snapshot s = {0};
+	struct ks_entry *entries = NULL;
+	size_t n, k;
+	unsigned saved;
+	int err;
+	if (!dir_emit_dots(file, ctx))
+		return 0;
+	saved = enter_fs(f);
+	err = ks_snapshot(f, KS_I(i)->id, &s);
+	if (!err)
+		err = ks_directory(f, &s.node, &entries, &n);
+	if (!err)
+		for (k = ctx->pos - 2; k < n; k++) {
+			struct ks_snapshot child = {0};
+			struct inode *ci;
+			err = ks_snapshot(f, entries[k].id, &child);
+			if (err)
+				break;
+			ci = get_inode(i->i_sb, entries[k].id, &child.node);
+			ks_snapshot_free(&child);
+			if (IS_ERR(ci)) {
+				err = PTR_ERR(ci);
+				break;
+			}
+			if (!dir_emit(ctx, entries[k].name, strlen(entries[k].name), ci->i_ino,
+				      S_ISDIR(ci->i_mode) ? DT_DIR : DT_REG)) {
+				iput(ci);
+				break;
+			}
+			iput(ci);
+			ctx->pos = k + 3;
+		}
+	ks_snapshot_free(&s);
+	sq_free(entries);
+	leave_fs(f, saved);
+	return err;
+}
+static int create_common(struct mnt_idmap *idmap, struct inode *parent, struct dentry *d,
+			 umode_t mode, bool dir)
+{
+	struct ks_fs *f = parent->i_sb->s_fs_info;
+	stqr_object_id id;
+	struct ks_snapshot s;
+	u32 uid = from_kuid(&init_user_ns, current_fsuid());
+	u32 gid = from_kgid(&init_user_ns, current_fsgid());
+	struct inode *i = NULL;
+	unsigned saved;
+	int err;
+	if (idmap != &nop_mnt_idmap)
+		return -EOPNOTSUPP;
+	if (parent->i_mode & S_ISGID) {
+		gid = i_gid_read(parent);
+		if (dir)
+			mode |= S_ISGID;
+	}
+	saved = enter_fs(f);
+	err = ks_create(f, KS_I(parent)->id, d->d_name.name, mode, uid, gid, dir, &id);
+	if (!err) {
+		err = ks_snapshot(f, id, &s);
+		if (!err) {
+			i = get_inode(parent->i_sb, id, &s.node);
+			ks_snapshot_free(&s);
+			if (IS_ERR(i))
+				err = PTR_ERR(i);
+		}
+	}
+	if (!err) {
+		d_instantiate(d, i);
+		refresh_inode(parent);
+	}
+	leave_fs(f, saved);
+	return err;
+}
+static int ks_create_file(struct mnt_idmap *idmap, struct inode *parent, struct dentry *d,
+			  umode_t mode, bool excl)
+{
+	(void)excl;
+	return create_common(idmap, parent, d, mode, false);
+}
+static struct dentry *ks_mkdir(struct mnt_idmap *idmap, struct inode *parent, struct dentry *d,
+			       umode_t mode)
+{
+	int err = create_common(idmap, parent, d, mode, true);
+	return err ? ERR_PTR(err) : NULL;
+}
+static int remove_common(struct inode *parent, struct dentry *d, bool dir)
+{
+	struct ks_fs *f = parent->i_sb->s_fs_info;
+	unsigned saved = enter_fs(f);
+	int err = ks_remove(f, KS_I(parent)->id, d->d_name.name, dir);
+	if (!err) {
+		clear_nlink(d_inode(d));
+		refresh_inode(parent);
+	}
+	leave_fs(f, saved);
+	return err;
+}
+static int ks_unlink(struct inode *parent, struct dentry *d)
+{
+	return remove_common(parent, d, false);
+}
+static int ks_rmdir(struct inode *parent, struct dentry *d)
+{
+	return remove_common(parent, d, true);
+}
+static int capture_path(struct dentry *d, stqr_object_id *ids, size_t *length)
+{
+	struct dentry *at = dget(d);
+	*length = 0;
+	for (;;) {
+		struct dentry *parent;
+		if (*length == 1024) {
+			dput(at);
+			return -E2BIG;
+		}
+		ids[(*length)++] = KS_I(d_inode(at))->id;
+		parent = dget_parent(at);
+		if (parent == at) {
+			dput(parent);
+			dput(at);
+			return 0;
+		}
+		dput(at);
+		at = parent;
+	}
+}
+static int ks_rename_vfs(struct mnt_idmap *idmap, struct inode *old, struct dentry *od,
+			 struct inode *new, struct dentry *nd, unsigned flags)
+{
+	struct ks_fs *f = old->i_sb->s_fs_info;
+	stqr_object_id *paths;
+	size_t from_length, to_length;
+	unsigned saved;
+	int err;
+	if (idmap != &nop_mnt_idmap)
+		return -EOPNOTSUPP;
+	paths = sq_alloc(2048 * sizeof(*paths));
+	if (!paths)
+		return -ENOMEM;
+	err = capture_path(od->d_parent, paths, &from_length);
+	if (!err)
+		err = capture_path(nd->d_parent, paths + 1024, &to_length);
+	if (err) {
+		sq_free(paths);
+		return err;
+	}
+	saved = enter_fs(f);
+	err = ks_rename(f, KS_I(old)->id, od->d_name.name, KS_I(new)->id, nd->d_name.name, flags,
+			paths, from_length, paths + 1024, to_length);
+	if (!err) {
+		if (!(flags & RENAME_EXCHANGE) && d_inode(nd))
+			clear_nlink(d_inode(nd));
+		refresh_inode(old);
+		if (new != old)
+			refresh_inode(new);
+	}
+	leave_fs(f, saved);
+	sq_free(paths);
+	return err;
+}
+static int ks_getattr(struct mnt_idmap *idmap, const struct path *path, struct kstat *stat,
+		      u32 mask, unsigned flags)
+{
+	struct inode *i = d_inode(path->dentry);
+	struct ks_fs *f = i->i_sb->s_fs_info;
+	unsigned saved = enter_fs(f);
+	int err = refresh_inode(i);
+	(void)flags;
+	if (!err)
+		generic_fillattr(idmap, mask, i, stat);
+	leave_fs(f, saved);
+	return err;
+}
+static int ks_setattr_vfs(struct mnt_idmap *idmap, struct dentry *d, struct iattr *attr)
+{
+	struct inode *i = d_inode(d);
+	struct ks_fs *f = i->i_sb->s_fs_info;
+	unsigned saved;
+	int err;
+	if (idmap != &nop_mnt_idmap)
+		return -EOPNOTSUPP;
+	err = setattr_prepare(idmap, d, attr);
+	if (err)
+		return err;
+	saved = enter_fs(f);
+	err = ks_setattr(f, KS_I(i)->id, attr);
+	if (!err)
+		err = refresh_inode(i);
+	leave_fs(f, saved);
+	if (!err && (attr->ia_valid & ATTR_SIZE))
+		truncate_setsize(i, attr->ia_size);
+	return err;
+}
+static ssize_t ks_read_iter(struct kiocb *iocb, struct iov_iter *to)
+{
+	struct inode *i = file_inode(iocb->ki_filp);
+	struct ks_fs *f = i->i_sb->s_fs_info;
+	struct ks_snapshot s = {0};
+	unsigned saved;
+	void *buffer;
+	ssize_t total = 0;
+	int err;
+	if (iocb->ki_flags & IOCB_NOWAIT)
+		return -EAGAIN;
+	if (iocb->ki_pos < 0)
+		return -EINVAL;
+	buffer = sq_alloc(65536);
+	if (!buffer)
+		return -ENOMEM;
+	saved = enter_fs(f);
+	err = ks_snapshot(f, KS_I(i)->id, &s);
+	if (!err)
+		update_inode(i, &s.node);
+	while (!err && iov_iter_count(to) && iocb->ki_pos < s.node.size) {
+		size_t n = min_t(u64, min_t(size_t, 65536, iov_iter_count(to)),
+				 s.node.size - iocb->ki_pos),
+		       copied;
+		err = ks_read(f, &s.node, buffer, n, iocb->ki_pos);
+		if (err)
+			break;
+		copied = copy_to_iter(buffer, n, to);
+		total += copied;
+		iocb->ki_pos += copied;
+		if (copied != n) {
+			err = -EFAULT;
+			break;
+		}
+	}
+	ks_snapshot_free(&s);
+	leave_fs(f, saved);
+	sq_free(buffer);
+	return total ? total : err;
+}
+static ssize_t ks_write_iter(struct kiocb *iocb, struct iov_iter *from)
+{
+	struct inode *i = file_inode(iocb->ki_filp);
+	struct ks_fs *f = i->i_sb->s_fs_info;
+	unsigned saved;
+	void *buffer;
+	ssize_t total = 0, checked;
+	int err = 0;
+	if (iocb->ki_flags & IOCB_NOWAIT)
+		return -EAGAIN;
+	if (f->readonly)
+		return -EROFS;
+	buffer = sq_alloc(65536);
+	if (!buffer)
+		return -ENOMEM;
+	inode_lock(i);
+	checked = generic_write_checks(iocb, from);
+	if (checked <= 0) {
+		total = checked;
+		goto out;
+	}
+	err = file_remove_privs(iocb->ki_filp);
+	if (err)
+		goto out;
+	saved = enter_fs(f);
+	while (iov_iter_count(from)) {
+		size_t n = min_t(size_t, 65536, iov_iter_count(from));
+		u64 position = iocb->ki_pos;
+		if (copy_from_iter(buffer, n, from) != n) {
+			err = -EFAULT;
+			break;
+		}
+		err = ks_write(f, KS_I(i)->id, &position, buffer, n,
+			       !!(iocb->ki_flags & IOCB_APPEND));
+		if (err) {
+			iov_iter_revert(from, n);
+			break;
+		}
+		iocb->ki_pos = position;
+		total += n;
+	}
+	if (total)
+		refresh_inode(i);
+	leave_fs(f, saved);
+	if (total)
+		truncate_inode_pages(i->i_mapping, 0);
+out:
+	inode_unlock(i);
+	sq_free(buffer);
+	return total ? total : err;
+}
+static int ks_read_folio(struct file *file, struct folio *folio)
+{
+	struct inode *i = folio->mapping->host;
+	struct ks_fs *f = i->i_sb->s_fs_info;
+	struct ks_snapshot s = {0};
+	unsigned saved;
+	void *buffer;
+	size_t n = 0;
+	int err;
+	(void)file;
+	buffer = sq_alloc(folio_size(folio));
+	if (!buffer) {
+		folio_unlock(folio);
+		return -ENOMEM;
+	}
+	saved = enter_fs(f);
+	err = ks_snapshot(f, KS_I(i)->id, &s);
+	if (!err && folio_pos(folio) < s.node.size) {
+		n = min_t(u64, folio_size(folio), s.node.size - folio_pos(folio));
+		err = ks_read(f, &s.node, buffer, n, folio_pos(folio));
+	}
+	if (!err) {
+		memcpy_to_folio(folio, 0, buffer, folio_size(folio));
+		folio_mark_uptodate(folio);
+	}
+	ks_snapshot_free(&s);
+	leave_fs(f, saved);
+	sq_free(buffer);
+	folio_unlock(folio);
+	return err;
+}
+static int ks_fsync(struct file *file, loff_t start, loff_t end, int datasync)
+{
+	(void)file;
+	(void)start;
+	(void)end;
+	(void)datasync;
+	/* Every write is already acknowledged by a durable object CAS. */
+	return 0;
+}
+static const struct address_space_operations ks_aops = {.read_folio = ks_read_folio};
+static const struct file_operations ks_file_fops = {
+    .owner = THIS_MODULE,
+    .open = generic_file_open,
+    .llseek = generic_file_llseek,
+    .read_iter = ks_read_iter,
+    .write_iter = ks_write_iter,
+    .fsync = ks_fsync,
+    .mmap = generic_file_readonly_mmap,
+};
+static const struct file_operations ks_dir_fops = {
+    .owner = THIS_MODULE,
+    .open = generic_file_open,
+    .llseek = generic_file_llseek,
+    .read = generic_read_dir,
+    .iterate_shared = ks_iterate,
+    .fsync = ks_fsync,
+};
+static const struct inode_operations ks_file_ops = {.getattr = ks_getattr,
+						    .setattr = ks_setattr_vfs};
+static const struct inode_operations ks_dir_ops = {
+    .lookup = ks_lookup,
+    .create = ks_create_file,
+    .mkdir = ks_mkdir,
+    .unlink = ks_unlink,
+    .rmdir = ks_rmdir,
+    .rename = ks_rename_vfs,
+    .getattr = ks_getattr,
+    .setattr = ks_setattr_vfs,
+};
+static struct inode *ks_alloc_inode(struct super_block *sb)
+{
+	struct ks_inode *i = kzalloc(sizeof(*i), GFP_KERNEL);
+	(void)sb;
+	if (!i)
+		return NULL;
+	inode_init_once(&i->inode);
+	return &i->inode;
+}
+static void ks_free_inode(struct inode *i) { kfree(KS_I(i)); }
+static void ks_evict(struct inode *i)
+{
+	truncate_inode_pages_final(&i->i_data);
+	clear_inode(i);
+}
+static void ks_put_super(struct super_block *sb)
+{
+	struct ks_fs *f = sb->s_fs_info;
+	if (!f)
+		return;
+	stqr_close(f->client);
+	kfree(f->url);
+	kfree(f);
+	sb->s_fs_info = NULL;
+}
+static int ks_show_options(struct seq_file *m, struct dentry *root)
+{
+	struct ks_fs *f = root->d_sb->s_fs_info;
+	char bucket[33];
+	bin2hex(bucket, f->bucket.bytes, 16);
+	bucket[32] = 0;
+	seq_show_option(m, "url", f->url);
+	seq_show_option(m, "bucket", bucket);
+	return 0;
+}
+static int ks_statfs(struct dentry *d, struct kstatfs *s)
+{
+	(void)d;
+	memset(s, 0, sizeof(*s));
+	s->f_type = KS_MAGIC;
+	s->f_bsize = 4096;
+	s->f_namelen = 255;
+	/* No invented physical capacity: bucket capacity RPC is not implemented. */
+	return 0;
+}
+static const struct super_operations ks_super_ops = {
+    .alloc_inode = ks_alloc_inode,
+    .free_inode = ks_free_inode,
+    .evict_inode = ks_evict,
+    .put_super = ks_put_super,
+    .show_options = ks_show_options,
+    .statfs = ks_statfs,
+};
+static int ks_fill_super(struct super_block *sb, struct fs_context *fc)
+{
+	struct ks_context *c = fc->fs_private;
+	struct ks_fs *f;
+	struct ks_snapshot root;
+	struct inode *inode;
+	int err;
+	unsigned saved;
+	if (!c->url || !c->username || !c->password || !memcmp(c->bucket.bytes, (u8[16]){0}, 16))
+		return -EINVAL;
+	if (current->nsproxy->net_ns != &init_net)
+		return -EOPNOTSUPP;
+	f = kzalloc(sizeof(*f), GFP_KERNEL);
+	if (!f)
+		return -ENOMEM;
+	mutex_init(&f->mutex);
+	f->readonly = c->readonly || !!(fc->sb_flags & SB_RDONLY);
+	if (f->readonly && c->create) {
+		kfree(f);
+		return -EINVAL;
+	}
+	f->bucket = c->bucket;
+	f->url = kstrdup(c->url, GFP_KERNEL);
+	if (!f->url) {
+		kfree(f);
+		return -ENOMEM;
+	}
+	sb->s_fs_info = f;
+	sb->s_op = &ks_super_ops;
+	sb->s_blocksize = PAGE_SIZE;
+	sb->s_blocksize_bits = PAGE_SHIFT;
+	sb->s_magic = KS_MAGIC;
+	sb->s_maxbytes = MAX_LFS_FILESIZE;
+	sb->s_time_gran = 1;
+	sb->s_flags |= SB_NOATIME;
+	if (f->readonly)
+		sb->s_flags |= SB_RDONLY;
+	set_default_d_op(sb, &ks_dentry_ops);
+	saved = enter_fs(f);
+	err = stqr_dial(&f->client, c->url, c->username, c->password, c->bucket, c->timeout);
+	if (!err)
+		err = ks_snapshot(f, ks_root_id, &root);
+	if (err == -ENOENT && c->create) {
+		err = ks_initialize(f, from_kuid(&init_user_ns, current_fsuid()),
+				    from_kgid(&init_user_ns, current_fsgid()));
+		if (!err || err == -EAGAIN)
+			err = ks_snapshot(f, ks_root_id, &root);
+	}
+	if (!err) {
+		if (root.node.kind != 2 || root.node.removed)
+			err = -ENOTDIR;
+		else {
+			inode = get_inode(sb, ks_root_id, &root.node);
+			if (IS_ERR(inode))
+				err = PTR_ERR(inode);
+			else {
+				sb->s_root = d_make_root(inode);
+				if (!sb->s_root)
+					err = -ENOMEM;
+			}
+		}
+		ks_snapshot_free(&root);
+	}
+	leave_fs(f, saved);
+	if (err)
+		ks_put_super(sb);
+	return err;
+}
+enum { Opt_url, Opt_bucket, Opt_credentials, Opt_timeout, Opt_init, Opt_readonly };
+static const struct fs_parameter_spec ks_parameters[] = {fsparam_string("url", Opt_url),
+							 fsparam_string("bucket", Opt_bucket),
+							 fsparam_fd("credentials", Opt_credentials),
+							 fsparam_u32("timeout_ms", Opt_timeout),
+							 fsparam_flag("init", Opt_init),
+							 fsparam_flag("readonly", Opt_readonly),
+							 {}};
+static int credentials(struct ks_context *c, struct file *file)
+{
+	struct inode *i = file_inode(file);
+	char *raw, *line, *next;
+	loff_t position = 0;
+	ssize_t size;
+	int err = 0;
+	if (!S_ISREG(i->i_mode) || !(file->f_mode & FMODE_READ) || (i->i_mode & 0077) ||
+	    !uid_eq(i->i_uid, current_fsuid()) || i_size_read(i) <= 0 || i_size_read(i) > 8192 ||
+	    c->username || c->password)
+		return -EACCES;
+	raw = kzalloc(8193, GFP_KERNEL);
+	if (!raw)
+		return -ENOMEM;
+	size = kernel_read(file, raw, 8192, &position);
+	if (size <= 0) {
+		err = size ? size : -EINVAL;
+		goto out;
+	}
+	if (memchr(raw, 0, size)) {
+		err = -EINVAL;
+		goto out;
+	}
+	raw[size] = 0;
+	line = raw;
+	while (line && *line) {
+		char *value;
+		next = strchr(line, '\n');
+		if (next)
+			*next++ = 0;
+		value = strchr(line, '=');
+		if (!value) {
+			err = -EINVAL;
+			break;
+		}
+		*value++ = 0;
+		if (!strcmp(line, "username") && !c->username)
+			c->username = kstrdup(value, GFP_KERNEL);
+		else if (!strcmp(line, "password") && !c->password)
+			c->password = kstrdup(value, GFP_KERNEL);
+		else {
+			err = -EINVAL;
+			break;
+		}
+		if ((!strcmp(line, "username") && !c->username) ||
+		    (!strcmp(line, "password") && !c->password)) {
+			err = -ENOMEM;
+			break;
+		}
+		line = next;
+	}
+	if (!err && (!c->username || !c->password || !*c->username || !*c->password))
+		err = -EINVAL;
+out:
+	memzero_explicit(raw, 8193);
+	kfree(raw);
+	return err;
+}
+static int ks_parse(struct fs_context *fc, struct fs_parameter *param)
+{
+	struct ks_context *c = fc->fs_private;
+	struct fs_parse_result result;
+	int opt = fs_parse(fc, ks_parameters, param, &result);
+	if (opt < 0)
+		return opt;
+	switch (opt) {
+	case Opt_url:
+		kfree(c->url);
+		c->url = param->string;
+		param->string = NULL;
+		break;
+	case Opt_bucket:
+		return stqr_parse_id(param->string, &c->bucket);
+	case Opt_credentials:
+		if (param->type != fs_value_is_file)
+			return -EINVAL;
+		return credentials(c, param->file);
+	case Opt_timeout:
+		if (!result.uint_32 || result.uint_32 > 3600000)
+			return -EINVAL;
+		c->timeout = result.uint_32;
+		break;
+	case Opt_init:
+		c->create = true;
+		break;
+	case Opt_readonly:
+		c->readonly = true;
+		break;
+	}
+	return 0;
+}
+static int ks_get_tree(struct fs_context *fc) { return get_tree_nodev(fc, ks_fill_super); }
+static void ks_free_context(struct fs_context *fc)
+{
+	struct ks_context *c = fc->fs_private;
+	if (c) {
+		kfree(c->url);
+		kfree_sensitive(c->username);
+		kfree_sensitive(c->password);
+		kfree(c);
+	}
+}
+static const struct fs_context_operations ks_context_ops = {
+    .free = ks_free_context, .parse_param = ks_parse, .get_tree = ks_get_tree};
+static int ks_init_context(struct fs_context *fc)
+{
+	struct ks_context *c = kzalloc(sizeof(*c), GFP_KERNEL);
+	if (!c)
+		return -ENOMEM;
+	c->timeout = 30000;
+	fc->fs_private = c;
+	fc->ops = &ks_context_ops;
+	return 0;
+}
+static struct file_system_type ks_type = {
+    .owner = THIS_MODULE,
+    .name = "kstqr",
+    .init_fs_context = ks_init_context,
+    .parameters = ks_parameters,
+    .kill_sb = kill_anon_super,
+};
+static int __init ks_init(void) { return register_filesystem(&ks_type); }
+static void __exit ks_exit(void)
+{
+	unregister_filesystem(&ks_type);
+	rcu_barrier();
+}
+module_init(ks_init);
+module_exit(ks_exit);
+MODULE_LICENSE("GPL");
+MODULE_DESCRIPTION("Standalone STQR network filesystem client");
+MODULE_ALIAS_FS("kstqr");
