@@ -82,7 +82,7 @@ func TestFormatRoundTripAndValidation(t *testing.T) {
 		t.Fatal(e)
 	}
 	bad := h
-	bad.DataTop = ^uint64(0)
+	bad.FreeBytes = ^uint64(0)
 	if _, e = bad.MarshalBinary(); e == nil {
 		t.Fatal("bad data top")
 	}
@@ -181,33 +181,29 @@ func TestDecodeCompressionBounds(t *testing.T) {
 		}
 	}
 }
-func FuzzDecodeRecord(f *testing.F) {
-	b, _ := encodeRecord(record{Op: opPut, Key: testKey(1), Version: 1})
-	f.Add(b)
+func FuzzTreeNode(f *testing.F) {
+	id := testID(1)
+	f.Add(encodeNode(treeNode{kind: treeObjects, entries: []treeEntry{{key: objectKey(testKey(1)), value: dataStart}}}, id, 1))
 	f.Add([]byte("bad"))
 	f.Fuzz(func(t *testing.T, b []byte) {
-		if len(b) > 2<<20 {
+		if len(b) > PageSize {
 			return
 		}
-		if len(b) >= 4 {
+		if len(b) == PageSize {
 			b = bytes.Clone(b)
-			diskOrder.PutUint32(b[len(b)-4:], checksum(b[:len(b)-4]))
+			diskOrder.PutUint32(b[PageSize-4:], checksum(b[:PageSize-4]))
 		}
-		r, e := decodeRecord(b)
+		n, e := decodeNode(b, id)
 		if e == nil {
-			again, e := encodeRecord(r)
-			if e != nil {
-				t.Fatal(e)
-			}
-			if _, e = decodeRecord(again); e != nil {
+			if _, e = decodeNode(encodeNode(n, id, 1), id); e != nil {
 				t.Fatal(e)
 			}
 		}
 	})
 }
 func FuzzSuperblock(f *testing.F) {
-	s := Superblock{Identity: Identity{VolumeID: testID(1), Size: MinVolumeSize}, Generation: 1, BankEpoch: 1}
-	s.DataTop = s.bankSize()
+	s := Superblock{Identity: Identity{VolumeID: testID(1), Size: MinVolumeSize}, Generation: 1, ObjectRoot: treeStart, FreeRoot: treeStart + PageSize, FreeBytes: MinVolumeSize - dataStart, MetadataBytes: 6 * PageSize}
+
 	b, _ := s.MarshalBinary()
 	f.Add(b)
 	f.Add([]byte("bad"))

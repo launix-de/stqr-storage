@@ -175,15 +175,16 @@ func TestPhysicalReserveAndFullVolume(t *testing.T) {
 	}
 	mustGet(t, v, testKey(2), bytes.Repeat([]byte{199}, 7000))
 	before := v.Stats()
-	if before.ReclaimablePhysical == 0 {
-		t.Fatalf("dead bytes not accounted %+v", before)
+	// Replaced allocations are immediately returned to the byte-exact free tree.
+	if before.ReclaimablePhysical != 0 {
+		t.Fatal("replaced data was not freed", before)
 	}
 	if e := v.Compact(); e != nil {
 		t.Fatal(e)
 	}
 	after := v.Stats()
-	if after.AllocatedPhysical >= before.AllocatedPhysical {
-		t.Fatalf("GC failed %+v %+v", before, after)
+	if after.AllocatedPhysical > before.AllocatedPhysical+2*PageSize {
+		t.Fatalf("defrag grew storage unexpectedly: %+v -> %+v", before, after)
 	}
 	v = reopen(t, v, d)
 	if v.Stats().Objects != 2 {
@@ -244,7 +245,7 @@ func TestPhysicalIOCounters(t *testing.T) {
 		t.Fatal(e)
 	}
 	after := v.Stats().IO
-	if after.SyncOps-before.SyncOps != 2 || after.ReadBytes <= before.ReadBytes || after.WriteBytes-before.WriteBytes <= 10 {
+	if after.SyncOps-before.SyncOps != 4 || after.ReadBytes <= before.ReadBytes || after.WriteBytes-before.WriteBytes <= 10 {
 		t.Fatalf("physical counters %+v => %+v", before, after)
 	}
 }

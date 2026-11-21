@@ -2,103 +2,11 @@
 package volume
 
 import (
-	"errors"
 	"io"
+	"os"
 )
 
-// ExtentSource yields ascending, nonoverlapping logical data intervals. Holes
-// are omitted, including arbitrarily large ZERO intervals. Each reader must
-// supply exactly length bytes before the callback returns. Neither source nor
-// its callbacks may reenter the destination Volume while Restore holds its lock.
 type ExtentSource func(yield func(offset uint64, data io.Reader, length uint64) error) error
-
-// restoreLocked atomically installs a trusted migration/recovery snapshot in a volume
-// which may already contain unrelated objects. It preserves the supplied logical
-// version and tombstone. The server must validate source ownership/epoch before
-// calling; this storage primitive does not grant cluster authority. Older/equal
-// existing versions are rejected; a nonzero retry ID makes repeats idempotent.
-func (v *Volume) restoreLocked(k Key, info Info, source ExtentSource, opts Options) error {
-	if e := v.check(true); e != nil {
-		return e
-	}
-	if (opts.Compression != nil && *opts.Compression != info.Compression) || info.Version == 0 || !info.Compression.valid() || (info.Deleted && info.Length != 0) {
-		return ErrRange
-	}
-	if len(v.runs) >= maxIndexRuns {
-		if e := v.compactLocked(); e != nil {
-			return e
-		}
-	}
-	h := fingerprint(opSnapshot, k, info.Version, info.Length, opts, nil)
-	flags := byte(0)
-	if info.Deleted {
-		flags = 1
-	}
-	h.Write([]byte{flags, byte(info.Compression)})
-	prior, retry, e := v.loadDedupe(opts.RequestID)
-	if e != nil {
-		return e
-	}
-	old, e := v.loadObject(k)
-	if e != nil && !errors.Is(e, ErrNotFound) {
-		return e
-	}
-	if !retry {
-		if e = precondition(old, opts); e != nil {
-			return e
-		}
-		if old != nil && (old.Info.Version > info.Version || (old.Info.Version == info.Version && !opts.restoreSameVersion)) {
-			return ErrPrecondition
-		}
-	}
-	s := v.sb
-	r := record{Op: opSnapshot, Key: k, Codec: info.Compression, Version: info.Version, Length: info.Length, Deleted: info.Deleted, Replace: true, Request: opts.RequestID, Result: Result{Info: info}}
-	var last uint64
-	buffer := make([]byte, BlockSize)
-	yield := func(off uint64, data io.Reader, length uint64) error {
-		if info.Deleted || length == 0 || data == nil || off < last || off > info.Length || length > info.Length-off {
-			return ErrRange
-		}
-		var header [16]byte
-		diskOrder.PutUint64(header[:], off)
-		diskOrder.PutUint64(header[8:], length)
-		h.Write(header[:])
-		var done uint64
-		for done < length {
-			n := min(uint64(len(buffer)), length-done)
-			if _, e := io.ReadFull(data, buffer[:n]); e != nil {
-				return e
-			}
-			h.Write(buffer[:n])
-			if !retry {
-				ext, e := v.storeBlock(&s, &r.Arena, off+done, buffer[:n], info.Compression, false)
-				if e != nil {
-					return e
-				}
-				r.Extents = append(r.Extents, ext)
-			}
-			done += n
-		}
-		last = off + length
-		return nil
-	}
-	if source != nil {
-		if e = source(yield); e != nil {
-			return e
-		}
-	}
-	copy(r.Fingerprint[:], h.Sum(nil))
-	if retry {
-		if prior.Key != k || prior.Fingerprint != r.Fingerprint {
-			return ErrRequestID
-		}
-		return nil
-	}
-	return v.commitWithReserve(r, s, opts.UseGuaranteed)
-}
-
-// RequestRecord is the persisted successful result carried alongside a migrated
-// object. It contains no pointers or physical locations from the source volume.
 type RequestRecord struct {
 	ID          ID
 	Key         Key
@@ -106,12 +14,108 @@ type RequestRecord struct {
 	Result      Result
 }
 
-// restoreRequestLocked imports original client retry state after its object snapshot.
-// Trusted server code must transfer this before activating target ownership.
-func (v *Volume) restoreRequestLocked(x RequestRecord) error {
-	if e := v.check(true); e != nil {
+func (v *Volume) restoreLocked(k Key, info Info, source ExtentSource, opts Options) error {
+	if info.Version == 0 || !info.Compression.valid() || info.Deleted && info.Length != 0 || opts.Compression != nil && *opts.Compression != info.Compression {
+		return ErrRange
+	}
+	old, e := v.loadObject(k)
+	if e == ErrNotFound {
+		old = nil
+	} else if e != nil {
 		return e
 	}
+	prior, retry, e := v.loadDedupe(opts.RequestID)
+	if e != nil {
+		return e
+	}
+	if !retry {
+		if e = precondition(old, opts); e != nil {
+			return e
+		}
+		if old != nil && (old.Info.Version > info.Version || old.Info.Version == info.Version && !opts.restoreSameVersion) {
+			return ErrPrecondition
+		}
+	}
+	// Trusted migration sources need not be seekable. Stage logical payload only,
+	// never sparse zero ranges, then allocate its final packed region exactly once.
+	spool, e := os.CreateTemp("", "stqr-restore-*")
+	if e != nil {
+		return e
+	}
+	defer func() { name := spool.Name(); spool.Close(); os.Remove(name) }()
+	h := fingerprint(opSnapshot, k, info.Version, info.Length, opts, nil)
+	flags := byte(0)
+	if info.Deleted {
+		flags = 1
+	}
+	h.Write([]byte{flags, byte(info.Compression)})
+	var pieces []payloadPiece
+	var last, physical uint64
+	if source != nil {
+		e = source(func(off uint64, r io.Reader, n uint64) error {
+			if info.Deleted || n == 0 || r == nil || off < last || off > info.Length || n > info.Length-off || n > uint64(^uint64(0)>>1) {
+				return ErrRange
+			}
+			var b [16]byte
+			diskOrder.PutUint64(b[:], off)
+			diskOrder.PutUint64(b[8:], n)
+			h.Write(b[:])
+			if _, e := io.CopyN(io.MultiWriter(spool, h), r, int64(n)); e != nil {
+				return e
+			}
+			pieces = append(pieces, payloadPiece{off, n, io.NewSectionReader(spool, int64(physical), int64(n))})
+			last = off + n
+			physical += n
+			return nil
+		})
+		if e != nil {
+			return e
+		}
+	}
+	var fp [32]byte
+	copy(fp[:], h.Sum(nil))
+	if retry {
+		if prior.Key != k || prior.Fingerprint != fp {
+			return ErrRequestID
+		}
+		return nil
+	}
+	t := v.transaction()
+	spans, e := t.storePacked(pieces, info.Compression)
+	if e != nil {
+		return e
+	}
+	o := &object{Info: info, Spans: spans, Segmented: opts.restoreSegmented}
+	if old != nil {
+		o.Base, o.Size = old.Base, old.Size
+	}
+	releaseData(t, old)
+	if old != nil && !old.Info.Deleted {
+		t.sb.Objects--
+		t.sb.LogicalBytes -= old.Info.Length
+	}
+	if !info.Deleted {
+		t.sb.Objects++
+		var err error
+		t.sb.LogicalBytes, err = add(t.sb.LogicalBytes, info.Length)
+		if err != nil {
+			return err
+		}
+	}
+	t.sb.ArenaUnused = arenaAfter(t.sb.ArenaUnused, old, o)
+	if e = t.saveObject(k, o); e != nil {
+		return e
+	}
+	if e = t.saveReceipt(opts.RequestID, dedupe{k, fp, Result{Info: info}}); e != nil {
+		return e
+	}
+	if e = t.commit(opts.UseGuaranteed); e != nil {
+		return e
+	}
+	v.cache.put(k, o)
+	return nil
+}
+func (v *Volume) restoreRequestLocked(x RequestRecord) error {
 	if x.ID == (ID{}) || !x.Result.Info.Compression.valid() {
 		return ErrRange
 	}
@@ -125,29 +129,26 @@ func (v *Volume) restoreRequestLocked(x RequestRecord) error {
 		}
 		return nil
 	}
-	if len(v.runs) >= maxIndexRuns {
-		if e := v.compactLocked(); e != nil {
-			return e
-		}
-	}
-	r := record{Op: opDedupe, Key: x.Key, Request: x.ID, Fingerprint: x.Fingerprint, Result: x.Result, Codec: x.Result.Info.Compression, Version: x.Result.Info.Version, Length: x.Result.Info.Length, Deleted: x.Result.Info.Deleted}
-	return v.commitWithReserve(r, v.sb, false)
-}
-
-// scanRequestsLocked streams retained retry records for migration under a read
-// or write lease. fn must not reenter this volume. Entries are ordered by RequestID.
-func (v *Volume) scanRequestsLocked(fn func(RequestRecord) error) error {
-	if e := v.check(false); e != nil {
+	t := v.transaction()
+	if e = t.saveReceipt(x.ID, dedupe{x.Key, x.Fingerprint, x.Result}); e != nil {
 		return e
 	}
+	return t.commit(false)
+}
+func (v *Volume) scanRequestsLocked(fn func(RequestRecord) error) error {
 	return v.walkIndex(func(x indexEntry) error {
 		if x.Key[0] != 1 {
 			return nil
 		}
-		r, e := v.readRecord(v.sb, x.Value-1)
+		var id ID
+		copy(id[:], x.Key[1:17])
+		d, found, e := v.loadDedupe(id)
 		if e != nil {
 			return e
 		}
-		return fn(RequestRecord{ID: r.Request, Key: r.Key, Fingerprint: r.Fingerprint, Result: r.Result})
+		if !found {
+			return ErrCorrupt
+		}
+		return fn(RequestRecord{ID: id, Key: d.Key, Fingerprint: d.Fingerprint, Result: d.Result})
 	})
 }

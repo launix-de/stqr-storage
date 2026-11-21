@@ -81,22 +81,22 @@ func (v *Volume) adoptBackendSizeLocked() (uint64, error) {
 		v.failed = ErrIdentity
 		return 0, ErrIdentity
 	}
-	if uint64(n) == v.sb.Identity.Size {
-		return uint64(n), nil
+	size := uint64(n)
+	if size == v.sb.Identity.Size {
+		return size, nil
 	}
-	// Old bank 0 always ends before new bank 1 starts, for every positive
-	// capacity increase. If bank 1 is active, first compact into OLD bank 0 and
-	// sync its root. Only then write NEW bank 1. An older root may be overwritten,
-	// but the latest committed bank/root remain untouched until final publish.
-	if v.sb.Bank != 0 {
-		if e = v.compactLocked(); e != nil {
-			return 0, e
-		}
-	}
-	if e = v.rewriteLocked(uint64(n), 1); e != nil {
+	v.limit = size
+	t := v.transaction()
+	old := t.sb.Identity.Size
+	t.sb.Identity.Size = size
+	t.sb.FreeBytes += size - old
+	if e = t.freeSpan(old, size-old); e != nil {
 		return 0, e
 	}
-	return v.sb.Identity.Size, nil
+	if e = t.commit(true); e != nil {
+		return 0, e
+	}
+	return size, nil
 }
 
 // BackingSize reads the backing handle's current size without adopting it. It
@@ -115,4 +115,88 @@ func (v *Volume) BackingSize() (uint64, error) {
 		return 0, ErrRange
 	}
 	return uint64(n), nil
+}
+
+// Shrink defragments first, then shortens a regular file/RAM volume only after
+// the entire removed tail is free. Metadata and the size commit before truncation;
+// interruption therefore leaves a valid smaller volume on a larger backend.
+// It never truncates raw devices. An occupied tail that cannot be evacuated
+// with the available workspace returns ErrFull without discarding data.
+func (v *Volume) Shrink(sizeBytes int64) error {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	if e := v.check(true); e != nil {
+		return e
+	}
+	n, e := alignedSize(sizeBytes)
+	if e != nil {
+		return e
+	}
+	size := uint64(n)
+	if size > v.sb.Identity.Size {
+		return ErrRange
+	}
+	backend := v.dev.(*meteredIO).VolumeIO
+	switch d := backend.(type) {
+	case *MemoryIO:
+	case *FileIO:
+		st, e := d.file.Stat()
+		if e != nil {
+			return e
+		}
+		if !st.Mode().IsRegular() {
+			return ErrUnsupported
+		}
+	default:
+		return ErrUnsupported
+	}
+	if size == v.sb.Identity.Size {
+		return nil
+	}
+	if e = v.compactLocked(); e != nil {
+		return e
+	}
+	tail, found, e := treeNeighbor(v.node, v.sb.FreeRoot, spaceKey(size), false)
+	if e != nil {
+		return e
+	}
+	start := keyOffset(tail.key)
+	if !found || start > size || start+tail.value != v.sb.Identity.Size {
+		return ErrFull
+	}
+	t := v.transaction()
+	if e = t.remove(&t.sb.FreeRoot, tail.key); e != nil {
+		return e
+	}
+	if start < size {
+		if e = t.set(&t.sb.FreeRoot, spaceKey(start), size-start); e != nil {
+			return e
+		}
+	}
+	t.sb.FreeBytes -= t.sb.Identity.Size - size
+	t.sb.Identity.Size = size
+	if e = t.commit(true); e != nil {
+		return e
+	}
+	switch d := backend.(type) {
+	case *MemoryIO:
+		d.mu.Lock()
+		d.size = n
+		for page := range d.pages {
+			if page >= n/PageSize {
+				delete(d.pages, page)
+			}
+		}
+		d.mu.Unlock()
+	case *FileIO:
+		if e = d.file.Truncate(n); e == nil {
+			e = d.file.Sync()
+		}
+		if e != nil {
+			v.failed = e
+			return e
+		}
+	}
+	v.limit = size
+	return nil
 }

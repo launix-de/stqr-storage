@@ -110,6 +110,19 @@ func (h *Handle) Stat(k Key) (Info, error) {
 	return withHandle(h, false, func(v *Volume) (Info, error) { return v.statLocked(k) })
 }
 
+// RecordInfo includes retained tombstones. The server uses it to keep routing
+// retries/recreation to the same version history instead of treating a deleted
+// object as a never-seen key. Client-facing Stat continues to hide tombstones.
+func (h *Handle) RecordInfo(k Key) (Info, error) {
+	return withHandle(h, false, func(v *Volume) (Info, error) {
+		o, err := v.loadObject(k)
+		if err != nil {
+			return Info{}, err
+		}
+		return o.Info, nil
+	})
+}
+
 // CopyTo streams a range to dst under the existing lock, clipping at EOF.
 // It never closes the handle. Both metadata and any further CopyTo calls remain
 // protected until Close. This writer API allows future direct-transfer paths;

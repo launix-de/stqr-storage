@@ -446,3 +446,27 @@ func ExampleVolume_Open() {
 	h.CopyTo(key, 0, info.Length, io.Discard)
 	h.CopyTo(key, 0, min(info.Length, 1024), io.Discard)
 }
+
+func TestHandleRecordInfoRetainsTombstoneVersion(t *testing.T) {
+	v, _ := memoryVolume(t, 1<<20)
+	key := testKey(37)
+	h := mustOpenHandle(t, v, true)
+	created, err := h.Put(key, []byte("old"), Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = h.Delete(key, Options{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = h.Stat(key); !errors.Is(err, ErrNotFound) {
+		t.Fatal("client-facing stat exposed tombstone", err)
+	}
+	tombstone, err := h.RecordInfo(key)
+	if err != nil || !tombstone.Deleted || tombstone.Version <= created.Version {
+		t.Fatal(tombstone, err)
+	}
+	recreated, err := h.Put(key, []byte("new"), Options{ExpectedVersion: &tombstone.Version})
+	if err != nil || recreated.Version <= tombstone.Version {
+		t.Fatal("recreation lost version history", recreated, err)
+	}
+}

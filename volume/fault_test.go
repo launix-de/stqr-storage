@@ -178,7 +178,7 @@ func TestCommittedCorruptionIsNotSilentlyTruncated(t *testing.T) {
 		t.Fatal(e)
 	}
 	s := v.Header()
-	pos := s.bankStart() + uint64(s.TailSlot)*PageSize + pageHeaderSize + recordHeader
+	pos := s.ObjectRoot + 40
 	d.live[pos] ^= 1
 	if _, e = Open(d, OpenOptions{}); !errors.Is(e, ErrCorrupt) {
 		t.Fatalf("corruption silently ignored: %v", e)
@@ -197,7 +197,7 @@ func TestPayloadCorruptionScrub(t *testing.T) {
 	if e != nil {
 		t.Fatal(e)
 	}
-	d.live[v.sb.bankStart()+o.Extents[0].Location] ^= 1
+	d.live[o.Spans[0].Location] ^= 1
 	if e = v.Scrub(); !errors.Is(e, ErrCorrupt) {
 		t.Fatalf("%v", e)
 	}
@@ -213,8 +213,11 @@ func TestScrubDoesNotTrustCachedMetadata(t *testing.T) {
 		t.Fatal(e)
 	}
 	mustGet(t, v, testKey(1), []byte("good"))
-	s := v.Header()
-	d.live[s.bankStart()+uint64(s.TailSlot)*PageSize+pageHeaderSize+recordHeader] ^= 1
+	o, err := v.loadObject(testKey(1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	d.live[o.Base+8] ^= 1
 	if e = v.Scrub(); !errors.Is(e, ErrCorrupt) {
 		t.Fatalf("cache hid metadata corruption: %v", e)
 	}

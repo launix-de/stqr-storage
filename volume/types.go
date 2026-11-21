@@ -13,9 +13,9 @@ import (
 
 const (
 	PageSize        = 4096
-	BlockSize       = 64 << 10
+	BlockSize       = 1 << 20
 	MinVolumeSize   = 256 << 10
-	FormatVersion   = 1
+	FormatVersion   = 2
 	pageHeaderSize  = 64
 	pagePayload     = PageSize - pageHeaderSize
 	superblockBytes = 2 * PageSize
@@ -139,6 +139,7 @@ type Options struct {
 	WholeObject                     bool
 	UseGuaranteed                   bool
 	restoreSameVersion              bool
+	restoreSegmented                bool
 }
 
 type Extent struct {
@@ -159,26 +160,23 @@ type Stats struct {
 	GuaranteedRemainingPhysical, InFlightReservedPhysical, AdmissionFreePhysical uint64
 }
 
+// Object layout is explicit: PUT owns one contiguous allocation; APPEND uses
+// a segment list and byte-packed, growable tail arenas. Compression chunks are
+// positions inside an allocation, not separate allocator extents.
 type object struct {
-	Info    Info
-	Extents []dataExtent
-	Arena   arena
+	Info                          Info
+	Segmented                     bool
+	Spans                         []dataSpan
+	ListHead, ListTail, ListCount uint64
+	ListBlocks                    []uint64
+	dirtyFrom, dirtyUntil         int
+	Base, Size                    uint64 // packed descriptor's location and encoded length
 }
-type arena struct {
-	Base  uint64
-	Pages uint32
-	Used  uint64
-}
-
-func (a arena) capacity() uint64 { return uint64(a.Pages) * pagePayload }
-
-type dataExtent struct {
-	Offset, Length                 uint64
-	Skip                           uint32
-	Codec                          Compression
-	Arena                          bool
-	Location, ArenaOffset          uint64
-	Stored, Raw, StoredCRC, RawCRC uint32
+type dataSpan struct {
+	Offset, Length, Location, Stored, Capacity, Checksums uint64
+	Skip                                                  uint64
+	Codec                                                 Compression
+	CRC                                                   uint32
 }
 type dedupe struct {
 	Key         Key

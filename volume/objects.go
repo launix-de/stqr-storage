@@ -7,94 +7,29 @@ import (
 	"encoding/binary"
 	"errors"
 	"hash"
+	"hash/crc32"
 	"io"
 	"sort"
 )
 
 const MaxBufferedRead = 16 << 20
+const (
+	opPut uint8 = iota + 1
+	opPutRange
+	opAppend
+	opTrunc
+	opDelete
+	opCAS
+	opSnapshot
+	opDedupe
+	opForget
+)
 
-func overlay(old []dataExtent, start, end uint64, fresh []dataExtent) []dataExtent {
-	out := make([]dataExtent, 0, len(old)+len(fresh)+1)
-	for _, e := range old {
-		ee := e.Offset + e.Length
-		if ee <= start || e.Offset >= end {
-			out = append(out, e)
-			continue
-		}
-		if e.Offset < start {
-			left := e
-			left.Length = start - e.Offset
-			out = append(out, left)
-		}
-		if ee > end {
-			right := e
-			right.Skip += uint32(end - e.Offset)
-			right.Offset = end
-			right.Length = ee - end
-			out = append(out, right)
-		}
-	}
-	out = append(out, fresh...)
-	sort.Slice(out, func(i, j int) bool { return out[i].Offset < out[j].Offset })
-	return out
-}
-func applyObject(o *object, r record) error {
-	if r.Op == opPut || r.Op == opSnapshot || r.Replace || r.Op == opDelete {
-		o.Extents = nil
-	}
-	end, e := add(r.Offset, r.WriteLength)
-	if e != nil {
-		return ErrCorrupt
-	}
-	if r.Op == opSnapshot {
-		o.Extents = append([]dataExtent(nil), r.Extents...)
-	} else if r.Op != opTrunc && r.Op != opDelete {
-		o.Extents = overlay(o.Extents, r.Offset, end, r.Extents)
-	}
-	o.Extents = overlay(o.Extents, r.Length, ^uint64(0), nil)
-	o.Info = Info{Version: r.Version, Length: r.Length, Compression: r.Codec, Deleted: r.Deleted}
-	o.Arena = r.Arena
-	var last uint64
-	for _, x := range o.Extents {
-		if x.Offset < last || x.Length == 0 || x.Offset > o.Info.Length || x.Length > o.Info.Length-x.Offset {
-			return ErrCorrupt
-		}
-		last = x.Offset + x.Length
-	}
-	return nil
-}
-func (v *Volume) readObject(o *object, dst []byte, offset uint64) error {
-	if offset > o.Info.Length || uint64(len(dst)) > o.Info.Length-offset {
-		return ErrRange
-	}
-	clear(dst)
-	end := offset + uint64(len(dst))
-	at := sort.Search(len(o.Extents), func(i int) bool { return o.Extents[i].Offset+o.Extents[i].Length > offset })
-	for ; at < len(o.Extents) && o.Extents[at].Offset < end; at++ {
-		e := o.Extents[at]
-		raw, err := v.readBlock(v.sb, e)
-		if err != nil {
-			return err
-		}
-		start := max(offset, e.Offset)
-		stop := min(end, e.Offset+e.Length)
-		pos := uint64(e.Skip) + start - e.Offset
-		if pos > uint64(len(raw)) || stop-start > uint64(len(raw))-pos {
-			return ErrCorrupt
-		}
-		copy(dst[start-offset:stop-offset], raw[pos:pos+stop-start])
-	}
-	return nil
-}
-
-// Stat returns general object information. For metadata and payload protected by
-// the same lock, use Open(false), Handle.Stat and Handle.CopyTo, then Close.
 func (v *Volume) Stat(k Key) (Info, error) {
 	v.mu.RLock()
 	defer v.mu.RUnlock()
 	return v.statLocked(k)
 }
-
 func (v *Volume) statLocked(k Key) (Info, error) {
 	if e := v.check(false); e != nil {
 		return Info{}, e
@@ -171,7 +106,7 @@ func (v *Volume) extentsLocked(k Key) ([]Extent, error) {
 	}
 	var out []Extent
 	var at uint64
-	for _, e := range o.Extents {
+	for _, e := range o.Spans {
 		if e.Offset > at {
 			out = append(out, Extent{at, e.Offset - at, true})
 		}
@@ -263,65 +198,132 @@ func validateCAS(offset uint64, expected, replacement []byte, opts Options) erro
 	return nil
 }
 
-// mutateWithRetryLocked requires a write handle's exclusive volume lock. All
-// mutations share validation, compaction and retry handling here.
+const receiptBytes = 144
+
+func (v *Volume) loadDedupe(id ID) (dedupe, bool, error) {
+	var d dedupe
+	if id == (ID{}) {
+		return d, false, nil
+	}
+	ptr, e := v.lookup(requestKey(id))
+	if e != nil || ptr == 0 {
+		return d, false, e
+	}
+	b := make([]byte, receiptBytes)
+	if e = v.readBytes(b, ptr); e != nil {
+		return d, false, e
+	}
+	if string(b[:4]) != "REQ2" || checksum(b[:140]) != diskOrder.Uint32(b[140:]) {
+		return d, false, ErrCorrupt
+	}
+	copy(d.Key.Bucket[:], b[4:20])
+	copy(d.Key.Object[:], b[20:52])
+	copy(d.Fingerprint[:], b[52:84])
+	d.Result = Result{Info: Info{Version: diskOrder.Uint64(b[84:]), Length: diskOrder.Uint64(b[92:]), Compression: Compression(b[100]), Deleted: b[101] != 0}, Offset: diskOrder.Uint64(b[104:])}
+	return d, true, nil
+}
+func (t *transaction) saveReceipt(id ID, d dedupe) error {
+	if id == (ID{}) {
+		return nil
+	}
+	b := make([]byte, receiptBytes)
+	copy(b, "REQ2")
+	copy(b[4:20], d.Key.Bucket[:])
+	copy(b[20:52], d.Key.Object[:])
+	copy(b[52:84], d.Fingerprint[:])
+	diskOrder.PutUint64(b[84:], d.Result.Info.Version)
+	diskOrder.PutUint64(b[92:], d.Result.Info.Length)
+	b[100] = byte(d.Result.Info.Compression)
+	if d.Result.Info.Deleted {
+		b[101] = 1
+	}
+	diskOrder.PutUint64(b[104:], d.Result.Offset)
+	diskOrder.PutUint32(b[140:], checksum(b[:140]))
+	off, e := t.alloc(receiptBytes, true)
+	if e != nil {
+		return e
+	}
+	if e = t.patch(off, b); e != nil {
+		return e
+	}
+	return t.set(&t.sb.ObjectRoot, requestKey(id), off)
+}
+func (v *Volume) operationStatusLocked(id ID) (Result, bool, error) {
+	d, found, e := v.loadDedupe(id)
+	return d.Result, found, e
+}
+func (v *Volume) forgetRequestLocked(id ID) error {
+	if id == (ID{}) {
+		return ErrRange
+	}
+	off, e := v.lookup(requestKey(id))
+	if e != nil || off == 0 {
+		return e
+	}
+	t := v.transaction()
+	t.release(off, receiptBytes, true)
+	if e = t.remove(&t.sb.ObjectRoot, requestKey(id)); e != nil {
+		return e
+	}
+	return t.commit(false)
+}
+func oldPieces(v *Volume, o *object, limit, cutStart, cutEnd uint64) []payloadPiece {
+	var pieces []payloadPiece
+	if o == nil || o.Info.Deleted {
+		return pieces
+	}
+	for _, s := range o.Spans {
+		end := min(s.Offset+s.Length, limit)
+		start := s.Offset
+		if start >= end {
+			continue
+		}
+		if cutStart < cutEnd && start < cutEnd && cutStart < end {
+			if start < cutStart {
+				n := cutStart - start
+				pieces = append(pieces, payloadPiece{start, n, &objectReader{v, o, start, n}})
+			}
+			start = max(start, cutEnd)
+		}
+		if start < end {
+			pieces = append(pieces, payloadPiece{start, end - start, &objectReader{v, o, start, end - start}})
+		}
+	}
+	return pieces
+}
 func (v *Volume) mutateWithRetryLocked(op uint8, k Key, offset, length uint64, src io.Reader, expected []byte, opts Options) (Result, error) {
 	if e := v.check(true); e != nil {
 		return Result{}, e
 	}
-	if op != opTrunc && op != opDelete && length > 0 && (src == nil || length > uint64(^uint64(0)>>1)) {
-		return Result{}, ErrRange
-	}
 	if opts.Compression != nil && !opts.Compression.valid() {
 		return Result{}, ErrRange
 	}
-	var seeker io.Seeker
-	var initial int64
-	if x, ok := src.(io.Seeker); ok {
-		seeker = x
-		initial, _ = x.Seek(0, io.SeekCurrent)
+	payload := op != opTrunc && op != opDelete
+	if payload && (length > uint64(^uint64(0)>>1) || length > 0 && src == nil) {
+		return Result{}, ErrRange
 	}
-	if len(v.runs) >= maxIndexRuns {
-		if e := v.compactLocked(); e != nil {
+	if payload {
+		if _, e := add(offset, length); e != nil {
 			return Result{}, e
 		}
 	}
-	result, e := v.mutateLocked(op, k, offset, length, src, expected, opts)
-	if errors.Is(e, ErrFull) && v.failed == nil && (src == nil || seeker != nil) {
-		if err := v.compactLocked(); err != nil {
-			return Result{}, err
-		}
-		if seeker != nil {
-			if _, err := seeker.Seek(initial, io.SeekStart); err != nil {
-				return Result{}, err
-			}
-		}
-		return v.mutateLocked(op, k, offset, length, src, expected, opts)
-	}
-	return result, e
-}
-func (v *Volume) mutateLocked(op uint8, k Key, offset, length uint64, src io.Reader, expected []byte, opts Options) (Result, error) {
 	h := fingerprint(op, k, offset, length, opts, expected)
-	d, exists, e := v.loadDedupe(opts.RequestID)
+	prior, retry, e := v.loadDedupe(opts.RequestID)
 	if e != nil {
 		return Result{}, e
 	}
-	payload := op != opTrunc && op != opDelete
-	if exists {
-		if payload {
-			if _, e = io.CopyN(h, src, int64min(length)); e != nil {
+	if retry {
+		if payload && length > 0 {
+			if _, e = io.CopyN(h, src, int64(length)); e != nil {
 				return Result{}, e
-			}
-			if length > uint64(^uint64(0)>>1) {
-				return Result{}, ErrRange
 			}
 		}
 		var fp [32]byte
 		copy(fp[:], h.Sum(nil))
-		if d.Key != k || d.Fingerprint != fp {
+		if prior.Key != k || prior.Fingerprint != fp {
 			return Result{}, ErrRequestID
 		}
-		return d.Result, nil
+		return prior.Result, nil
 	}
 	old, e := v.loadObject(k)
 	if errors.Is(e, ErrNotFound) {
@@ -332,21 +334,20 @@ func (v *Volume) mutateLocked(op uint8, k Key, offset, length uint64, src io.Rea
 	if e = precondition(old, opts); e != nil {
 		return Result{}, e
 	}
-	o := &object{}
-	if old != nil {
-		*o = *old
-	}
+	o := cloneObject(old)
 	alive := old != nil && !old.Info.Deleted
 	if !alive {
 		o.Info.Length = 0
-		o.Extents = nil
-		o.Arena = arena{}
+		o.Spans = nil
+		o.ListBlocks = nil
+		o.Segmented = false
 	}
 	codec := o.Info.Compression
 	if opts.Compression != nil {
 		codec = *opts.Compression
 	}
-	if alive && codec != old.Info.Compression && op != opPut {
+	replace := op == opPut || op == opCAS && opts.WholeObject
+	if alive && codec != old.Info.Compression && !replace {
 		return Result{}, ErrPrecondition
 	}
 	if op == opAppend {
@@ -373,87 +374,222 @@ func (v *Volume) mutateLocked(op uint8, k Key, offset, length uint64, src io.Rea
 		return Result{}, ErrRange
 	}
 	newLength := o.Info.Length
-	replace := op == opPut || (op == opCAS && opts.WholeObject)
 	if replace {
 		newLength = length
-		o.Arena = arena{}
 	} else if payload {
 		newLength = max(newLength, end)
 	} else if op == opTrunc {
 		newLength = length
 	} else {
 		newLength = 0
-		o.Arena = arena{}
 	}
-	if op == opAppend && length == 0 && alive { // A no-op may still need a durable retry result.
+	if op == opAppend && length == 0 && alive {
 		version = o.Info.Version
 	}
-	prev, e := v.lookup(objectKey(k))
-	if e != nil {
-		return Result{}, e
+	t := v.transaction()
+	reader := src
+	if payload && length > 0 {
+		reader = io.TeeReader(src, h)
 	}
-	r := record{Op: op, Codec: codec, Key: k, Request: opts.RequestID, Version: version, Offset: offset, Length: newLength, Previous: prev, Replace: replace, Deleted: op == opDelete, Arena: o.Arena}
-	if payload {
-		r.WriteLength = length
-	}
-	s := v.sb
-	buffer := make([]byte, BlockSize)
-	remaining := uint64(0)
-	if payload {
-		remaining = length
-	}
-	for remaining > 0 {
-		n := min(uint64(len(buffer)), remaining)
-		if _, e = io.ReadFull(src, buffer[:n]); e != nil {
-			return Result{}, e
+	if op == opAppend {
+		o.Segmented = true
+		o.dirtyFrom = max(0, len(o.Spans)-1)
+		if length > 0 {
+			if e = t.appendPayload(o, offset, reader, length); e != nil {
+				return Result{}, e
+			}
 		}
-		h.Write(buffer[:n])
-		ext, e := v.storeBlock(&s, &r.Arena, offset+(length-remaining), buffer[:n], codec, op == opAppend)
+		o.dirtyUntil = len(o.Spans)
+	} else {
+		var pieces []payloadPiece
+		if replace {
+			if length > 0 {
+				pieces = []payloadPiece{{0, length, reader}}
+			}
+			o.Segmented = false
+		} else if op == opDelete {
+			o.Segmented = false
+		} else if op == opTrunc {
+			pieces = oldPieces(v, old, newLength, 0, 0)
+		} else {
+			pieces = oldPieces(v, old, newLength, offset, end)
+			if length > 0 {
+				pieces = append(pieces, payloadPiece{offset, length, reader})
+			}
+			sort.Slice(pieces, func(i, j int) bool { return pieces[i].offset < pieces[j].offset })
+		}
+		spans, e := t.storePacked(pieces, codec)
 		if e != nil {
 			return Result{}, e
 		}
-		r.Extents = append(r.Extents, ext)
-		remaining -= n
+		releaseData(t, old)
+		o.Spans = spans
+		o.ListBlocks = nil
+		o.ListHead = 0
+		o.ListTail = 0
 	}
-	if op == opTrunc && length < o.Info.Length {
-		r.Arena = arena{}
-	} // Retained data refs remain valid; drop spare append tail.
-	copy(r.Fingerprint[:], h.Sum(nil))
-	r.Result = Result{Info: Info{version, newLength, codec, r.Deleted}, Offset: offset}
-	// Reserve includes payload, index delta flush and commit metadata. The final
-	// check is repeated after journal/index staging inside commitWithReserve.
-	if e = v.commitWithReserve(r, s, opts.UseGuaranteed); e != nil {
+	o.Info = Info{Version: version, Length: newLength, Compression: codec, Deleted: op == opDelete}
+	if old != nil && !old.Info.Deleted {
+		t.sb.Objects--
+		t.sb.LogicalBytes -= old.Info.Length
+	}
+	if !o.Info.Deleted {
+		if newLength > ^uint64(0)-t.sb.LogicalBytes {
+			return Result{}, ErrRange
+		}
+		t.sb.Objects++
+		t.sb.LogicalBytes += newLength
+	}
+	t.sb.ArenaUnused = arenaAfter(t.sb.ArenaUnused, old, o)
+	if e = t.saveObject(k, o); e != nil {
 		return Result{}, e
 	}
-	return r.Result, nil
-}
-func int64min(n uint64) int64 {
-	if n > uint64(^uint64(0)>>1) {
-		return int64(^uint64(0) >> 1)
+	result := Result{Info: o.Info, Offset: offset}
+	var fp [32]byte
+	copy(fp[:], h.Sum(nil))
+	if e = t.saveReceipt(opts.RequestID, dedupe{k, fp, result}); e != nil {
+		return Result{}, e
 	}
-	return int64(n)
-}
-
-// operationStatusLocked returns a stored successful result, if its RequestID has not
-// been explicitly forgotten. Absence is not a proof that an operation never ran.
-func (v *Volume) operationStatusLocked(id ID) (Result, bool, error) {
-	if e := v.check(false); e != nil {
-		return Result{}, false, e
+	if e = t.commit(opts.UseGuaranteed); e != nil {
+		return Result{}, e
 	}
-	d, ok, e := v.loadDedupe(id)
-	return d.Result, ok, e
+	v.cache.put(k, o)
+	return result, nil
 }
-func (v *Volume) forgetRequestLocked(id ID) error {
-	if e := v.check(true); e != nil {
+func arenaUnused(o *object) uint64 {
+	var n uint64
+	if o != nil && o.Segmented {
+		for _, s := range o.Spans {
+			n += s.Capacity - s.Stored
+		}
+	}
+	return n
+}
+func arenaAfter(total uint64, old, next *object) uint64 {
+	return total - arenaUnused(old) + arenaUnused(next)
+}
+func (t *transaction) appendPayload(o *object, offset uint64, src io.Reader, length uint64) error {
+	if len(o.Spans) > 0 {
+		last := &o.Spans[len(o.Spans)-1]
+		if last.Codec == Raw && last.Skip == 0 && last.Offset+last.Length == offset && length <= last.Capacity-last.Stored {
+			// Continue the stored CRC with only the new bytes. Reading the old
+			// arena would turn each tiny append into an ever larger read.
+			oldLength := last.Length
+			oldCount := (oldLength + BlockSize - 1) / BlockSize
+			count := (oldLength + length + BlockSize - 1) / BlockSize
+			oldChecks := checksumsSize(*last)
+			oldTable := last.Checksums
+			if count > 1 && count*4 != oldChecks {
+				next, e := t.alloc(count*4, true)
+				if e != nil {
+					return e
+				}
+				if oldChecks > 0 {
+					buf := make([]byte, min(uint64(64<<10), oldChecks))
+					for off := uint64(0); off < oldChecks; {
+						n := min(uint64(len(buf)), oldChecks-off)
+						if e = t.readBytes(buf[:n], oldTable+off); e != nil {
+							return e
+						}
+						if e = t.patch(next+off, buf[:n]); e != nil {
+							return e
+						}
+						off += n
+					}
+					t.release(oldTable, oldChecks, true)
+				} else if oldCount == 1 {
+					var b [4]byte
+					diskOrder.PutUint32(b[:], last.CRC)
+					if e = t.patch(next, b[:]); e != nil {
+						return e
+					}
+				}
+				last.Checksums = next
+			}
+			position := oldLength
+			remaining := length
+			buf := make([]byte, min(uint64(BlockSize), length))
+			for remaining > 0 {
+				index := position / BlockSize
+				within := position % BlockSize
+				crc := uint32(0)
+				if within > 0 {
+					if oldCount == 1 && index == 0 {
+						crc = last.CRC
+					} else {
+						var b [4]byte
+						if e := t.readBytes(b[:], last.Checksums+index*4); e != nil {
+							return e
+						}
+						crc = diskOrder.Uint32(b[:])
+					}
+				}
+				n := min(uint64(len(buf)), remaining, uint64(BlockSize)-within)
+				raw := buf[:n]
+				if _, e := io.ReadFull(src, raw); e != nil {
+					return e
+				}
+				crc = crc32.Update(crc, crcTable, raw)
+				if e := t.writeBytes(last.Location+position, raw); e != nil {
+					return e
+				}
+				if count == 1 {
+					last.CRC = crc
+				} else {
+					var b [4]byte
+					diskOrder.PutUint32(b[:], crc)
+					if e := t.patch(last.Checksums+index*4, b[:]); e != nil {
+						return e
+					}
+				}
+				position += n
+				remaining -= n
+			}
+			last.Length += length
+			last.Stored += length
+			return nil
+		}
+	}
+	capacity := align(length)
+	if capacity < PageSize {
+		capacity = PageSize
+	}
+	if n := len(o.Spans); n > 0 {
+		capacity = max(capacity, min(o.Spans[n-1].Capacity*2, uint64(BlockSize)))
+	}
+	base, e := t.alloc(capacity, false)
+	if e != nil {
 		return e
 	}
-	if id == (ID{}) {
-		return ErrRange
-	}
-	if len(v.runs) >= maxIndexRuns {
-		if e := v.compactLocked(); e != nil {
+	s := dataSpan{Offset: offset, Length: length, Location: base, Stored: length, Capacity: capacity, Codec: Raw}
+	count := (length + BlockSize - 1) / BlockSize
+	if count > 1 {
+		s.Checksums, e = t.alloc(count*4, true)
+		if e != nil {
 			return e
 		}
 	}
-	return v.commitWithReserve(record{Op: opForget, Request: id}, v.sb, false)
+	buf := make([]byte, BlockSize)
+	for i := uint64(0); i < count; i++ {
+		n := min(uint64(BlockSize), length-i*BlockSize)
+		raw := buf[:n]
+		if _, e = io.ReadFull(src, raw); e != nil {
+			return e
+		}
+		if e = t.writeBytes(base+i*BlockSize, raw); e != nil {
+			return e
+		}
+		crc := checksum(raw)
+		if count == 1 {
+			s.CRC = crc
+		} else {
+			var b [4]byte
+			diskOrder.PutUint32(b[:], crc)
+			if e = t.patch(s.Checksums+i*4, b[:]); e != nil {
+				return e
+			}
+		}
+	}
+	o.Spans = append(o.Spans, s)
+	return nil
 }

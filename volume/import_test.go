@@ -3,6 +3,7 @@ package volume
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"io"
 	"testing"
@@ -55,14 +56,10 @@ func TestExportImportTranscodesSparseAndRetry(t *testing.T) {
 func TestImportMalformedDoesNotPublish(t *testing.T) {
 	v, _ := memoryVolume(t, 2<<20)
 	var b bytes.Buffer
-	b.WriteString(snapshotMagic)
-	var count [8]byte
-	diskOrder.PutUint64(count[:], 1)
-	b.Write(count[:])
-	r := record{Op: opSnapshot, Key: testKey(1), Version: 1, Length: 3}
-	raw, _ := encodeRecord(r)
-	writeFrame(&b, 1, raw)
-	writeFrame(&b, 3, append(make([]byte, 8), []byte("abc")...)) // missing object/end markers
+	enc := json.NewEncoder(&b)
+	enc.Encode(snapshotFrame{Kind: "STQR-SNAPSHOT-2"})
+	enc.Encode(snapshotFrame{Kind: "object", Key: testKey(1), Info: Info{Version: 1, Length: 3}})
+	enc.Encode(snapshotFrame{Kind: "data", Data: []byte("abc")}) // missing end/complete
 	if e := v.Import(&b, nil); e == nil {
 		t.Fatal("truncated import succeeded")
 	}
@@ -130,7 +127,7 @@ func TestRepairRetainsLogicalVersionAndRetry(t *testing.T) {
 	if e != nil {
 		t.Fatal(e)
 	}
-	d.live[v.sb.bankStart()+o.Extents[0].Location] ^= 1
+	d.live[o.Spans[0].Location] ^= 1
 	if e = v.Scrub(); !errors.Is(e, ErrCorrupt) {
 		t.Fatal(e)
 	}

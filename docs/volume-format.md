@@ -1,4 +1,4 @@
-# Volume library and on-volume format v1
+# Volume library and on-volume format 2
 
 The implementation is the Go package `github.com/launix-de/stqr-storage/volume`.
 There are no UI handlers, CLI commands, or networking code. Runtime files live in
@@ -82,7 +82,7 @@ before process exit: `defer h.Close()` is part of the caller's contract.
 - Volume management and maintenance, called outside handle sessions: `Open`,
   standalone `Stat`, `Identity`, `Name`, `Header`, `Size`, `State`, `SetState`,
   `Describe`, `Stats`, `IOStats`, `SetCacheLimits`, `SetGuaranteedReserve`, `Sync`,
-  `Bind`, `VerifyIdentity`, `Grow`, `Rescan`, `Checkpoint`, `Compact`, `Scrub`, `Export`, `Import`,
+  `Bind`, `VerifyIdentity`, `Grow`, `Rescan`, `Shrink`, `Checkpoint`, `Compact`, `Scrub`, `Export`, `Import`,
   `Detach`, `Close`. These operate on the volume itself and manage their own
   locking. Volume `Close` closes the backend; handle `Close` ends only its session.
 
@@ -103,114 +103,114 @@ An explicit codec change uses `Recompress`, preserving the logical version.
 can replace a corrupted physical representation at the same logical version.
 These are trusted server primitives, not authority to perform a cluster cutover.
 
-## Physical layout and commit
+## Packed format 2
 
-All integers are little endian. Pages are 4096 bytes and carry CRC32C checksums.
-The first two pages are alternating commit roots. The remaining space consists
-of two equal page-aligned banks; trailing sub-page bytes are unused. Within the
-active bank metadata page pairs grow upward and payload allocations downward.
+The pre-release format was replaced, not kept as a runtime compatibility mode.
+Existing local data was exported with the old binary and rebuilt separately.
 
-**The current implementation reserves one complete bank (approximately half the
-volume) for crash-safe compaction.** Admission uses the active-bank free gap,
-subtracting guaranteed reserves. This is a deliberate initial implementation
-trade-off, not a claimed optimal space overhead. A later segment-local collector
-can reduce this reserve after measurements and a format revision. Reported
-physical bytes include index, headers, alignment, arena space and GC reserve;
-logical object length is a separate value.
+The physical layout starts with two alternating 4096-byte superblocks, two
+commit-anchor pages and eight redo scratch pages (32 KiB). The initial object
+and free-space tree roots occupy two further pages. Remaining bytes belong to
+the allocator. There is no permanently reserved second bank or half-volume GC
+reserve. Headers carry volume identity/configuration, generations, B+-tree root
+pointers, exact physical accounting and an optional resumable relocation cursor.
 
-Commit order:
+### Object representation
 
-1. Stage immutable payload blocks or the alternate copy of an append-arena page.
-2. Append the mutation record and optional index checkpoint to COW journal pages.
-3. Sync all new payload and metadata bytes.
-4. Write the other physical superblock slot and sync it.
-5. Publish the new in-memory root and return success.
+The object descriptor explicitly distinguishes CONTIGUOUS and SEGMENTED.
+A complete PUT reserves **one contiguous physical range of its exact stored
+length**, regardless of object size. Large payload ranges start on a page
+boundary. Smaller payloads and descriptors are byte-packed into remaining gaps;
+page alignment does not round their allocation length. A zero-byte object has
+an index entry and descriptor, but no payload allocation.
 
-The physical root slot alternates independently of generation numbers, because
-one commit can add multiple metadata records. Multiple modifications of a tail
-page within an unpublished transaction reuse its staged copy, never the copy
-still referenced by the committed root. An I/O/sync failure fences the instance;
-reopen decides whether the operation committed. A short input reader does not
-publish a partial object. RAM uses the same local format/atomics on a volatile
-paged backend; `Sync` does not make RAM persistent.
+A normal descriptor has a 40-byte header and 64 bytes per physical/logical span.
+An ordinary PUT needs one span (104 descriptor bytes). Sparse PUT_RANGE/TRUNC
+represent zero intervals implicitly; their actual nonzero ranges are packed
+into a single allocation, rather than materializing holes.
 
-## Root encoding
+The first APPEND keeps a PUT's existing data in place and switches the layout
+flag. Segment lists use linked 512-byte blocks with seven entries each. List
+blocks are themselves byte-allocated within page-aligned storage pages. APPEND
+reserves a page-sized tail arena, grows subsequent arenas in steps, and reuses
+an existing tail for small writes. Only the changed descriptor/list block and
+tail page are updated; the full directory/list is not copied per append. A full
+PUT replaces the segment representation again and releases the old arenas/list.
 
-| Offset | Encoding | Meaning |
-|---:|---|---|
-| 0 | 8 bytes | `STQRVOL1` |
-| 8 | u16 | format version 1 |
-| 10, 11, 12 | u8 each | class, active bank, journal tail copy |
-| 16, 32, 48 | 16 bytes each | cluster, node, volume identity |
-| 64 | fourteen u64s | physical size, generation, bank epoch, mutation sequence, journal byte length, data top, live object count, logical bytes, allocated index bytes, full-index location, full-index count, replay start, live payload allocation, arena slack |
-| 4092 | u32 | CRC32C over bytes 0..4091 |
+Compression chunks (up to 1 MiB) are positions **inside** the one allocation,
+not independently allocated extents. Raw 1-MiB PUTs are one uninterrupted payload
+range, with their checksum in the descriptor. Larger raw PUTs have a separate
+small checksum array. Compressed containers hold a compact chunk table so
+ranged reads need only decode affected chunks. Incompressible chunks use raw
+encoding. Hot APPEND arenas store raw bytes for efficient small updates; explicit
+recompression can compress them without changing the logical object version.
+Compression staging uses at most 4 MiB of RAM before spilling transient encoded
+input to a temporary file. Committed data always lives in the volume.
 
-Zero node/cluster IDs are initially unbound. Volume IDs are generated, nonzero and
-stable. The highest valid root is chosen; a supported older root is not used to
-ignore a valid unsupported-format root. Corruption in a committed journal or
-payload is reported, never interpreted as a missing/uncommitted object.
+### Page-sized B+-trees
 
-## Pages, journal and disk index
+The object/request index and byte-exact free-space index are mutable 4-KiB
+B+-trees. Object/request keys use 49 bytes and their value pointer 8 bytes;
+free-space leaves use `(offset:u64,length:u64)` entries. Free-tree internal
+entries additionally contain maximum byte/aligned allocation sizes for subtree
+pruning. Splits and merges update affected pages. An unchanged parent/root is
+not rewritten just because an object descriptor changes. Neighbor lookups and
+coalescing use search paths, not directory scans. Object and decoded tree caches
+are bounded; a decoded tree page is budgeted at 8 KiB of RAM.
 
-Page magic is `JPG1` (journal), `APG1` (append data), or `IDX1` (index).
-Offsets: magic 0, bank epoch 8:u64, page/pair index 16:u64, generation 24:u64,
-used bytes 32:u32, payload CRC 36:u32, full volume ID 44:16 bytes, header CRC
-60:u32 over the preceding 60 bytes. Payload starts at 64 (4032 usable bytes).
-Volume ID and bank epoch exclude stale pages after reformat or bank reuse.
+Returned bytes are immediately merged with adjacent free ranges. Even one-byte
+holes remain represented externally in the free tree, rather than needing room
+for a free-list header inside the hole. Physical counters include descriptors,
+request receipts, tree pages and reserved arena capacity. Every byte is accounted
+as allocation, redo scratch or free space.
 
-Mutation records (`TXN1`) have a 184-byte header, 32-byte result/arena section,
-56 bytes per extent, and a trailing CRC32C. They encode operation, codec,
-sequence/version, range/new length, key, RequestID, request fingerprint,
-previous record pointer, arena description, and new extents. The codec is per
-object version; compression blocks are independently decodable. `raw`, gzip,
-LZ4 frames and xz streams use at most 64 KiB decoded bytes per payload block.
-XZ dictionaries are bounded to 1 MiB. Checksums cover stored and decoded bytes.
+### Transaction and recovery order
 
-The in-memory index delta is bounded (128 keys, also flushed every 64 mutations).
-Immutable sorted runs hold 64-byte entries: a one-byte namespace plus 48-byte
-key (object or RequestID), then the journal pointer at offset 56. Lookup binary
-searches at most eight recent runs plus the delta. Metadata LRU defaults to 256
-objects / 16 MiB, configurable; oversized entries are not cached. Full checkpoint
-roots point to a sorted on-volume directory and replay only the later journal.
-Compaction builds its new sorted directory with one page of RAM after a first
-streaming count pass. It does not build a whole-volume hash map.
+1. Reserve new ranges in the transaction's free tree and stage new payload.
+2. Persist redo images of modified occupied/shared pages and the new superblock.
+   Entirely free old pages can be staged directly; they contain no confirmed
+   neighbors. Larger redo records use additional free pages temporarily.
+3. Sync payload/log, write and sync a checksummed commit anchor containing the
+   complete log digest and generation.
+4. Install changed pages and sync them; publish and sync the alternate root.
 
-Raw PUT blocks allocate only encoded payload/alignment, no append arena. APPEND
-reserves paired pages; capacity doubles up to 256 page pairs. A touched tail page
-is rewritten to its alternate copy, preserving the confirmed prefix under torn
-writes. Compaction coalesces contiguous live data, drops dead allocations, and
-retains tombstones and non-forgotten retry records. Recompression and export
-preserve gaps without materializing large zero ranges.
+Before the anchor commits, the old tree remains authoritative. After it commits,
+recovery must finish that transaction before serving clients. Redo includes full
+shared-page images, so a torn write cannot damage adjacent small objects. Old log
+pages become reusable after checkpoint publication. Ambiguous I/O errors fence
+the open volume until recovery. Nonzero RequestIDs retain independently indexed
+results until explicitly forgotten.
 
-## Verification boundary
+### Defragmentation and capacity changes
 
-Tests cover temporary files and bounded RAM/mock devices, 4-KiB-aligned I/O,
-codec/range/CAS/sparse/model histories, many-object index spill, concurrent
-requests, discovery fixtures, every simulated write/sync failure at commit and
-compaction, payload/header corruption, migration and retry recovery. Format
-parsers have fuzz targets. Real raw-device writes, actual controller power-loss
-behavior, SMART integration and performance/space-efficiency claims require
-separate hardware testing/review. There is intentionally no project README or
-benchmark claim yet.
+Defragmentation moves allocations leftward and coalesces released ranges. A
+move may overlap its source: only the free destination prefix is reserved, and
+each moved page plus cursor is journalled. Startup resumes a committed cursor
+before exposing any object. This needs bounded redo scratch, not a second copy
+of the largest object. Index pointers switch only when the move is complete.
 
-## Explicit growth and capacity rescan
+`Grow(bytes)` extends regular files/RAM; `Rescan()` adopts an externally enlarged
+blockdevice. Both add the new bytes to the free tree without rewriting a bank.
+`Shrink(bytes)` defragments and shortens regular file/RAM volumes only when the
+whole removed tail is free. If live data or metadata cannot be evacuated, it
+returns an error. The smaller header commits before the backend is truncated.
 
-`Volume.Grow(sizeBytes)` grows regular files and RAM volumes, never raw devices. RAM growth extends
-the sparse address space and preserves existing objects and retry records.
-`Volume.Rescan()` re-queries backing capacity (`BLKGETSIZE64` for Linux block
-nodes) after external enlargement and adopts only additional space. Open accepts
-larger backing storage while keeping the old committed capacity; truncated
-backends are rejected. Both operations run outside handle sessions.
+Snapshot Export/Import carries logical ranges, versions, tombstones, layout flags
+and request receipts. Import validates the complete stream and publishes the
+final snapshot in one destination transaction. Restore/Repair additionally support
+already populated destinations under the existing handle API.
 
-For any positive growth, new bank 1 starts at or beyond the end of old bank 0.
-If old bank 1 is active, first perform a normal crash-safe compaction into old
-bank 0. Then rewrite all live objects, tombstones and retry records into new
-bank 1 with the larger bank geometry, sync it and publish the alternate root.
-The latest committed source bank/root never overlaps staging writes. A crash can
-leave either the old or new committed capacity; versions, identity and data stay
-intact. No on-disk format revision is needed. Auto-growing admin files use this
-operation; blockdevices require explicit rescan and are never truncated.
+### Planning estimates and verification
 
-`Handle.ScanObjects(after, limit)` is a bounded cursor scan over all buckets,
-including tombstones. It returns logical keys/Info only, with limit 1..4096, and
-supports server-side local evacuation without loading the whole index in RAM.
+The bucket UI selects a typical object-size range instead of asking an admin
+for a metadata percentage. `EstimatePutOverheadPPM` budgets packed descriptors,
+one retained request per PUT, half-full index leaves, free-tree entries and
+amortized inner nodes. The already withheld roots/WAL scratch are not charged
+again. Compression savings and repeated-request/update history are not guessed.
+These are workload estimates, not guaranteed fill ratios.
+
+Tests cover 0–5-byte packing, contiguous multi-MiB PUTs, PUT/APPEND transitions,
+tail reuse, sparse ranges, codecs, bounded caches, B+-tree splits/merges, exact
+free-space accounting, growth/shrink, overlapping defrag and crashes at individual
+writes/syncs. Hardware power-loss behavior and benchmarks still need separate
+measurement. There is intentionally no README or performance claim yet.

@@ -152,7 +152,7 @@ func TestCodecsRangesAndRecompress(t *testing.T) {
 		t.Run(c.String(), func(t *testing.T) {
 			v, d := memoryVolume(t, 8<<20)
 			k := testKey(1)
-			want := bytes.Repeat([]byte("abcdef"), 24000)
+			want := bytes.Repeat([]byte("abcdef"), (BlockSize*2+1024)/6+1)
 			info, e := testPut(v, k, want, Options{Compression: Codec(c)})
 			if e != nil {
 				t.Fatal(e)
@@ -231,8 +231,8 @@ func TestIndexSpillAndCompaction(t *testing.T) {
 	for i := 0; i < 900; i += 17 {
 		mustGet(t, v, testKey(uint64(i)), []byte(fmt.Sprintf("object-%d", i)))
 	}
-	if len(v.cache.items) > 2 || len(v.delta) > deltaLimit || len(v.runs) > maxIndexRuns {
-		t.Fatalf("cache %d delta %d runs %d", len(v.cache.items), len(v.delta), len(v.runs))
+	if len(v.cache.items) > 2 {
+		t.Fatalf("cache grew beyond configured bound: %d", len(v.cache.items))
 	}
 	if e := v.Compact(); e != nil {
 		t.Fatal(e)
