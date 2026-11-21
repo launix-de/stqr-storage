@@ -50,18 +50,21 @@ type VolumeConfig struct {
 	OperationID string `yaml:"operation_id,omitempty" json:"operation_id,omitempty"`
 }
 type Config struct {
-	Node                 NodeConfig     `yaml:"node" json:"node"`
-	ClusterID            string         `yaml:"cluster_id" json:"cluster_id"`
-	Generation           uint64         `yaml:"generation" json:"generation"`
-	BucketCatalogVersion uint16         `yaml:"bucket_catalog_version,omitempty" json:"-"`
-	Auth                 AuthConfig     `yaml:"auth" json:"auth"`
-	VolumesDir           string         `yaml:"volumes_dir" json:"volumes_dir"`
-	SystemVolumeBytes    int64          `yaml:"system_volume_bytes" json:"system_volume_bytes"`
-	RAMBytes             int64          `yaml:"ram_bytes" json:"ram_bytes"`
-	RAMCacheBytes        int64          `yaml:"ramcache_bytes" json:"ramcache_bytes"`
-	AllowSubnets         []string       `yaml:"allow_subnets" json:"allow_subnets"`
-	Peers                []PeerConfig   `yaml:"peers" json:"peers"`
-	Volumes              []VolumeConfig `yaml:"volumes" json:"volumes"`
+	Node                   NodeConfig     `yaml:"node" json:"node"`
+	ClusterID              string         `yaml:"cluster_id" json:"cluster_id"`
+	Generation             uint64         `yaml:"generation" json:"generation"`
+	BucketCatalogVersion   uint16         `yaml:"bucket_catalog_version,omitempty" json:"-"`
+	JoinPending            bool           `yaml:"join_pending,omitempty" json:"join_pending"`
+	PeerDirectoryVersion   uint16         `yaml:"peer_directory_version,omitempty" json:"-"`
+	PlacementGroupsVersion uint16         `yaml:"placement_groups_version,omitempty" json:"-"`
+	Auth                   AuthConfig     `yaml:"auth" json:"auth"`
+	VolumesDir             string         `yaml:"volumes_dir" json:"volumes_dir"`
+	SystemVolumeBytes      int64          `yaml:"system_volume_bytes" json:"system_volume_bytes"`
+	RAMBytes               int64          `yaml:"ram_bytes" json:"ram_bytes"`
+	RAMCacheBytes          int64          `yaml:"ramcache_bytes" json:"ramcache_bytes"`
+	AllowSubnets           []string       `yaml:"allow_subnets" json:"allow_subnets"`
+	Peers                  []PeerConfig   `yaml:"peers" json:"peers"`
+	Volumes                []VolumeConfig `yaml:"volumes" json:"volumes"`
 }
 
 // Options describes daemon startup overrides, not a separate administrative CLI.
@@ -208,6 +211,9 @@ func loadConfig(path string, o Options) (Config, error) {
 			}
 		case "connect":
 			if v != "" {
+				if err := validateURL(v); err != nil {
+					return c, err
+				}
 				c.Peers = append(c.Peers, PeerConfig{URL: v})
 			}
 		case "ram-bytes", "ramcache-bytes", "system-volume-bytes":
@@ -225,11 +231,20 @@ func loadConfig(path string, o Options) (Config, error) {
 			}
 		}
 	}
-	// A seed/known peer is never ignored and never bootstraps another cluster.
-	// TODO(multinode): authenticate NODE_HELLO/JOIN and restore control/system data
-	// before enabling local authority. For now fail explicitly rather than fork.
-	if len(c.Peers) > 0 {
-		return c, errors.New("multinode join/resume is not implemented; configured peers are preserved, no new cluster was created")
+	// Contacts are not membership or placement. A fresh candidate must retain a
+	// preconfigured cluster identity/token and remain non-authoritative until the
+	// durable membership/system bootstrap has finished. Never create a new cluster
+	// when a seed is present but unavailable or its credentials are missing.
+	if (len(c.Peers) > 0 || c.JoinPending) && c.ClusterID == "" {
+		return c, errors.New("joining requires the existing cluster identity and token; no new cluster was created")
+	}
+	if c.JoinPending && c.Generation == 0 {
+		c.Generation = 1
+	}
+	if c.PeerDirectoryVersion == 1 {
+		// This is only a YAML cache. The durable system object is loaded after
+		// opening its volume. A stale/missing cache must not pin the old initiator.
+		c.Peers = nil
 	}
 	if c.ClusterID == "" {
 		if len(c.Volumes) > 0 {
@@ -279,7 +294,7 @@ func validateConfig(c Config) error {
 	if c.SystemVolumeBytes < volume.MinVolumeSize || c.RAMBytes < 0 || c.RAMCacheBytes < 0 {
 		return errors.New("invalid storage budget")
 	}
-	if c.Auth.ClusterToken == "" || c.Auth.BootstrapAdmin.Username == "" || c.Auth.BootstrapAdmin.Password == "" {
+	if c.Auth.ClusterToken == "" || !c.JoinPending && (c.Auth.BootstrapAdmin.Username == "" || c.Auth.BootstrapAdmin.Password == "") {
 		return errors.New("existing cluster credentials are missing; refusing to recreate them")
 	}
 	for _, s := range c.AllowSubnets {
@@ -291,6 +306,14 @@ func validateConfig(c Config) error {
 		if e = validateURL(p.URL); e != nil {
 			return e
 		}
+		if p.NodeID != "" {
+			if _, e = parseID(p.NodeID); e != nil || p.NodeID == c.Node.ID {
+				return errors.New("peer identity must be valid and different from this node")
+			}
+		}
+	}
+	if c.JoinPending && len(c.Peers) == 0 && c.PeerDirectoryVersion == 0 {
+		return errors.New("joining node requires at least one known seed")
 	}
 	return nil
 }

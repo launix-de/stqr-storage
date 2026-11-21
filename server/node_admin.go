@@ -59,7 +59,7 @@ func (s *Server) nodeAdmin(m client.Message, ws *wsSession, p principal) ([]byte
 	return result, int(status)
 }
 
-func (s *Server) peerAdmin(m client.Message) ([]byte, error) {
+func (s *Server) peerAdmin(m client.Message, ws *wsSession, peer principal) ([]byte, error) {
 	request, err := client.DecodePeerAdmin(m.Body)
 	if err != nil {
 		return nil, fail(400, "invalid peer administration request")
@@ -67,11 +67,63 @@ func (s *Server) peerAdmin(m client.Message) ([]byte, error) {
 	// The trusted peer delegates an identity, never a claimed role. Revalidate
 	// against our system bucket before dispatch; mutations revalidate again under
 	// opMu. Neither passwords nor remote volume configurations are replicated here.
-	user, err := s.findAccount(request.Username)
-	if err != nil || user.ID != request.Actor.String() || user.Role != "ADMIN" || user.Disabled {
-		return nil, fail(403, "delegated administrator is not authorized on target")
+	var actor principal
+	if s.joinPending() {
+		// A pending candidate has no authoritative account replica. Authenticate
+		// this operation against its explicitly configured seed over the same
+		// duplex link. Direct browser/client authentication remains disabled.
+		if ws == nil {
+			return nil, fail(503, "pending-node administration requires the seed link")
+		}
+		s.mu.RLock()
+		trusted := false
+		for _, contact := range s.cfg.Peers {
+			trusted = trusted || contact.NodeID == peer.User.ID
+		}
+		s.mu.RUnlock()
+		if !trusted {
+			return nil, fail(403, "only a configured seed may administer a pending node")
+		}
+		e := client.Encoder{}
+		e.ID(request.Actor)
+		e.Text(request.Username)
+		body, err := ws.requestPeer(ws.ctx, client.PeerVerifyAdmin, e.B)
+		if err != nil {
+			return nil, fail(403, "seed did not authorize the delegated administrator")
+		}
+		d := client.Decoder{B: body}
+		id, name := d.ID(), d.Text()
+		if d.Done() != nil || id != request.Actor || name != request.Username {
+			return nil, fail(403, "invalid delegated administrator proof")
+		}
+		actor = principal{User: account{ID: id.String(), Name: name, Role: "ADMIN"}, connection: &connectionAuthorization{admin: true}}
+	} else {
+		user, err := s.findAccount(request.Username)
+		if err != nil || user.ID != request.Actor.String() || user.Role != "ADMIN" || user.Disabled {
+			return nil, fail(403, "delegated administrator is not authorized on target")
+		}
+		actor = principal{User: user}
 	}
 	inner := client.Message{Kind: client.Request, Opcode: request.Opcode, ID: request.Operation, Body: request.Body}
-	result, _ := s.dispatchAs(inner, nil, principal{User: user})
+	result, _ := s.dispatchAs(inner, nil, actor)
 	return result, nil
+}
+
+func (s *Server) verifyDelegatedAdmin(body []byte) ([]byte, error) {
+	if s.joinPending() {
+		return nil, fail(503, "node has no committed account authority")
+	}
+	d := client.Decoder{B: body}
+	id, name := d.ID(), d.Text()
+	if d.Done() != nil || id == (client.ID{}) {
+		return nil, fail(400, "invalid delegated administrator identity")
+	}
+	user, err := s.findAccount(name)
+	if err != nil || user.ID != id.String() || user.Role != "ADMIN" || user.Disabled {
+		return nil, fail(403, "delegated administrator is not authorized")
+	}
+	e := client.Encoder{}
+	e.ID(id)
+	e.Text(name)
+	return e.B, nil
 }

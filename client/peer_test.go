@@ -55,6 +55,29 @@ func TestNodeHelloAckCodec(t *testing.T) {
 		t.Fatal("member also excluded")
 	}
 }
+
+func TestPendingNodeHelloHasNoCommittedMembership(t *testing.T) {
+	message := NodeHello{Cluster: ID{1}, Node: ID{2}, Boot: ID{3}}
+	b, err := message.MarshalBinary()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := DecodeNodeHello(b); err != nil || got.Membership != 0 {
+		t.Fatal("prejoin identity cannot claim a membership", err)
+	}
+	ack := NodeHelloAck{Membership: Membership{Cluster: ID{1}}}
+	b, err = ack.MarshalBinary()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := DecodeNodeHelloAck(b); err != nil || got.Membership.Epoch != 0 || len(got.Membership.Members) != 0 || got.Generation != 0 {
+		t.Fatal("prejoin ACK claimed membership", err)
+	}
+	ack.Generation = 1
+	if _, err := ack.MarshalBinary(); err == nil {
+		t.Fatal("unknown membership carried an authoritative generation")
+	}
+}
 func FuzzPeerIdentityPayloads(f *testing.F) {
 	b, _ := (NodeHello{Cluster: ID{1}, Node: ID{2}, Boot: ID{3}, Membership: 1}).MarshalBinary()
 	f.Add(b)

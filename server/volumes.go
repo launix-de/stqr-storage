@@ -381,7 +381,13 @@ func (s *Server) configView() map[string]any {
 	defer s.mu.RUnlock()
 	c := copyConfig(s.cfg)
 	restart := c.Node.Listen != s.running.Node.Listen || c.Node.DataDir != s.running.Node.DataDir || c.VolumesDir != s.running.VolumesDir || c.RAMBytes != s.running.RAMBytes || c.RAMCacheBytes != s.running.RAMCacheBytes
-	return map[string]any{"config": c, "config_path": s.configPath, "active_listen": s.running.Node.Listen, "active_volumes_dir": s.volumesDir, "restart_required": restart, "mode": "single-node", "system_bucket_placement": "everywhere"}
+	mode := "single-node"
+	if c.JoinPending {
+		mode = "joining"
+	} else if len(c.Peers) > 0 {
+		mode = "cluster-preparation"
+	}
+	return map[string]any{"config": c, "config_path": s.configPath, "active_listen": s.running.Node.Listen, "active_volumes_dir": s.volumesDir, "restart_required": restart, "mode": mode, "system_bucket_placement": "everywhere"}
 }
 func (s *Server) updateConfig(patch map[string]json.RawMessage) error {
 	s.opMu.Lock()

@@ -5,10 +5,8 @@ import (
 	"context"
 	"encoding/base64"
 	"errors"
-	"fmt"
 	"net/http"
 	"net/url"
-	"strings"
 	"sync"
 	"time"
 
@@ -41,7 +39,7 @@ func (s *Server) nodeHello(m client.Message, ws *wsSession, p principal) ([]byte
 	if hello.Node == client.ID(node) {
 		return nil, fail(409, "duplicate local node identity")
 	}
-	if hello.Membership != 1 {
+	if hello.Membership != 0 && hello.Membership != 1 {
 		return nil, fail(409, "membership epoch does not match current state")
 	}
 	addresses := []string{}
@@ -49,11 +47,20 @@ func (s *Server) nodeHello(m client.Message, ws *wsSession, p principal) ([]byte
 		addresses = append(addresses, advertise)
 	}
 	ack := client.NodeHelloAck{Membership: client.Membership{Epoch: 1, Cluster: client.ID(cluster), Members: []client.Member{{ID: client.ID(node), Addresses: addresses}}}, Generation: generation, MapRevision: generation}
+	if s.joinPending() {
+		ack = client.NodeHelloAck{Membership: client.Membership{Cluster: client.ID(cluster)}}
+	}
 	body, err := ack.MarshalBinary()
 	if err != nil {
 		return nil, err
 	}
 	p.connection.peerVerified.Store(true)
+	if len(hello.Addresses) > 0 && !s.joinPending() {
+		if err := s.rememberPeer(hello.Node, hello.Addresses[0]); err != nil {
+			p.connection.peerVerified.Store(false)
+			return nil, err
+		}
+	}
 	return body, nil
 }
 
@@ -81,6 +88,8 @@ type peerConnection struct {
 	Node         client.ID
 	Membership   client.Membership
 	Capabilities uint64
+	incoming     chan client.Message
+	ready        chan struct{}
 }
 
 func (s *Server) dialPeer(ctx context.Context, address string, expected client.ID) (*peerConnection, error) {
@@ -114,17 +123,18 @@ func (s *Server) dialPeer(ctx context.Context, address string, expected client.I
 	}
 	conn.SetReadLimit(client.MaxMessage)
 	lifetime, cancel := context.WithCancel(s.ctx)
-	p := &peerConnection{server: s, conn: conn, ctx: lifetime, cancel: cancel, pending: map[client.ID]peerPending{}, outgoing: make(chan client.Message, sendQueueCapacity), pushes: make(chan client.Message, 64)}
+	p := &peerConnection{server: s, conn: conn, ctx: lifetime, cancel: cancel, pending: map[client.ID]peerPending{}, outgoing: make(chan client.Message, sendQueueCapacity), pushes: make(chan client.Message, 64), incoming: make(chan client.Message, receiveQueueCapacity), ready: make(chan struct{})}
 	s.mu.Lock()
 	if s.closed {
 		s.mu.Unlock()
 		p.close()
 		return nil, errors.New("server is stopping")
 	}
-	s.workers.Add(2)
+	s.workers.Add(3)
 	s.mu.Unlock()
 	go func() { defer s.workers.Done(); p.writeLoop() }()
 	go func() { defer s.workers.Done(); p.readLoop() }()
+	go func() { defer s.workers.Done(); p.requestLoop() }()
 	success := false
 	defer func() {
 		if !success {
@@ -152,7 +162,11 @@ func (s *Server) dialPeer(ctx context.Context, address string, expected client.I
 	if advertise != "" {
 		addresses = append(addresses, advertise)
 	}
-	body, err := (client.NodeHello{Cluster: client.ID(cluster), Node: client.ID(node), Membership: membership, Addresses: addresses, Boot: boot}).MarshalBinary()
+	localMembership := uint64(1)
+	if s.joinPending() {
+		localMembership = 0
+	}
+	body, err := (client.NodeHello{Cluster: client.ID(cluster), Node: client.ID(node), Membership: localMembership, Addresses: addresses, Boot: boot}).MarshalBinary()
 	if err != nil {
 		return nil, err
 	}
@@ -170,12 +184,17 @@ func (s *Server) dialPeer(ctx context.Context, address string, expected client.I
 			present = true
 		}
 	}
-	if !present {
+	if capabilities&client.CapabilityPendingNode != 0 {
+		if ack.Membership.Epoch != 0 || len(ack.Membership.Members) != 0 || ack.Generation != 0 {
+			return nil, fail(409, "pending peer claimed committed membership")
+		}
+	} else if !present {
 		return nil, fail(409, "peer is absent from its own current membership")
 	}
 	p.Node = remoteNode
 	p.Membership = ack.Membership
 	p.Capabilities = capabilities
+	close(p.ready)
 	success = true
 	return p, nil
 }
@@ -262,36 +281,15 @@ func (p *peerConnection) readLoop() {
 			if !ok {
 				continue
 			}
-			if pending.opcode != m.Opcode {
-				pending.result <- peerReply{err: client.ErrProtocol}
+			pending.result <- decodePeerReply(m, pending.opcode)
+		case client.Request, client.FireAndForget:
+			select {
+			case p.incoming <- m:
+			case <-p.ctx.Done():
+				return
+			default:
 				return
 			}
-			d := client.Decoder{B: m.Body}
-			status := d.V()
-			headers := d.Blob()
-			if d.Err != nil {
-				pending.result <- peerReply{err: client.ErrProtocol}
-				return
-			}
-			result := peerReply{body: append([]byte(nil), d.B...)}
-			if status >= 300 {
-				message := "peer request rejected"
-				h := client.Decoder{B: headers}
-				count := h.Count(64)
-				for i := 0; i < count; i++ {
-					tag, data := h.V(), h.Blob()
-					if tag == 3 {
-						detail := client.Decoder{B: data}
-						message = strings.ToValidUTF8(detail.Text(), "?")
-						if detail.Done() != nil {
-							pending.result <- peerReply{err: client.ErrProtocol}
-							return
-						}
-					}
-				}
-				result.err = fail(int(status), fmt.Sprintf("peer status %d: %s", status, message))
-			}
-			pending.result <- result
 		case client.Push:
 			select {
 			case p.pushes <- m:

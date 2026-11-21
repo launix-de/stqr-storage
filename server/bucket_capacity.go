@@ -85,11 +85,13 @@ func (s *Server) bucketQuotaCapacity(id volume.ID, strategy uint8) (bucketQuotaC
 		return bucketQuotaCapacity{}, fail(400, "invalid storage strategy")
 	}
 	var used uint64
+	group := ""
 	if id != (volume.ID{}) {
 		b, e := s.Bucket(id)
 		if e != nil {
 			return bucketQuotaCapacity{}, e
 		}
+		group = b.Describe().Policy.PlacementGroup
 		var err error
 		used, err = b.logicalUsage()
 		if err != nil {
@@ -97,12 +99,11 @@ func (s *Server) bucketQuotaCapacity(id volume.ID, strategy uint8) (bucketQuotaC
 		}
 	}
 	var node quotaNodeCapacity
-	s.mu.RLock()
-	for _, v := range s.volumes {
-		if v.config.System || v.store.State() != volume.Active {
+	for _, store := range s.placementVolumes(group) {
+		if store.State() != volume.Active {
 			continue
 		}
-		stats := v.store.Stats()
+		stats := store.Stats()
 		class := int(stats.Identity.Class)
 		if class > 2 {
 			continue
@@ -110,7 +111,6 @@ func (s *Server) bucketQuotaCapacity(id volume.ID, strategy uint8) (bucketQuotaC
 		node.Free[class] = addCapacity(node.Free[class], addCapacity(stats.AdmissionFreePhysical, stats.GuaranteedRemainingPhysical))
 		node.Reserved[class] = addCapacity(node.Reserved[class], stats.GuaranteedRemainingPhysical)
 	}
-	s.mu.RUnlock()
 	var guarantees [3]uint64
 	for _, d := range s.bucketSnapshots() {
 		if d.ID == id.String() || d.ID == systemBucket.String() || d.DeletionComplete {

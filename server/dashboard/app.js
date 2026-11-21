@@ -62,7 +62,7 @@ function onStats(s){
  entry.previous=entry.snapshot;entry.snapshot=s;entry.received=Date.now();nodeStates.set(s.node,entry);
  if(s.node===localNode()||!snapshot)snapshot=s;
  renderMetrics();renderVolumes();
- $('snapshot-info').textContent=`${nodeStates.size} NODE${nodeStates.size===1?'':'S'} · GEN ${s.generation} · ${new Date(Number(s.captured/1000000n)).toLocaleTimeString('de-DE')}`;
+ $('snapshot-info').textContent=`${nodeStates.size} NODE${nodeStates.size===1?'':'S'} · GEN ${nodeStates.get(localNode())?.snapshot?.generation??s.generation} · ${new Date(Number(s.captured/1000000n)).toLocaleTimeString('de-DE')}`;
  if(!configView||fetchingConfigs.has(s.node))return;
  const ids=new Set(entry.config?.config.volumes.map(v=>v.id)??[]);
  if(!entry.config||s.volumes.length!==ids.size||s.volumes.some(v=>!ids.has(v.id))){fetchingConfigs.add(s.node);refreshConfig(s.node).finally(()=>fetchingConfigs.delete(s.node))}

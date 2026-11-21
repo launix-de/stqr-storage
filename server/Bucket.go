@@ -78,6 +78,7 @@ type BucketPolicy struct {
 	Redundancy       BucketRedundancy       `json:"redundancy"`
 	ReadAcceleration BucketReadAcceleration `json:"read_acceleration"`
 	Limits           BucketLimits           `json:"limits"`
+	PlacementGroup   string                 `json:"placement_group,omitempty"`
 }
 type BucketGrant struct {
 	UserID      string            `json:"user_id"` // canonical 128-bit hex ID, not a username
@@ -154,6 +155,7 @@ func NewBucket(id volume.ID, name string) (*Bucket, error) {
 	if id == systemBucket {
 		d.Policy.PlacementMode = "everywhere"
 		d.Policy.Redundancy = BucketRedundancy{Mode: "replication", ACK: "all"}
+		d.Policy.PlacementGroup = systemPlacementGroup.String()
 	}
 	d, err := normalizeBucketDescription(d)
 	if err != nil {
@@ -184,6 +186,11 @@ func bucketEnum(value string, values ...string) (uint8, bool) {
 func validateBucketPolicy(p BucketPolicy) error {
 	if p.Version == 0 {
 		return ErrBucketInvalid
+	}
+	if p.PlacementGroup != "" {
+		if _, err := bucketID(p.PlacementGroup); err != nil {
+			return ErrBucketInvalid
+		}
 	}
 	if _, ok := bucketEnum(p.StorageStrategy, "hdd", "ssd", "ram"); !ok {
 		return ErrBucketInvalid
@@ -235,6 +242,10 @@ func normalizeBucketDescription(d BucketDescription) (BucketDescription, error) 
 	if err = validateBucketPolicy(d.Policy); err != nil {
 		return d, err
 	}
+	if d.Policy.PlacementGroup != "" {
+		group, _ := bucketID(d.Policy.PlacementGroup)
+		d.Policy.PlacementGroup = group.String()
+	}
 	if d.DeletionComplete && (d.State != BucketDeleting || id == systemBucket) {
 		return d, ErrBucketInvalid
 	}
@@ -255,6 +266,10 @@ func normalizeBucketDescription(d BucketDescription) (BucketDescription, error) 
 		if err = validateBucketPolicy(*d.DesiredPolicy); err != nil || d.DesiredPolicy.Version <= d.Policy.Version {
 			return d, ErrBucketInvalid
 		}
+		if d.DesiredPolicy.PlacementGroup != "" {
+			group, _ := bucketID(d.DesiredPolicy.PlacementGroup)
+			d.DesiredPolicy.PlacementGroup = group.String()
+		}
 	}
 	sort.Slice(d.Grants, func(i, j int) bool { return d.Grants[i].UserID < d.Grants[j].UserID })
 	for i, g := range d.Grants {
@@ -264,7 +279,7 @@ func normalizeBucketDescription(d BucketDescription) (BucketDescription, error) 
 	}
 	if id == systemBucket {
 		validSystem := func(p BucketPolicy) bool {
-			return p.StorageStrategy == "hdd" && p.Compression == "raw" && p.PlacementMode == "everywhere" && p.Redundancy.Mode == "replication" && !p.ReadAcceleration.Enabled && p.Limits.Unlimited && p.Limits.Guaranteed == 0
+			return p.StorageStrategy == "hdd" && p.Compression == "raw" && p.PlacementMode == "everywhere" && p.Redundancy.Mode == "replication" && !p.ReadAcceleration.Enabled && p.Limits.Unlimited && p.Limits.Guaranteed == 0 && (p.PlacementGroup == "" || p.PlacementGroup == systemPlacementGroup.String())
 		}
 		if d.Name != "system" || d.State != BucketActive || len(d.Grants) != 0 || !validSystem(d.Policy) || (d.DesiredPolicy != nil && !validSystem(*d.DesiredPolicy)) {
 			return d, ErrBucketInvalid

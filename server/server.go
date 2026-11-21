@@ -57,6 +57,9 @@ type Server struct {
 	retiredIO              client.IOStats
 	peerStatsMu            sync.RWMutex
 	peerStats              map[client.ID]*peerObservation
+	peerManagers           map[string]bool
+	directory              atomic.Pointer[peerDirectoryImage]
+	placementGroups        atomic.Pointer[placementGroupImage]
 }
 
 func Open(opts Options) (s *Server, err error) {
@@ -201,10 +204,31 @@ func Open(opts Options) (s *Server, err error) {
 		s.volumes[id] = &managedVolume{config: vc, store: v}
 		s.cfg.Volumes = append(s.cfg.Volumes, vc)
 	}
-	if e = s.initAccounts(newSystem); e != nil {
+	if e = s.bootstrapPlacementGroups(); e != nil {
+		return s, e
+	}
+	if c.JoinPending {
+		// No second bootstrap administrator and no stale local account authority.
+		// The pending node accepts peer traffic and delegated local-volume admin
+		// only; ordinary authentication waits for committed system bootstrap.
+		var users accountsImage
+		e = s.readBlob("accounts", &users)
+		if errors.Is(e, volume.ErrNotFound) && newSystem && s.system.Stats().Objects == 0 {
+			e = s.writeBlob("accounts", accountsImage{Schema: 1, Users: []account{}})
+		}
+	} else {
+		e = s.initAccounts(newSystem)
+	}
+	if e != nil {
+		return s, e
+	}
+	if e = s.initPlacementGroups(); e != nil {
 		return s, e
 	}
 	if e = s.initBuckets(); e != nil {
+		return s, e
+	}
+	if e = s.initPeerDirectory(); e != nil {
 		return s, e
 	}
 	if e = s.recoverOperations(); e != nil {
@@ -223,7 +247,7 @@ func Open(opts Options) (s *Server, err error) {
 			s.startBucketCleanup(id)
 		}
 	}
-	for _, v := range s.cfg.Volumes {
+	for _, v := range s.running.Volumes {
 		if v.State == "draining" {
 			id := v.OperationID
 			if id == "" {
@@ -231,6 +255,14 @@ func Open(opts Options) (s *Server, err error) {
 			}
 			s.startDrain(id, v.ID)
 		}
+	}
+	s.startKnownPeers()
+	if hint := opts.values["connect"]; hint != "" {
+		// An explicit helper is attempted once as a contact source. Only verified
+		// discovered identities enter the durable directory; this is not a primary.
+		s.mu.Lock()
+		s.startPeerContactsLocked([]PeerConfig{{URL: hint}})
+		s.mu.Unlock()
 	}
 	return s, nil
 }

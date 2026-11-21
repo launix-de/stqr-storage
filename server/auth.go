@@ -36,7 +36,11 @@ type accountsImage struct {
 }
 
 func (s *Server) readBlob(name string, dst any) error {
-	h, e := s.system.Open(false)
+	store, e := s.metadataStore()
+	if e != nil {
+		return e
+	}
+	h, e := store.Open(false)
 	if e != nil {
 		return e
 	}
@@ -57,8 +61,12 @@ func (s *Server) writeBlob(name string, value any) error {
 	}
 	s.systemMu.Lock()
 	defer s.systemMu.Unlock()
+	store, e := s.metadataStore()
+	if e != nil {
+		return e
+	}
 	for {
-		h, e := s.system.Open(true)
+		h, e := store.Open(true)
 		if e != nil {
 			return e
 		}
@@ -67,18 +75,18 @@ func (s *Server) writeBlob(name string, value any) error {
 		if !errors.Is(e, volume.ErrFull) || errors.Is(e, volume.ErrRecovery) {
 			return e
 		}
-		current := s.system.Size()
+		current := store.Size()
 		if current > uint64(^uint64(0)>>1)/2 {
 			return volume.ErrFull
 		}
-		if e = s.system.Grow(int64(current * 2)); e != nil {
+		if e = store.Grow(int64(current * 2)); e != nil {
 			return e
 		}
 		s.mu.Lock()
 		c := copyConfig(s.cfg)
 		for i := range c.Volumes {
-			if c.Volumes[i].System {
-				c.Volumes[i].SizeBytes = int64(s.system.Size())
+			if c.Volumes[i].ID == store.Identity().VolumeID.String() {
+				c.Volumes[i].SizeBytes = int64(store.Size())
 				if m := s.volumes[c.Volumes[i].ID]; m != nil {
 					m.config.SizeBytes = c.Volumes[i].SizeBytes
 				}
@@ -157,6 +165,9 @@ func (s *Server) authenticate(r *http.Request) (principal, error) {
 			}
 			return principal{User: account{ID: id.String(), Name: name, Role: "NODE"}, ClusterPeer: true}, nil
 		}
+		if s.joinPending() {
+			return principal{}, fail(503, "node is waiting for committed cluster admission")
+		}
 		u, e := s.findAccount(name)
 		if e != nil || bcrypt.CompareHashAndPassword([]byte(u.PasswordHash), []byte(password)) != nil {
 			return principal{}, errors.New("invalid credentials")
@@ -165,6 +176,9 @@ func (s *Server) authenticate(r *http.Request) (principal, error) {
 			return principal{}, errors.New("invalid account role")
 		}
 		return principal{User: u}, nil
+	}
+	if s.joinPending() {
+		return principal{}, fail(503, "node is waiting for committed cluster admission")
 	}
 	c, e := r.Cookie("stqr_session")
 	if e != nil {

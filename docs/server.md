@@ -324,13 +324,50 @@ persistent decision, process-crash and multi-host stress tests remain necessary
 before choosing and accepting the coordinator algorithm. Join, CURRENT/NEXT,
 range routing, ownership fencing and ALL replication remain unimplemented.
 
+## Placement groups
+
+`PlacementGroup.go` implements immutable compiled effective masks, stable IDs,
+all/blacklist/whitelist filters, default-all semantics and independent desired
+masks. Unknown group/node and empty whitelist fail closed. Offline identities are
+kept without probing device availability; a newly attached volume is implicitly
+eligible for all/blacklist, and needs explicit inclusion for whitelist. Bucket
+object selection and quota preview use the same effective mask. Changing an
+ordinary native policy preserves its existing PG reference.
+
+The system bucket stores a reference to its metadata PG and retains EVERYWHERE.
+Each node's metadata volume is selected by the PG whitelist through the same
+resolver as any other bucket. Internal account/peer/PG objects and catalog opening
+use that resolver, with one committed local metadata store in the current engine.
+The exclusively claimed root volume is a bootstrap anchor for loading the PG
+object itself, rather than an unconditional bucket-ID/physical-volume override.
+Existing system descriptions are migrated once without replacing user accounts
+or payloads. Missing/corrupt established PG metadata is an error, never a reset.
+
+PG editing in the dashboard and cross-node desired/effective PG commits still
+need the durable control/rebuild implementation. These filters do not claim
+that global PG replication, migration or membership is complete.
+
 ## Multinode acceptance gate
 
-The telemetry and remote-volume path is now exercised with two isolated native
-WebSocket servers and a real browser. The test explicitly installs a common
-account image and attaches the peer observer; **automatic JOIN and system-bucket
-replication are not exercised or implemented by this fixture**. The regular
-daemon still rejects configured peers rather than bootstrapping a second cluster.
+The regular daemon now connects/reconnects configured/discovered authenticated
+contacts. `--connect` is only an initial helper; the `peers` system object is the
+authority for discovered addresses and the YAML peer list is a derived cache.
+Peers broadcast their directories after connecting and relay set-union updates;
+this never admits members, changes ownership or revives excluded membership.
+`TestPeerDirectoryReconnectsWithoutOriginalInitiator` stops three nodes, erases
+the returning nodes' YAML peer caches, and reconnects two nodes while the old
+initiator remains stopped. This proves discovery/telemetry recovery, not complete
+storage availability or committed membership recovery.
+
+A prepared candidate has `join_pending: true`, no new bootstrap administrator and
+no normal browser/client authentication. HELLO advertises the PendingNode bit;
+NODE_HELLO_ACK has epoch/generation/revision zero and no invented singleton
+membership. Its statistics likewise report no committed placement. It is visible
+as JOINING and may prepare
+local volumes through an authenticated active peer. The candidate verifies the
+actor against that peer's live account authority over the reverse direction of
+the same socket (0x1037); it does not use copied/stale accounts. Durable membership,
+EVERYWHERE account/policy replication and activation still remain to implement.
 
 `startPeerObservation` subscribes to LOCAL stats every three seconds, validates
 fragments/digest/source/boot/sequence and relays only complete snapshots to CLUSTER
@@ -343,8 +380,8 @@ each node's own deltas; old samples are visibly stale, never membership removals
 
 `NODE_ADMIN_REQUEST` (0x2024) targets a node ID using the original opcode/body and
 operation ID. `PEER_ADMIN_REQUEST` (0x1036) delegates the actor identity on the
-authenticated peer link. The target looks up the current admin account and owns
-its local config and retry receipts. Proxy recursion and bucket/user/object
+authenticated peer link. An active target looks up the current admin account; a pending candidate verifies
+it with the referring active peer. The target owns its local config and retry receipts. Proxy recursion and bucket/user/object
 commands are rejected. The browser tree has add/grow/drain controls for each
 node; drain still uses the local evacuation implementation until the rebuild
 controller replaces it with committed cross-node placement.
@@ -358,6 +395,8 @@ Checks implemented for this path:
 - Opt-in Chrome dashboard check: two node rows, add a file on the remote node,
   grow it there, and assert the source did not acquire that volume
   (`TestDashboardPeerVolumesBrowser`, `STQR_TEST_BROWSER_MODULE` selects Playwright).
+  This test now uses ordinary configuration/advertisement and automatic discovery;
+  it neither manually dials/attaches observers nor copies account images.
 
 These checks do not establish extension, crash-safe rebuild or cluster SHORT.
 

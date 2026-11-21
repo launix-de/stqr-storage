@@ -7,6 +7,7 @@ import "net/url"
 // coordinator binding, placement, replication or authority over remote objects.
 const CapabilityPeerTransport uint64 = 1
 const CapabilityNodeAdmin uint64 = 2
+const CapabilityPendingNode uint64 = 4
 const NodeHelloMessage uint16 = 0x1000
 
 type NodeHello struct {
@@ -59,7 +60,7 @@ func readAddresses(d *Decoder) []string {
 	return addresses
 }
 func (m NodeHello) MarshalBinary() ([]byte, error) {
-	if m.Cluster == (ID{}) || m.Node == (ID{}) || m.Boot == (ID{}) || m.Membership == 0 || len(m.Addresses) > 64 {
+	if m.Cluster == (ID{}) || m.Node == (ID{}) || m.Boot == (ID{}) || len(m.Addresses) > 64 {
 		return nil, ErrProtocol
 	}
 	e := Encoder{}
@@ -83,14 +84,14 @@ func DecodeNodeHello(body []byte) (NodeHello, error) {
 	m := NodeHello{Cluster: d.ID(), Node: d.ID(), Membership: d.U64()}
 	m.Addresses = readAddresses(&d)
 	m.Boot = d.ID()
-	if d.Done() != nil || m.Cluster == (ID{}) || m.Node == (ID{}) || m.Boot == (ID{}) || m.Membership == 0 {
+	if d.Done() != nil || m.Cluster == (ID{}) || m.Node == (ID{}) || m.Boot == (ID{}) {
 		return NodeHello{}, ErrProtocol
 	}
 	return m, nil
 }
 func (m NodeHelloAck) MarshalBinary() ([]byte, error) {
 	membership := m.Membership
-	if membership.Epoch == 0 || membership.Cluster == (ID{}) || len(membership.Members) == 0 || len(membership.Members) > 10000 || len(membership.Excluded) > 10000 || m.Generation == 0 {
+	if !m.validMembership() || len(membership.Members) > 10000 || len(membership.Excluded) > 10000 {
 		return nil, ErrProtocol
 	}
 	e := Encoder{}
@@ -176,8 +177,20 @@ func DecodeNodeHelloAck(body []byte) (NodeHelloAck, error) {
 	m.ControlSequence = d.U64()
 	m.Generation = d.U64()
 	m.MapRevision = d.U64()
-	if d.Done() != nil || membership.Epoch == 0 || membership.Cluster == (ID{}) || len(membership.Members) == 0 || m.Generation == 0 {
+	if d.Done() != nil || !m.validMembership() {
 		return m, ErrProtocol
 	}
 	return m, nil
+}
+
+func (m NodeHelloAck) validMembership() bool {
+	if m.Membership.Cluster == (ID{}) {
+		return false
+	}
+	if m.Membership.Epoch == 0 {
+		// Explicitly no committed membership/placement, used only with the
+		// PendingNode capability. It cannot claim an active singleton cluster.
+		return len(m.Membership.Members) == 0 && len(m.Membership.Excluded) == 0 && m.ControlSequence == 0 && m.Generation == 0 && m.MapRevision == 0
+	}
+	return len(m.Membership.Members) > 0 && m.Generation > 0
 }

@@ -21,6 +21,20 @@ func (s *Server) CollectStats(filter client.StatsFilter) client.StatsSnapshot {
 	node, _ := parseID(s.cfg.Node.ID)
 	snap := client.StatsSnapshot{Schema: 1, Node: client.ID(node), BootID: s.boot, Sequence: s.sequence.Add(1), CapturedUnixNS: uint64(time.Now().UnixNano()), WindowNS: uint64(3 * time.Second), MembershipEpoch: 1, Generation: s.cfg.Generation, MapRevision: s.cfg.Generation, Volumes: []client.VolumeStats{}, Buckets: []client.BucketStats{}, Ranges: []client.RangeStats{}}
 	snap.IO = s.retiredIO
+	if s.cfg.JoinPending {
+		snap.NodeState = 4
+		snap.MembershipEpoch, snap.Generation, snap.MapRevision = 0, 0, 0
+		snap.NeedRebuild = true
+		snap.ReasonBits |= 1 // JOIN; pending until committed membership activation
+	}
+	if groups := s.placementGroups.Load(); groups != nil {
+		for _, group := range groups.object.Groups {
+			if group.Desired != nil {
+				snap.NeedRebuild = true
+				snap.ReasonBits |= 1 << 6 // POLICY; storing desired is not applying it
+			}
+		}
+	}
 	var usage syscall.Rusage
 	if syscall.Getrusage(syscall.RUSAGE_SELF, &usage) == nil {
 		snap.CPUTimeNS = uint64(usage.Utime.Nano() + usage.Stime.Nano())

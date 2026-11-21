@@ -18,7 +18,11 @@ func (s *Server) initBuckets() error {
 	if s.cfg.BucketCatalogVersion > 1 {
 		return fmt.Errorf("unsupported bucket catalog version %d", s.cfg.BucketCatalogVersion)
 	}
-	catalog, err := NewBucketCatalog(s.system)
+	store, err := s.metadataStore()
+	if err != nil {
+		return err
+	}
+	catalog, err := NewBucketCatalog(store)
 	if err != nil {
 		return err
 	}
@@ -36,6 +40,15 @@ func (s *Server) initBuckets() error {
 	s.bucketsByID = make(map[volume.ID]*Bucket)
 	s.bucketsByName = make(map[string]*Bucket)
 	for _, b := range loaded {
+		if b.ID() == systemBucket && b.Describe().Policy.PlacementGroup == "" {
+			d := b.Describe()
+			d.Policy.PlacementGroup = systemPlacementGroup.String()
+			d.Policy.Version++
+			b, err = catalog.Save(d, d.Revision)
+			if err != nil {
+				return fmt.Errorf("migrate system placement-group reference: %w", err)
+			}
+		}
 		s.publishBucket(b.Describe())
 	}
 	catalog.onSave = s.publishBucket

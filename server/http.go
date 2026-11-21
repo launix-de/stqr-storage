@@ -96,6 +96,10 @@ func (s *Server) Handler() http.Handler {
 		}
 		p, e := s.authenticate(r)
 		if e != nil {
+			if statusOf(e) == 503 {
+				httpError(w, 503, e)
+				return
+			}
 			if r.URL.Path != "/api/session" {
 				w.Header().Set("WWW-Authenticate", `Basic realm="STQR", charset="UTF-8"`)
 			}

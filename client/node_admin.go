@@ -5,6 +5,7 @@ package client
 // receipts remain on the target node, and inner operation IDs survive retries.
 const NodeAdminRequest uint16 = 0x2024
 const PeerAdminRequest uint16 = 0x1036
+const PeerVerifyAdmin uint16 = 0x1037
 
 type NodeAdmin struct {
 	Target ID

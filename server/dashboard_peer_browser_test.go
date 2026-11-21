@@ -19,31 +19,14 @@ func TestDashboardPeerVolumesBrowser(t *testing.T) {
 		t.Skip("set STQR_TEST_BROWSER_MODULE to the local Playwright module")
 	}
 	source := testServer(t)
-	target := peerTestNode(t, source.cfg)
-	// This fixture deliberately supplies the shared account image and connected
-	// peer. It does not claim to exercise membership admission or system replication.
-	var accounts accountsImage
-	if err := source.readBlob("accounts", &accounts); err != nil {
-		t.Fatal(err)
-	}
-	if err := target.writeBlob("accounts", accounts); err != nil {
-		t.Fatal(err)
-	}
-	targetHost := httptest.NewServer(target.Handler())
-	defer targetHost.Close()
-	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
-	defer cancel()
-	node, _ := parseID(target.cfg.Node.ID)
-	p, err := source.dialPeer(ctx, targetHost.URL, client.ID(node))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err = source.startPeerObservation(p); err != nil {
-		t.Fatal(err)
-	}
 	host := httptest.NewServer(source.Handler())
 	defer host.Close()
-	input, err := json.Marshal(map[string]string{"url": host.URL, "username": source.cfg.Auth.BootstrapAdmin.Username, "password": source.cfg.Auth.BootstrapAdmin.Password, "target": node.String()})
+	target, _ := openPendingPeer(t, source, host.URL)
+	id, _ := parseID(target.running.Node.ID)
+	awaitPeerObservation(t, source, client.ID(id), func(o *peerObservation) bool { return o.online && o.snapshot != nil })
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+	input, err := json.Marshal(map[string]string{"url": host.URL, "username": source.running.Auth.BootstrapAdmin.Username, "password": source.running.Auth.BootstrapAdmin.Password, "target": id.String()})
 	if err != nil {
 		t.Fatal(err)
 	}

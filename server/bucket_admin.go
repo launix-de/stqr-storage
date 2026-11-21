@@ -218,6 +218,9 @@ func (s *Server) executeBuckets(m client.Message, p principal) ([]byte, int, err
 			b, err = s.Bucket(target)
 			if err == nil {
 				description = b.Describe()
+				// The existing object-client Policy wire schema does not edit PG
+				// references. Preserve the committed mask on ordinary policy changes.
+				policy.PlacementGroup = description.Policy.PlacementGroup
 				if description.DesiredPolicy != nil {
 					return nil, 0, ErrBucketConflict
 				}

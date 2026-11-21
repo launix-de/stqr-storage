@@ -135,7 +135,7 @@ ramcache_bytes: 0
 
 - Die lokale Einstellungsdatei beschreibt vor allem die eigene Node, ihre Volumes und einige bekannte Peers. Fehlt sie, legt der Daemon eine leere Datei an, ergänzt persistente Node-ID/Defaults und speichert nachfolgende lokale Änderungen atomar. Cluster-Token und initiales Admin-Passwort werden beim neuen Cluster automatisch erzeugt und **im Klartext in dieser lokalen Konfiguration** gespeichert; neue Accounts und weitere Admins werden als Passwortverifier im System-Bucket geführt (§5.7). Beim Join wird das vorhandene Cluster-Token in der Config verwendet; es wird kein abweichendes neues Cluster-Secret oder zweiter Bootstrap-Admin angelegt. Keine Credentials in veröffentlichten Maps.
 - `stqr` startet den Daemon. Ohne bestehende Clusteridentität, bekannte Peers oder `--connect http://host:port` entsteht automatisch ein neuer Single-Node-Cluster; ein gesondertes `init` ist nicht nötig.
-- Sind Peers konfiguriert, ist `--connect` gesetzt oder liegt bereits eine persistente Clusteridentität vor, verbindet sich die Node mit diesem Cluster bzw. wartet auf dessen Wiederkehr. Unerreichbare Peers dürfen **keinen versehentlichen neuen Cluster** auslösen.
+- Sind Peers konfiguriert, ist `--connect` gesetzt oder liegt bereits eine persistente Clusteridentität vor, verbindet sich die Node mit diesem Cluster bzw. wartet auf dessen Wiederkehr. Unerreichbare Peers dürfen **keinen versehentlichen neuen Cluster** auslösen. **`--connect` ist nur ein Helfer für die erste Kontaktaufnahme, kein Primary und keine dauerhaft bevorzugte Anlaufstelle.** Der entdeckte Peer-Stand liegt als normales Objekt im System-Bucket und ist beim Wiederanlauf maßgeblich; die lokale Config enthält höchstens einen abgeleiteten Cache bzw. anfängliche Kontaktinformationen. Nach Peer-Connect werden Identität/Adressen an die übrigen Nodes weiterverteilt. Nach komplettem Cluster-Stopp müssen beliebige verfügbare bekannte Nodes den Wiederverbund ermöglichen, auch wenn der ursprüngliche Initiator noch ausgeschaltet ist. Peer-Erkennung allein ändert keine committed Membership und reaktiviert insbesondere keine ausgeschlossene Node.
 - Dashboard/API können Volumes direkt hinzufügen; validieren/formatieren/mounten und Speichern der Konfiguration geschehen im Daemon (§8.2). Ein separates Admin-CLI oder Map-Agent gehört nicht zu v1.
 
 ### 3.2 Bootstrap, Join und Wiederkehr
@@ -355,6 +355,26 @@ bucket:
 
 ---
 
+### 5.8 Placement Groups und Volume-Filter
+
+Eine **Placement Group (PG)** bezeichnet in STQR eine administrativ definierte Platzierungsmaske mit stabiler ID und einer Liste erlaubter Nodes. Pro aufgeführter Node kann die Auswahl ihrer Datenvolumes eingeschränkt werden. Ein Bucket kann eine PG referenzieren oder ohne PG auf allen geeigneten Nodes/Volumes platziert werden. Die Maske bestimmt zulässige Ziele; Speicherklasse, Redundanz, Failure Domains und Kapazitätsgrenzen gelten zusätzlich. Sie verlangt allein keine Kopie auf jeder aufgeführten Node.
+
+Pro Node-Eintrag besitzt der Volume-Filter einen expliziten Modus und eine Liste stabiler Volume-IDs:
+
+| Modus | Zulässige Volumes der aufgeführten Node |
+|---|---|
+| **Alle** (`all`, Standard) | Alle ansonsten geeigneten Datenvolumes; keine Listenfilterung. |
+| **Blacklist** (`blacklist`) | Alle ansonsten geeigneten Datenvolumes außer den aufgeführten Volumes. |
+| **Whitelist** (`whitelist`) | Ausschließlich die aufgeführten, ansonsten geeigneten Datenvolumes. |
+
+Eine leere Blacklist schließt kein Volume aus; eine leere Whitelist erlaubt kein Volume. Neu hinzugefügte Volumes sind bei Alle und Blacklist grundsätzlich zugelassen, bei Whitelist erst nach expliziter Aufnahme. Bei Alle ist die Liste nicht wirksam. Kein Platzmangel oder Offline-Zustand erlaubt ein Ausweichen außerhalb der Maske. Änderungen folgen dem Desired-/Effective- und NEXT-Generationenmodell (§5.3); für Offline-Placement und vorgemerkte Rebuild-Gründe gilt §4.3. Der reservierte System-Bucket behält seine clusterweite EVERYWHERE-Platzierung.
+
+**Systemdaten und Bootstrap:** Auch der System-Bucket referenziert eine PG. Seine EVERYWHERE-Policy bestimmt weiterhin eine Kopie auf jeder erforderlichen Node; die PG wählt dort das konkrete persistente Metadatenvolume per Whitelist stabiler Volume-IDs. Es gibt keine gesonderte Laufzeitregel „Bucket-ID system ⇒ physisches Admin-Volume“. Die lokale Volume-Konfiguration liefert nur den minimalen Bootstrap-Anker zum Lesen der PG- und Systemobjekte. Anschließend gelten die persistierten effektiven Masken. Ein fehlender Node-Eintrag, eine leere Whitelist oder ein widersprüchlicher Bootstrap-/PG-Stand führt zum Anhalten, niemals zum Ausweichen auf ein anderes Volume. Neue Mitglieder benötigen ihren Metadatenvolume-Eintrag vor Aktivierung der Systemkopie. Die clusterweite PG-Aktualisierung folgt denselben Kontroll-/Generationsbarrieren wie andere Platzierungsänderungen.
+
+PG-Beschreibungen werden als normales Systemobjekt mit stabiler Group-ID, Name, Revision sowie `effective:{version,nodes}` und optional `desired:{version,nodes}` geführt. Ein Node-Eintrag enthält `node_id`, `volume_filter` und `volumes`. Die serverseitige Bucket-Policy speichert die optionale `placement_group`-ID. Objektclients benötigen die PG-Maske nicht; ihre bestehenden Objekt-/Policy-Response-Bytes werden dafür nicht still erweitert. Die administrative PG-Editor-/Nachrichtenoberfläche wird gesondert versioniert. Der Volume- und Quota-Auswahlpfad muss dieselbe effektive Maske benutzen.
+
+**Dashboard:** Der Bucket bietet eine PG-Auswahl einschließlich „Keine Einschränkung“. Im PG-Editor erhält jeder Node-Eintrag ein Dropdown **„Alle / Blacklist / Whitelist“**. Nur bei **Blacklist** oder **Whitelist** erscheint die editierbare Volume-Liste mit **Hinzufügen** und **Entfernen**; bei **Alle** ist sie ausgeblendet. Volumes werden mit lesbarer Bezeichnung ausgewählt und über ihre stabile ID gespeichert. Bereits ausgewählte Offline-Volumes bleiben sichtbar und entfernbar; ihre Nichterreichbarkeit ändert den Filter nicht. Dies beschreibt den vorgesehenen PG-Ausbau, nicht bereits implementierte Dashboard-Funktionen.
+
 ## 6. Placement-Map: Binärmodell und Ranges
 
 ### 6.1 Hashraum und Startgrenzen
@@ -547,7 +567,7 @@ Diese Zielfunktion ist ein Planungsmodell, keine zugesagte globale optimale Lös
 ### 7.4 Node-/Volume-Planung
 
 - Globaler Planer wählt **Nodes** für Range-Gruppen, unter Einbezug physischer Volume-Kapazitäten und Reservierungen. `storage_strategy` wählt die Strategie: **HDD darf auf SSD ausweichen, SSD niemals auf HDD**; RAM ist ein eigener flüchtiger Pool, CACHE reserviert für später. Gibt es für SSD keinen geeigneten physischen Platz, folgt 507.
-- Node-interner Volume-Manager wählt das konkrete geeignete Volume aus seinem zugesagten Kontingent. HDD-Fallback auf SSD ist nur zulässig, wenn die physischen Garantiereserven aller Buckets erhalten bleiben; insbesondere dürfen SSD-Zusicherungen nicht durch HDD-Fallback verbraucht werden. Die tatsächliche Klasse wird in Stats/Placement gemeldet.
+- Node-interner Volume-Manager wählt das konkrete geeignete Volume aus seinem zugesagten Kontingent unter Beachtung der PG-Maske und ihres Alle-/Blacklist-/Whitelist-Filters (§5.8). HDD-Fallback auf SSD ist nur zulässig, wenn die physischen Garantiereserven aller Buckets erhalten bleiben; insbesondere dürfen SSD-Zusicherungen nicht durch HDD-Fallback verbraucht werden. Die tatsächliche Klasse wird in Stats/Placement gemeldet.
 - **RAMCACHE** darf nur `READ_CACHE` enthalten, niemals das autoritative Exemplar; autoritative RAM-Buckets verwenden den getrennten RAM-Pool.
 - Ein neuer Node wird nicht automatisch mit bestehenden Daten befüllt: NEXT kann zunächst neue Ranges oder Wachstum zuweisen und echte Migration sparsam planen. Bei gleichmäßig verteilten Objekthashes können bereits belegte Ranges jedoch nicht ohne zusätzliche Indirektion „nur für neue Objekte“ auf neue Nodes geroutet werden.
 
@@ -1197,6 +1217,8 @@ Nur authentifizierte NODE-Rolle, gebunden an Membership-Epoch. In der Tabelle be
 | 0x1034 | RUNTIME_RESET_COMMIT / P | `decision:Decision,certificate:Certificate` |
 | 0x1035 | RUNTIME_RESET_APPLIED / P | `decision:Decision,proof:Proof` |
 | 0x1036 | PEER_ADMIN_REQUEST / Q | `actor:ID,username:Text,operation:ID,opcode:u16,body:Blob` => vollständiger innerer RESPONSE-Body (`status:V,follow_headers:Blob,result`); nur nach NODE_HELLO, Ziel prüft den aktuellen Admin-Account selbst |
+| 0x1037 | PEER_VERIFY_ADMIN / Q | `actor:ID,username:Text` => `actor:ID,username:Text`; Gegenrichtung derselben gebundenen Peer-Verbindung, Abgleich mit aktuellem autoritativem Accountstand, keine Rollenbehauptung und kein Membership-/Commit-Beleg |
+| 0x1038 | PEER_DIRECTORY / F, Q für Diagnose | `cluster:ID,sender:ID,nodes:Vec(NodeAddress)`; nur geprüfte Peer-Identität, Absender-ID muss dem gebundenen Peer entsprechen; persistiert/vereinigt Kontaktinformationen und verteilt Änderungen weiter, keine Membership- oder Placement-Autorität |
 
 ```text
 ControlWire = membership:u64,generation:u64,round:RoundID,coordinator:ID,
@@ -1273,12 +1295,12 @@ insbesondere 201, 202 und Fehler. Das Ziel ermittelt die Rolle aus seinem
 System-Bucket, niemals aus einer mitgesendeten Rollenbehauptung.
 
 HELLO-Capabilities: Bit 0 (`1`) bezeichnet Peer-Identitätsbindung/Telemetrie;
-Bit 1 (`2`) bezeichnet gezielte Node-Administration. Diese Bits behaupten weder
+Bit 1 (`2`) bezeichnet gezielte Node-Administration. Bit 2 (`4`) kennzeichnet einen noch nicht aufgenommenen Beitrittsknoten. Dieser liefert in HELLO und NODE_HELLO_ACK Membership-Epoch/Generation/Map-Revision 0 und eine leere Mitgliederliste; Cluster-ID und Transportidentität bleiben vorhanden. NODE_HELLO darf deshalb für die reine Vorbeitritts-Identitätsbindung membership=0 tragen. Das bestätigt keine Aufnahme oder Objekt-Autorität. Diese Bits behaupten weder
 Membership-Aufnahme noch funktionierendes Rebuild/Placement. Die spätere
 Membership-Steuerung muss die Peer-Verbindung vor Freigabe dieser Abläufe
 an den committed Kontrollstand binden.
 
-Der erste Single-Node-Dashboard-Stand verwendet bereits diese Nachrichten, VOLUME_ADD/REMOVE und STATS_SUBSCRIBE/SNAPSHOT/UNSUBSCRIBE über binäre `stqr.v1`-WebSockets. Quelle bei VOLUME_ADD: `0 FILE,1 BLOCKDEVICE,2 RAM`. Empfang, Dispatch und Senden haben getrennte begrenzte Queues; Antworten werden korreliert, Telemetrie darf nur als vollständiger neuer Snapshot einen älteren ersetzen. Der CLI-Einstieg sammelt `--config`, `--port`, `--listen`, `--connect`, `--name`, `--advertise`, `--data-dir`, `--volumes-dir`, `--ram-bytes`, `--ramcache-bytes`, `--system-volume-bytes` und `--allow-subnet`. Standardport 7419, Standardzugriff nur IPv4-/IPv6-Loopback, erweiterbar auf explizite CIDRs. Listener/Verzeichnisse/RAM-Budget benötigen nach Config-Änderung einen Neustart; Name/Advertise/Subnetze gelten unmittelbar. Konfigurierte Peers oder `--connect` erhalten bis zur Join-Implementierung einen ausdrücklichen Nicht-implementiert-Fehler statt eines neu erzeugten Clusters.
+Der erste Single-Node-Dashboard-Stand verwendet bereits diese Nachrichten, VOLUME_ADD/REMOVE und STATS_SUBSCRIBE/SNAPSHOT/UNSUBSCRIBE über binäre `stqr.v1`-WebSockets. Quelle bei VOLUME_ADD: `0 FILE,1 BLOCKDEVICE,2 RAM`. Empfang, Dispatch und Senden haben getrennte begrenzte Queues; Antworten werden korreliert, Telemetrie darf nur als vollständiger neuer Snapshot einen älteren ersetzen. Der CLI-Einstieg sammelt `--config`, `--port`, `--listen`, `--connect`, `--name`, `--advertise`, `--data-dir`, `--volumes-dir`, `--ram-bytes`, `--ramcache-bytes`, `--system-volume-bytes` und `--allow-subnet`. Standardport 7419, Standardzugriff nur IPv4-/IPv6-Loopback, erweiterbar auf explizite CIDRs. Listener/Verzeichnisse/RAM-Budget benötigen nach Config-Änderung einen Neustart; Name/Advertise/Subnetze gelten unmittelbar. Bekannte authentifizierte Kontakte verbinden sich automatisch und tauschen Statistik-Pushes sowie das persistente Peer-Verzeichnis aus. Ein neuer vorbereiteter Beitrittsknoten bleibt als JOINING sichtbar und für normale Authentifizierung/Objektzugriffe gesperrt, bis Systemkopie und Membership committed aktiviert sind. Die automatische Kontaktaufnahme allein ist kein fertiger Storage-Join; fehlende Clusteridentität/-Credentials erzeugen keinen neuen Ersatzcluster.
 
 
 ```text

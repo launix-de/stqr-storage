@@ -7,7 +7,6 @@ import (
 	"errors"
 	"io"
 	"math"
-	"sort"
 
 	"github.com/launix-de/stqr-storage/volume"
 )
@@ -61,21 +60,11 @@ func (b *Bucket) authorize(p principal, permission BucketPermissions) (BucketDes
 	return d, nil
 }
 func (b *Bucket) allVolumes() []*volume.Volume {
-	s := b.server
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	var out []*volume.Volume
-	for _, v := range s.volumes {
-		if !v.config.System {
-			out = append(out, v.store)
-		}
-	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Identity().VolumeID.String() < out[j].Identity().VolumeID.String() })
-	return out
+	return b.server.placementVolumes(b.storageDescription().Policy.PlacementGroup)
 }
 func (b *Bucket) localVolumes() []*volume.Volume { return b.volumesFor(b.Describe()) }
 func (b *Bucket) volumesFor(d BucketDescription) []*volume.Volume {
-	all := b.allVolumes()
+	all := b.server.placementVolumes(d.Policy.PlacementGroup)
 	if len(d.LocalVolumes) == 0 {
 		return all
 	}

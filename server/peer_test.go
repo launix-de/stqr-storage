@@ -29,6 +29,8 @@ func peerTestNode(t *testing.T, base Config) *Server {
 	c.Peers = nil
 	c.VolumesDir = "volumes"
 	c.BucketCatalogVersion = 0
+	c.PeerDirectoryVersion = 0
+	c.PlacementGroupsVersion = 0
 	path := filepath.Join(t.TempDir(), "node.yaml")
 	if e := saveConfig(path, c); e != nil {
 		t.Fatal(e)

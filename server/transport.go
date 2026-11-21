@@ -41,6 +41,8 @@ type wsSession struct {
 	subMu          sync.Mutex
 	subscription   client.ID
 	filter         client.StatsFilter
+	peerMu         sync.Mutex
+	peerPending    map[client.ID]peerPending
 }
 
 func (ws *wsSession) close() {
@@ -132,7 +134,13 @@ func (s *Server) serveWebSocket(w http.ResponseWriter, r *http.Request, p princi
 			return
 		}
 		m, e := client.DecodeMessage(b)
-		if e != nil || m.Kind != client.Request && m.Kind != client.FireAndForget {
+		if e != nil {
+			return
+		}
+		if m.Kind == client.Response && ws.receivePeerReply(m) {
+			continue
+		}
+		if m.Kind != client.Request && m.Kind != client.FireAndForget {
 			return
 		}
 		if m.Opcode >= 0x0100 && m.Opcode <= 0x0108 || m.Opcode == client.BucketMaintenance || m.Opcode == client.BucketScan {
