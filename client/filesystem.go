@@ -21,16 +21,19 @@ type FilesystemStore interface {
 var _ FilesystemStore = (*Client)(nil)
 
 // Filesystem is a bucket-local filesystem with a fixed root inode. It has no
-// global writer lock: each mutation publishes through the target inode's CAS.
-// Data/index objects are immutable. Orphans (including unlinked open inodes) are
-// retained until a future reachability collector; no unsafe eager GC is performed.
+// global writer lock: inode writes use CAS, namespace transactions use durable
+// per-inode intents. Data/index objects are immutable. Unlinked inodes, old
+// segments and completed intents are retained until offline fsck collection.
 type Filesystem struct {
 	store                FilesystemStore
 	directoryMemoryLimit uint64
+	readOnly             bool
+	lower                *Filesystem
 }
 type FSOptions struct {
 	Create         bool
 	Mode, UID, GID uint32
+	ReadOnly       bool
 	// DirectoryMemoryLimit bounds materialized directory content. Zero selects
 	// 64 MiB. Storage remains segmented; larger directories need a future
 	// incremental directory editor or an explicitly increased memory budget.
@@ -47,7 +50,13 @@ func OpenFilesystem(ctx context.Context, store FilesystemStore, opt FSOptions) (
 	if limit == 0 {
 		limit = 64 << 20
 	}
-	f := &Filesystem{store: store, directoryMemoryLimit: limit}
+	if opt.Create && opt.ReadOnly {
+		return nil, syscall.EROFS
+	}
+	f := &Filesystem{store: store, directoryMemoryLimit: limit, readOnly: opt.ReadOnly}
+	if raw, _, err := store.Get(ctx, FilesystemRootID()); err == nil && len(raw) >= 4 && string(raw[:4]) == "STOR" {
+		return nil, ErrOverlayNeedsLower
+	}
 	_, _, err := f.load(ctx, FilesystemRootID())
 	if errors.Is(err, ErrNotFound) && opt.Create {
 		mode := opt.Mode
@@ -73,30 +82,36 @@ func OpenFilesystem(ctx context.Context, store FilesystemStore, opt FSOptions) (
 	return f, nil
 }
 func (f *Filesystem) load(ctx context.Context, id ObjectID) (fsNode, ObjectInfo, error) {
-	data, info, err := f.store.Get(ctx, id)
-	if err != nil {
-		return fsNode{}, info, err
+	if f.readOnly {
+		return f.readLockedSnapshot(ctx, id)
 	}
-	n, err := decodeFSNode(data)
-	return n, info, err
+	s, err := f.snapshot(ctx, id)
+	if errors.Is(err, ErrUnauthorized) {
+		return f.readLockedSnapshot(ctx, id)
+	}
+	return s.node, s.info, err
 }
 func fsInfo(id ObjectID, n fsNode, info ObjectInfo) FSInfo {
-	return FSInfo{ID: id, Version: info.Version, Size: n.blob.length, Mode: n.mode, UID: n.uid, GID: n.gid, MtimeNS: n.mtime, Directory: n.kind == fsDirectory}
+	return FSInfo{ID: id, Version: info.Version, Size: n.blob.length, Mode: n.mode, UID: n.uid, GID: n.gid, MtimeNS: n.mtime, AtimeNS: n.atime, CtimeNS: n.ctime, Directory: n.kind == fsDirectory, Removed: n.removed}
 }
 func (f *Filesystem) Stat(ctx context.Context, id ObjectID) (FSInfo, error) {
 	n, i, err := f.load(ctx, id)
 	return fsInfo(id, n, i), err
 }
 func (f *Filesystem) mutate(ctx context.Context, id ObjectID, fn func(*fsNode) error) (FSInfo, error) {
+	if f.readOnly {
+		return FSInfo{}, syscall.EROFS
+	}
 	for attempt := 0; attempt < 64; attempt++ {
 		if err := ctx.Err(); err != nil {
 			return FSInfo{}, err
 		}
-		n, i, err := f.load(ctx, id)
+		s, err := f.snapshot(ctx, id)
 		if err != nil {
 			return FSInfo{}, err
 		}
-		n.mtime = uint64(time.Now().UnixNano())
+		n, i := s.node, s.info
+		n.ctime = uint64(time.Now().UnixNano())
 		if err = fn(&n); err != nil {
 			return FSInfo{}, err
 		}
@@ -111,6 +126,9 @@ func (f *Filesystem) mutate(ctx context.Context, id ObjectID, fn func(*fsNode) e
 func (f *Filesystem) directory(ctx context.Context, n fsNode) ([]FSEntry, error) {
 	if n.kind != fsDirectory {
 		return nil, syscall.ENOTDIR
+	}
+	if n.removed {
+		return nil, syscall.ENOENT
 	}
 	// This prototype materializes directory entries for CAS editing; their storage
 	// is segmented, but directory edit RAM still scales with the entry count.
@@ -151,7 +169,11 @@ func (f *Filesystem) Lookup(ctx context.Context, parent ObjectID, name string) (
 	if i < 0 {
 		return FSInfo{}, syscall.ENOENT
 	}
-	return f.Stat(ctx, entries[i].ID)
+	info, err := f.Stat(ctx, entries[i].ID)
+	if err == nil && info.Removed {
+		err = syscall.ENOENT
+	}
+	return info, err
 }
 func (f *Filesystem) editDirectory(ctx context.Context, id ObjectID, fn func([]FSEntry) ([]FSEntry, error)) error {
 	_, err := f.mutate(ctx, id, func(n *fsNode) error {
@@ -171,6 +193,7 @@ func (f *Filesystem) editDirectory(ctx context.Context, id ObjectID, fn func([]F
 			return syscall.ENOMEM
 		}
 		n.blob, err = f.blobFromBytes(ctx, data)
+		n.mtime = n.ctime
 		return err
 	})
 	return err
@@ -179,6 +202,9 @@ func (f *Filesystem) editDirectory(ctx context.Context, id ObjectID, fn func([]F
 // Create makes a regular file or directory. It publishes the initialized inode
 // through a parent CAS; failed publication can leave an unreachable object.
 func (f *Filesystem) Create(ctx context.Context, parent ObjectID, name string, mode, uid, gid uint32, directory bool) (FSInfo, error) {
+	if f.readOnly {
+		return FSInfo{}, syscall.EROFS
+	}
 	if !validFSName(name) {
 		return FSInfo{}, syscall.EINVAL
 	}
@@ -231,6 +257,7 @@ func (f *Filesystem) writeNode(ctx context.Context, n *fsNode, data []byte, star
 	if len(data) == 0 {
 		return nil
 	}
+	n.mtime = n.ctime
 	end := start + uint64(len(data))
 	length := max(n.blob.length, end)
 	if length <= fsInlineSize {
@@ -291,6 +318,7 @@ func (f *Filesystem) resize(ctx context.Context, n *fsNode, length uint64) error
 	if length == n.blob.length {
 		return nil
 	}
+	n.mtime = n.ctime
 	if length <= fsInlineSize {
 		inline := make([]byte, int(length))
 		count := min(length, n.blob.length)
@@ -322,6 +350,7 @@ type FSAttributes struct {
 	Size           *uint64
 	Mode, UID, GID *uint32
 	MtimeNS        *uint64
+	AtimeNS        *uint64
 }
 
 func (f *Filesystem) SetAttributes(ctx context.Context, id ObjectID, a FSAttributes) (FSInfo, error) {
@@ -343,14 +372,19 @@ func (f *Filesystem) SetAttributes(ctx context.Context, id ObjectID, a FSAttribu
 		if a.MtimeNS != nil {
 			n.mtime = *a.MtimeNS
 		}
+		if a.AtimeNS != nil {
+			n.atime = *a.AtimeNS
+		}
 		return nil
 	})
 }
 
 // Unlink removes a file name while retaining its inode for existing handles.
-// Rmdir and cross-directory rename require an intent protocol and are not yet
-// exposed: an emptiness check followed by a parent CAS would race another mount.
+// Removed files remain readable through open handles until offline collection.
 func (f *Filesystem) Unlink(ctx context.Context, parent ObjectID, name string) error {
+	if f.readOnly {
+		return syscall.EROFS
+	}
 	if !validFSName(name) {
 		return syscall.EINVAL
 	}
@@ -370,29 +404,9 @@ func (f *Filesystem) Unlink(ctx context.Context, parent ObjectID, name string) e
 	})
 }
 
-// Rename currently supports a same-directory rename to an unused name. Other
-// cases return explicit errors until replacement/intent semantics are defined.
+// Rename atomically moves a name, replacing a compatible destination if present.
 func (f *Filesystem) Rename(ctx context.Context, parent ObjectID, name string, newParent ObjectID, newName string) error {
-	if !validFSName(name) || !validFSName(newName) {
-		return syscall.EINVAL
-	}
-	if parent != newParent {
-		return syscall.EXDEV
-	}
-	return f.editDirectory(ctx, parent, func(entries []FSEntry) ([]FSEntry, error) {
-		i := findFSEntry(entries, name)
-		if i < 0 {
-			return nil, syscall.ENOENT
-		}
-		if name == newName {
-			return entries, nil
-		}
-		if findFSEntry(entries, newName) >= 0 {
-			return nil, syscall.EEXIST
-		}
-		entries[i].Name = newName
-		return entries, nil
-	})
+	return f.RenameWithFlags(ctx, parent, name, newParent, newName, 0)
 }
 
 // Sync performs no additional flush: no dirty data is buffered by this frontend.
@@ -400,4 +414,11 @@ func (f *Filesystem) Rename(ctx context.Context, parent ObjectID, name string, n
 func (f *Filesystem) Sync(ctx context.Context, id ObjectID) error {
 	_, err := f.Stat(ctx, id)
 	return err
+}
+
+func (f *Filesystem) CheckWrite(ctx context.Context, id ObjectID) error {
+	if f.readOnly {
+		return syscall.EROFS
+	}
+	return ctx.Err()
 }

@@ -1,0 +1,616 @@
+// SPDX-License-Identifier: GPL-3.0-only
+package client
+
+import (
+	"context"
+	"errors"
+	"io"
+	"sort"
+	"strings"
+	"sync"
+	"syscall"
+	"time"
+)
+
+type OverlayOptions struct {
+	Create        bool
+	LowerBucketID BucketID
+	// nil adopts an existing upper's policy. Directory rules end in '/'.
+	Whitelist []string
+}
+type OverlayFilesystem struct {
+	upper, lower *Filesystem
+	lowerID      BucketID
+	mu           sync.Mutex
+	cacheVersion uint64
+	paths        map[ObjectID]string
+}
+
+var errOverlayUnchanged = errors.New("overlay unchanged")
+
+func OpenOverlayFilesystem(ctx context.Context, lowerStore, upperStore FilesystemStore, opt OverlayOptions) (*OverlayFilesystem, error) {
+	if lowerStore == nil || upperStore == nil || opt.LowerBucketID == (BucketID{}) {
+		return nil, syscall.EINVAL
+	}
+	if c, ok := lowerStore.(*Client); ok && (c == nil || c.bucket != opt.LowerBucketID) {
+		return nil, syscall.EINVAL
+	}
+	if c, ok := upperStore.(*Client); ok && (c == nil || c.bucket == opt.LowerBucketID) {
+		return nil, syscall.EINVAL
+	}
+	lower, err := OpenFilesystem(ctx, lowerStore, FSOptions{ReadOnly: true})
+	if err != nil {
+		return nil, err
+	}
+	policy, err := canonicalWhitelist(opt.Whitelist)
+	if err != nil {
+		return nil, err
+	}
+	// Existing lower directories also accept the convenient "foldername"
+	// spelling. A trailing slash explicitly declares a directory not yet there.
+	for i, p := range policy {
+		if strings.HasSuffix(p, "/") {
+			continue
+		}
+		id := FilesystemRootID()
+		var info FSInfo
+		for _, name := range strings.Split(p, "/") {
+			info, err = lower.Lookup(ctx, id, name)
+			if err != nil {
+				break
+			}
+			id = info.ID
+		}
+		if err == nil && info.Directory {
+			policy[i] = p + "/"
+		} else if err != nil && !errors.Is(err, syscall.ENOENT) && !errors.Is(err, ErrNotFound) {
+			return nil, err
+		}
+	}
+	policy, err = canonicalWhitelist(policy)
+	if err != nil {
+		return nil, err
+	}
+	o := &OverlayFilesystem{lower: lower, lowerID: opt.LowerBucketID, paths: map[ObjectID]string{}}
+	o.upper = &Filesystem{store: upperStore, lower: lower, directoryMemoryLimit: 64 << 20}
+	_, _, _, err = o.state(ctx)
+	if errors.Is(err, ErrNotFound) && opt.Create {
+		n, _, e := lower.load(ctx, FilesystemRootID())
+		if e != nil {
+			return nil, e
+		}
+		n.blob = fsBlob{}
+		n.removed = false
+		s := &overlayState{policy: policy, dirs: map[ObjectID]*overlayDirectory{FilesystemRootID(): {lower: FilesystemRootID(), node: n, entries: map[string]ObjectID{}}}}
+		body, e := encodeOverlayState(s)
+		if e != nil {
+			return nil, e
+		}
+		blob, e := o.upper.blobFromBytes(ctx, body)
+		if e != nil {
+			return nil, e
+		}
+		_, err = upperStore.CAS(ctx, FilesystemRootID(), 0, nil, encodeOverlayRoot(o.lowerID, blob), CASOptions{Scope: CASObject, MutationOptions: MutationOptions{RequestID: NewRequestID(), Absent: true}})
+		if err != nil && !errors.Is(err, ErrPrecondition) {
+			return nil, err
+		}
+	} else if err != nil {
+		return nil, err
+	}
+	s, _, _, err := o.state(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if opt.Whitelist != nil && !equalStrings(policy, s.policy) {
+		return nil, errors.New("client: whitelist differs from persisted overlay policy; use a separate upper bucket")
+	}
+	return o, nil
+}
+func equalStrings(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+func (o *OverlayFilesystem) state(ctx context.Context) (*overlayState, ObjectInfo, fsBlob, error) {
+	raw, info, err := o.upper.store.Get(ctx, FilesystemRootID())
+	if err != nil {
+		return nil, info, fsBlob{}, err
+	}
+	id, blob, err := decodeOverlayRoot(raw)
+	if err != nil {
+		return nil, info, blob, err
+	}
+	if id != o.lowerID {
+		return nil, info, blob, errors.New("client: upper belongs to a different readonly bucket")
+	}
+	if blob.length > o.upper.directoryMemoryLimit {
+		return nil, info, blob, syscall.ENOMEM
+	}
+	data := make([]byte, int(blob.length))
+	if _, err = o.upper.readBlob(ctx, blob, data, 0); err != nil && !(len(data) == 0 && errors.Is(err, io.EOF)) {
+		return nil, info, blob, err
+	}
+	s, err := decodeOverlayState(data)
+	return s, info, blob, err
+}
+func (o *OverlayFilesystem) publish(ctx context.Context, s *overlayState, version uint64) error {
+	body, err := encodeOverlayState(s)
+	if err != nil {
+		return err
+	}
+	if uint64(len(body)) > o.upper.directoryMemoryLimit {
+		return syscall.ENOMEM
+	}
+	blob, err := o.upper.blobFromBytes(ctx, body)
+	if err != nil {
+		return err
+	}
+	_, err = o.upper.store.CAS(ctx, FilesystemRootID(), 0, nil, encodeOverlayRoot(o.lowerID, blob), CASOptions{Scope: CASObject, MutationOptions: MutationOptions{RequestID: NewRequestID(), ExpectedVersion: &version}})
+	return err
+}
+func (o *OverlayFilesystem) edit(ctx context.Context, fn func(*overlayState) error) error {
+	for attempt := 0; attempt < 128; attempt++ {
+		s, info, _, err := o.state(ctx)
+		if err != nil {
+			return err
+		}
+		if err = fn(s); errors.Is(err, errOverlayUnchanged) {
+			return nil
+		} else if err != nil {
+			return err
+		}
+		err = o.publish(ctx, s, info.Version)
+		if errors.Is(err, ErrPrecondition) {
+			continue
+		}
+		return err
+	}
+	return syscall.EAGAIN
+}
+func (o *OverlayFilesystem) stat(ctx context.Context, s *overlayState, version uint64, id ObjectID) (FSInfo, error) {
+	if dir := s.dirs[id]; dir != nil {
+		n := dir.node
+		if !dir.metadata && !dir.opaque && !n.removed {
+			base, _, err := o.lower.load(ctx, dir.lower)
+			if err != nil {
+				return FSInfo{}, err
+			}
+			n.mode, n.uid, n.gid, n.mtime = base.mode, base.uid, base.gid, base.mtime
+			n.atime, n.ctime = base.atime, base.ctime
+		}
+		return fsInfo(id, n, ObjectInfo{Version: version}), nil
+	}
+	n, info, err := o.upper.load(ctx, id)
+	if errors.Is(err, ErrNotFound) {
+		if overlayUpperReference(s, id) {
+			return FSInfo{}, ErrNotFound
+		}
+		return o.lower.Stat(ctx, id)
+	}
+	if err != nil {
+		return FSInfo{}, err
+	}
+	if n.kind == fsDirectory {
+		return FSInfo{}, ErrFSFormat
+	}
+	return fsInfo(id, n, info), nil
+}
+
+func overlayUpperReference(s *overlayState, id ObjectID) bool {
+	for _, dir := range s.dirs {
+		for _, child := range dir.entries {
+			if child == id && child != (ObjectID{}) {
+				return true
+			}
+		}
+	}
+	return false
+}
+func (o *OverlayFilesystem) entries(ctx context.Context, s *overlayState, id ObjectID) ([]FSEntry, error) {
+	dir := s.dirs[id]
+	lower := id
+	merged := map[string]ObjectID{}
+	if dir != nil {
+		if dir.node.removed {
+			return nil, syscall.ENOENT
+		}
+		lower = dir.lower
+	}
+	if dir == nil || !dir.opaque {
+		entries, err := o.lower.ReadDir(ctx, lower)
+		if err != nil {
+			return nil, err
+		}
+		for _, entry := range entries {
+			merged[entry.Name] = entry.ID
+		}
+	}
+	if dir != nil {
+		for name, child := range dir.entries {
+			if child == (ObjectID{}) {
+				delete(merged, name)
+			} else {
+				merged[name] = child
+			}
+		}
+	}
+	out := make([]FSEntry, 0, len(merged))
+	for name, child := range merged {
+		out = append(out, FSEntry{Name: name, ID: child})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out, nil
+}
+func (o *OverlayFilesystem) child(ctx context.Context, s *overlayState, parent ObjectID, name string) (ObjectID, error) {
+	if !validFSName(name) {
+		return ObjectID{}, syscall.EINVAL
+	}
+	entries, err := o.entries(ctx, s, parent)
+	if err != nil {
+		return ObjectID{}, err
+	}
+	i := findFSEntry(entries, name)
+	if i < 0 {
+		return ObjectID{}, syscall.ENOENT
+	}
+	return entries[i].ID, nil
+}
+func (o *OverlayFilesystem) directory(ctx context.Context, s *overlayState, id ObjectID) (*overlayDirectory, error) {
+	if dir := s.dirs[id]; dir != nil {
+		if dir.node.removed {
+			return nil, syscall.ENOENT
+		}
+		return dir, nil
+	}
+	n, _, err := o.lower.load(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if n.kind != fsDirectory {
+		return nil, syscall.ENOTDIR
+	}
+	if n.removed {
+		return nil, syscall.ENOENT
+	}
+	n.blob = fsBlob{}
+	dir := &overlayDirectory{lower: id, node: n, entries: map[string]ObjectID{}}
+	s.dirs[id] = dir
+	return dir, nil
+}
+func (o *OverlayFilesystem) pathID(ctx context.Context, s *overlayState, p string) (ObjectID, error) {
+	id := FilesystemRootID()
+	if p == "" {
+		return id, nil
+	}
+	for _, name := range strings.Split(p, "/") {
+		next, err := o.child(ctx, s, id, name)
+		if err != nil {
+			return ObjectID{}, err
+		}
+		id = next
+	}
+	return id, nil
+}
+func (o *OverlayFilesystem) path(ctx context.Context, s *overlayState, version uint64, target ObjectID) (string, error) {
+	if target == FilesystemRootID() {
+		return "", nil
+	}
+	o.mu.Lock()
+	cached, ok := o.paths[target]
+	if o.cacheVersion != version {
+		ok = false
+	}
+	o.mu.Unlock()
+	if ok {
+		if id, err := o.pathID(ctx, s, cached); err == nil && id == target {
+			return cached, nil
+		}
+	}
+	paths := map[ObjectID]string{}
+	seen := map[ObjectID]bool{}
+	var walk func(ObjectID, string, int) error
+	walk = func(id ObjectID, p string, depth int) error {
+		if depth > 1024 || seen[id] {
+			return ErrFSFormat
+		}
+		seen[id] = true
+		paths[id] = p
+		info, err := o.stat(ctx, s, version, id)
+		if err != nil {
+			return err
+		}
+		if !info.Directory {
+			return nil
+		}
+		entries, err := o.entries(ctx, s, id)
+		if err != nil {
+			return err
+		}
+		for _, entry := range entries {
+			next := entry.Name
+			if p != "" {
+				next = p + "/" + entry.Name
+			}
+			if err = walk(entry.ID, next, depth+1); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	if err := walk(FilesystemRootID(), "", 0); err != nil {
+		return "", err
+	}
+	o.mu.Lock()
+	o.cacheVersion = version
+	o.paths = paths
+	o.mu.Unlock()
+	p, ok := paths[target]
+	if !ok {
+		return "", syscall.ENOENT
+	}
+	return p, nil
+}
+func overlayChildPath(parent, name string) string {
+	if parent == "" {
+		return name
+	}
+	return parent + "/" + name
+}
+func (o *OverlayFilesystem) writable(ctx context.Context, s *overlayState, version uint64, id ObjectID) (string, error) {
+	info, err := o.stat(ctx, s, version, id)
+	if err != nil {
+		return "", err
+	}
+	if info.Removed {
+		return "", syscall.ENOENT
+	}
+	p, err := o.path(ctx, s, version, id)
+	if errors.Is(err, syscall.ENOENT) && !info.Directory {
+		n, _, e := o.upper.load(ctx, id)
+		if e == nil && n.writePath != "" && overlayAllowed(s.policy, n.writePath, false) {
+			return n.writePath, nil
+		}
+	}
+	if err != nil {
+		return "", err
+	}
+	if !overlayAllowed(s.policy, p, info.Directory) {
+		return "", syscall.EROFS
+	}
+	return p, nil
+}
+func (o *OverlayFilesystem) CheckWrite(ctx context.Context, id ObjectID) error {
+	s, info, _, err := o.state(ctx)
+	if err != nil {
+		return err
+	}
+	_, err = o.writable(ctx, s, info.Version, id)
+	return err
+}
+func (o *OverlayFilesystem) Stat(ctx context.Context, id ObjectID) (FSInfo, error) {
+	s, info, _, err := o.state(ctx)
+	if err != nil {
+		return FSInfo{}, err
+	}
+	return o.stat(ctx, s, info.Version, id)
+}
+func (o *OverlayFilesystem) ReadDir(ctx context.Context, id ObjectID) ([]FSEntry, error) {
+	s, _, _, err := o.state(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return o.entries(ctx, s, id)
+}
+func (o *OverlayFilesystem) Lookup(ctx context.Context, parent ObjectID, name string) (FSInfo, error) {
+	s, info, _, err := o.state(ctx)
+	if err != nil {
+		return FSInfo{}, err
+	}
+	id, err := o.child(ctx, s, parent, name)
+	if err != nil {
+		return FSInfo{}, err
+	}
+	return o.stat(ctx, s, info.Version, id)
+}
+func (o *OverlayFilesystem) ReadAt(ctx context.Context, id ObjectID, dst []byte, offset int64) (int, error) {
+	if offset < 0 {
+		return 0, syscall.EINVAL
+	}
+	if id == FilesystemRootID() {
+		return 0, syscall.EISDIR
+	}
+	raw, _, err := o.upper.store.Get(ctx, id)
+	if errors.Is(err, ErrNotFound) {
+		s, _, _, e := o.state(ctx)
+		if e != nil {
+			return 0, e
+		}
+		if overlayUpperReference(s, id) {
+			return 0, ErrNotFound
+		}
+		return o.lower.ReadAt(ctx, id, dst, offset)
+	}
+	if err != nil {
+		return 0, err
+	}
+	n, err := decodeFSNode(raw)
+	if err != nil {
+		return 0, err
+	}
+	if n.kind != fsFile {
+		return 0, syscall.EISDIR
+	}
+	if len(dst) == 0 {
+		return 0, nil
+	}
+	return o.upper.readBlob(ctx, n.blob, dst, uint64(offset))
+}
+func (o *OverlayFilesystem) Sync(ctx context.Context, id ObjectID) error {
+	_, err := o.Stat(ctx, id)
+	return err
+}
+
+func (o *OverlayFilesystem) copyUp(ctx context.Context, id ObjectID) error {
+	s, info, _, err := o.state(ctx)
+	if err != nil {
+		return err
+	}
+	p, err := o.writable(ctx, s, info.Version, id)
+	if err != nil {
+		return err
+	}
+	visible, err := o.stat(ctx, s, info.Version, id)
+	if err != nil {
+		return err
+	}
+	if visible.Directory {
+		return syscall.EISDIR
+	}
+	parentPath, name := "", p
+	if i := strings.LastIndex(p, "/"); i >= 0 {
+		parentPath, name = p[:i], p[i+1:]
+	}
+	_, _, err = o.upper.store.Get(ctx, id)
+	if errors.Is(err, ErrNotFound) {
+		n, base, err := o.lower.load(ctx, id)
+		if err != nil {
+			return err
+		}
+		if n.kind != fsFile {
+			return syscall.EISDIR
+		}
+		n.blob = fsBlob{length: n.blob.length, source: id, sourceVersion: base.Version}
+		n.writePath = p
+		_, err = o.upper.store.CAS(ctx, id, 0, nil, encodeFSNode(n), CASOptions{Scope: CASObject, MutationOptions: MutationOptions{RequestID: NewRequestID(), Absent: true}})
+		if err != nil && !errors.Is(err, ErrPrecondition) {
+			return err
+		}
+	} else if err != nil {
+		return err
+	} else {
+		parent, e := o.pathID(ctx, s, parentPath)
+		if errors.Is(e, syscall.ENOENT) {
+			return nil
+		}
+		if e != nil {
+			return e
+		}
+		if dir := s.dirs[parent]; dir != nil && dir.entries[name] == id {
+			return nil
+		}
+		if child, e := o.child(ctx, s, parent, name); errors.Is(e, syscall.ENOENT) || e == nil && child != id {
+			return nil
+		} else if e != nil {
+			return e
+		}
+	}
+	// Publish the dentry before changing the copied inode. A concurrent unlink
+	// may leave an open, unlinked upper inode; its persisted authorized path
+	// keeps that handle writable without making any protected name writable.
+	return o.edit(ctx, func(s *overlayState) error {
+		parent, e := o.pathID(ctx, s, parentPath)
+		if errors.Is(e, syscall.ENOENT) {
+			return errOverlayUnchanged
+		}
+		if e != nil {
+			return e
+		}
+		current, e := o.child(ctx, s, parent, name)
+		if errors.Is(e, syscall.ENOENT) {
+			return errOverlayUnchanged
+		}
+		if e != nil {
+			return e
+		}
+		if current != id {
+			return errOverlayUnchanged
+		}
+		dir, e := o.directory(ctx, s, parent)
+		if e != nil {
+			return e
+		}
+		dir.entries[name] = id
+		return nil
+	})
+}
+func (o *OverlayFilesystem) WriteAt(ctx context.Context, id ObjectID, data []byte, offset int64) (int, error) {
+	if err := o.copyUp(ctx, id); err != nil {
+		return 0, err
+	}
+	return o.upper.WriteAt(ctx, id, data, offset)
+}
+func (o *OverlayFilesystem) Append(ctx context.Context, id ObjectID, data []byte) (int, error) {
+	if err := o.copyUp(ctx, id); err != nil {
+		return 0, err
+	}
+	return o.upper.Append(ctx, id, data)
+}
+func (o *OverlayFilesystem) Truncate(ctx context.Context, id ObjectID, size uint64) (FSInfo, error) {
+	if err := o.copyUp(ctx, id); err != nil {
+		return FSInfo{}, err
+	}
+	return o.upper.Truncate(ctx, id, size)
+}
+func overlaySetAttrs(n *fsNode, a FSAttributes) {
+	if a.Mode != nil {
+		n.mode = *a.Mode & 07777
+	}
+	if a.UID != nil {
+		n.uid = *a.UID
+	}
+	if a.GID != nil {
+		n.gid = *a.GID
+	}
+	if a.MtimeNS != nil {
+		n.mtime = *a.MtimeNS
+	}
+	if a.AtimeNS != nil {
+		n.atime = *a.AtimeNS
+	}
+	n.ctime = uint64(time.Now().UnixNano())
+}
+func (o *OverlayFilesystem) SetAttributes(ctx context.Context, id ObjectID, a FSAttributes) (FSInfo, error) {
+	info, err := o.Stat(ctx, id)
+	if err != nil {
+		return info, err
+	}
+	if !info.Directory {
+		if err = o.copyUp(ctx, id); err != nil {
+			return FSInfo{}, err
+		}
+		return o.upper.SetAttributes(ctx, id, a)
+	}
+	if a.Size != nil {
+		return FSInfo{}, syscall.EISDIR
+	}
+	err = o.edit(ctx, func(s *overlayState) error {
+		if _, e := o.writable(ctx, s, 0, id); e != nil {
+			return e
+		}
+		dir, e := o.directory(ctx, s, id)
+		if e != nil {
+			return e
+		}
+		if !dir.metadata && !dir.opaque {
+			base, _, e := o.lower.load(ctx, dir.lower)
+			if e != nil {
+				return e
+			}
+			dir.node.mode, dir.node.uid, dir.node.gid, dir.node.mtime = base.mode, base.uid, base.gid, base.mtime
+			dir.node.atime, dir.node.ctime = base.atime, base.ctime
+		}
+		overlaySetAttrs(&dir.node, a)
+		dir.metadata = true
+		return nil
+	})
+	if err != nil {
+		return FSInfo{}, err
+	}
+	return o.Stat(ctx, id)
+}

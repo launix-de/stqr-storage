@@ -9,5 +9,7 @@ coverage/
 
 # Local daemon executable and bootstrap credentials.
 /stqr
+/stqr-fuse
+/mnt/
 /stqr.yaml
 /stqr.yaml.lock

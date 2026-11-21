@@ -8,9 +8,11 @@ import (
 	"errors"
 	"io"
 	"os"
+	"runtime"
 	"sync"
 	"syscall"
 	"time"
+	"weak"
 
 	fusefs "github.com/hanwen/go-fuse/v2/fs"
 	"github.com/hanwen/go-fuse/v2/fuse"
@@ -21,41 +23,87 @@ import (
 // OIDs are never truncated to 64 bits to synthesize kernel inode numbers.
 type FSNode struct {
 	fusefs.Inode
-	filesystem *Filesystem
+	filesystem FilesystemView
 	numbers    *fsInodeNumbers
+	identity   *fsInodeIdentity
 	id         ObjectID
 }
 
 type fsInodeNumbers struct {
 	mu   sync.Mutex
 	next uint64
-	ids  map[ObjectID]uint64
+	ids  map[ObjectID]weak.Pointer[fsInodeIdentity]
+}
+type fsInodeIdentity struct {
+	ino   uint64
+	table *fsInodeNumbers
+}
+type fsIdentityCleanup struct {
+	table *fsInodeNumbers
+	id    ObjectID
+	ino   uint64
 }
 
-func (s *fsInodeNumbers) number(id ObjectID) uint64 {
+func (s *fsInodeNumbers) acquire(id ObjectID) *fsInodeIdentity {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if ino, ok := s.ids[id]; ok {
-		return ino
+	if entry, ok := s.ids[id]; ok {
+		if identity := entry.Value(); identity != nil {
+			return identity
+		}
 	}
-	ino := s.next
+	if s.next%256 == 0 {
+		for key, entry := range s.ids {
+			if entry.Value() == nil {
+				delete(s.ids, key)
+			}
+		}
+	}
+	identity := &fsInodeIdentity{ino: s.next, table: s}
 	s.next++
-	s.ids[id] = ino
-	return ino
+	s.ids[id] = weak.Make(identity)
+	runtime.AddCleanup(identity, func(arg fsIdentityCleanup) {
+		arg.table.mu.Lock()
+		defer arg.table.mu.Unlock()
+		if entry, ok := arg.table.ids[arg.id]; ok {
+			current := entry.Value()
+			if current == nil || current.ino == arg.ino {
+				delete(arg.table.ids, arg.id)
+			}
+		}
+	}, fsIdentityCleanup{s, id, identity.ino})
+	return identity
 }
 func (f *Filesystem) FUSERoot() *FSNode {
-	return &FSNode{filesystem: f, id: FilesystemRootID(), numbers: &fsInodeNumbers{next: 2, ids: map[ObjectID]uint64{FilesystemRootID(): 1}}}
+	return NewFUSERoot(f)
+}
+func NewFUSERoot(view FilesystemView) *FSNode {
+	numbers := &fsInodeNumbers{next: 1, ids: map[ObjectID]weak.Pointer[fsInodeIdentity]{}}
+	return &FSNode{filesystem: view, id: FilesystemRootID(), numbers: numbers, identity: numbers.acquire(FilesystemRootID())}
 }
 
-type fsOpenFile struct{ append bool }
+type fsOpenFile struct {
+	append   bool
+	identity *fsInodeIdentity
+}
 
 // Mount serves this filesystem through go-fuse. No daemon/CLI is started.
 // The dry memory backend loses all data when its process ends. Other backends
 // must honor FilesystemStore's synchronous commit contract.
 func (f *Filesystem) Mount(mountpoint string, debug bool) (*fuse.Server, error) {
+	return MountFilesystem(f, mountpoint, FSMountOptions{Debug: debug, ReadOnly: f.readOnly})
+}
+
+type FSMountOptions struct{ Debug, ReadOnly, AllowOther bool }
+
+func MountFilesystem(view FilesystemView, mountpoint string, opt FSMountOptions) (*fuse.Server, error) {
 	zero := time.Duration(0)
-	return fusefs.Mount(mountpoint, f.FUSERoot(), &fusefs.Options{
-		MountOptions: fuse.MountOptions{FsName: "stqr", Name: "stqr", Debug: debug, Options: []string{"default_permissions"}},
+	options := []string{"default_permissions", "noatime"}
+	if opt.ReadOnly {
+		options = append(options, "ro")
+	}
+	return fusefs.Mount(mountpoint, NewFUSERoot(view), &fusefs.Options{
+		MountOptions: fuse.MountOptions{FsName: "stqr", Name: "stqr", Debug: opt.Debug, AllowOther: opt.AllowOther, Options: options},
 		EntryTimeout: &zero, AttrTimeout: &zero, NegativeTimeout: &zero, NullPermissions: true,
 	})
 }
@@ -103,15 +151,23 @@ func fillFSAttr(out *fuse.Attr, info FSInfo) {
 	out.Mtimensec = uint32(info.MtimeNS % 1e9)
 	out.Ctime = out.Mtime
 	out.Ctimensec = out.Mtimensec
+	out.Atime = info.AtimeNS / 1e9
+	out.Atimensec = uint32(info.AtimeNS % 1e9)
+	out.Ctime = info.CtimeNS / 1e9
+	out.Ctimensec = uint32(info.CtimeNS % 1e9)
 	out.Nlink = 1
 	if info.Directory {
 		out.Nlink = 2
+	}
+	if info.Removed {
+		out.Nlink = 0
 	}
 	out.Blksize = 4096
 }
 func (n *FSNode) child(ctx context.Context, info FSInfo, out *fuse.EntryOut) *fusefs.Inode {
 	fillFSAttr(&out.Attr, info)
-	return n.NewInode(ctx, &FSNode{filesystem: n.filesystem, id: info.ID, numbers: n.numbers}, fusefs.StableAttr{Mode: fsMode(info) & syscall.S_IFMT, Ino: n.numbers.number(info.ID)})
+	identity := n.numbers.acquire(info.ID)
+	return n.NewInode(ctx, &FSNode{filesystem: n.filesystem, id: info.ID, numbers: n.numbers, identity: identity}, fusefs.StableAttr{Mode: fsMode(info) & syscall.S_IFMT, Ino: identity.ino})
 }
 func (n *FSNode) Getattr(ctx context.Context, fh fusefs.FileHandle, out *fuse.AttrOut) syscall.Errno {
 	info, err := n.filesystem.Stat(ctx, n.id)
@@ -172,7 +228,8 @@ func (n *FSNode) Create(ctx context.Context, name string, flags, mode uint32, ou
 	if err != nil {
 		return nil, nil, 0, fsErrno(err)
 	}
-	return n.child(ctx, info, out), &fsOpenFile{append: flags&syscall.O_APPEND != 0}, fuse.FOPEN_DIRECT_IO, 0
+	child := n.child(ctx, info, out)
+	return child, &fsOpenFile{append: flags&syscall.O_APPEND != 0, identity: child.Operations().(*FSNode).identity}, fuse.FOPEN_DIRECT_IO, 0
 }
 func (n *FSNode) Open(ctx context.Context, flags uint32) (fusefs.FileHandle, uint32, syscall.Errno) {
 	info, err := n.filesystem.Stat(ctx, n.id)
@@ -182,12 +239,21 @@ func (n *FSNode) Open(ctx context.Context, flags uint32) (fusefs.FileHandle, uin
 	if info.Directory {
 		return nil, 0, syscall.EISDIR
 	}
+	if flags&(syscall.O_WRONLY|syscall.O_RDWR|syscall.O_TRUNC) != 0 {
+		if err = n.filesystem.PrepareWrite(ctx, n.id); err != nil {
+			return nil, 0, fsErrno(err)
+		}
+	}
 	if flags&syscall.O_TRUNC != 0 {
 		if _, err = n.filesystem.Truncate(ctx, n.id, 0); err != nil {
 			return nil, 0, fsErrno(err)
 		}
 	}
-	return &fsOpenFile{append: flags&syscall.O_APPEND != 0}, fuse.FOPEN_DIRECT_IO, 0
+	openFlags := uint32(0) // normal readonly opens allow mmap (e.g. PHP streams)
+	if flags&(syscall.O_WRONLY|syscall.O_RDWR) != 0 {
+		openFlags = fuse.FOPEN_DIRECT_IO
+	}
+	return &fsOpenFile{append: flags&syscall.O_APPEND != 0, identity: n.identity}, openFlags, 0
 }
 func (n *FSNode) Read(ctx context.Context, fh fusefs.FileHandle, dst []byte, offset int64) (fuse.ReadResult, syscall.Errno) {
 	count, err := n.filesystem.ReadAt(ctx, n.id, dst, offset)
@@ -218,24 +284,25 @@ func (n *FSNode) Flush(ctx context.Context, fh fusefs.FileHandle) syscall.Errno 
 func (n *FSNode) Unlink(ctx context.Context, name string) syscall.Errno {
 	return fsErrno(n.filesystem.Unlink(ctx, n.id, name))
 }
-func (n *FSNode) Rmdir(ctx context.Context, name string) syscall.Errno { return syscall.ENOTSUP }
+func (n *FSNode) Rmdir(ctx context.Context, name string) syscall.Errno {
+	return fsErrno(n.filesystem.Rmdir(ctx, n.id, name))
+}
 func (n *FSNode) Rename(ctx context.Context, name string, newParent fusefs.InodeEmbedder, newName string, flags uint32) syscall.Errno {
-	if flags & ^uint32(1) != 0 {
-		return syscall.ENOTSUP
-	}
 	other, ok := newParent.(*FSNode)
-	if !ok || other.filesystem != n.filesystem {
+	if !ok || other.numbers != n.numbers {
 		return syscall.EXDEV
 	}
-	return fsErrno(n.filesystem.Rename(ctx, n.id, name, other.id, newName))
+	return fsErrno(n.filesystem.RenameWithFlags(ctx, n.id, name, other.id, newName, flags))
 }
 func (n *FSNode) Setattr(ctx context.Context, fh fusefs.FileHandle, in *fuse.SetAttrIn, out *fuse.AttrOut) syscall.Errno {
-	// Atime/ctime are not stored separately in this prototype. Reject explicit
-	// atime changes rather than silently claiming to persist them.
-	if _, ok := in.GetATime(); ok {
-		return syscall.ENOTSUP
-	}
 	a := FSAttributes{}
+	if x, ok := in.GetATime(); ok {
+		if x.UnixNano() < 0 {
+			return syscall.EINVAL
+		}
+		v := uint64(x.UnixNano())
+		a.AtimeNS = &v
+	}
 	if x, ok := in.GetSize(); ok {
 		a.Size = &x
 	}
@@ -249,6 +316,9 @@ func (n *FSNode) Setattr(ctx context.Context, fh fusefs.FileHandle, in *fuse.Set
 		a.GID = &x
 	}
 	if x, ok := in.GetMTime(); ok {
+		if x.UnixNano() < 0 {
+			return syscall.EINVAL
+		}
 		v := uint64(x.UnixNano())
 		a.MtimeNS = &v
 	}

@@ -81,7 +81,7 @@ func TestFilesystemTreeAndReopen(t *testing.T) {
 	if string(readTestFile(t, reopened, file.ID)) != "hello" {
 		t.Fatal("unlink invalidated open inode")
 	}
-	if err = f.Rename(ctx, FilesystemRootID(), "folder", dir.ID, "bad"); !errors.Is(err, syscall.EXDEV) {
+	if err = f.Rename(ctx, FilesystemRootID(), "folder", dir.ID, "bad"); !errors.Is(err, syscall.EINVAL) {
 		t.Fatal(err)
 	}
 	for _, name := range []string{"", ".", "..", "a/b", "a\x00b"} {
@@ -417,6 +417,15 @@ func FuzzFilesystemDecoders(f *testing.F) {
 	dir, _ := encodeFSDirectory([]FSEntry{{Name: "test", ID: ObjectID{1}}})
 	f.Add(dir)
 	f.Add(encodeFSIndex([]fsSegment{{length: 4, id: ObjectID{1}}}))
+	f.Add(fsLock(ObjectID{2}))
+	node := encodeFSNode(fsNode{kind: fsFile, mode: 0644})
+	f.Add(encodeFSTransaction(fsTransaction{members: []fsTxMember{{id: ObjectID{2}, version: 1, before: node, after: node}}}))
+	f.Add(encodeFSNode(fsNode{kind: fsDirectory, removed: true}))
+	f.Add(encodeFSNode(fsNode{kind: fsFile, blob: fsBlob{length: 4096, source: ObjectID{2}, sourceVersion: 1}, writePath: "conf.json", atime: 1, ctime: 2}))
+	f.Add(encodeFSIndex([]fsSegment{{length: 4096, id: ObjectID{2}, offset: 1 << 33, lowerVersion: 2}}))
+	manifest, _ := encodeOverlayState(&overlayState{policy: []string{"conf.json", "fop-files/"}, dirs: map[ObjectID]*overlayDirectory{FilesystemRootID(): {lower: FilesystemRootID(), node: fsNode{kind: fsDirectory}, entries: map[string]ObjectID{"removed": {}}}}})
+	f.Add(manifest)
+	f.Add(encodeOverlayRoot(BucketID{1}, fsBlob{length: uint64(len(manifest)), inline: manifest}))
 	f.Fuzz(func(t *testing.T, data []byte) {
 		if len(data) > FSObjectSize {
 			return
@@ -424,6 +433,10 @@ func FuzzFilesystemDecoders(f *testing.F) {
 		decodeFSNode(data)
 		decodeFSDirectory(data)
 		decodeFSIndex(data, 4096, 1)
+		fsLockID(data)
+		decodeFSTransaction(data, ObjectID{1})
+		decodeOverlayRoot(data)
+		decodeOverlayState(data)
 	})
 }
 func ExampleOpenFilesystem() {
