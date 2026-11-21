@@ -31,6 +31,7 @@ export function setupBucketViews({connection,escape,toast,showView}){
   const query=$('bucket-search').value.toLowerCase().trim();$('bucket-count').textContent=String(buckets.length);$('nav-buckets-count').textContent=String(buckets.length);
   const active=buckets.filter(b=>b.state==='active').length,locked=buckets.filter(b=>b.state==='locked').length;
   $('bucket-summary').textContent=`${active} aktiv${locked?' · '+locked+' gesperrt':''}`;
+  $('bucket-metric-count').textContent=String(buckets.length);$('bucket-metric-state').textContent=$('bucket-summary').textContent;
   $('bucket-rows').innerHTML=buckets.filter(b=>`${b.name} ${b.policy.storage_strategy}`.toLowerCase().includes(query)).map(b=>{
    const p=b.policy,system=b.id===SYSTEM,busy=b.state==='deleting',locked=b.state==='locked';
    const disabled=system||busy?'disabled':'',changing=!!b.desired_policy;

@@ -222,6 +222,11 @@ credentials/sessions, including the administrator's own session when applicable.
 Account updates and retry receipts commit atomically to the admin volume; only
 bcrypt verifiers and keyed request digests are stored, never plaintext passwords.
 
+Browser sessions are process-local. After a WebSocket disconnect the dashboard
+checks HTTP session validity: expired/revoked sessions return to login, while a
+new session cookie refreshes the CSRF binding. Temporary network failures keep
+reconnecting; callbacks from an old connection cannot mark a new one offline.
+
 Sidebar badges show volume, bucket and user counts. Bucket/user counts load
 immediately after login and refresh after local changes.
 
@@ -234,6 +239,13 @@ checkboxes for read/write/append/delete, a plus action to add users, and a remov
 action. These access/write-protection changes save immediately; failed requests
 restore the displayed state and retain their request ID for retry. Write
 protection blocks mutations while keeping objects readable.
+The Buckets view has global summary cards for physical capacity, bucket count,
+read throughput and write throughput. Capacity/used/free and throughput reuse
+exactly the same pushed node snapshot and time window as the Volumes view,
+including system-volume overhead; no additional polling or I/O scan is needed.
+Bucket count/state includes the complete list, unaffected by the search filter.
+Per-bucket quota bars remain separate logical-accounting values.
+
 Finite logical quotas show a live used/limit bar in the bucket list, refreshed
 every three seconds while the view is open. BUCKET_LIST includes optional live
 `used_bytes` values from the same logical accounting as quota admission; these
