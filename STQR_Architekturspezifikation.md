@@ -22,7 +22,7 @@
 4. **Single-Node-first:** Betrieb auf einem Node und einer Volume-Datei ohne künstliche Mindestzahl an Nodes; später dynamisches Wachstum.
 5. **Direktes Routing:** Client-SDKs können anhand lokal gespeicherter Placement-Maps direkt mit den zuständigen Nodes kommunizieren. Kein dauerhafter zentraler Datenproxy.
 6. **Adaptive Hash-Ranges:** Binäres Splitten, Zusammenführen benachbarter Ranges, bytegenaue Kapazitäts- und lastbasierte Placement-Entscheidungen.
-7. **Lazy Migration und Generationen:** Maximal `CURRENT` und `NEXT`; ohne Rebuild-Grund keine Migration. Während eines Rebuilds sammelt der Koordinator weitere Gründe in `needrebuild` und startet nach Abschluss direkt den nächsten Lauf. Bei Nichterreichbarkeit wird gewartet; nur ein administrativer Forceful Disconnect darf die Mitgliedschaft unter Verlustannahme ändern.
+7. **Lazy Migration und Generationen:** Maximal `CURRENT` und `NEXT`; ohne Rebuild-Grund keine Migration. Rebalancing bezieht nur Online-Nodes ein; das Placement von Offline-Nodes bleibt unverändert. Während eines Rebuilds sammelt der Koordinator weitere Gründe in `needrebuild`. Ausführbare Folgegründe starten nach Abschluss den nächsten Lauf; von Offline-Nodes abhängige Gründe bleiben bis zu deren Wiederkehr vorgemerkt. Nur ein administrativer Forceful Disconnect darf die Mitgliedschaft unter Verlustannahme ändern.
 8. **Gleichberechtigte Nodes:** Kein dauerhaft bevorzugter Master. Ein nur für die Generation gewählter Plan-Koordinator; der laufende Datenpfad ist unabhängig von ihm.
 9. **Buckets und Multi-Tenancy:** Admin-gesteuerte Bucket-Policies, User-Freigaben, Quotas, HDD-/SSD-/RAM-Basisspeicher, optionale RAM-Read-Caches und später Erasure Coding.
 10. **HTTP-Daemon mit Basic Auth**, integriertem Dashboard, administrativer HTTP-API und WebSocket-Upgrade. Jede binäre WebSocket-Nachricht enthält genau eine STQR-Nachricht; ein gemeinsamer Codec dient Clients, Admin und Nodes.
@@ -100,8 +100,8 @@
 ### 2.2 Verteilung von Zuständigkeiten
 
 - Alle Nodes sind gleichberechtigt. Ein temporärer Generationskoordinator plant außerhalb des normalen Objekt-I/O-Pfads.
-- **ENTWURFSFESTLEGUNG (noch abzustimmender Umfang der Barrieren, §20.5): kooperatives ALL-Member-Protokoll**, kein Raft mit zeitgetriebener Leader-Neuwahl. Der konkrete Race-Algorithmus der Koordinatorwahl ist ausdrücklich bis nach Stresstests zurückgestellt (§4.2). „Quorum“ bedeutet hier die festgeschriebene Menge aller stimmberechtigten Mitglieder einer Membership-Epoch, nicht eine wechselnde Mehrheit. Statistik-Snapshots, Plan-Freigaben und Ownership-Entscheidungen sind wiederaufnehmbar; §4 beschreibt die Barrieren.
-- Ein Node genügt. Bei zwei oder mehr Nodes blockiert ein fehlendes erforderliches Mitglied die jeweilige Clusterentscheidung. Objekt-I/O kann auf unveränderten erreichbaren Replica-Sets weiterlaufen; abhängige Operationen warten.
+- **ENTWURFSFESTLEGUNG: kooperatives ALL-Protokoll**, kein Raft mit zeitgetriebener Leader-Neuwahl. Für einen Rebuild umfasst ALL die fest gebundene Online-Teilnehmermenge der Runde (§4.3); globale Membership-/Admin-Entscheidungen benötigen weiterhin alle erforderlichen Mitglieder (§4.5). Es handelt sich nicht um eine wechselnde Mehrheit. Der konkrete Race-Algorithmus der Koordinatorwahl einschließlich sicherer Teilnehmerbindung ist ausdrücklich bis nach Stresstests zurückgestellt (§4.2, §20.5). Statistik-Snapshots, Plan-Freigaben und Ownership-Entscheidungen sind wiederaufnehmbar.
+- Ein Node genügt. Bereits vor einer Rebuild-Runde fehlende Mitglieder blockieren das Rebalancing unabhängiger Online-Ranges nicht; ihr Placement wird unverändert übernommen. Ein fehlender erforderlicher Teilnehmer einer bereits gebundenen Runde oder einer globalen Kontrollentscheidung blockiert dagegen deren Abschluss. Objekt-I/O kann auf unveränderten erreichbaren Replica-Sets weiterlaufen; abhängige Operationen warten.
 - Nichterreichbarkeit entzieht niemals selbsttätig Mitgliedschaft, Ownership oder einen Koordinatorstatus. Es gibt keinen Failure-Timeout mit automatischem Ausschluss. Verbindungsfehler, Reconnect-Backoff und anwendungsseitige Cancellation sind zulässig und ändern diesen Vertrag nicht.
 - Join, geplanter Leave und Forceful Disconnect wechseln die Membership-Epoch nach §4.5. Ein ausgeschlossener Node darf mit alter Epoch nicht wieder als gültiges Mitglied auftreten.
 
@@ -166,6 +166,16 @@ Node, Host, Rack und Zone sind optionale, administrativ gesetzte Failure-Domain-
 
 ### 3.5 Shutdown-Modi und Forceful Disconnect
 
+**Standard bei Prozess-/Systemende ist immer `SHORT` („Warte auf mich“):**
+`SIGTERM`, `SIGINT`, `pm2 restart`/`pm2 stop` und das reguläre Herunterfahren
+des Node-Linux-Systems lösen niemals selbst einen Drain aus. Daten, Placement
+und Membership bleiben erhalten; erforderliche Zugriffe warten auf die Rückkehr,
+wobei Reads erreichbare gültige Replikate bevorzugen. Unabhängige Zugriffe auf
+andere Nodes laufen weiter. `DRAIN` darf ausschließlich durch einen expliziten,
+autorisierten Admin-Command bzw. das Dashboard angefordert werden. Ein bereits
+administrativ angeforderter Drain bleibt über einen Prozessneustart vorgemerkt
+und wird danach fortgesetzt; das Stoppsignal selbst fordert keinen neuen an.
+
 | Modus | Ablauf und Wirkung |
 |---|---|
 | `DRAIN` | Intern `DRAINING` setzen, Rebuild-Grund melden; nächster Plan evakuiert die Node. Nach sicherer Übergabe inklusive späterer Subscriptions `GOAWAY`, Verbindungen schließen, Membership-Leave abschließen. |
@@ -196,6 +206,8 @@ type ControlState struct {
 
 Der Zustand liegt in einem replaybaren Kontrolljournal im Node-Datenverzeichnis; kein flüchtiges Dashboard-Objekt. Jeder Snapshot-/Kontrollbeleg bindet Membership-Epoch, Ausgangsgeneration, RoundID und Hash der Daten. Zusätzliche Race-/Wahlzustände werden erst nach den Stresstests spezifiziert. Kontrollentscheidungen besitzen eine monotone Sequenz und den Hash ihres Vorgängers. Eine Node bestätigt nie widersprüchliche Entscheidungen derselben Sequenz.
 
+Zum persistenten Rundenzustand gehören außerdem die gebundene Teilnehmermenge, eingefrorene Placement-Bereiche und die noch offenen Rebuild-Gründe samt Offline-Abhängigkeiten (§4.3). Das obige Strukturbeispiel und die vorläufigen Wire-Layouts sind dafür noch zu erweitern; `NeedRebuild` allein kann diese Informationen nicht ausdrücken.
+
 ### 4.2 Auslöser und Push-Wahl: funktionaler Vertrag, Race-Algorithmus später
 
 1. In IDLE passiert ohne Rebuild-Grund keine Migration. Hat ein Peer einen Grund und kennt keinen laufenden Rebuild, bietet er sich direkt per REBUILD_OFFER an und beginnt mit der Vorbereitung.
@@ -204,27 +216,33 @@ Der Zustand liegt in einem replaybaren Kontrolljournal im Node-Datenverzeichnis;
 4. Der Testaufbau variiert gleichzeitige Auslöser, Broadcast-/Statistikverzögerungen, Duplikate, unterbrochene und wiederkehrende Peers, Node-ID-Verteilungen und Clustergrößen. Gemessen werden Konfliktrate, Zeit bis eindeutiger Koordinatorbindung, Nachrichten-/Flushaufwand, Wiederholungen und konkurrierende Planversuche. Baseline-Abläufe/Instrumentierung dienen der Messung, sind kein vorweggenommenes finales Wahlprotokoll.
 5. Unverändert gelten die Sicherheitsziele: kein widersprüchlicher aktivierter Plan, keine doppelte Schreibautorität, nach Bindung kein automatischer Koordinatorwechsel und bei Crash Warten/Wiederaufnahme. Die Implementierung darf diese Ziele erst nach Entwurf und Verifikation des gewählten Algorithmus als garantiert deklarieren.
 
-Broadcast ist Fan-out über Peer-Verbindungen, kein Netzwerk-Broadcast. Die unten reservierten Wahl-/Konfliktnachrichten sind vorläufige Katalogeinträge; ihre Feldfolgen können nach der Messphase geändert oder entfernt werden. ALL-Plan-/Cutover-Barrieren aus §4.3 sind davon getrennte Entwurfsfestlegungen.
+**Erster Messbaustein:** `server/rebuild_race_test.go` simuliert Angebote, Präferenzwechsel, Statistikfragmente, Duplikate und Pause/Wiederkehr mit reproduzierbaren Seeds und den Codecs aus `client/rebuild.go`. Er zählt mögliche konkurrierende Bindungen, ohne einer Kandidatin tatsächlich Autorität zu geben. Die Scheduler-Ticks sind virtuelle Zeit; echte Peer-/Netzwerk-/Crash-Messungen stehen noch aus. Der Harness legt ausdrücklich noch keinen Bindungs-/Wahlalgorithmus fest. Messaufruf und Baseline-Befunde stehen in `docs/server.md`.
+
+Broadcast ist Fan-out über Peer-Verbindungen, kein Netzwerk-Broadcast. Die unten reservierten Wahl-/Konfliktnachrichten sind vorläufige Katalogeinträge; ihre Feldfolgen können nach der Messphase geändert oder entfernt werden. ALL-Plan-/Cutover-Barrieren beziehen sich auf die gebundene Online-Teilnehmermenge aus §4.3; deren sichere Bindung gehört zum noch zu entwerfenden Wahlprotokoll.
 
 ### 4.3 Plan, Migration und Folgegründe
 
 ```text
 IDLE -> OFFER/COLLECT -> SEALED -> PLAN -> PREPARE_ALL
      -> MIGRATING/CATCH_UP -> CUTOVER_ALL -> CLEANUP -> FINALIZE_ALL
-     -> needrebuild ? nächste Runde beim bisherigen Koordinator : IDLE
+     -> ausführbarer Rebuild-Grund ? nächste Runde beim bisherigen Koordinator : IDLE
 ```
 
-- Der Koordinator plant deterministisch aus vollständig eingesandten Snapshots; physische Reservierungen werden beim PREPARE auf den Zielvolumes erneut geprüft, da Statistikwerte keine Kapazitätslocks sind. Der Plan soll **so wenig Nutzdaten wie möglich bewegen, idealerweise null**. Bestehende zulässige Zuordnungen bleiben erhalten; Splits/Merges dürfen rein logisch sein. Redundanz, garantierte Reserven und erforderliche Drain-Vorgaben sind harte Constraints, Lastoptimierung rechtfertigt nur begründete Moves.
-- `PLAN_PREPARE` enthält vollständige NEXT-Map, Policy-/Membership-Änderungen, Reservierungen und Planhash. Jedes Mitglied validiert und persistiert diese, bevor es `PLAN_READY` pusht. Erst nach ALL-READY persistiert/verteilt der Koordinator `PLAN_COMMIT` samt Belegen; jedes Mitglied pusht `PLAN_APPLIED`. Bulk-Copy startet erst nach ALL-APPLIED.
-- Writes bleiben bis zum expliziten Range-Cutover beim bisherigen Owner. Der Source stoppt neue Mutationen kurz, flusht und fencet sich persistent, Ziel bestätigt Daten-/Dedupe-/Subscription-Stand. Alle Mitglieder persistieren denselben Ownership-Epoch-Wechsel (`CUTOVER_PREPARE/READY/COMMIT/APPLIED`). Erst nach ALL-APPLIED bedient das Ziel neue autoritative Operationen. Keine zeitlich ablaufende Lease ist nötig, weil der alte Owner selbst persistent stillgelegt wird. Ist er nicht erreichbar, wird gewartet oder FORCE_DISCONNECT mit externem Fencing verlangt.
+- **Online-Teilnehmer und eingefrorenes Placement:** Eine Rebuild-Runde bindet vor dem Versiegeln des Snapshots eine explizite Menge erreichbarer, synchronisierter und teilnahmebereiter Nodes. `PAUSED`-/Offline-Nodes gehören nicht dazu. ALL bei Statistikaufnahme, Plan, Cutover und Finalize bedeutet alle Teilnehmer dieser gebundenen Runde. Die Cluster-Membership bleibt unverändert. Die Teilnehmermenge darf nach Bindung nicht aufgrund eines Verbindungsfehlers verkleinert werden; fällt ein Teilnehmer danach aus, wartet die Runde auf dessen Wiederkehr (§4.4).
+- Der Koordinator plant deterministisch aus den vollständig eingesandten Snapshots der Teilnehmer. **Jede Range-Group mit einer Location auf einer nicht teilnehmenden Node wird vollständig unverändert von CURRENT nach NEXT übernommen**, einschließlich Range-Grenzen, Locations, Rollen, Layout und Ownership-Epoch. Das gilt auch für READ_CACHE-Locations. Keine Evakuierung, Ersatzplatzierung, Replica-Reduktion, Split-/Merge- oder Ownership-Änderung dieser Gruppen. Unabhängige, vollständig online befindliche Range-Groups dürfen umverteilt werden; Ziele müssen Teilnehmer sein und geeignete Online-Volumes besitzen. Offline-Volumes teilnehmender Nodes werden ebenfalls nicht umplatziert; betroffene Range-Groups bleiben eingefroren. Veraltete Kapazitätsbilder sind keine Quelle freier Zielkapazität.
+- Physische Reservierungen werden beim PREPARE auf den Zielvolumes erneut geprüft, da Statistikwerte keine Kapazitätslocks sind. Der Plan soll **so wenig Nutzdaten wie möglich bewegen, idealerweise null**. Bestehende zulässige Zuordnungen bleiben erhalten; Splits/Merges dürfen rein logisch sein. Redundanz, garantierte Reserven und erforderliche Drain-Vorgaben sind harte Constraints. Nicht online ausführbare Drain-/Policy-Anpassungen bleiben ausstehend; eine teilweise Umsetzung darf nicht als vollständig erfüllt gemeldet werden.
+- `PLAN_PREPARE` enthält vollständige NEXT-Map, bereits verbindlich freigegebene Zielpolicies, Teilnehmermenge, unverändert übernommene Bereiche, Reservierungen und Planhash. Jeder Teilnehmer validiert und persistiert diese, bevor er `PLAN_READY` pusht. Erst nach ALL-READY persistiert/verteilt der Koordinator `PLAN_COMMIT` samt Belegen; jeder Teilnehmer pusht `PLAN_APPLIED`. Bulk-Copy startet erst nach ALL-APPLIED. Der Rebuild ersetzt keine global erforderliche Policy-/Membership-Freigabe nach §4.5.
+- Writes bleiben bis zum expliziten Range-Cutover beim bisherigen Owner. Der Source stoppt neue Mutationen kurz, flusht und fencet sich persistent, Ziel bestätigt Daten-/Dedupe-/Subscription-Stand. Alle Rundenteilnehmer persistieren denselben Ownership-Epoch-Wechsel (`CUTOVER_PREPARE/READY/COMMIT/APPLIED`). Erst nach ALL-APPLIED bedient das Ziel neue autoritative Operationen. Keine zeitlich ablaufende Lease ist nötig, weil der alte Owner selbst persistent stillgelegt wird. Ist ein erforderlicher Beteiligter inzwischen nicht erreichbar, wird gewartet oder FORCE_DISCONNECT mit externem Fencing verlangt.
 - **Während eines aktiven Laufs:** Jeder neue Grund wird mit `REBUILD_NEEDED` an den bekannten Koordinator gepusht. Dieser setzt vor Bestätigung weiterer Kontrollfortschritte persistent `needrebuild=true`; Detailgründe können zusätzlich gesammelt werden. Der Sender behält seinen Grund bis er in einem Snapshot einer folgenden Runde berücksichtigt ist. Eine verlorene Push-Nachricht kann so nach Reconnect wiederholt werden.
-- Nach Cleanup werden alle FINALIZE-Belege persistiert. Bei `needrebuild` beginnt der bisherige Koordinator unmittelbar die nächste Runde, lässt aktuelle Fragmente pushen und löscht das Flag erst, nachdem deren Erfassung gesichert ist. Neue danach eintreffende Gründe setzen es erneut. Erst ohne Folgegrund kehrt er nach IDLE zurück; keine periodische Migration.
-- Kontrollphasen dürfen Nachrichten bündeln und unabhängige Ranges parallel abwickeln. Persistenz-/ALL-Barrieren bleiben zwingend; Push statt Request/Response entfernt keine notwendigen Zustimmungen.
+- **Vorgemerkte Gründe:** Rebuild-Gründe werden persistent mit ihrem betroffenen Node-/Volume-/Range-/Policy-Umfang geführt; `needrebuild` ist deren Sammelindikator. Bloße Erfassung in einem Snapshot erledigt keinen wegen Offline-Ressourcen zurückgestellten Grund. Er bleibt bis zur erfolgreichen Umsetzung erhalten, ebenso auf dem Sender bis zur bestätigten Übernahme bzw. Erledigung. Offline-Abhängigkeiten dürfen weder einen ausführbaren Online-Rebuild blockieren noch eine endlose Folge wirkungsloser Generationen auslösen.
+- Nach Cleanup werden alle FINALIZE-Belege der Runde persistiert. Gibt es ausführbare Folgegründe, beginnt der bisherige Koordinator unmittelbar die nächste Runde mit aktuellen Fragmenten. Sind nur Offline-Abhängigkeiten übrig, geht der Cluster mit persistent gesetztem `needrebuild` nach IDLE. Nach Wiederkehr und Zustandsabgleich einer betroffenen Node bzw. eines Volumes wird die Ausführbarkeit erneut geprüft und bei ausführbarem Grund eine neue Generation ausgelöst. Eine während der Runde wiederkehrende Node wird erst in einer Folgerunde Teilnehmer; der laufende Plan bleibt unverändert.
+- Kontrollphasen dürfen Nachrichten bündeln und unabhängige Ranges parallel abwickeln. Persistenz-/ALL-Barrieren innerhalb der gebundenen Teilnehmermenge bleiben zwingend; Push statt Request/Response entfernt keine notwendigen Zustimmungen.
 
 ### 4.4 Crash und Wiederaufnahme
 
 - Bei Koordinator-Crash warten die Peers. Sie halten RoundID, Snapshots und Plan-/Cutover-Belege vor; es gibt keine Crash-getriebene Neuwahl.
 - Nach Reconnect pusht jeder Peer `RESUME_STATE`, insbesondere die bekannte Koordinatorrolle. Der wiederkehrende Koordinator rekonstruiert den gemeinsamen Stand aus Journal und Belegen und setzt denselben Lauf idempotent fort. Noch nicht zugestellte Fragmente/READYs/APPLIEDs werden erneut gepusht.
+- Eine zuvor nicht teilnehmende Offline-Node übernimmt nach Reconnect die inzwischen committed Generationen und Belege in ihrer Reihenfolge, bevor sie an neuen Kontrollentscheidungen oder Rebuilds teilnimmt. Ihr unverändertes Placement und ihre Ownership-Epoch bleiben gültig; unabhängiges Objekt-I/O auf diesen unveränderten Zuständigkeiten verlangt keine globale Rebuild-Barriere. Zurückgestellte Rebuild-Gründe werden erneut gemeldet und können in einer Folgerunde umgesetzt werden.
 - Bei Verlust der Koordinator-Node kann nur ein ausdrücklich administrativer Membership-Reset unter FORCE_DISCONNECT die blockierte Runde ersetzen. Bereits verbindliche Cutover-/Commitstände dürfen dabei nicht rückgängig gemacht werden. Widersprüche blockieren den Recovery-Pfad bis zur Klärung.
 
 ### 4.5 Membership und administrative Kontrolländerungen
@@ -894,13 +912,13 @@ Der Ablauf gilt für alle v1-Strategien: HDD/SSD flushen Daten und Commitbelege 
 STABLE -> PREPARED -> COPYING -> CATCHING_UP -> CUTOVER -> CLEANUP -> STABLE
 ```
 
-**PREPARED:** NEXT-Map von ALL-Member-Quorum committed und angewendet, alle Mitglieder informiert. Alter Owner ist autoritativ.
+**PREPARED:** NEXT-Map von allen gebundenen Online-Teilnehmern der Rebuild-Runde committed und angewendet. Nicht teilnehmende Nodes behalten unverändertes Placement und ziehen die Map nach Reconnect nach (§4.3/§4.4). Alter Owner ist autoritativ.
 
 **COPYING:** Snapshot der Range auf Ziel kopieren. Source verarbeitet weiter Writes/Appends und führt ein der Strategie entsprechendes Änderungsjournal (HDD/SSD persistent, RAM repliziert im Arbeitsspeicher).
 
 **CATCHING_UP:** Ziel holt Änderungen, Deletes, TRUNC/CAS, Append-Sequenzen und Dedupe-Status vollständig nach; anschließend werden aktive Subscriptions und ihre Replay-Cursor übertragen (§10.7).
 
-**CUTOVER:** Persistentes Selbst-Fencing des alten Owners, Ziel bestätigt synchronisierten Daten-/Dedupe-/Subscription-Stand; ALL-Member-Ownership-Epoch-Wechsel nach §4.3.
+**CUTOVER:** Persistentes Selbst-Fencing des alten Owners, Ziel bestätigt synchronisierten Daten-/Dedupe-/Subscription-Stand; Ownership-Epoch-Wechsel mit Zustimmung aller gebundenen Rundenteilnehmer nach §4.3. Eingefrorene Range-Groups erhalten keinen Cutover.
 
 **CLEANUP:** Neue Owner bedienen Requests; alte Daten erst nach gesichertem Cutover und ohne benötigte Referenzen entfernen.
 
@@ -1178,6 +1196,7 @@ Nur authentifizierte NODE-Rolle, gebunden an Membership-Epoch. In der Tabelle be
 | 0x1033 | RUNTIME_RESET_READY / P | `decision:Decision,proof:Proof` |
 | 0x1034 | RUNTIME_RESET_COMMIT / P | `decision:Decision,certificate:Certificate` |
 | 0x1035 | RUNTIME_RESET_APPLIED / P | `decision:Decision,proof:Proof` |
+| 0x1036 | PEER_ADMIN_REQUEST / Q | `actor:ID,username:Text,operation:ID,opcode:u16,body:Blob` => vollständiger innerer RESPONSE-Body (`status:V,follow_headers:Blob,result`); nur nach NODE_HELLO, Ziel prüft den aktuellen Admin-Account selbst |
 
 ```text
 ControlWire = membership:u64,generation:u64,round:RoundID,coordinator:ID,
@@ -1241,6 +1260,23 @@ ADMIN oder ausdrücklich ADMIN_READ für reine Leseoperationen. `C` bedeutet glo
 | 0x2022 | BUCKET_LIST / Q | `after_name:Text,limit:u32` (1..1000) => `page_json:Text` mit `{buckets:[BucketDescription...],next:Text}`; leeres after_name startet, leeres next beendet die Liste; nur Admin, User-Freigaben als Unterarray je Bucket, keine internen Retry-Belege; Listenansicht ergänzt bei endlicher logischer Quota `used_bytes:u64` als Live-Belegung (bei Lesefehlern stattdessen `usage_error:Text`, niemals eine vorgetäuschte Nullbelegung) |
 | 0x2023 | BUCKET_QUOTA_CAPACITY / Q | `bucket:ID,strategy:u8,object_size_profile:u8,previous_overhead_ppm:u32` => `used:u64,available_physical:u64,reserved_other_physical:u64,maximum:u64,nodes:u32,overhead_ppm:u32,profiles:Vec(key:u8,label:Text,typical_bytes:u64,overhead_ppm:u32)`; ID null = neuer Bucket; Profil 255 bewahrt eine bestehende Pauschale, sonst wird sie aus dem Format berechnet |
 | 0x201e | VOLUME_CAPACITY_GET / Q / L | leer => `filesystem_available:u64,ram_available:u64,ram_limit:u64`; Available-Wert für das aktive Volume-Verzeichnis, verfügbarer System-RAM und wirksame RAM-Grenze nach optionalem Budget |
+| 0x2024 | NODE_ADMIN_REQUEST / Q/F / L | `target:ID,opcode:u16,body:Blob` => Status/Folgeheader/result des inneren Befehls; Operations-ID bleibt die ID des äußeren Requests; kein beliebiges URL-Ziel |
+
+`NODE_ADMIN_REQUEST` erlaubt ausschließlich Volume-Anlegen/-Entfernen/-Rescan/
+-Vergrößern, Volume-Kandidaten/Kapazität/Wachstumsgrenzen, lokale Config-Ansicht/
+Feldänderungen und Operationsstatus. Rekursive Weiterleitung, Objekt-, Bucket-
+und Benutzerbefehle sind ausgeschlossen. Nur die Ziel-Node speichert ihre
+Volume-Konfiguration und lokalen Operationsbelege. Der interne Peer-Aufruf
+unterscheidet Transporterfolg (äußere Antwort) und den vollständigen inneren
+Admin-Response-Body; der Dashboard-Proxy reicht dessen Status unverändert durch,
+insbesondere 201, 202 und Fehler. Das Ziel ermittelt die Rolle aus seinem
+System-Bucket, niemals aus einer mitgesendeten Rollenbehauptung.
+
+HELLO-Capabilities: Bit 0 (`1`) bezeichnet Peer-Identitätsbindung/Telemetrie;
+Bit 1 (`2`) bezeichnet gezielte Node-Administration. Diese Bits behaupten weder
+Membership-Aufnahme noch funktionierendes Rebuild/Placement. Die spätere
+Membership-Steuerung muss die Peer-Verbindung vor Freigabe dieser Abläufe
+an den committed Kontrollstand binden.
 
 Der erste Single-Node-Dashboard-Stand verwendet bereits diese Nachrichten, VOLUME_ADD/REMOVE und STATS_SUBSCRIBE/SNAPSHOT/UNSUBSCRIBE über binäre `stqr.v1`-WebSockets. Quelle bei VOLUME_ADD: `0 FILE,1 BLOCKDEVICE,2 RAM`. Empfang, Dispatch und Senden haben getrennte begrenzte Queues; Antworten werden korreliert, Telemetrie darf nur als vollständiger neuer Snapshot einen älteren ersetzen. Der CLI-Einstieg sammelt `--config`, `--port`, `--listen`, `--connect`, `--name`, `--advertise`, `--data-dir`, `--volumes-dir`, `--ram-bytes`, `--ramcache-bytes`, `--system-volume-bytes` und `--allow-subnet`. Standardport 7419, Standardzugriff nur IPv4-/IPv6-Loopback, erweiterbar auf explizite CIDRs. Listener/Verzeichnisse/RAM-Budget benötigen nach Config-Änderung einen Neustart; Name/Advertise/Subnetze gelten unmittelbar. Konfigurierte Peers oder `--connect` erhalten bis zur Join-Implementierung einen ausdrücklichen Nicht-implementiert-Fehler statt eines neu erzeugten Clusters.
 
@@ -1572,7 +1608,8 @@ Mit künstlich kleinen Volumes (z. B. **4, 8, 16, 32 und 64 MiB**) und determini
 ### 18.5.1 Zusätzliche Protokoll-/Betriebsabnahmen
 
 - Wahl-Races: erst Mess-/Stresstestharness mit gleichzeitigen Auslösern, verzögerten/überkreuzten Fragmenten und Reconnects; Konflikte, Konvergenzzeit und Overhead messen. Erst anschließend den Race-Algorithmus entwerfen und dessen Eindeutigkeit/Crash-Sicherheit prüfen, keinen Grant-/ABORT-Algorithmus vorwegnehmen.
-- Keine neue Generation ohne Grund; mehrere Gründe in needrebuild bündeln, direkt nach Finalize nächsten Lauf starten; Rebuild mit 0 Payloadbytes bei rein logischem Split/Merge.
+- Keine neue Generation ohne Grund; mehrere Gründe in needrebuild bündeln, bei ausführbaren Gründen direkt nach Finalize nächsten Lauf starten; Rebuild mit 0 Payloadbytes bei rein logischem Split/Merge.
+- Online-Rebuild bei über mehrere Tage fehlenden Nodes: unabhängige Online-Ranges umverteilen und Generation abschließen; Offline-Range-Groups einschließlich Grenzen, Locations, Rollen und Epochs unverändert lassen. Offline-Volumes ebenfalls einfrieren. Aufgeschobene Gründe über Neustarts erhalten, ohne wirkungslose Folgeläufe; nach Reconnect/Abgleich in einer neuen Generation umsetzen. Während eines gebundenen Laufs ausfallende Teilnehmer müssen dessen Abschluss blockieren; wiederkehrende Nichtteilnehmer dürfen erst eine Folgerunde erweitern.
 - Gemeinsame Stats-Codec-Golden-Vectors Go/JS, 3-Sekunden-Push ohne Polling, mehrteilige Snapshots, BootID-Wechsel und Replika-Accounting ohne logische Doppelzählung.
 - Leere/UNKNOWN-Client-Map, zufälliger Erstkontakt, 301 mit Patch/Push, Grenzbereiche/Split/Merge/alte Patches und segmentierte Aktualisierung ohne falsche Range-Erweiterung.
 - Basic-Auth-/Cookie-/Origin-Prüfung, HTTP und WebSocket mit identischen Adminhandlern, Q exakt eine terminale Antwort, F keine RESPONSE, begrenzte Queues und Stream-Abbruch ohne partiellen Commit.
@@ -1672,7 +1709,7 @@ Hier stehen nur noch nicht entschiedene Details. Bereits geklärt sind: Intranet
 
 ### 20.5 Noch abzustimmende Vertragsfragen
 
-1. **Umfang der ALL-Barrieren:** Alle Statistikfragmente zur Koordinatorbindung sind vorgegeben. Der Entwurf fordert zusätzlich ALL-Member-Zustimmung bei jedem Range-Cutover/globalen Admin-Commit. Soll eine Range-Übergabe stattdessen nur auf Source, Ziel und erforderliche Replikate warten, während andere Nodes die Map per Push nachziehen?
+1. **Sichere Bindung der Online-Teilnehmer:** Der Rebuild darf Offline-Placement nicht verändern und benötigt nur die in §4.3 gebundenen Online-Teilnehmer. Noch zu entwerfen und zu verifizieren sind deren eindeutige Bindung bei asymmetrischer Erreichbarkeit/Netzwerkpartitionen, der Ausschluss konkurrierender aktivierter Generationen und die geordnete Nachführung ausgelassener Nodes. Bloße Erreichbarkeit beweist weder eine sichere Teilnehmermenge noch das Ende einer bereits gebundenen Runde. Globale Membership-/Admin-Commits behalten die ALL-Member-Regel aus §4.5.
 2. **Dedupe-Freigabe:** Sollen Clients abgeschlossene Operationen ausdrücklich freigeben oder gilt eine dokumentierte Retention? Wie wird ein Retry nach Ablauf beantwortet, ohne still erneut zu mutieren?
 3. **Verbleibende Objektrandfälle:** GET_RANGE am/hinter EOF und TRUNC eines fehlenden Objekts; die bereits entschieden Range-/Null-/Vergrößerungsregeln bleiben unverändert.
 
@@ -1743,7 +1780,7 @@ STQR reduziert einige spezifische Zielkonflikte anderer Systeme, **beseitigt abe
 
 - **99 % Füllstand:** Kleine Ranges ermöglichen präzisere Moves, garantieren aber weder Platz auf dem Ziel noch ausreichend Platz für weitere Writes, Replikataufbau oder einen Host-Ausfall. Sicherheitsreserve und `full`-/`nearfull`-Regeln bleiben notwendig.
 - **Zwei Generationen sind keine Transaktion:** Für garantierte linearisierbare Objektoperationen braucht es weiterhin Fencing, persistente Entscheidung über Ownership, Änderungsübernahme, Idempotenz und Crash-Recovery.
-- **ALL-Quorum und Warten:** Ein einzelner persistenter Node ist nicht host-ausfallsicher. Mit mehreren Nodes blockieren fehlende erforderliche Mitglieder neue Kontrollentscheidungen und betroffene Commits. Unbegrenztes Warten bis Reconnect oder administrativem Forceful Disconnect ist eine bewusste Verfügbarkeitsgrenze.
+- **ALL-Barrieren und Warten:** Ein einzelner persistenter Node ist nicht host-ausfallsicher. Bereits vor einer Rebuild-Runde fehlende Nodes blockieren unabhängiges Online-Rebalancing nicht; ihr Placement bleibt eingefroren. Fehlende erforderliche Replikate blockieren betroffene Writes, fehlende Mitglieder globale Membership-/Admin-Entscheidungen und nach Bindung ausfallende Rundenteilnehmer den laufenden Rebuild. Warten bis Reconnect oder administrativem Forceful Disconnect bleibt in diesen Fällen eine bewusste Verfügbarkeitsgrenze.
 - **Hot Objects:** Splitting isoliert ein heißes Objekt, verteilt aber dessen Writes nicht. Read-Cache-Skalierung funktioniert nur mit einer korrekten Versions-/Invalidierungsstrategie.
 - **S3/POSIX/Block:** `LIST` braucht einen Namensindex; FUSE braucht Dateisystemmetadaten und Semantik; NBD braucht Flush/Discard/partielle Writes. Diese Gateways sind nicht bloß ein Protokoll-Wrapper.
 - **Crash-Durability:** `ACK` darf nur nach persistenter Daten- und Recovery-Information erfolgen; SSD-/HDD-Controller müssen Flush/FUA korrekt unterstützen. Group Commit kann Flush-Aufwand zusammenfassen, aber nicht umgehen.
@@ -1816,7 +1853,7 @@ STQR SOLL reproduzierbar gegen Ceph und eine geeignete lokale beziehungsweise vo
 | Kompression | raw/gzip/lz4/xz pro Bucket und Objektversion; Migration konvertiert ins Zielverfahren |
 | Sparse | ZERO-Extents für große Null-Lücken, logische Bytes ohne entsprechende Datenallokation |
 | Nodes | gleichberechtigt, Cluster-Token + bekannte HTTP-Peers bzw. --connect |
-| Generationen | maximal CURRENT/NEXT im Bulk-Balancing; nach abgeschlossener Migration und neuem Rebuild-Grund |
+| Generationen | maximal CURRENT/NEXT im Bulk-Balancing; nur Online-Teilnehmer umverteilen, Offline-Placement einfrieren; zurückgestellte Gründe nach Wiederkehr in neuer Generation umsetzen |
 | Koordinator | Push-Wahl/Bindung als Ziel; konkrete Race-Behandlung erst nach Stresstestmessung entwerfen |
 | Objektaddressierung | `SHA-256(bucket-id, object-key)` |
 | Range-Spezifikation | inklusiver Start; nächster Start ist implizite Grenze |

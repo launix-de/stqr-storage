@@ -1,0 +1,317 @@
+// SPDX-License-Identifier: GPL-3.0-only
+package server
+
+import (
+	"context"
+	"encoding/base64"
+	"errors"
+	"fmt"
+	"net/http"
+	"net/url"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/gorilla/websocket"
+	"github.com/launix-de/stqr-storage/client"
+)
+
+// nodeHello binds a token-authenticated socket to its claimed identities. The
+// response describes the CURRENT single-member membership, not an admitted join.
+func (s *Server) nodeHello(m client.Message, ws *wsSession, p principal) ([]byte, error) {
+	if ws == nil || p.connection == nil || m.Kind != client.Request {
+		return nil, fail(400, "NODE_HELLO requires a peer WebSocket request")
+	}
+	hello, err := client.DecodeNodeHello(m.Body)
+	if err != nil {
+		return nil, fail(400, "invalid NODE_HELLO")
+	}
+	s.mu.RLock()
+	cluster, _ := parseID(s.cfg.ClusterID)
+	node, _ := parseID(s.cfg.Node.ID)
+	generation, advertise := s.cfg.Generation, s.cfg.Node.Advertise
+	s.mu.RUnlock()
+	claimed, err := parseID(p.User.ID)
+	if err != nil || hello.Node != client.ID(claimed) {
+		return nil, fail(403, "peer identity does not match authenticated node")
+	}
+	if hello.Cluster != client.ID(cluster) {
+		return nil, fail(409, "foreign cluster")
+	}
+	if hello.Node == client.ID(node) {
+		return nil, fail(409, "duplicate local node identity")
+	}
+	if hello.Membership != 1 {
+		return nil, fail(409, "membership epoch does not match current state")
+	}
+	addresses := []string{}
+	if advertise != "" {
+		addresses = append(addresses, advertise)
+	}
+	ack := client.NodeHelloAck{Membership: client.Membership{Epoch: 1, Cluster: client.ID(cluster), Members: []client.Member{{ID: client.ID(node), Addresses: addresses}}}, Generation: generation, MapRevision: generation}
+	body, err := ack.MarshalBinary()
+	if err != nil {
+		return nil, err
+	}
+	p.connection.peerVerified.Store(true)
+	return body, nil
+}
+
+type peerReply struct {
+	body []byte
+	err  error
+}
+type peerPending struct {
+	opcode uint16
+	result chan peerReply
+}
+
+// peerConnection is transport infrastructure. Losing it does not change
+// membership, ownership, generation, coordinator or required replica counts.
+type peerConnection struct {
+	server       *Server
+	conn         *websocket.Conn
+	ctx          context.Context
+	cancel       context.CancelFunc
+	once         sync.Once
+	mu           sync.Mutex
+	pending      map[client.ID]peerPending
+	outgoing     chan client.Message
+	pushes       chan client.Message
+	Node         client.ID
+	Membership   client.Membership
+	Capabilities uint64
+}
+
+func (s *Server) dialPeer(ctx context.Context, address string, expected client.ID) (*peerConnection, error) {
+	if err := validateURL(address); err != nil {
+		return nil, err
+	}
+	u, err := url.Parse(address)
+	if err != nil {
+		return nil, err
+	}
+	u.Scheme = "ws"
+	u.Path = "/api/ws"
+	u.RawQuery = ""
+	u.Fragment = ""
+	s.mu.RLock()
+	node, _ := parseID(s.cfg.Node.ID)
+	cluster, _ := parseID(s.cfg.ClusterID)
+	token := s.cfg.Auth.ClusterToken
+	boot := s.boot
+	advertise := s.cfg.Node.Advertise
+	s.mu.RUnlock()
+	headers := http.Header{"Authorization": []string{"Basic " + base64.StdEncoding.EncodeToString([]byte("node-"+node.String()+":"+token))}}
+	dialer := websocket.Dialer{Subprotocols: []string{"stqr.v1"}, HandshakeTimeout: 10 * time.Second, EnableCompression: false}
+	conn, response, err := dialer.DialContext(ctx, u.String(), headers)
+	if err != nil {
+		if response != nil {
+			response.Body.Close()
+			return nil, fail(response.StatusCode, "peer WebSocket upgrade rejected")
+		}
+		return nil, err
+	}
+	conn.SetReadLimit(client.MaxMessage)
+	lifetime, cancel := context.WithCancel(s.ctx)
+	p := &peerConnection{server: s, conn: conn, ctx: lifetime, cancel: cancel, pending: map[client.ID]peerPending{}, outgoing: make(chan client.Message, sendQueueCapacity), pushes: make(chan client.Message, 64)}
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		p.close()
+		return nil, errors.New("server is stopping")
+	}
+	s.workers.Add(2)
+	s.mu.Unlock()
+	go func() { defer s.workers.Done(); p.writeLoop() }()
+	go func() { defer s.workers.Done(); p.readLoop() }()
+	success := false
+	defer func() {
+		if !success {
+			p.close()
+		}
+	}()
+	e := client.Encoder{}
+	e.U16(1)
+	e.U16(1)
+	e.U64(client.CapabilityPeerTransport)
+	e.Text("stqr-peer")
+	result, err := p.request(ctx, client.Hello, e.B)
+	if err != nil {
+		return nil, err
+	}
+	d := client.Decoder{B: result}
+	version, capabilities := d.U16(), d.U64()
+	remoteNode, remoteCluster := d.ID(), d.ID()
+	membership := d.U64()
+	d.U64()
+	if d.Done() != nil || version != 1 || capabilities&client.CapabilityPeerTransport == 0 || remoteCluster != client.ID(cluster) || remoteNode == (client.ID{}) || remoteNode == client.ID(node) || (expected != (client.ID{}) && remoteNode != expected) {
+		return nil, fail(409, "peer identity/cluster/capability mismatch")
+	}
+	addresses := []string{}
+	if advertise != "" {
+		addresses = append(addresses, advertise)
+	}
+	body, err := (client.NodeHello{Cluster: client.ID(cluster), Node: client.ID(node), Membership: membership, Addresses: addresses, Boot: boot}).MarshalBinary()
+	if err != nil {
+		return nil, err
+	}
+	result, err = p.request(ctx, client.NodeHelloMessage, body)
+	if err != nil {
+		return nil, err
+	}
+	ack, err := client.DecodeNodeHelloAck(result)
+	if err != nil || ack.Membership.Cluster != remoteCluster || ack.Membership.Epoch != membership {
+		return nil, fail(409, "peer membership response mismatch")
+	}
+	present := false
+	for _, member := range ack.Membership.Members {
+		if member.ID == remoteNode {
+			present = true
+		}
+	}
+	if !present {
+		return nil, fail(409, "peer is absent from its own current membership")
+	}
+	p.Node = remoteNode
+	p.Membership = ack.Membership
+	p.Capabilities = capabilities
+	success = true
+	return p, nil
+}
+func (p *peerConnection) close() {
+	p.once.Do(func() {
+		p.cancel()
+		p.conn.Close()
+		p.mu.Lock()
+		defer p.mu.Unlock()
+		for id, pending := range p.pending {
+			pending.result <- peerReply{err: errors.New("peer connection closed")}
+			delete(p.pending, id)
+		}
+	})
+}
+func (p *peerConnection) request(ctx context.Context, opcode uint16, body []byte) ([]byte, error) {
+	if len(body) > client.MaxMessage-20 {
+		return nil, client.ErrProtocol
+	}
+	body = append([]byte(nil), body...)
+	id := client.NewRequestID()
+	pending := peerPending{opcode: opcode, result: make(chan peerReply, 1)}
+	p.mu.Lock()
+	if p.ctx.Err() != nil {
+		p.mu.Unlock()
+		return nil, p.ctx.Err()
+	}
+	if len(p.pending) >= receiveQueueCapacity {
+		p.mu.Unlock()
+		return nil, client.ErrWouldBlock
+	}
+	p.pending[id] = pending
+	p.mu.Unlock()
+	defer func() { p.mu.Lock(); delete(p.pending, id); p.mu.Unlock() }()
+	select {
+	case p.outgoing <- client.Message{Kind: client.Request, Opcode: opcode, ID: id, Body: body}:
+	case <-p.ctx.Done():
+		return nil, p.ctx.Err()
+	default:
+		return nil, client.ErrWouldBlock
+	}
+	select {
+	case result := <-pending.result:
+		return result.body, result.err
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-p.ctx.Done():
+		return nil, p.ctx.Err()
+	}
+}
+func (p *peerConnection) writeLoop() {
+	defer p.close()
+	for {
+		select {
+		case <-p.ctx.Done():
+			return
+		case m := <-p.outgoing:
+			p.conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
+			if p.conn.WriteMessage(websocket.BinaryMessage, client.EncodeMessage(m)) != nil {
+				return
+			}
+		}
+	}
+}
+func (p *peerConnection) readLoop() {
+	defer p.close()
+	for {
+		kind, b, err := p.conn.ReadMessage()
+		if err != nil || kind != websocket.BinaryMessage {
+			return
+		}
+		m, err := client.DecodeMessage(b)
+		if err != nil {
+			return
+		}
+		switch m.Kind {
+		case client.Response:
+			p.mu.Lock()
+			pending, ok := p.pending[m.ID]
+			if ok {
+				delete(p.pending, m.ID)
+			}
+			p.mu.Unlock()
+			if !ok {
+				continue
+			}
+			if pending.opcode != m.Opcode {
+				pending.result <- peerReply{err: client.ErrProtocol}
+				return
+			}
+			d := client.Decoder{B: m.Body}
+			status := d.V()
+			headers := d.Blob()
+			if d.Err != nil {
+				pending.result <- peerReply{err: client.ErrProtocol}
+				return
+			}
+			result := peerReply{body: append([]byte(nil), d.B...)}
+			if status >= 300 {
+				message := "peer request rejected"
+				h := client.Decoder{B: headers}
+				count := h.Count(64)
+				for i := 0; i < count; i++ {
+					tag, data := h.V(), h.Blob()
+					if tag == 3 {
+						detail := client.Decoder{B: data}
+						message = strings.ToValidUTF8(detail.Text(), "?")
+						if detail.Done() != nil {
+							pending.result <- peerReply{err: client.ErrProtocol}
+							return
+						}
+					}
+				}
+				result.err = fail(int(status), fmt.Sprintf("peer status %d: %s", status, message))
+			}
+			pending.result <- result
+		case client.Push:
+			select {
+			case p.pushes <- m:
+			case <-p.ctx.Done():
+				return
+			default:
+				return
+			}
+		default:
+			return
+		}
+	}
+}
+func (p *peerConnection) nextPush(ctx context.Context) (client.Message, error) {
+	select {
+	case m := <-p.pushes:
+		return m, nil
+	case <-ctx.Done():
+		return client.Message{}, ctx.Err()
+	case <-p.ctx.Done():
+		return client.Message{}, p.ctx.Err()
+	}
+}

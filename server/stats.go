@@ -101,6 +101,10 @@ func filterSnapshot(snap client.StatsSnapshot, f client.StatsFilter) client.Stat
 func (s *Server) publishStats() {
 	snap := s.CollectStats(client.StatsFilter{})
 	s.latest.Store(&snap)
+	s.broadcastStats(snap)
+}
+
+func (s *Server) broadcastStats(snap client.StatsSnapshot) {
 	s.wsMu.Lock()
 	sockets := make([]*wsSession, 0, len(s.sockets))
 	for ws := range s.sockets {

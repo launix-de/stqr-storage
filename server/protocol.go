@@ -52,8 +52,33 @@ func (s *Server) dispatchAs(m client.Message, ws *wsSession, p principal) ([]byt
 			return client.ResponseBody(403, nil, "bucket connection has no administrative privileges"), 403
 		}
 	}
+	if m.Opcode == client.NodeHelloMessage {
+		if !p.isPeer() {
+			return client.ResponseBody(403, nil, "cluster peer required"), 403
+		}
+		result, err := s.nodeHello(m, ws, p)
+		if err != nil {
+			status := statusOf(err)
+			return client.ResponseBody(status, nil, err.Error()), status
+		}
+		return client.ResponseBody(200, result, ""), 200
+	}
 	if p.isPeer() {
-		if m.Opcode == client.Hello || m.Opcode == client.Ping || m.Opcode == client.StatsGet || m.Opcode == client.StatsSubscribe || m.Opcode == client.StatsUnsubscribe || (m.Opcode >= 0x1000 && m.Opcode < 0x1100) {
+		if m.Opcode == client.Hello || m.Opcode == client.Ping {
+			return s.dispatch(m, ws)
+		}
+		if p.connection == nil || !p.connection.peerVerified.Load() {
+			return client.ResponseBody(403, nil, "NODE_HELLO identity binding required"), 403
+		}
+		if m.Opcode == client.PeerAdminRequest {
+			result, err := s.peerAdmin(m)
+			if err != nil {
+				status := statusOf(err)
+				return client.ResponseBody(status, nil, err.Error()), status
+			}
+			return client.ResponseBody(200, result, ""), 200
+		}
+		if m.Opcode == client.StatsGet || m.Opcode == client.StatsSubscribe || m.Opcode == client.StatsUnsubscribe || (m.Opcode >= 0x1000 && m.Opcode < 0x1100) {
 			return s.dispatch(m, ws)
 		}
 		return client.ResponseBody(403, nil, "cluster peer operation required"), 403
@@ -61,6 +86,9 @@ func (s *Server) dispatchAs(m client.Message, ws *wsSession, p principal) ([]byt
 
 	if !p.isAdmin() && m.Opcode != client.Hello && m.Opcode != client.Ping && !(m.Opcode >= 0x0100 && m.Opcode <= client.BucketScan) {
 		return client.ResponseBody(403, nil, "administrator required"), 403
+	}
+	if m.Opcode == client.NodeAdminRequest {
+		return s.nodeAdmin(m, ws, p)
 	}
 	// Metadata uses the authenticated connection capability, never role/rights
 	// claimed in message contents. Changes revoke cached socket grants.
@@ -144,7 +172,7 @@ func (s *Server) execute(m client.Message, ws *wsSession) ([]byte, int, error) {
 		s.mu.RUnlock()
 		e := client.Encoder{}
 		e.U16(1)
-		e.U64(0)
+		e.U64(client.CapabilityPeerTransport | client.CapabilityNodeAdmin)
 		node, _ := parseID(c.Node.ID)
 		cluster, _ := parseID(c.ClusterID)
 		e.ID(client.ID(node))

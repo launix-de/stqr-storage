@@ -19,6 +19,7 @@ type connectionAuthorization struct {
 	bucketID           volume.ID
 	permissions        BucketPermissions
 	invalid            atomic.Bool
+	peerVerified       atomic.Bool
 	expires            time.Time
 }
 

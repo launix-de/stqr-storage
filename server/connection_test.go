@@ -193,7 +193,7 @@ func TestConnectionCachesAdminAndPeerRoles(t *testing.T) {
 	}
 	bucketReplyResult(t, requestMessage(t, peer, client.Message{Kind: client.Request, Opcode: client.UserList, ID: client.NewRequestID()}), 403)
 	// Authentication grants a transport role, never cluster membership/ownership.
-	bucketReplyResult(t, requestMessage(t, peer, client.Message{Kind: client.Request, Opcode: 0x1000, ID: client.NewRequestID()}), 501)
+	bucketReplyResult(t, requestMessage(t, peer, client.Message{Kind: client.Request, Opcode: 0x1000, ID: client.NewRequestID()}), 400)
 	bad, response, err := dialTestSocket(t, host.URL, "node-"+peerID.String(), "wrong-token", "")
 	if err == nil {
 		bad.Close()

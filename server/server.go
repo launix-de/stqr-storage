@@ -55,6 +55,8 @@ type Server struct {
 	sockets                map[*wsSession]struct{}
 	latest                 atomic.Pointer[client.StatsSnapshot]
 	retiredIO              client.IOStats
+	peerStatsMu            sync.RWMutex
+	peerStats              map[client.ID]*peerObservation
 }
 
 func Open(opts Options) (s *Server, err error) {
@@ -282,6 +284,9 @@ func Run(ctx context.Context, opts Options, output io.Writer) error {
 		}
 		return e
 	case <-ctx.Done():
+		// Process/supervisor/system shutdown is always SHORT (wait for return).
+		// Never infer a drain from cancellation; only explicit admin intent may
+		// initiate evacuation. An existing persisted drain remains resumable.
 		// TODO(multinode): announce persistent SHORT and coordinate RESUME_STATE.
 		// Do not implement a failure timeout or evict peers on process shutdown.
 		s.cancel()

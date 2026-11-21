@@ -149,7 +149,9 @@ operations only; the dashboard's unbound admin socket exposes administration.
 Non-admin user sockets must select a bucket. Peer sockets authenticate once with
 `node-<32-hex-ID>` and the cluster token and cache a separate peer flag; they may
 use peer/statistics messages but cannot administer accounts/buckets. This grants
-no membership or ownership: NODE_HELLO/JOIN and distributed control remain 501.
+no membership or ownership: NODE_HELLO binds the transport identity; JOIN and
+distributed control remain unimplemented. Targeted volume administration is a
+separate allowlisted peer RPC and revalidates the initiating admin at the target.
 Catalog corruption is checked on restart, without rereading all descriptions
 for every request.
 
@@ -291,3 +293,99 @@ reads do not persist synchronization records. The scan is hash-ordered and merge
 versions/tombstones across local copies before returning live records. Tombstones
 can advance a cursor without returning live entries. The daemon does not decode
 filesystem formats or determine reachability; the client performs mark-and-sweep.
+
+## First multinode preparation: rebuild race measurements
+
+`client/rebuild.go` implements the specified REBUILD_OFFER (0x1004) and
+STATS_FRAGMENT (0x1007) payload codecs with round/identity checks, bounded fragment
+sizes and counts, and strict decoding. These are wire primitives only: the live
+single-node dispatcher still returns 501 for the unimplemented peer operations.
+
+`server/rebuild_race_test.go` is a deterministic event-scheduler baseline. It
+uses those codecs and real serialized collector snapshot layouts, models 2/3/5/9/32
+nodes, delayed/crossing offers, fragmentation, duplicates and pause/reconnect, and
+records message/byte counts and seed-reproducible potential binding conflicts.
+A candidate with every valid snapshot is merely a *potential* binding in this
+model; it never acquires production authority. No grants, abort rule, membership
+eviction, persistent binding or chosen coordinator algorithm is implemented.
+
+Run it with `go test ./server -run '^TestRebuild' -v`. The initial seven scenarios
+use 200 seeds each. In the five-node `crossing_offers` baseline, 10/200 seeds
+allowed more than one potential binding; seeds are 4,21,57,62,83,114,132,151,153,161.
+This exposes the need for a defined binding boundary and for communicating that
+boundary before a later competing offer can gain authority. It is not evidence
+for any particular final election protocol. The explicit two-node regression
+constructs the same ambiguity without randomness.
+
+Ticks are virtual scheduler time, not measured network milliseconds or cluster
+convergence latency. `BenchmarkRebuildOfferBaseline` measures the CPU/allocation
+cost of this simulation, not the throughput of real peers. Real socket/network,
+persistent decision, process-crash and multi-host stress tests remain necessary
+before choosing and accepting the coordinator algorithm. Join, CURRENT/NEXT,
+range routing, ownership fencing and ALL replication remain unimplemented.
+
+## Multinode acceptance gate
+
+The telemetry and remote-volume path is now exercised with two isolated native
+WebSocket servers and a real browser. The test explicitly installs a common
+account image and attaches the peer observer; **automatic JOIN and system-bucket
+replication are not exercised or implemented by this fixture**. The regular
+daemon still rejects configured peers rather than bootstrapping a second cluster.
+
+`startPeerObservation` subscribes to LOCAL stats every three seconds, validates
+fragments/digest/source/boot/sequence and relays only complete snapshots to CLUSTER
+subscribers. Disconnect retains the last snapshot; a replacement connection cannot
+be overwritten by the old observer. Both Go and JS assemble interleaved sources
+independently with bounded buffers. WebSocket telemetry coalesces one complete
+pending batch per node, preserving fair service to other nodes. The dashboard
+retains per-node samples, sums physical capacity and computes throughput from
+each node's own deltas; old samples are visibly stale, never membership removals.
+
+`NODE_ADMIN_REQUEST` (0x2024) targets a node ID using the original opcode/body and
+operation ID. `PEER_ADMIN_REQUEST` (0x1036) delegates the actor identity on the
+authenticated peer link. The target looks up the current admin account and owns
+its local config and retry receipts. Proxy recursion and bucket/user/object
+commands are rejected. The browser tree has add/grow/drain controls for each
+node; drain still uses the local evacuation implementation until the rebuild
+controller replaces it with committed cross-node placement.
+
+Checks implemented for this path:
+
+- Native peer statistics pushes, dashboard subscription, disconnect retention
+  and new BootID after target reopen (`TestPeerStatsPushDashboardAndReconnect`).
+- Remote volume add/grow, duplicate retry, target-local receipt and current role
+  validation (`TestNodeAdminTargetsVolumesAndPreservesReceipts`).
+- Opt-in Chrome dashboard check: two node rows, add a file on the remote node,
+  grow it there, and assert the source did not acquire that volume
+  (`TestDashboardPeerVolumesBrowser`, `STQR_TEST_BROWSER_MODULE` selects Playwright).
+
+These checks do not establish extension, crash-safe rebuild or cluster SHORT.
+
+The preserved single-node baseline is commit `71c7d09` on `origin/master`.
+The current implementation work is on branch `multinode`. Do not announce the
+cluster as ready for user testing until all of the following work together:
+
+- Statistics heartbeats and an all-node dashboard, including stale/paused nodes.
+- Administrators can discover/add/grow/drain volumes on any node. A node owns
+  its volume configuration locally; the aggregated list is administrative data.
+- Persistent rebuild rounds, unique coordinator binding, CURRENT/NEXT planning,
+  copy/catch-up/fencing/cutover/cleanup, recovery, and queued `needrebuild` runs.
+- Required: one bucket/client stores more data than fits on one node, using
+  learned range routing. Data replication is optional for this milestone.
+- SHORT/update shutdown preserves placement/data; unaffected nodes keep serving.
+  Only dependent operations wait for the paused owner; replica reads are preferred
+  when replication is present. No timeout-based membership removal.
+- SIGTERM, SIGINT, PM2 stop/restart and normal Linux shutdown always use SHORT;
+  they never initiate node or volume drain. Only an explicit authenticated admin
+  command/dashboard action requests DRAIN. Previously requested drains remain
+  resumable after restart.
+- DRAIN shutdown migrates a departing node empty before removal.
+- Volume drain is scheduled in the next rebuild and releases the volume only
+  after its needed contents have moved and ownership is safe.
+- Real multi-process/multi-host checks cover extension, rolling restarts, node
+  and volume drain, concurrent object mutations and coordinator interruption.
+
+Peer identity/telemetry transport alone is not membership admission or a working
+rebuild. Model scheduler results are not real cluster availability measurements.
+The user's existing local volumes and accounts must survive upgrades; use
+separate fixtures for destructive/failure tests.

@@ -36,7 +36,7 @@ type wsSession struct {
 	done           chan struct{}
 	once           sync.Once
 	responses      chan []byte
-	telemetry      chan [][]byte
+	telemetry      *statsSendQueue
 	requests       chan client.Message
 	subMu          sync.Mutex
 	subscription   client.ID
@@ -102,7 +102,7 @@ func (s *Server) serveWebSocket(w http.ResponseWriter, r *http.Request, p princi
 	p.User.PasswordHash = ""
 	conn.SetReadLimit(client.MaxMessage)
 	sessionCtx, sessionCancel := context.WithCancel(s.ctx)
-	ws := &wsSession{authorization: authorization, ctx: sessionCtx, cancel: sessionCancel, server: s, conn: conn, request: r, principal: p, done: make(chan struct{}), responses: make(chan []byte, sendQueueCapacity), telemetry: make(chan [][]byte, 1), requests: make(chan client.Message, receiveQueueCapacity)}
+	ws := &wsSession{authorization: authorization, ctx: sessionCtx, cancel: sessionCancel, server: s, conn: conn, request: r, principal: p, done: make(chan struct{}), responses: make(chan []byte, sendQueueCapacity), telemetry: newStatsSendQueue(), requests: make(chan client.Message, receiveQueueCapacity)}
 	s.mu.Lock()
 	if s.closed {
 		s.mu.Unlock()
@@ -176,7 +176,8 @@ func (ws *wsSession) writeLoop() {
 			return
 		case b := <-ws.responses:
 			batch = [][]byte{b}
-		case batch = <-ws.telemetry:
+		case <-ws.telemetry.wake:
+			batch = ws.telemetry.take()
 		}
 		for _, b := range batch {
 			ws.conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
@@ -239,15 +240,17 @@ func (ws *wsSession) subscribe(id client.ID, f client.StatsFilter) {
 	ws.subMu.Lock()
 	ws.subscription = id
 	ws.filter = f
+	ws.telemetry.clear()
 	ws.subMu.Unlock()
-	if snap := ws.server.latest.Load(); snap != nil {
-		ws.pushStats(*snap)
+	for _, snap := range ws.server.statsSnapshots(f) {
+		ws.pushStats(snap)
 	}
 }
 func (ws *wsSession) unsubscribe(id client.ID) {
 	ws.subMu.Lock()
 	if ws.subscription == id {
 		ws.subscription = client.ID{}
+		ws.telemetry.clear()
 	}
 	ws.subMu.Unlock()
 }
@@ -255,8 +258,16 @@ func (ws *wsSession) pushStats(snapshot client.StatsSnapshot) {
 	ws.subMu.Lock()
 	id, f := ws.subscription, ws.filter
 	ws.subMu.Unlock()
-	if id == (client.ID{}) {
+	if id == (client.ID{}) || !matches(f.Nodes, snapshot.Node) {
 		return
+	}
+	if f.Scope == 0 {
+		ws.server.mu.RLock()
+		local := ws.server.cfg.Node.ID == snapshot.Node.String()
+		ws.server.mu.RUnlock()
+		if !local {
+			return
+		}
 	}
 	p, ok := ws.principalNow()
 	if !ok || (!p.isAdmin() && !p.isPeer()) {
@@ -266,8 +277,8 @@ func (ws *wsSession) pushStats(snapshot client.StatsSnapshot) {
 	digest := sha256.Sum256(data)
 	const chunk = 1 << 20
 	count := (len(data) + chunk - 1) / chunk
-	// One queue slot owns an entire snapshot batch. Coalescing never leaves
-	// fragments of an older snapshot mixed with a newer one.
+	// Each source owns one complete pending batch; another source cannot
+	// overwrite it. Coalescing never mixes incomplete snapshot fragments.
 	if count > 64 {
 		ws.close()
 		return
@@ -286,16 +297,14 @@ func (ws *wsSession) pushStats(snapshot client.StatsSnapshot) {
 		eventID, _ := parseID(newID())
 		batch = append(batch, client.EncodeMessage(client.Message{Kind: client.Push, Opcode: client.StatsSnapshotMessage, ID: client.ID(eventID), Body: e.B}))
 	}
-	select {
-	case ws.telemetry <- batch:
-	default:
-		select {
-		case <-ws.telemetry:
-		default:
-		}
-		select {
-		case ws.telemetry <- batch:
-		default:
-		}
+	ws.subMu.Lock()
+	defer ws.subMu.Unlock()
+	if ws.subscription != id {
+		return
+	}
+	if !ws.telemetry.put(snapshot.Node, batch) {
+		// The consumer must reconnect/resubscribe rather than receiving silently
+		// incomplete cluster telemetry when its bounded budget is exhausted.
+		ws.close()
 	}
 }

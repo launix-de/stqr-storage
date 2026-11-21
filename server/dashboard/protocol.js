@@ -3,7 +3,7 @@
 // control channel: administrative JSON field patches are explicitly Text bodies
 // of NODE_CONFIG_GET/SET; all messages use the original STQR binary envelope.
 import {writeBucketPolicy,writeBucketQuota,parseBucketPage} from './bucket-codec.js';
-export const OP={HELLO:1,PING:2,EVENT:4,STATS_GET:8,STATS_SUBSCRIBE:9,STATS_UNSUBSCRIBE:10,STATS_SNAPSHOT:11,VOLUME_ADD:0x2001,VOLUME_REMOVE:0x2002,OPERATION_STATUS:0x2019,CONFIG_GET:0x201a,CONFIG_SET:0x201b,VOLUME_CANDIDATES:0x201c,VOLUME_RESCAN:0x201d,VOLUME_CAPACITY:0x201e,VOLUME_GROW_INFO:0x201f,VOLUME_GROW:0x2020,USER_LIST:0x2021,USER_CREATE:0x200b,USER_UPDATE:0x200c,USER_SET_PASSWORD:0x200d,USER_DELETE:0x200e,BUCKET_LIST:0x2022,BUCKET_QUOTA_CAPACITY:0x2023,BUCKET_CREATE:0x2003,BUCKET_SET_POLICY:0x2004,BUCKET_SET_QUOTA:0x2005,BUCKET_RENAME:0x2006,BUCKET_LOCK:0x2007,BUCKET_DELETE:0x2008,BUCKET_GRANT:0x2009,BUCKET_REVOKE:0x200a};
+export const OP={NODE_ADMIN:0x2024,HELLO:1,PING:2,EVENT:4,STATS_GET:8,STATS_SUBSCRIBE:9,STATS_UNSUBSCRIBE:10,STATS_SNAPSHOT:11,VOLUME_ADD:0x2001,VOLUME_REMOVE:0x2002,OPERATION_STATUS:0x2019,CONFIG_GET:0x201a,CONFIG_SET:0x201b,VOLUME_CANDIDATES:0x201c,VOLUME_RESCAN:0x201d,VOLUME_CAPACITY:0x201e,VOLUME_GROW_INFO:0x201f,VOLUME_GROW:0x2020,USER_LIST:0x2021,USER_CREATE:0x200b,USER_UPDATE:0x200c,USER_SET_PASSWORD:0x200d,USER_DELETE:0x200e,BUCKET_LIST:0x2022,BUCKET_QUOTA_CAPACITY:0x2023,BUCKET_CREATE:0x2003,BUCKET_SET_POLICY:0x2004,BUCKET_SET_QUOTA:0x2005,BUCKET_RENAME:0x2006,BUCKET_LOCK:0x2007,BUCKET_DELETE:0x2008,BUCKET_GRANT:0x2009,BUCKET_REVOKE:0x200a};
 const utf8=new TextEncoder(),text=new TextDecoder('utf-8',{fatal:true});
 export const newID=()=>Array.from(crypto.getRandomValues(new Uint8Array(16)),b=>b.toString(16).padStart(2,'0')).join('');
 export class Writer{
@@ -44,12 +44,42 @@ function sha256(bytes){const k=[0x428a2f98,0x71374491,0xb5c0fbcf,0xe9b5dba5,0x39
 export class NodeConnection{
  constructor(csrf,onState,onStats){this.csrf=csrf;this.onState=onState;this.onStats=onStats;this.pending=new Map;this.outbox=[];this.parts=new Map;this.stopped=false;this.retry=500;this.sub=newID();this.connect()}
  connect(){if(this.stopped)return;const ws=this.ws=new WebSocket(`ws://${location.host}/api/ws`,['stqr.v1',`csrf.${this.csrf}`]);ws.binaryType='arraybuffer';ws.onopen=()=>{this.retry=500;this.onState(true);this.onOpen?.();this.flush()};ws.onmessage=e=>{try{this.receive(e.data)}catch(err){console.error(err);this.onProtocolError?.(err);ws.close(1002,'invalid STQR message')}};ws.onerror=()=>{};ws.onclose=()=>{this.onState(false);this.outbox=[];this.parts.clear();for(const [id,p]of this.pending){const e=Error(`Verbindung unterbrochen. Ausgang unklar; Operations-ID: ${id}`);e.operationID=id;p.reject(e)}this.pending.clear();if(!this.stopped){Promise.resolve().then(()=>this.onDisconnect?.()).catch(()=>{});this.reconnect=setTimeout(()=>this.connect(),this.retry);this.retry=Math.min(10000,this.retry*2)}}}
- request(op,body=new Uint8Array,id=newID()){if(this.stopped||this.ws?.readyState!==WebSocket.OPEN)return Promise.reject(Error('Keine Verbindung zur Node'));if(this.outbox.length>=64||this.pending.size>=12)return Promise.reject(Error('Sendequeue voll (WOULD_BLOCK)'));const m=envelope(op,body,id);return new Promise((resolve,reject)=>{this.pending.set(id,{resolve,reject,op});this.outbox.push(m.bytes);this.flush()})}
+ request(op,body=new Uint8Array,id=newID(),resultOpcode=op){if(this.stopped||this.ws?.readyState!==WebSocket.OPEN)return Promise.reject(Error('Keine Verbindung zur Node'));if(this.outbox.length>=64||this.pending.size>=12)return Promise.reject(Error('Sendequeue voll (WOULD_BLOCK)'));const m=envelope(op,body,id);return new Promise((resolve,reject)=>{this.pending.set(id,{resolve,reject,op,resultOpcode});this.outbox.push(m.bytes);this.flush()})}
  fireAndForget(op,body=new Uint8Array){if(this.ws?.readyState!==WebSocket.OPEN||this.outbox.length>=64)throw Error('Sendequeue nicht verfügbar (WOULD_BLOCK)');this.outbox.push(envelope(op,body,newID(),0).bytes);this.flush()}
  flush(){clearTimeout(this.flushTimer);while(this.outbox.length&&this.ws.readyState===WebSocket.OPEN&&this.ws.bufferedAmount<1<<20)this.ws.send(this.outbox.shift());if(this.outbox.length)this.flushTimer=setTimeout(()=>this.flush(),25)}
- receive(buffer){const r=new Reader(buffer);if(r.u8()!==1)throw Error('Unbekannte STQR-Version');const kind=r.u8(),op=r.u16(),id=r.id(),body=r.take(r.b.length-r.at);if(kind===2){const p=this.pending.get(id);if(!p)return;this.pending.delete(id);try{p.resolve(decodeResponse(op,body))}catch(e){e.operationID=id;p.reject(e)}return}if(kind!==3)throw Error('Unerwarteter Nachrichtentyp');if(op===OP.STATS_SNAPSHOT)this.statsPart(body);else if(op===OP.EVENT){const e=new Reader(body);const cause=e.id(),status=Number(e.v()),message=e.text();e.done();this.onEvent?.({cause,status,message})}}
- statsPart(body){const r=new Reader(body),subscription=r.id(),source=r.id(),boot=r.id(),seq=r.u64(),index=r.u32(),count=r.u32(),digest=r.take(32),data=r.blob();r.done();if(subscription!==this.sub)return;if(count<1||count>64||index>=count||data.length>1<<20)throw Error('Ungültiges Statistikfragment');const key=`${source}:${boot}:${seq}`;let entry=this.parts.get(key);if(!entry){this.parts.clear();entry={count,digest,parts:new Array(count)};this.parts.set(key,entry)}if(entry.count!==count||entry.digest.some((v,i)=>v!==digest[i]))throw Error('Widersprüchliche Statistikfragmente');entry.parts[index]=data;if(entry.parts.filter(Boolean).length!==count)return;const size=entry.parts.reduce((n,p)=>n+p.length,0),joined=new Uint8Array(size);let at=0;for(const p of entry.parts){joined.set(p,at);at+=p.length}if(sha256(joined).some((b,i)=>b!==digest[i]))throw Error('Statistik-Digest stimmt nicht');this.parts.delete(key);this.onStats(decodeStats(joined))}
+ receive(buffer){const r=new Reader(buffer);if(r.u8()!==1)throw Error('Unbekannte STQR-Version');const kind=r.u8(),op=r.u16(),id=r.id(),body=r.take(r.b.length-r.at);if(kind===2){const p=this.pending.get(id);if(!p)return;this.pending.delete(id);try{if(op!==p.op)throw Error('Antwort-Opcode stimmt nicht');p.resolve(decodeResponse(p.resultOpcode??op,body))}catch(e){e.operationID=id;p.reject(e)}return}if(kind!==3)throw Error('Unerwarteter Nachrichtentyp');if(op===OP.STATS_SNAPSHOT)this.statsPart(body);else if(op===OP.EVENT){const e=new Reader(body);const cause=e.id(),status=Number(e.v()),message=e.text();e.done();this.onEvent?.({cause,status,message})}}
+ statsPart(body){
+  const r=new Reader(body),subscription=r.id(),source=r.id(),boot=r.id(),seq=r.u64(),index=r.u32(),count=r.u32(),digest=r.take(32),data=r.blob();r.done();
+  if(subscription!==this.sub)return;
+  const zero='0'.repeat(32);
+  if(source===zero||boot===zero||seq===0n||count<1||count>64||index>=count||data.length===0||data.length>1<<20)throw Error('Ungültiges Statistikfragment');
+  let entry=this.parts.get(source);
+  if(entry&&entry.boot===boot&&seq<entry.seq)return;
+  if(!entry||entry.boot!==boot||seq>entry.seq){
+   if(!entry&&this.parts.size>=10000)throw Error('Zu viele Statistikquellen');
+   entry={boot,seq,count,digest,parts:new Array(count),received:0,bytes:0,complete:false};this.parts.set(source,entry);
+  }
+  if(entry.count!==count||entry.digest.some((v,i)=>v!==digest[i]))throw Error('Widersprüchliche Statistikfragmente');
+  if(entry.complete)return;
+  const prior=entry.parts[index];
+  if(prior){if(prior.length!==data.length||prior.some((v,i)=>v!==data[i]))throw Error('Widersprüchliches Statistikfragment');return}
+  let pendingBytes=data.length;for(const value of this.parts.values())pendingBytes+=value.bytes;
+  if(pendingBytes>64<<20)throw Error('Statistikpuffer voll');
+  entry.parts[index]=data.slice();entry.received++;entry.bytes+=data.length;
+  if(entry.received!==count)return;
+  const joined=new Uint8Array(entry.bytes);let at=0;for(const p of entry.parts){joined.set(p,at);at+=p.length}
+  if(sha256(joined).some((b,i)=>b!==digest[i]))throw Error('Statistik-Digest stimmt nicht');
+  const snapshot=decodeStats(joined);
+  if(snapshot.node!==source||snapshot.boot!==boot||snapshot.sequence!==seq)throw Error('Statistikquelle stimmt nicht');
+  entry.parts=[];entry.bytes=0;entry.complete=true;this.onStats(snapshot);
+ }
+
  stop(){this.stopped=true;clearTimeout(this.reconnect);clearTimeout(this.flushTimer);if(this.ws?.readyState===WebSocket.OPEN){try{this.fireAndForget(OP.STATS_UNSUBSCRIBE,new Writer().id(this.sub).bytes())}catch{}}this.ws?.close()}
+ forNode(target){
+  const scoped={request:(op,body=new Uint8Array,id=newID())=>this.request(OP.NODE_ADMIN,new Writer().id(target).u16(op).blob(body).bytes(),id,op)};
+  for(const name of ['getConfig','setConfig','volumeGrowInfo','growVolume','volumeCapacity','listVolumeCandidates','addVolume','removeVolume','rescanVolume','operationStatus'])scoped[name]=NodeConnection.prototype[name];
+  return scoped;
+ }
  getConfig(){return this.request(OP.CONFIG_GET)}setConfig(fields){return this.request(OP.CONFIG_SET,new Writer().text(JSON.stringify(fields)).bytes())}
  bucketQuotaCapacity(bucket,strategy,profile=255,overhead=0){return this.request(OP.BUCKET_QUOTA_CAPACITY,new Writer().id(bucket).u8({hdd:0,ssd:1,ram:2}[strategy]).u8(profile).u32(overhead).bytes())}
  listBuckets(after='',limit=100){return this.request(OP.BUCKET_LIST,new Writer().text(after).u32(limit).bytes())}

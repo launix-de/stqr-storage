@@ -4,13 +4,17 @@ import {setupUserViews} from './users.js';
 import {setupBucketViews} from './buckets.js';
 import {MIN_VOLUME_SIZE,parseSize,sizeSteps,sizeLimit,formatSize,sizeLabel} from './size.js';
 const $=id=>document.getElementById(id),escape=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-let node,configView,snapshot,previous,source=0,candidates=[],collapsed=false,drainID,drainVolume,addRetry;
+let node,configView,snapshot,source=0,candidates=[],volumeNode,drainID,drainVolume,addRetry;
+const nodeStates=new Map,fetchingConfigs=new Set;
+const localNode=()=>configView?.config.node.id;
+const volumeConnection=()=>volumeNode&&volumeNode!==localNode()?node.forNode(volumeNode):node;
+const volumeConfig=()=>nodeStates.get(volumeNode)?.config??configView;
 const states=['pending','active','draining','detached','failed'],stateNames=['Ausstehend','Aktiv','Wird geleert','Ausgehängt','Fehler'],classes=['hdd','ssd','ram','ramcache'];
 export function bytes(n){n=BigInt(n??0);const units=['B','KiB','MiB','GiB','TiB','PiB','EiB'];let unit=0,div=1n;while(n>=div*1024n&&unit<units.length-1){div*=1024n;unit++}const v=Number(n*10n/div)/10;return `${v.toLocaleString('de-DE',{maximumFractionDigits:unit?1:0})} ${units[unit]}`}
 function toast(message,error=false){const div=document.createElement('div');div.className='toast'+(error?' error-toast':'');div.textContent=message;while($('toasts').children.length>=3)$('toasts').firstElementChild.remove();$('toasts').append(div);setTimeout(()=>div.remove(),error?10000:5000)}
 function setConnected(connected){$('connection').classList.toggle('offline',!connected);$('connection').innerHTML=`<span class="dot"></span>${connected?'Live · alle 3 Sekunden':'Verbindung wird wiederhergestellt'}`;$('refresh').disabled=!connected}
 function beginSession(session){
- $('login').hidden=true;$('app').hidden=false;$('profile-name').textContent=session.username;userViews.clear();bucketViews.clear();node?.stop();
+ $('login').hidden=true;$('app').hidden=false;$('profile-name').textContent=session.username;userViews.clear();bucketViews.clear();node?.stop();nodeStates.clear();fetchingConfigs.clear();snapshot=null;configView=null;volumeNode=null;
  const connection=node=new NodeConnection(session.csrf_token,connected=>{if(node===connection)setConnected(connected)},stats=>{if(node===connection)onStats(stats)});
  connection.onOpen=async()=>{try{const [cfg]=await Promise.all([connection.getConfig(),connection.subscribeStats(),userViews.load(),bucketViews.load()]);if(node===connection)applyConfig(cfg)}catch(e){if(node===connection)toast(e.message,true)}};
  connection.onProtocolError=e=>{if(node===connection)toast('Protokollfehler: '+e.message,true)};
@@ -38,31 +42,80 @@ function requireLogin(message){node?.stop();$('app').hidden=true;$('login').hidd
 const bucketViews=setupBucketViews({connection:()=>node,escape,toast,showView});
 const userViews=setupUserViews({connection:()=>node,currentUsername:()=>$('profile-name').textContent,escape,toast,showView,requireLogin,openBucketCreate:options=>bucketViews.openCreate(options)});
 
-function applyConfig(view){configView=view;$('add-node-name').textContent=view.config.node.name;$('config-location').textContent=view.config_path;$('restart-notice').hidden=!view.restart_required;if(!$('settings-fields').children.length)renderSettings();else syncSettingsValues();renderVolumes();updatePath()}
-async function refreshConfig(){try{applyConfig(await node.getConfig())}catch(e){toast(e.message,true)}}
-let fetchingConfig=false;
+function applyConfig(view){
+ configView=view;const id=view.config.node.id,entry=nodeStates.get(id)??{};entry.config=view;nodeStates.set(id,entry);
+ snapshot=entry.snapshot??snapshot;volumeNode??=id;
+ $('config-location').textContent=view.config_path;$('restart-notice').hidden=!view.restart_required;
+ if(!$('settings-fields').children.length)renderSettings();else syncSettingsValues();renderVolumes();updatePath();
+}
+async function refreshConfig(target=localNode()){
+ const connection=node;
+ try{const view=await(target&&target!==localNode()?connection.forNode(target):connection).getConfig();
+  if(node!==connection)return;
+  if(!target||target===localNode())applyConfig(view);else{const entry=nodeStates.get(target)??{};entry.config=view;nodeStates.set(target,entry);renderVolumes()}
+ }catch(e){if(node===connection)toast(e.message,true)}
+}
 let capacity=null,steps=[],selectedSizes={0:50n*1024n*1024n,2:50n*1024n*1024n};
-function onStats(s){if(snapshot&&s.boot===snapshot.boot&&s.sequence<=snapshot.sequence)return;previous=snapshot;snapshot=s;renderMetrics();renderVolumes();$('snapshot-info').textContent=`GEN ${s.generation} · SNAPSHOT ${s.sequence} · ${new Date(Number(s.captured/1000000n)).toLocaleTimeString('de-DE')}`;
- if(configView&&!fetchingConfig){const ids=new Set(configView.config.volumes.map(v=>v.id));if(s.volumes.length!==ids.size||s.volumes.some(v=>!ids.has(v.id))){fetchingConfig=true;refreshConfig().finally(()=>fetchingConfig=false)}}}
+function onStats(s){
+ const entry=nodeStates.get(s.node)??{};
+ if(entry.snapshot&&s.boot===entry.snapshot.boot&&s.sequence<=entry.snapshot.sequence)return;
+ entry.previous=entry.snapshot;entry.snapshot=s;entry.received=Date.now();nodeStates.set(s.node,entry);
+ if(s.node===localNode()||!snapshot)snapshot=s;
+ renderMetrics();renderVolumes();
+ $('snapshot-info').textContent=`${nodeStates.size} NODE${nodeStates.size===1?'':'S'} · GEN ${s.generation} · ${new Date(Number(s.captured/1000000n)).toLocaleTimeString('de-DE')}`;
+ if(!configView||fetchingConfigs.has(s.node))return;
+ const ids=new Set(entry.config?.config.volumes.map(v=>v.id)??[]);
+ if(!entry.config||s.volumes.length!==ids.size||s.volumes.some(v=>!ids.has(v.id))){fetchingConfigs.add(s.node);refreshConfig(s.node).finally(()=>fetchingConfigs.delete(s.node))}
+}
 function totals(volumes){return volumes.reduce((a,v)=>({capacity:a.capacity+v.capacity,allocated:a.allocated+v.allocated,admission:a.admission+v.admission,reserved:a.reserved+v.operating+v.guaranteed+v.inFlightReserved}),{capacity:0n,allocated:0n,admission:0n,reserved:0n})}
-function renderMetrics(){if(!snapshot)return;const t=totals(snapshot.volumes);for(const prefix of ['', 'bucket-']){$(prefix+'metric-capacity').textContent=bytes(t.capacity);$(prefix+'metric-used').textContent=`${bytes(t.allocated)} belegt · ${bytes(t.admission)} nutzbar`;}$('metric-volumes').textContent=String(snapshot.volumes.length);const active=snapshot.volumes.filter(v=>v.state===1).length,draining=snapshot.volumes.filter(v=>v.state===2).length;$('metric-active').textContent=`${active} aktiv${draining?` · ${draining} im Drain`:''}`;$('nav-count').textContent=String(snapshot.volumes.length);
- const seconds=previous&&previous.boot===snapshot.boot?Number(snapshot.captured-previous.captured)/1e9:0;for(const key of ['read','write']){let rate='—';if(seconds>0&&snapshot.io[key]>=previous.io[key])rate=bytes(BigInt(Math.round(Number(snapshot.io[key]-previous.io[key])/seconds)))+'/s';for(const prefix of ['', 'bucket-'])$(prefix+'metric-'+key).textContent=rate}}
+function renderMetrics(){
+ const entries=[...nodeStates.values()].filter(e=>e.snapshot);if(!entries.length)return;
+ const volumes=entries.flatMap(e=>e.snapshot.volumes),t=totals(volumes);
+ for(const prefix of ['', 'bucket-']){$(prefix+'metric-capacity').textContent=bytes(t.capacity);$(prefix+'metric-used').textContent=`${bytes(t.allocated)} belegt · ${bytes(t.admission)} nutzbar`;}
+ $('metric-volumes').textContent=String(volumes.length);
+ const active=volumes.filter(v=>v.state===1).length,draining=volumes.filter(v=>v.state===2).length;
+ $('metric-active').textContent=`${active} aktiv${draining?` · ${draining} im Drain`:''}`;$('nav-count').textContent=String(volumes.length);
+ for(const key of ['read','write']){
+  let sum=0n,count=0;
+  for(const {snapshot:s,previous:p,received}of entries){const seconds=p&&p.boot===s.boot?Number(s.captured-p.captured)/1e9:0;
+   if(seconds>0&&s.io[key]>=p.io[key]&&Date.now()-received<10000){sum+=BigInt(Math.round(Number(s.io[key]-p.io[key])/seconds));count++}}
+  for(const prefix of ['', 'bucket-'])$(prefix+'metric-'+key).textContent=count?bytes(sum)+'/s':'—';
+ }
+ const count=entries.length===1?'1 Node':`${entries.length} Nodes`;$('node-count').textContent=count;$('topbar-node-count').textContent=count.toUpperCase();
+ const mode=document.querySelector('.mode-card');mode.querySelector('strong').textContent=count;
+ mode.querySelector('p').textContent='Speicher und Zustand im Überblick.';
+}
 function usage(v){const allocated=v.allocated??0n,capacity=v.capacity??0n,reserved=v.reserved??v.operating+v.guaranteed+v.inFlightReserved;const percent=n=>capacity>0n?Math.min(100,Number(n*10000n/capacity)/100):0;return `<div class="usage-label"><strong>${escape(bytes(allocated))}</strong><span>von ${escape(bytes(capacity))}</span></div><div class="usage-track"><i class="usage-used" data-percent="${percent(allocated)}"></i><i class="usage-reserved" data-percent="${percent(reserved)}"></i></div>`}
-function renderVolumes(){if(!snapshot)return;const cfg=configView?.config,byID=new Map((cfg?.volumes??[]).map(v=>[v.id,v])),t=totals(snapshot.volumes),query=$('volume-search').value.trim().toLowerCase();const visible=snapshot.volumes.filter(v=>{const c=byID.get(v.id);return `${c?.name??''} ${v.path} ${classes[v.class]}`.toLowerCase().includes(query)});
- let rows=`<tr class="node-row"><td><div class="node-cell"><button class="node-toggle" aria-label="Volumes ${collapsed?'aufklappen':'einklappen'}" aria-expanded="${!collapsed}">${collapsed?'›':'⌄'}</button><span class="node-symbol">▤</span><div><div class="node-name">${escape(cfg?.node.name??'Lokale Node')}<span class="node-badge">DIESE NODE</span></div><div class="node-sub">${escape(snapshot.node.slice(0,8))} · ${escape(configView?.active_listen??'')}</div></div></div></td><td><span class="class-badge">${snapshot.volumes.length} VOLUMES</span></td><td>${usage(t)}</td><td class="free-value">${escape(bytes(t.admission))}</td><td><span class="state-badge"><i></i>Online</span></td><td></td></tr>`;
- if(!collapsed)for(const v of visible){const c=byID.get(v.id),state=states[v.state]??'failed';rows+=`<tr data-volume="${v.id}"><td><div class="volume-cell"><span class="volume-symbol">▤</span><div><div class="volume-name">${escape(c?.name??v.path.split('/').pop())}${c?.system?'<span class="system-label">SYSTEM</span>':''}</div><div class="volume-path" title="${escape(v.path)}">${escape(v.path)}</div></div></div></td><td><span class="class-badge ${classes[v.class]}">${classes[v.class].toUpperCase()}</span></td><td>${usage(v)}</td><td class="free-value">${escape(bytes(v.admission))}</td><td><span class="state-badge ${state}"><i></i>${stateNames[v.state]??'Unbekannt'}</span></td><td><div class="row-actions"><button class="row-action" data-detail="${v.id}" aria-label="Details für ${escape(c?.name??v.path)}">Details</button><button class="row-action" data-grow="${v.id}" ${v.state!==1?'disabled':''}>Vergrößern</button><button class="row-action" data-drain="${v.id}" ${c?.system||v.state!==1?'disabled':''} title="${c?.system?'Das Admin-Volume bleibt für Systemdaten eingebunden':'Kooperativ aushängen und entfernen'}">Aushängen ↗</button></div></td></tr>`}
- rows+=`<tr class="add-row"><td colspan="6"><button class="add-volume-button" id="add-volume">＋ Volume hinzufügen</button><span class="add-row-note">Datei, ungemountetes Blockdevice oder RAM</span></td></tr>`;if($('volume-rows').dataset.rendered!==rows){$('volume-rows').innerHTML=rows;$('volume-rows').dataset.rendered=rows;}$('table-empty').hidden=visible.length!==0||!query;
- for(const bar of document.querySelectorAll('[data-percent]'))bar.style.width=bar.dataset.percent+'%';document.querySelector('.node-toggle').onclick=()=>{collapsed=!collapsed;renderVolumes()};$('add-volume').onclick=()=>openAdd();for(const b of document.querySelectorAll('[data-detail]'))b.onclick=()=>openDetail(b.dataset.detail);for(const b of document.querySelectorAll('[data-grow]'))b.onclick=()=>openGrow(b.dataset.grow);for(const b of document.querySelectorAll('[data-drain]'))b.onclick=()=>openDrain(b.dataset.drain)}
+function renderVolumes(){
+ const entries=[...nodeStates.entries()].filter(([,e])=>e.snapshot).sort(([a],[b])=>a===localNode()?-1:b===localNode()?1:a.localeCompare(b));
+ if(!entries.length)return;
+ const query=$('volume-search').value.trim().toLowerCase();let rows='',visibleCount=0;
+ for(const [id,entry]of entries){
+  const s=entry.snapshot,view=entry.config,cfg=view?.config,byID=new Map((cfg?.volumes??[]).map(v=>[v.id,v])),t=totals(s.volumes),collapsed=entry.collapsed??false;
+  const visible=s.volumes.filter(v=>{const c=byID.get(v.id);return `${cfg?.node.name??id} ${c?.name??''} ${v.path} ${classes[v.class]}`.toLowerCase().includes(query)});
+  visibleCount+=visible.length;
+  const stale=Date.now()-entry.received>=10000,label=stale?'Letzter Stand':(['Online','Wird geleert','Wartung','Wird beendet','Beitritt','Ausgeschlossen'][s.state]??'Unbekannt');
+  rows+=`<tr class="node-row" data-node="${id}"><td><div class="node-cell"><button class="node-toggle" data-toggle="${id}" aria-label="Volumes ${collapsed?'aufklappen':'einklappen'}" aria-expanded="${!collapsed}">${collapsed?'›':'⌄'}</button><span class="node-symbol">▤</span><div><div class="node-name">${escape(cfg?.node.name??id.slice(0,8))}${id===localNode()?'<span class="node-badge">DIESE NODE</span>':''}</div><div class="node-sub">${escape(id.slice(0,8))} · ${escape(view?.active_listen??'')}</div></div></div></td><td><span class="class-badge">${s.volumes.length} VOLUMES</span></td><td>${usage(t)}</td><td class="free-value">${escape(bytes(t.admission))}</td><td><span class="state-badge ${stale?'pending':''}"><i></i>${label}</span></td><td></td></tr>`;
+  if(!collapsed)for(const v of visible){const c=byID.get(v.id),state=states[v.state]??'failed';rows+=`<tr data-volume="${v.id}" data-node="${id}"><td><div class="volume-cell"><span class="volume-symbol">▤</span><div><div class="volume-name">${escape(c?.name??v.path.split('/').pop())}${c?.system?'<span class="system-label">SYSTEM</span>':''}</div><div class="volume-path" title="${escape(v.path)}">${escape(v.path)}</div></div></div></td><td><span class="class-badge ${classes[v.class]}">${classes[v.class].toUpperCase()}</span></td><td>${usage(v)}</td><td class="free-value">${escape(bytes(v.admission))}</td><td><span class="state-badge ${state}"><i></i>${stateNames[v.state]??'Unbekannt'}</span></td><td><div class="row-actions"><button class="row-action" data-detail="${v.id}" data-node="${id}" aria-label="Details für ${escape(c?.name??v.path)}">Details</button><button class="row-action" data-grow="${v.id}" data-node="${id}" ${!cfg||v.state!==1?'disabled':''}>Vergrößern</button><button class="row-action" data-drain="${v.id}" data-node="${id}" ${!cfg||c?.system||v.state!==1?'disabled':''} title="${c?.system?'Das Admin-Volume bleibt für Systemdaten eingebunden':'Kooperativ aushängen und entfernen'}">Aushängen ↗</button></div></td></tr>`}
+  rows+=`<tr class="add-row"><td colspan="6"><button class="add-volume-button" data-add-node="${id}" ${!cfg?'disabled':''}>＋ Volume hinzufügen</button><span class="add-row-note">Datei, ungemountetes Blockdevice oder RAM</span></td></tr>`;
+ }
+ if($('volume-rows').dataset.rendered!==rows){$('volume-rows').innerHTML=rows;$('volume-rows').dataset.rendered=rows;}
+ $('table-empty').hidden=visibleCount!==0||!query;
+ for(const bar of document.querySelectorAll('[data-percent]'))bar.style.width=bar.dataset.percent+'%';
+ for(const b of document.querySelectorAll('[data-toggle]'))b.onclick=()=>{const e=nodeStates.get(b.dataset.toggle);e.collapsed=!e.collapsed;renderVolumes()};
+ for(const b of document.querySelectorAll('[data-add-node]'))b.onclick=()=>openAdd(b.dataset.addNode);
+ for(const [attr,fn]of [['detail',openDetail],['grow',openGrow],['drain',openDrain]])for(const b of document.querySelectorAll(`[data-${attr}]`))b.onclick=()=>fn(b.dataset[attr],b.dataset.node);
+}
 $('volume-search').addEventListener('input',renderVolumes);$('refresh').onclick=async()=>{try{onStats(await node.getStats());toast('Statistik aktualisiert.')}catch(e){toast(e.message,true)}};
 for(const b of document.querySelectorAll('[data-close]'))b.addEventListener('click',()=>$(b.dataset.close).close());
-function openDetail(id){const v=snapshot.volumes.find(v=>v.id===id),c=configView?.config.volumes.find(v=>v.id===id);if(!v)return;$('detail-title').textContent=c?.name??v.path;const details=[['Volume-ID',id,true],['Pfad / Device',v.path,true],['Klasse',classes[v.class].toUpperCase()],['Zustand',stateNames[v.state]],['Kapazität',bytes(v.capacity)],['Belegt',bytes(v.allocated)],['Metadaten',bytes(v.metadata)],['Betriebsreserve',bytes(v.operating)],['Für neue Daten nutzbar',bytes(v.admission)]];let html='<dl class="detail-grid">'+details.map(([k,value,mono])=>`<div><dt>${escape(k)}</dt><dd class="${mono?'mono':''}">${escape(value)}</dd></div>`).join('')+'</dl>';if(c?.system)html+='<div class="notice">Admin-Dateivolume: wächst bei Platzbedarf automatisch. Die Startgröße ist keine Obergrenze.</div>';if(v.class<2)html+='<button id="rescan-volume" class="secondary">↻ Größe neu einlesen</button><p class="field-note">Nach einer externen Vergrößerung, z. B. mit LVM, wird zusätzlicher Platz crashsicher ins Layout übernommen.</p>';$('detail-body').innerHTML=html;if($('rescan-volume'))$('rescan-volume').onclick=async e=>{e.currentTarget.disabled=true;try{await node.rescanVolume(id);toast('Volume-Größe neu eingelesen.');$('detail-dialog').close();await refreshConfig()}catch(e){toast(e.message,true);$('rescan-volume').disabled=false}};$('detail-dialog').showModal()}
+function openDetail(id,target=localNode()){volumeNode=target;const v=nodeStates.get(target)?.snapshot?.volumes.find(v=>v.id===id),c=volumeConfig()?.config.volumes.find(v=>v.id===id);if(!v)return;$('detail-title').textContent=c?.name??v.path;const details=[['Volume-ID',id,true],['Pfad / Device',v.path,true],['Klasse',classes[v.class].toUpperCase()],['Zustand',stateNames[v.state]],['Kapazität',bytes(v.capacity)],['Belegt',bytes(v.allocated)],['Metadaten',bytes(v.metadata)],['Betriebsreserve',bytes(v.operating)],['Für neue Daten nutzbar',bytes(v.admission)]];let html='<dl class="detail-grid">'+details.map(([k,value,mono])=>`<div><dt>${escape(k)}</dt><dd class="${mono?'mono':''}">${escape(value)}</dd></div>`).join('')+'</dl>';if(c?.system)html+='<div class="notice">Admin-Dateivolume: wächst bei Platzbedarf automatisch. Die Startgröße ist keine Obergrenze.</div>';if(v.class<2)html+='<button id="rescan-volume" class="secondary">↻ Größe neu einlesen</button><p class="field-note">Nach einer externen Vergrößerung, z. B. mit LVM, wird zusätzlicher Platz crashsicher ins Layout übernommen.</p>';$('detail-body').innerHTML=html;if($('rescan-volume'))$('rescan-volume').onclick=async e=>{e.currentTarget.disabled=true;try{await volumeConnection().rescanVolume(id);toast('Volume-Größe neu eingelesen.');$('detail-dialog').close();await refreshConfig(volumeNode)}catch(e){toast(e.message,true);$('rescan-volume').disabled=false}};$('detail-dialog').showModal()}
 let growInfo,growVolume,growSteps=[],growRetry;
-async function openGrow(id){
- growVolume=id;growInfo=null;growRetry=null;const c=configView?.config.volumes.find(v=>v.id===id);
+async function openGrow(id,target=localNode()){
+ volumeNode=target;growVolume=id;growInfo=null;growRetry=null;const c=volumeConfig()?.config.volumes.find(v=>v.id===id);
  $('grow-description').textContent=c?.name??id;$('grow-error').textContent='';$('grow-note').textContent='Verfügbarer Speicher wird ermittelt …';
  $('grow-size').value='';$('grow-size').disabled=true;$('grow-size').setCustomValidity('');$('grow-submit').disabled=true;$('grow-slider').disabled=true;$('grow-slider-wrap').hidden=true;
  $('grow-dialog').showModal();
- try{const info=await node.volumeGrowInfo(id);if(growVolume!==id||!$('grow-dialog').open)return;growInfo=info;
+ try{const info=await volumeConnection().volumeGrowInfo(id);if(growVolume!==id||volumeNode!==target||!$('grow-dialog').open)return;growInfo=info;
   const raw=info.kind===1,value=raw?info.maximum:info.current;
   $('grow-size').disabled=false;$('grow-size').readOnly=raw;$('grow-size').value=formatSize(value);
   $('grow-slider-wrap').hidden=raw;
@@ -86,15 +139,15 @@ $('grow-size').addEventListener('change',()=>{if(updateGrowSize())$('grow-size')
 $('grow-slider').addEventListener('input',()=>{const value=growSteps[Number($('grow-slider').value)];if(value===undefined)return;$('grow-size').value=formatSize(value);$('grow-size').setCustomValidity('');$('grow-value').textContent=formatSize(value);$('grow-slider').setAttribute('aria-valuetext',formatSize(value));$('grow-submit').disabled=value<=growInfo.current});
 $('grow-form').addEventListener('submit',async e=>{
  e.preventDefault();if(!growInfo)return;$('grow-submit').disabled=true;$('grow-error').textContent='';
- try{const size=growInfo.kind===1?0n:parseSize($('grow-size').value),signature=`${growVolume}:${size}`;if(growRetry?.signature!==signature)growRetry={signature,id:newID()};await node.growVolume(growVolume,size,growRetry.id);$('grow-dialog').close();toast('Volume wurde vergrößert.');await refreshConfig();onStats(await node.getStats())}
+ try{const size=growInfo.kind===1?0n:parseSize($('grow-size').value),signature=`${growVolume}:${size}`;if(growRetry?.signature!==signature)growRetry={signature,id:newID()};await volumeConnection().growVolume(growVolume,size,growRetry.id);$('grow-dialog').close();toast('Volume wurde vergrößert.');await refreshConfig(volumeNode);onStats(await node.getStats())}
  catch(e){$('grow-error').textContent=e.message}finally{$('grow-submit').disabled=false}
 });
-function openDrain(id){const c=configView?.config.volumes.find(v=>v.id===id);drainVolume=id;drainID=newID();$('drain-description').textContent=`„${c?.name??id}“ wird erst freigegeben, wenn alle benötigten Objekte sicher auf geeigneten Zielvolumes liegen.`;$('drain-error').textContent='';$('drain-dialog').showModal()}
-$('drain-form').addEventListener('submit',async e=>{e.preventDefault();e.submitter.disabled=true;try{await node.removeVolume(drainVolume,drainID);$('drain-dialog').close();toast('Kooperatives Aushängen wurde gestartet.');await refreshConfig()}catch(e){$('drain-error').textContent=e.message}finally{e.submitter.disabled=false}});
+function openDrain(id,target=localNode()){volumeNode=target;const c=volumeConfig()?.config.volumes.find(v=>v.id===id);drainVolume=id;drainID=newID();$('drain-description').textContent=`„${c?.name??id}“ wird erst freigegeben, wenn alle benötigten Objekte sicher auf geeigneten Zielvolumes liegen.`;$('drain-error').textContent='';$('drain-dialog').showModal()}
+$('drain-form').addEventListener('submit',async e=>{e.preventDefault();e.submitter.disabled=true;try{await volumeConnection().removeVolume(drainVolume,drainID);$('drain-dialog').close();toast('Kooperatives Aushängen wurde gestartet.');await refreshConfig(volumeNode)}catch(e){$('drain-error').textContent=e.message}finally{e.submitter.disabled=false}});
 async function loadCandidates(){
  $('refresh-devices').disabled=true;
  try{
-  const [available,limits]=await Promise.all([node.listVolumeCandidates(),node.volumeCapacity()]);candidates=available??[];capacity=limits;
+  const [available,limits]=await Promise.all([volumeConnection().listVolumeCandidates(),volumeConnection().volumeCapacity()]);candidates=available??[];capacity=limits;
   const devices=candidates.filter(v=>v.type!=='file'),files=candidates.filter(v=>v.type==='file');
   const devicePath=$('device-path').value,filePath=$('existing-file').value;
   $('device-path').innerHTML=devices.length?'<option value="">Device auswählen …</option>'+devices.map(v=>`<option value="${escape(v.path)}">${escape(v.path)} · ${escape(bytes(BigInt(v.size_bytes)))} · ${escape(v.type.toUpperCase())}</option>`).join(''):'<option value="">Keine verfügbaren ungemounteten Devices</option>';
@@ -104,12 +157,13 @@ async function loadCandidates(){
   updateSource();
  }catch(e){$('add-error').textContent=e.message;$('add-submit').disabled=true}finally{$('refresh-devices').disabled=false}
 }
-function openAdd(){
+function openAdd(target=localNode()){
+ volumeNode=target;$('add-node-name').textContent=volumeConfig()?.config.node.name??target;
  addRetry=null;capacity=null;steps=[];selectedSizes={0:50n*1024n*1024n,2:50n*1024n*1024n};
  $('add-error').textContent='';$('volume-name').value='';$('volume-name').readOnly=false;$('volume-class').value='hdd';$('existing-file').value='';$('device-path').value='';source=0;
  updateSource();$('add-dialog').showModal();loadCandidates();$('volume-name').focus();
 }
-function updatePath(){$('volume-path-preview').textContent=source===0?`${configView?.active_volumes_dir??'volumes'}/${$('volume-name').value||'<name>'}`:source===2?'Prozessgebunden · flüchtiger Speicher':$('device-path').value}
+function updatePath(){$('volume-path-preview').textContent=source===0?`${volumeConfig()?.active_volumes_dir??'volumes'}/${$('volume-name').value||'<name>'}`:source===2?'Prozessgebunden · flüchtiger Speicher':$('device-path').value}
 function editableSize(){return source!==1&&!(source===0&&$('existing-file').value)}
 function currentLimit(){return capacity?sizeLimit(source===2?capacity.ramLimit:capacity.fileAvailable):0n}
 function updateSource(){
@@ -158,7 +212,7 @@ $('volume-slider').addEventListener('input',()=>{
  const value=steps[Number($('volume-slider').value)];if(value===undefined)return;
  selectedSizes[source]=value;$('volume-size').value=formatSize(value);$('volume-size').setCustomValidity('');$('slider-value').textContent=formatSize(value);$('volume-slider').setAttribute('aria-valuetext',formatSize(value));
 });
-$('add-form').addEventListener('submit',async e=>{e.preventDefault();$('add-error').textContent='';e.submitter.disabled=true;try{const existing=source===0&&$('existing-file').value,q={name:$('volume-name').value,source,path:source===1?$('device-path').value:existing||'',class:$('volume-class').value,size:source===1||existing?0n:parseSize($('volume-size').value)};if(source===1&&!q.path)throw Error('Bitte ein verfügbares Device auswählen.');const signature=JSON.stringify(q,(_,v)=>typeof v==='bigint'?String(v):v);if(addRetry?.signature!==signature)addRetry={signature,id:newID()};await node.addVolume(q,addRetry.id);$('add-dialog').close();toast(`Volume „${q.name}“ wurde hinzugefügt.`);await refreshConfig()}catch(e){$('add-error').textContent=e.message}finally{e.submitter.disabled=editableSize()&&(!capacity||currentLimit()<MIN_VOLUME_SIZE)}});
+$('add-form').addEventListener('submit',async e=>{e.preventDefault();$('add-error').textContent='';e.submitter.disabled=true;try{const existing=source===0&&$('existing-file').value,q={name:$('volume-name').value,source,path:source===1?$('device-path').value:existing||'',class:$('volume-class').value,size:source===1||existing?0n:parseSize($('volume-size').value)};if(source===1&&!q.path)throw Error('Bitte ein verfügbares Device auswählen.');const signature=JSON.stringify(q,(_,v)=>typeof v==='bigint'?String(v):v);if(addRetry?.signature!==signature)addRetry={signature,id:newID()};await volumeConnection().addVolume(q,addRetry.id);$('add-dialog').close();toast(`Volume „${q.name}“ wurde hinzugefügt.`);await refreshConfig(volumeNode)}catch(e){$('add-error').textContent=e.message}finally{e.submitter.disabled=editableSize()&&(!capacity||currentLimit()<MIN_VOLUME_SIZE)}});
 const settingSections=[{title:'Node',note:'Name und veröffentlichte Adresse gelten sofort. Bind-Adresse und Verzeichnisse werden beim nächsten Start aktiv.',fields:[['name','Anzeigename','Ein verständlicher Name für diese Node.','text'],['listen','HTTP-Bind-Adresse','HTTP und WebSocket auf derselben Adresse. Neustart erforderlich.','text'],['advertise','Veröffentlichte Adresse','Optionales http://host:port für zukünftige Peer-Kontakte.','text'],['data_dir','Datenverzeichnis','Relative Pfade beziehen sich auf den Config-Ordner. Neustart erforderlich.','text'],['volumes_dir','Volume-Verzeichnis','Neue Dateivolumes liegen direkt in diesem Ordner. Neustart erforderlich.','text']]},{title:'Kapazität & System-Volume',note:'Alle Werte sind Bytes. Das Admin-Dateivolume wächst automatisch; die Startgröße ist kein festes Limit.',fields:[['ram_bytes','RAM-Budget','Optionales RAM-Budget; 0 nutzt den freien System-RAM. Neustart erforderlich.','number'],['ramcache_bytes','Read-Cache-Budget','Für die spätere Cache-Implementierung reserviert. Neustart erforderlich.','number'],['system_volume_bytes','Admin-Volume Startgröße','Nur bei Neuanlage; vorhandene Admin-Volumes wachsen nach Bedarf.','number']]},{title:'Netzwerkzugriff',note:'Die echte IPv4-/IPv6-Adresse der Verbindung zählt. Forwarded-Header werden nicht vertraut.',fields:[['allow_subnets','Erlaubte Subnetze','Ein CIDR pro Zeile. Leer erlaubt alle Adressen. Änderungen gelten sofort, auch für diese Verbindung.','subnets']]},{title:'Identität & Bootstrap',note:'Die Identitäten sind unveränderlich. Das initiale Passwort steht in der geschützten YAML-Datei; Accounts mit Passwort-Hashes liegen im Admin-Volume.',fields:[]}];
 function renderSettings(){if(!configView)return;const c=configView.config,nodeConfig=c.node;let html='';for(const section of settingSections){html+=`<section class="settings-section"><h2>${section.title}</h2><p>${section.note}</p>`;for(const [key,label,note,type]of section.fields){const value=key in nodeConfig?nodeConfig[key]:c[key];html+=`<form class="setting-row" data-setting="${key}" data-type="${type}"><div class="setting-label"><label for="setting-${key}">${label}</label><p>${note}</p></div>${type==='subnets'?`<textarea id="setting-${key}" spellcheck="false">${escape(value.join('\n'))}</textarea>`:`<input id="setting-${key}" type="${type}" value="${escape(value??'')}" ${type==='number'?'min="0" step="1" required':''}>`}<button class="secondary" type="submit">Speichern</button></form>`}if(!section.fields.length){for(const [label,value]of [['Node-ID',nodeConfig.id],['Cluster-ID',c.cluster_id],['Bootstrap-Admin',c.auth.bootstrap_admin.username],['System-Bucket-Platzierung','EVERYWHERE · Multinode-Replikation folgt'],['Peers',c.peers?.length?c.peers.map(p=>p.url).join(', '):'Keine · Single-node']])html+=`<div class="setting-row"><div class="setting-label"><label>${escape(label)}</label></div><div class="setting-readonly">${escape(value)}</div></div>`}html+='</section>'}$('settings-fields').innerHTML=html;for(const form of document.querySelectorAll('[data-setting]')){form.addEventListener('input',()=>{form.dataset.dirty='true'});form.addEventListener('submit',async e=>{e.preventDefault();const key=form.dataset.setting,input=form.querySelector('input,textarea'),type=form.dataset.type;let value=input.value;if(type==='number'){value=Number(value);if(!Number.isSafeInteger(value)||value<0){toast('Bitte eine nichtnegative ganze Bytezahl eingeben.',true);return}}else if(type==='subnets')value=value.split(/[\n,]+/).map(v=>v.trim()).filter(Boolean);const b=form.querySelector('button');b.disabled=true;try{const view=await node.setConfig({[key]:value});form.dataset.dirty='false';b.disabled=false;applyConfig(view);toast('Einstellung gespeichert.' )}catch(e){toast(e.message,true);b.disabled=false}})}}
 function syncSettingsValues(){const c=configView.config;for(const form of document.querySelectorAll('[data-setting]')){if(form.dataset.dirty==='true')continue;const key=form.dataset.setting,value=key in c.node?c.node[key]:c[key];form.querySelector('input,textarea').value=form.dataset.type==='subnets'?value.join('\n'):value??''}}
