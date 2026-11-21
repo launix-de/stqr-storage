@@ -9,6 +9,9 @@ import (
 	"unicode/utf8"
 )
 
+// BucketHeader selects the native bucket once during HTTP/WebSocket upgrade.
+const BucketHeader = "X-STQR-Bucket"
+
 const MaxMessage = 16 << 20
 const (
 	FireAndForget uint8 = iota
@@ -24,6 +27,19 @@ const (
 	StatsSubscribe       uint16 = 0x0009
 	StatsUnsubscribe     uint16 = 0x000a
 	StatsSnapshotMessage uint16 = 0x000b
+	BucketInfoGet        uint16 = 0x010c
+	BucketMaintenance    uint16 = 0x0115
+	BucketScan           uint16 = 0x0116
+	BucketCreate         uint16 = 0x2003
+	BucketSetPolicy      uint16 = 0x2004
+	BucketSetQuota       uint16 = 0x2005
+	BucketRename         uint16 = 0x2006
+	BucketLock           uint16 = 0x2007
+	BucketDelete         uint16 = 0x2008
+	BucketGrant          uint16 = 0x2009
+	BucketRevoke         uint16 = 0x200a
+	BucketList           uint16 = 0x2022
+	BucketQuotaCapacity  uint16 = 0x2023
 	AdminGet             uint16 = 0x2000
 	VolumeAdd            uint16 = 0x2001
 	VolumeRemove         uint16 = 0x2002
@@ -36,6 +52,11 @@ const (
 	VolumeCapacityGet uint16 = 0x201e
 	VolumeGrowInfo    uint16 = 0x201f
 	VolumeGrow        uint16 = 0x2020
+	UserList          uint16 = 0x2021
+	UserCreate        uint16 = 0x200b
+	UserUpdate        uint16 = 0x200c
+	UserSetPassword   uint16 = 0x200d
+	UserDelete        uint16 = 0x200e
 )
 
 type ID [16]byte

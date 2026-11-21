@@ -2,7 +2,8 @@
 // Same canonical LE/LEB128 codec as client/protocol.go and spec §13. No JSON
 // control channel: administrative JSON field patches are explicitly Text bodies
 // of NODE_CONFIG_GET/SET; all messages use the original STQR binary envelope.
-export const OP={HELLO:1,PING:2,EVENT:4,STATS_GET:8,STATS_SUBSCRIBE:9,STATS_UNSUBSCRIBE:10,STATS_SNAPSHOT:11,VOLUME_ADD:0x2001,VOLUME_REMOVE:0x2002,OPERATION_STATUS:0x2019,CONFIG_GET:0x201a,CONFIG_SET:0x201b,VOLUME_CANDIDATES:0x201c,VOLUME_RESCAN:0x201d,VOLUME_CAPACITY:0x201e,VOLUME_GROW_INFO:0x201f,VOLUME_GROW:0x2020};
+import {writeBucketPolicy,writeBucketQuota,parseBucketPage} from './bucket-codec.js';
+export const OP={HELLO:1,PING:2,EVENT:4,STATS_GET:8,STATS_SUBSCRIBE:9,STATS_UNSUBSCRIBE:10,STATS_SNAPSHOT:11,VOLUME_ADD:0x2001,VOLUME_REMOVE:0x2002,OPERATION_STATUS:0x2019,CONFIG_GET:0x201a,CONFIG_SET:0x201b,VOLUME_CANDIDATES:0x201c,VOLUME_RESCAN:0x201d,VOLUME_CAPACITY:0x201e,VOLUME_GROW_INFO:0x201f,VOLUME_GROW:0x2020,USER_LIST:0x2021,USER_CREATE:0x200b,USER_UPDATE:0x200c,USER_SET_PASSWORD:0x200d,USER_DELETE:0x200e,BUCKET_LIST:0x2022,BUCKET_QUOTA_CAPACITY:0x2023,BUCKET_CREATE:0x2003,BUCKET_SET_POLICY:0x2004,BUCKET_SET_QUOTA:0x2005,BUCKET_RENAME:0x2006,BUCKET_LOCK:0x2007,BUCKET_DELETE:0x2008,BUCKET_GRANT:0x2009,BUCKET_REVOKE:0x200a};
 const utf8=new TextEncoder(),text=new TextDecoder('utf-8',{fatal:true});
 export const newID=()=>Array.from(crypto.getRandomValues(new Uint8Array(16)),b=>b.toString(16).padStart(2,'0')).join('');
 export class Writer{
@@ -34,7 +35,7 @@ export function decodeStats(data){const r=new Reader(data),s={schema:r.u16(),nod
 function ack(r){return {operation_id:r.id(),state:['requested','running','fulfilled','failed'][r.u8()],volume_id:r.bool()?r.id():null}}
 function decodeResponse(op,body){const r=new Reader(body),status=Number(r.v()),headers=new Reader(r.blob());let detail='';for(let i=0,n=headers.count(100);i<n;i++){const tag=Number(headers.v()),value=new Reader(headers.blob());if(tag===3){detail=value.text();value.done()}}headers.done();if(status>=300){const e=Error(detail||`STQR-Fehler ${status}`);e.status=status;throw e}
  let result;
- if(op===OP.VOLUME_GROW_INFO)result={kind:r.u8(),current:r.u64(),available:r.u64(),maximum:r.u64()};else if(op===OP.VOLUME_CAPACITY)result={fileAvailable:r.u64(),ramAvailable:r.u64(),ramLimit:r.u64()};else if([OP.CONFIG_GET,OP.CONFIG_SET,OP.VOLUME_CANDIDATES].includes(op))result=JSON.parse(r.text());else if([OP.VOLUME_ADD,OP.VOLUME_REMOVE,OP.VOLUME_RESCAN,OP.VOLUME_GROW].includes(op))result=ack(r);else if(op===OP.OPERATION_STATUS){result=ack(r);result.status=Number(r.v());result.detail=r.text()}else if(op===OP.STATS_GET){result=decodeStats(r.take(r.b.length-r.at))}else if(op===OP.STATS_SUBSCRIBE){result=r.id()}else if(op===OP.PING){result=r.u64()}else result=r.take(r.b.length-r.at);r.done();return result}
+ if(op===OP.BUCKET_QUOTA_CAPACITY){result={used:r.u64(),available:r.u64(),reservedOther:r.u64(),maximum:r.u64(),nodes:r.u32(),overhead:r.u32(),profiles:[]};for(let i=0,n=r.count(32);i<n;i++)result.profiles.push({key:r.u8(),label:r.text(),size:r.u64(),overhead:r.u32()})}else if(op===OP.BUCKET_LIST)result=parseBucketPage(r.text());else if(op===OP.USER_LIST){result=[];for(let i=0,n=r.count(100000);i<n;i++)result.push({id:r.id(),name:r.text(),role:r.u8(),disabled:r.bool()})}else if(op===OP.VOLUME_GROW_INFO)result={kind:r.u8(),current:r.u64(),available:r.u64(),maximum:r.u64()};else if(op===OP.VOLUME_CAPACITY)result={fileAvailable:r.u64(),ramAvailable:r.u64(),ramLimit:r.u64()};else if([OP.CONFIG_GET,OP.CONFIG_SET,OP.VOLUME_CANDIDATES].includes(op))result=JSON.parse(r.text());else if([OP.VOLUME_ADD,OP.VOLUME_REMOVE,OP.VOLUME_RESCAN,OP.VOLUME_GROW,OP.USER_CREATE,OP.USER_UPDATE,OP.USER_SET_PASSWORD,OP.USER_DELETE,OP.BUCKET_CREATE,OP.BUCKET_SET_POLICY,OP.BUCKET_SET_QUOTA,OP.BUCKET_RENAME,OP.BUCKET_LOCK,OP.BUCKET_DELETE,OP.BUCKET_GRANT,OP.BUCKET_REVOKE].includes(op))result=ack(r);else if(op===OP.OPERATION_STATUS){result=ack(r);result.status=Number(r.v());result.detail=r.text()}else if(op===OP.STATS_GET){result=decodeStats(r.take(r.b.length-r.at))}else if(op===OP.STATS_SUBSCRIBE){result=r.id()}else if(op===OP.PING){result=r.u64()}else result=r.take(r.b.length-r.at);r.done();return result}
 
 // SHA-256 works on HTTP intranets where WebCrypto's secure-context-only digest
 // is unavailable. Verify complete StatsPart data before publishing a snapshot.
@@ -50,6 +51,21 @@ export class NodeConnection{
  statsPart(body){const r=new Reader(body),subscription=r.id(),source=r.id(),boot=r.id(),seq=r.u64(),index=r.u32(),count=r.u32(),digest=r.take(32),data=r.blob();r.done();if(subscription!==this.sub)return;if(count<1||count>64||index>=count||data.length>1<<20)throw Error('Ungültiges Statistikfragment');const key=`${source}:${boot}:${seq}`;let entry=this.parts.get(key);if(!entry){this.parts.clear();entry={count,digest,parts:new Array(count)};this.parts.set(key,entry)}if(entry.count!==count||entry.digest.some((v,i)=>v!==digest[i]))throw Error('Widersprüchliche Statistikfragmente');entry.parts[index]=data;if(entry.parts.filter(Boolean).length!==count)return;const size=entry.parts.reduce((n,p)=>n+p.length,0),joined=new Uint8Array(size);let at=0;for(const p of entry.parts){joined.set(p,at);at+=p.length}if(sha256(joined).some((b,i)=>b!==digest[i]))throw Error('Statistik-Digest stimmt nicht');this.parts.delete(key);this.onStats(decodeStats(joined))}
  stop(){this.stopped=true;clearTimeout(this.reconnect);clearTimeout(this.flushTimer);if(this.ws?.readyState===WebSocket.OPEN){try{this.fireAndForget(OP.STATS_UNSUBSCRIBE,new Writer().id(this.sub).bytes())}catch{}}this.ws?.close()}
  getConfig(){return this.request(OP.CONFIG_GET)}setConfig(fields){return this.request(OP.CONFIG_SET,new Writer().text(JSON.stringify(fields)).bytes())}
+ bucketQuotaCapacity(bucket,strategy,profile=255,overhead=0){return this.request(OP.BUCKET_QUOTA_CAPACITY,new Writer().id(bucket).u8({hdd:0,ssd:1,ram:2}[strategy]).u8(profile).u32(overhead).bytes())}
+ listBuckets(after='',limit=100){return this.request(OP.BUCKET_LIST,new Writer().text(after).u32(limit).bytes())}
+ createBucket(bucket,id){return this.request(OP.BUCKET_CREATE,writeBucketPolicy(new Writer(),bucket).bytes(),id)}
+ setBucketPolicy(bucket,expected,id){return this.request(OP.BUCKET_SET_POLICY,writeBucketPolicy(new Writer(),bucket).u64(expected).bytes(),id)}
+ setBucketQuota(bucket,expected,id){return this.request(OP.BUCKET_SET_QUOTA,writeBucketQuota(new Writer(),bucket,expected).bytes(),id)}
+ renameBucket(bucket,name,id){return this.request(OP.BUCKET_RENAME,new Writer().id(bucket).text(name).bytes(),id)}
+ lockBucket(bucket,locked,id){return this.request(OP.BUCKET_LOCK,new Writer().id(bucket).bool(locked).bytes(),id)}
+ deleteBucket(bucket,id){return this.request(OP.BUCKET_DELETE,new Writer().id(bucket).bytes(),id)}
+ grantBucket(bucket,user,permissions,id){return this.request(OP.BUCKET_GRANT,new Writer().id(bucket).id(user).u32(permissions).bytes(),id)}
+ revokeBucket(bucket,user,id){return this.request(OP.BUCKET_REVOKE,new Writer().id(bucket).id(user).bytes(),id)}
+ listUsers(){return this.request(OP.USER_LIST)}
+ createUser(user,password,id){return this.request(OP.USER_CREATE,new Writer().id(user.id).text(user.name).u8(user.role??0).bool(false).text(password).bytes(),id)}
+ setUserRole(user,role,id){return this.request(OP.USER_UPDATE,new Writer().id(user.id).text(user.name).u8(role).bool(user.disabled).bytes(),id)}
+ setUserPassword(user,password,id){return this.request(OP.USER_SET_PASSWORD,new Writer().id(user).text(password).bytes(),id)}
+ deleteUser(user,id){return this.request(OP.USER_DELETE,new Writer().id(user).bytes(),id)}
  volumeGrowInfo(volume){return this.request(OP.VOLUME_GROW_INFO,new Writer().id(volume).bytes())}
  growVolume(volume,size,id){return this.request(OP.VOLUME_GROW,new Writer().id(volume).u64(size).bytes(),id)}
  volumeCapacity(){return this.request(OP.VOLUME_CAPACITY)}

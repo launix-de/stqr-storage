@@ -38,6 +38,7 @@ var (
 	ErrRedirect       = errors.New("client: object routing redirect")
 	ErrTooLarge       = errors.New("client: use a streaming read for payloads above 16 MiB")
 	ErrRange          = errors.New("client: invalid object range or precondition")
+	ErrGone           = errors.New("client: object range or bucket runtime no longer valid")
 )
 
 // ObjectInfo describes one atomic object snapshot. Version zero is not a

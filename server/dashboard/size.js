@@ -12,8 +12,8 @@ export function parseSize(raw){
  return size;
 }
 export function sizeLimit(bytes){return bytes/4096n*4096n}
-export function sizeSteps(limit,custom,minimum=MIN_VOLUME_SIZE){
- limit=sizeLimit(limit);if(limit<minimum)return [];
+export function sizeSteps(limit,custom,minimum=MIN_VOLUME_SIZE,alignment=4096n){
+ limit=limit/alignment*alignment;if(limit<minimum)return [];
  const values=new Set([minimum,limit]);
  for(let unit=1024n,prefix=0;prefix<UNITS.length;prefix++,unit*=1024n){
   for(let magnitude=1n;magnitude<=100n;magnitude*=10n){

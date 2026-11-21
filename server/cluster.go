@@ -72,6 +72,7 @@ func (s *Server) drainOnce(id, vid string) error {
 	}
 	sort.Slice(targets, func(i, j int) bool { return targets[i].config.ID < targets[j].config.ID })
 	class := src.store.Identity().Class
+	moved := map[volume.ID]map[string]bool{}
 	var after *volume.Key
 	for {
 		if s.ctx.Err() != nil {
@@ -90,6 +91,16 @@ func (s *Server) drainOnce(id, vid string) error {
 			break
 		}
 		for _, record := range records {
+			if b, err := s.Bucket(record.Key.Bucket); err == nil {
+				d := b.Describe()
+				owned := len(d.LocalVolumes) == 0
+				for _, location := range d.LocalVolumes {
+					owned = owned || location == vid
+				}
+				if !owned {
+					continue
+				}
+			}
 			copied := false
 			var last error
 			for _, dst := range targets {
@@ -98,6 +109,10 @@ func (s *Server) drainOnce(id, vid string) error {
 				}
 				if e = copyObject(s.ctx, src.store, dst.store, record.Key, record.Info); e == nil {
 					copied = true
+					if moved[record.Key.Bucket] == nil {
+						moved[record.Key.Bucket] = map[string]bool{}
+					}
+					moved[record.Key.Bucket][dst.config.ID] = true
 					break
 				}
 				last = e
@@ -111,6 +126,9 @@ func (s *Server) drainOnce(id, vid string) error {
 		}
 		last := records[len(records)-1].Key
 		after = &last
+	}
+	if err := s.noteBucketDrain(vid, moved); err != nil {
+		return err
 	}
 	return s.completeDetach(id, vid, src)
 }

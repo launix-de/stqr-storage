@@ -30,6 +30,16 @@ func statusOf(e error) int {
 		return a.status
 	}
 	switch {
+	case errors.Is(e, ErrBucketCatalogMissing), errors.Is(e, ErrBucketCatalogCorrupt):
+		return 503
+	case errors.Is(e, ErrBucketForbidden):
+		return 403
+	case errors.Is(e, ErrBucketNotFound):
+		return 404
+	case errors.Is(e, ErrBucketConflict):
+		return 409
+	case errors.Is(e, ErrBucketInvalid):
+		return 400
 	case errors.Is(e, volume.ErrFull):
 		return 507
 	case errors.Is(e, volume.ErrNotFound):
@@ -38,7 +48,7 @@ func statusOf(e error) int {
 		return 409
 	case errors.Is(e, volume.ErrUnsupported):
 		return 501
-	case errors.Is(e, volume.ErrClosed), errors.Is(e, volume.ErrRecovery):
+	case errors.Is(e, volume.ErrClosed), errors.Is(e, volume.ErrRecovery), errors.Is(e, volume.ErrDraining):
 		return 503
 	case errors.Is(e, volume.ErrRange):
 		return 400
@@ -58,6 +68,7 @@ type Operation struct {
 	ID        string `json:"operation_id"`
 	State     string `json:"state"`
 	VolumeID  string `json:"volume_id,omitempty"`
+	BucketID  string `json:"bucket_id,omitempty"`
 	Status    int    `json:"status"`
 	Detail    string `json:"detail"`
 	Kind      string `json:"kind"`
@@ -108,6 +119,22 @@ func (s *Server) operation(id string) (Operation, error) {
 		return op, fail(400, "invalid operation ID")
 	}
 	e := s.readBlob("admin-op/"+id, &op)
+	if errors.Is(e, volume.ErrNotFound) {
+		for _, d := range s.bucketSnapshots() {
+			for _, r := range d.Receipts {
+				if r.ID == id {
+					state := "fulfilled"
+					if r.Running {
+						state = "running"
+					}
+					if r.Status >= 400 {
+						state = "failed"
+					}
+					return Operation{ID: id, BucketID: d.ID, Kind: "bucket", Status: r.Status, State: state}, nil
+				}
+			}
+		}
+	}
 	return op, e
 }
 func (s *Server) finishOperation(op Operation, e error) (Operation, error) {
@@ -410,6 +437,7 @@ func (s *Server) updateConfig(patch map[string]json.RawMessage) error {
 	s.mu.Lock()
 	s.cfg = c
 	s.mu.Unlock()
+	s.invalidateDisallowedConnections()
 	s.notifyStats()
 	return nil
 }

@@ -1,17 +1,29 @@
 // SPDX-License-Identifier: GPL-3.0-only
 import {NodeConnection,newID} from './protocol.js';
+import {setupUserViews} from './users.js';
+import {setupBucketViews} from './buckets.js';
 import {MIN_VOLUME_SIZE,parseSize,sizeSteps,sizeLimit,formatSize,sizeLabel} from './size.js';
 const $=id=>document.getElementById(id),escape=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 let node,configView,snapshot,previous,source=0,candidates=[],collapsed=false,drainID,drainVolume,addRetry;
 const states=['pending','active','draining','detached','failed'],stateNames=['Ausstehend','Aktiv','Wird geleert','Ausgehängt','Fehler'],classes=['hdd','ssd','ram','ramcache'];
 export function bytes(n){n=BigInt(n??0);const units=['B','KiB','MiB','GiB','TiB','PiB','EiB'];let unit=0,div=1n;while(n>=div*1024n&&unit<units.length-1){div*=1024n;unit++}const v=Number(n*10n/div)/10;return `${v.toLocaleString('de-DE',{maximumFractionDigits:unit?1:0})} ${units[unit]}`}
-function toast(message,error=false){const div=document.createElement('div');div.className='toast'+(error?' error-toast':'');div.textContent=message;$('toasts').append(div);setTimeout(()=>div.remove(),error?10000:5000)}
+function toast(message,error=false){const div=document.createElement('div');div.className='toast'+(error?' error-toast':'');div.textContent=message;while($('toasts').children.length>=3)$('toasts').firstElementChild.remove();$('toasts').append(div);setTimeout(()=>div.remove(),error?10000:5000)}
 function setConnected(connected){$('connection').classList.toggle('offline',!connected);$('connection').innerHTML=`<span class="dot"></span>${connected?'Live · alle 3 Sekunden':'Verbindung wird wiederhergestellt'}`;$('refresh').disabled=!connected}
-function beginSession(session){$('login').hidden=true;$('app').hidden=false;$('profile-name').textContent=session.username;node?.stop();node=new NodeConnection(session.csrf_token,setConnected,onStats);node.onOpen=async()=>{try{const [cfg]=await Promise.all([node.getConfig(),node.subscribeStats()]);applyConfig(cfg)}catch(e){toast(e.message,true)}};node.onProtocolError=e=>toast('Protokollfehler: '+e.message,true)}
+function beginSession(session){$('login').hidden=true;$('app').hidden=false;$('profile-name').textContent=session.username;userViews.clear();bucketViews.clear();node?.stop();node=new NodeConnection(session.csrf_token,setConnected,onStats);node.onOpen=async()=>{try{const [cfg]=await Promise.all([node.getConfig(),node.subscribeStats(),userViews.load(),bucketViews.load()]);applyConfig(cfg)}catch(e){toast(e.message,true)}};node.onProtocolError=e=>toast('Protokollfehler: '+e.message,true)}
 async function sessionFetch(method='GET',headers={}){return fetch('/api/session',{method,headers,credentials:'same-origin'})}
-$('login-form').addEventListener('submit',async e=>{e.preventDefault();const submit=e.submitter;submit.disabled=true;$('login-error').textContent='';try{const raw=new TextEncoder().encode(`${$('username').value}:${$('password').value}`);const response=await sessionFetch('POST',{Authorization:'Basic '+btoa(Array.from(raw,b=>String.fromCharCode(b)).join(''))});if(!response.ok)throw Error(response.status===401?'Benutzername oder Passwort ist nicht korrekt.':'Anmeldung nicht möglich.');const data=await response.json();$('password').value='';beginSession(data)}catch(e){$('login-error').textContent=e.message}finally{submit.disabled=false}});
+$('login-form').addEventListener('submit',async e=>{e.preventDefault();const submit=e.submitter;submit.disabled=true;$('login-error').textContent='';try{const raw=new TextEncoder().encode(`${$('username').value}:${$('password').value}`);const response=await sessionFetch('POST',{Authorization:'Basic '+btoa(Array.from(raw,b=>String.fromCharCode(b)).join(''))});if(!response.ok){const failure=await response.json().catch(()=>({}));throw Error(response.status===401?'Benutzername oder Passwort ist nicht korrekt.':response.status===403&&failure.error==='administrator required'?'Für das Dashboard ist ein Administratorkonto erforderlich.':response.status===403?'Zugriff auf das Dashboard verweigert.':'Anmeldung nicht möglich.')}const data=await response.json();$('password').value='';beginSession(data)}catch(e){$('login-error').textContent=e.message}finally{submit.disabled=false}});
 $('logout').addEventListener('click',async()=>{try{await sessionFetch('DELETE',{'X-CSRF-Token':node.csrf})}catch{}node?.stop();$('app').hidden=true;$('login').hidden=false;$('password').focus()});
-for(const button of document.querySelectorAll('[data-view]'))button.addEventListener('click',()=>{const view=button.dataset.view;for(const b of document.querySelectorAll('[data-view]'))b.classList.toggle('selected',b===button);$('volumes-view').hidden=view!=='volumes';$('settings-view').hidden=view!=='settings';$('breadcrumb-current').textContent=view==='volumes'?'Volumes':'Einstellungen';if(view==='settings')node.getConfig().then(applyConfig).catch(e=>toast(e.message,true))});
+function showView(view){
+ for(const b of document.querySelectorAll('[data-view]'))b.classList.toggle('selected',b.dataset.view===view);
+ for(const name of ['volumes','buckets','users','settings'])$(name+'-view').hidden=view!==name;
+ $('breadcrumb-current').textContent={volumes:'Volumes',buckets:'Buckets',users:'User',settings:'Einstellungen'}[view];
+ if(view==='settings')node.getConfig().then(applyConfig).catch(e=>toast(e.message,true));if(view==='users')userViews.load();if(view==='buckets')bucketViews.load();
+}
+for(const button of document.querySelectorAll('[data-view]'))button.addEventListener('click',()=>showView(button.dataset.view));
+function requireLogin(message){node?.stop();$('app').hidden=true;$('login').hidden=false;$('password').value='';$('login-error').textContent=message;$('password').focus()}
+const bucketViews=setupBucketViews({connection:()=>node,escape,toast,showView});
+const userViews=setupUserViews({connection:()=>node,currentUsername:()=>$('profile-name').textContent,escape,toast,showView,requireLogin,openBucketCreate:options=>bucketViews.openCreate(options)});
+
 function applyConfig(view){configView=view;$('add-node-name').textContent=view.config.node.name;$('config-location').textContent=view.config_path;$('restart-notice').hidden=!view.restart_required;if(!$('settings-fields').children.length)renderSettings();else syncSettingsValues();renderVolumes();updatePath()}
 async function refreshConfig(){try{applyConfig(await node.getConfig())}catch(e){toast(e.message,true)}}
 let fetchingConfig=false;

@@ -33,6 +33,13 @@ The in-memory filesystem backend is an explicitly volatile development backend,
 not an unauthenticated network connection. Real network connections always require
 all constructor arguments.
 
+The constructor supplies `X-STQR-Bucket` during the authenticated upgrade.
+The server validates the bucket and grant before accepting the socket: `Dial`
+already fails for missing buckets or denied access. Its live connection stores
+that Bucket instance and authenticated capabilities; later data operations do
+not repeat account or grant lookups. Revocation/password changes invalidate the
+connection, and reconnect performs the complete check again.
+
 The transport uses HTTP Basic for the `stqr.v1` WebSocket upgrade, HELLO on each
 new session, bounded send/pending queues and correlated responses. Data transfers
 above 1 MiB use 1-MiB chunks and SHA-256. Streaming uses temporary files and bounded
@@ -49,9 +56,19 @@ it unchanged. `StatusError` preserves server status/follow headers and maps 404,
 No blind HTTP redirect forwards credentials to another host. Segmented routing,
 learned ownership/RAM runtime IDs and replica routing are explicit multinode TODOs.
 
-This server milestone implements volume administration first. Bucket management
-is still specified only; native object handlers return 501. The client wire path
-is tested against a protocol peer, including streaming, cancellation, request
-multiplexing and a committed mutation whose connection fails before the reply.
-The daemon integration checks successful normal-user HELLO, explicit 501 for
-object commands and 403 for unauthorized administrative messages.
+The server dispatches object operations to its RAM-resident `Bucket` instances,
+with current account/bucket authorization and persistent descriptions in the
+admin bucket. Get/GetRange, Put/PutRange, Append, Trunc, Delete, Stat, CAS and
+streaming work end to end on single-node volumes, including the FUSE core.
+The client learns the single-node RAM runtime from successful object replies and
+carries it across reconnects. HTTP/protocol 410 maps to `ErrGone`; an application
+must explicitly accept a reset, e.g. by opening a new connection, rather than
+silently replaying pre-reset mutations into empty RAM.
+
+Tests cover real client/server streaming (including transfers above the receive
+queue size), conditional writes, durable retries after drain/restart, bucket
+isolation, quota limits, grant revocation, codec/tier changes and RAM resets.
+Protocol-peer tests additionally cover request multiplexing, cancellation and a
+committed mutation whose connection fails before the reply. Multinode routing,
+multiple-node replicas, guaranteed reservations and finite physical quotas remain
+explicit unsupported features; the server never acknowledges those guarantees.

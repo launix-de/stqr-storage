@@ -1,0 +1,221 @@
+// SPDX-License-Identifier: GPL-3.0-only
+package server
+
+import (
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
+	"sort"
+	"strings"
+	"unicode"
+	"unicode/utf8"
+
+	"github.com/launix-de/stqr-storage/client"
+	"golang.org/x/crypto/bcrypt"
+)
+
+// Account mutations and their retry receipts share one atomic system object.
+// No plaintext password or unkeyed password digest is persisted. opMu serializes
+// read/modify/write with other local administrative commits. TODO(multinode):
+// publish account changes through CONTROL_CHANGE / EVERYWHERE before ACK.
+type accountReceipt struct {
+	ID     string `json:"id"`
+	Actor  string `json:"actor"`
+	Digest string `json:"digest"`
+	Status int    `json:"status"`
+}
+
+func userOpcode(op uint16) bool {
+	return op == client.UserList || op == client.UserCreate || op == client.UserUpdate || op == client.UserSetPassword || op == client.UserDelete
+}
+func encodeUser(e *client.Encoder, u account) {
+	id, _ := parseID(u.ID)
+	e.ID(client.ID(id))
+	e.Text(u.Name)
+	role := uint8(0)
+	if u.Role == "ADMIN" {
+		role = 1
+	}
+	e.U8(role)
+	e.Bool(u.Disabled)
+}
+func (s *Server) executeUsers(m client.Message, p principal) ([]byte, int, error) {
+	s.opMu.Lock()
+	defer s.opMu.Unlock()
+	s.mu.RLock()
+	closed := s.closed
+	token := s.cfg.Auth.ClusterToken
+	s.mu.RUnlock()
+	if closed {
+		return nil, 0, fail(503, "server is stopping")
+	}
+	var image accountsImage
+	if e := s.readBlob("accounts", &image); e != nil {
+		return nil, 0, e
+	}
+	// Authorization is checked again inside the mutation lock so an already queued
+	// request cannot survive deletion, password change or role revocation.
+	authorized := p.connection != nil && p.isAdmin()
+	if p.connection == nil {
+		for _, u := range image.Users {
+			if u.ID == p.User.ID && u.Role == "ADMIN" && !u.Disabled && constantEqual(u.PasswordHash, p.User.PasswordHash) {
+				authorized = true
+				break
+			}
+		}
+
+	}
+	if !authorized {
+		return nil, 0, fail(403, "administrator required")
+	}
+	d := client.Decoder{B: m.Body}
+	if m.Opcode == client.UserList {
+		if e := d.Done(); e != nil {
+			return nil, 0, fail(400, "USER_LIST requires an empty body")
+		}
+		users := append([]account(nil), image.Users...)
+		sort.Slice(users, func(i, j int) bool { return users[i].Name < users[j].Name })
+		e := client.Encoder{}
+		e.V(uint64(len(users)))
+		for _, u := range users {
+			encodeUser(&e, u)
+		}
+		return e.B, 200, nil
+	}
+	if m.ID == (client.ID{}) {
+		return nil, 0, fail(400, "a nonzero operation ID is required")
+	}
+	mac := hmac.New(sha256.New, []byte(token))
+	mac.Write([]byte("STQR account mutation v1"))
+	mac.Write([]byte(p.User.ID))
+	mac.Write([]byte{byte(m.Opcode), byte(m.Opcode >> 8)})
+	mac.Write(m.Body)
+	digest := hex.EncodeToString(mac.Sum(nil))
+	for _, receipt := range image.Receipts {
+		if receipt.ID == m.ID.String() {
+			if receipt.Actor != p.User.ID || !constantEqual(receipt.Digest, digest) {
+				return nil, 0, fail(400, "operation ID reused with different input")
+			}
+			return encodeAck(Operation{ID: receipt.ID, State: "fulfilled"}), receipt.Status, nil
+		}
+	}
+	target := d.ID()
+	var name, password string
+	var role uint8
+	var disabled bool
+	if m.Opcode == client.UserCreate || m.Opcode == client.UserUpdate {
+		name = d.Text()
+		role = d.U8()
+		disabled = d.Bool()
+		if m.Opcode == client.UserCreate {
+			password = d.Text()
+		}
+	} else if m.Opcode == client.UserSetPassword {
+		password = d.Text()
+	}
+	if e := d.Done(); e != nil {
+		return nil, 0, fail(400, "invalid user message")
+	}
+	if target == (client.ID{}) {
+		return nil, 0, fail(400, "a nonzero user ID is required")
+	}
+	if m.Opcode == client.UserCreate || m.Opcode == client.UserUpdate {
+		if !validUsername(name) || role > 1 {
+			return nil, 0, fail(400, "invalid username or role")
+		}
+		for _, u := range image.Users {
+			if m.Opcode == client.UserCreate && u.ID == target.String() || u.Name == name && u.ID != target.String() {
+				return nil, 0, fail(409, "username or user ID already exists")
+			}
+		}
+	}
+	if m.Opcode != client.UserCreate {
+		found := false
+		for _, u := range image.Users {
+			if u.ID == target.String() {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return nil, 0, fail(404, "user not found")
+		}
+		if m.Opcode == client.UserDelete && target.String() == p.User.ID {
+			return nil, 0, fail(409, "you cannot delete your own account")
+		}
+		if m.Opcode == client.UserUpdate && target.String() == p.User.ID && (role != 1 || disabled) {
+			return nil, 0, fail(409, "you cannot change your own role or disable your own account")
+		}
+	}
+	var hash []byte
+	if m.Opcode == client.UserCreate || m.Opcode == client.UserSetPassword {
+		if len(password) == 0 || len(password) > 72 || !utf8.ValidString(password) {
+			return nil, 0, fail(400, "password must contain 1 to 72 UTF-8 bytes")
+		}
+		var e error
+		hash, e = bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+		if e != nil {
+			return nil, 0, e
+		}
+	}
+	status := 200
+	switch m.Opcode {
+	case client.UserCreate:
+		roleName := "USER"
+		if role == 1 {
+			roleName = "ADMIN"
+		}
+		image.Users = append(image.Users, account{ID: target.String(), Name: name, Role: roleName, Disabled: disabled, PasswordHash: string(hash)})
+		status = 201
+	case client.UserUpdate:
+		for i := range image.Users {
+			if image.Users[i].ID == target.String() {
+				image.Users[i].Name = name
+				image.Users[i].Role = "USER"
+				if role == 1 {
+					image.Users[i].Role = "ADMIN"
+				}
+				image.Users[i].Disabled = disabled
+			}
+		}
+	case client.UserSetPassword:
+		for i := range image.Users {
+			if image.Users[i].ID == target.String() {
+				image.Users[i].PasswordHash = string(hash)
+			}
+		}
+	case client.UserDelete:
+		for i := range image.Users {
+			if image.Users[i].ID == target.String() {
+				image.Users = append(image.Users[:i], image.Users[i+1:]...)
+				break
+			}
+		}
+	}
+	image.Receipts = append(image.Receipts, accountReceipt{ID: m.ID.String(), Actor: p.User.ID, Digest: digest, Status: status})
+	if e := s.writeBlob("accounts", image); e != nil {
+		return nil, 0, e
+	}
+	if m.Opcode != client.UserCreate {
+		s.invalidateUserConnections(target.String())
+		s.authMu.Lock()
+		for key, ss := range s.sessions {
+			if ss.UserID == target.String() {
+				delete(s.sessions, key)
+			}
+		}
+		s.authMu.Unlock()
+	}
+	return encodeAck(Operation{ID: m.ID.String(), State: "fulfilled"}), status, nil
+}
+func validUsername(name string) bool {
+	if name == "" || len(name) > 128 || !utf8.ValidString(name) || strings.HasPrefix(name, "node-") {
+		return false
+	}
+	for _, r := range name {
+		if unicode.IsSpace(r) || unicode.IsControl(r) || r == ':' {
+			return false
+		}
+	}
+	return true
+}

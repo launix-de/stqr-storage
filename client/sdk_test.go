@@ -73,6 +73,10 @@ func (p *wireObjectPeer) serve(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(401)
 		return
 	}
+	if r.Header.Get(BucketHeader) != p.bucket.String() {
+		w.WriteHeader(403)
+		return
+	}
 	if p.stallHandshake.CompareAndSwap(true, false) {
 		close(p.handshakeStarted)
 		select {

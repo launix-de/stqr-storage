@@ -50,7 +50,10 @@ func (c *Client) objectRef(e *Encoder, id ObjectID) {
 	e.B = append(e.B, id[:]...)
 	e.U64(0)
 	e.U64(0)
-	e.ID(ID{}) /* TODO(multinode): learned map revision, owner epoch and RAM runtime. */
+	c.mu.Lock()
+	runtime := c.runtime
+	c.mu.Unlock()
+	e.ID(runtime) // TODO(multinode): map revision/epoch and per-range runtime.
 }
 func encodePrecondition(e *Encoder, o MutationOptions) error {
 	if o.Absent && o.ExpectedVersion != nil {
@@ -157,6 +160,9 @@ func (c *Client) getTo(ctx context.Context, id ObjectID, off, length uint64, ran
 		if uint64(len(data)) != total || sha256.Sum256(data) != digest {
 			return info, ErrProtocol
 		}
+		if err := c.acceptObjectInfo(info); err != nil {
+			return info, err
+		}
 		if len(data) == 0 {
 			return info, nil
 		}
@@ -168,6 +174,9 @@ func (c *Client) getTo(ctx context.Context, id ObjectID, off, length uint64, ran
 	}
 	if mode != 1 || len(data) != 0 || r.transfer == nil || r.transfer.length != total || r.transfer.digest != digest {
 		return info, ErrProtocol
+	}
+	if err := c.acceptObjectInfo(info); err != nil {
+		return info, err
 	}
 	_, err = io.CopyBuffer(dst, contextReader{ctx, r.transfer.file}, make([]byte, 64<<10))
 	return info, err
@@ -197,6 +206,9 @@ func (c *Client) Stat(ctx context.Context, id ObjectID) (ObjectInfo, error) {
 	info := readObjectInfo(&d)
 	if d.Done() != nil {
 		return ObjectInfo{}, ErrProtocol
+	}
+	if err := c.acceptObjectInfo(info); err != nil {
+		return info, err
 	}
 	return info, nil
 }
@@ -242,6 +254,9 @@ func (c *Client) Trunc(ctx context.Context, id ObjectID, length uint64, opt Trun
 	if d.Done() != nil {
 		return ObjectInfo{}, ErrProtocol
 	}
+	if err := c.acceptObjectInfo(info); err != nil {
+		return info, err
+	}
 	return info, nil
 }
 func (c *Client) Delete(ctx context.Context, id ObjectID, opt DeleteOptions) error {
@@ -285,6 +300,9 @@ func (c *Client) CAS(ctx context.Context, id ObjectID, off uint64, expected, rep
 	info := readObjectInfo(&d)
 	if d.Done() != nil {
 		return ObjectInfo{}, ErrProtocol
+	}
+	if err := c.acceptObjectInfo(info); err != nil {
+		return info, err
 	}
 	return info, nil
 }

@@ -33,6 +33,11 @@ type Server struct {
 	configPath, volumesDir string
 	volumes                map[string]*managedVolume
 	system                 *volume.Volume
+	buckets                *BucketCatalog
+	bucketMu               sync.RWMutex
+	bucketsByID            map[volume.ID]*Bucket
+	bucketsByName          map[string]*Bucket
+	bucketJobs             map[volume.ID]bool
 	lock                   *os.File
 	ctx                    context.Context
 	cancel                 context.CancelFunc
@@ -197,6 +202,9 @@ func Open(opts Options) (s *Server, err error) {
 	if e = s.initAccounts(newSystem); e != nil {
 		return s, e
 	}
+	if e = s.initBuckets(); e != nil {
+		return s, e
+	}
 	if e = s.recoverOperations(); e != nil {
 		return s, e
 	}
@@ -207,6 +215,12 @@ func Open(opts Options) (s *Server, err error) {
 	s.publishStats()
 	s.workers.Add(1)
 	go s.statsLoop()
+	for _, d := range s.bucketSnapshots() {
+		if !d.DeletionComplete && (d.State == BucketDeleting || d.DesiredPolicy != nil) {
+			id, _ := bucketID(d.ID)
+			s.startBucketCleanup(id)
+		}
+	}
 	for _, v := range s.cfg.Volumes {
 		if v.State == "draining" {
 			id := v.OperationID

@@ -2,6 +2,7 @@
 package server
 
 import (
+	"context"
 	"crypto/sha256"
 	"errors"
 	"net/http"
@@ -21,43 +22,44 @@ const receiveQueueCapacity = 16
 const sendQueueCapacity = 32
 
 type wsSession struct {
-	server       *Server
-	conn         *websocket.Conn
-	request      *http.Request
-	principal    principal
-	done         chan struct{}
-	once         sync.Once
-	responses    chan []byte
-	telemetry    chan [][]byte
-	requests     chan client.Message
-	subMu        sync.Mutex
-	subscription client.ID
-	filter       client.StatsFilter
+	server         *Server
+	ctx            context.Context
+	cancel         context.CancelFunc
+	uploads        map[client.ID]*serverObjectUpload
+	stagedBytes    uint64
+	objectMu       sync.Mutex
+	objectContexts map[client.ID]objectRequestContext
+	conn           *websocket.Conn
+	request        *http.Request
+	principal      principal
+	authorization  *connectionAuthorization
+	done           chan struct{}
+	once           sync.Once
+	responses      chan []byte
+	telemetry      chan [][]byte
+	requests       chan client.Message
+	subMu          sync.Mutex
+	subscription   client.ID
+	filter         client.StatsFilter
 }
 
-func (ws *wsSession) close() { ws.once.Do(func() { close(ws.done); ws.conn.Close() }) }
-
-// The upgrade already proved the password. Revalidate the authoritative
-// account, role, verifier and session on every message without repeating bcrypt.
-func (ws *wsSession) principalNow() (principal, bool) {
-	p := ws.principal
-	if !ws.server.allowed(ws.request) {
-		return p, false
-	}
-	if p.Cookie {
-		ws.server.authMu.Lock()
-		session, ok := ws.server.sessions[p.SessionToken]
-		ws.server.authMu.Unlock()
-		if !ok || time.Now().After(session.Expires) || session.UserID != p.User.ID {
-			return p, false
+func (ws *wsSession) close() {
+	ws.once.Do(func() {
+		if ws.authorization != nil {
+			ws.authorization.invalid.Store(true)
 		}
-	}
-	user, e := ws.server.findAccount(p.User.Name)
-	if e != nil || user.ID != p.User.ID || !constantEqual(user.PasswordHash, p.User.PasswordHash) || user.Role != "ADMIN" && user.Role != "USER" || p.Cookie && user.Role != "ADMIN" {
-		return p, false
-	}
-	p.User = user
-	return p, true
+		close(ws.done)
+		if ws.cancel != nil {
+			ws.cancel()
+		}
+		ws.conn.Close()
+	})
+}
+
+// Authentication and capabilities were fixed at upgrade. Revocation is pushed
+// into the connection by administrative changes; this path performs no lookups.
+func (ws *wsSession) principalNow() (principal, bool) {
+	return ws.principal, ws.authorization != nil && !ws.authorization.invalid.Load()
 }
 func (s *Server) serveWebSocket(w http.ResponseWriter, r *http.Request, p principal) {
 	if p.Cookie {
@@ -82,16 +84,29 @@ func (s *Server) serveWebSocket(w http.ResponseWriter, r *http.Request, p princi
 		httpError(w, 400, errors.New("stqr.v1 subprotocol required"))
 		return
 	}
+	s.opMu.Lock()
+	authorization, p, authErr := s.authorizeConnection(r, p)
+	if authErr != nil {
+		s.opMu.Unlock()
+		httpError(w, statusOf(authErr), authErr)
+		return
+	}
 	up := websocket.Upgrader{Subprotocols: []string{"stqr.v1"}, CheckOrigin: sameOrigin, EnableCompression: false, ReadBufferSize: 4096, WriteBufferSize: 4096}
 	conn, e := up.Upgrade(w, r, nil)
 	if e != nil {
+		s.opMu.Unlock()
 		return
 	}
+	// Credentials have served their purpose; the live socket keeps capabilities.
+	r.Header.Del("Authorization")
+	p.User.PasswordHash = ""
 	conn.SetReadLimit(client.MaxMessage)
-	ws := &wsSession{server: s, conn: conn, request: r, principal: p, done: make(chan struct{}), responses: make(chan []byte, sendQueueCapacity), telemetry: make(chan [][]byte, 1), requests: make(chan client.Message, receiveQueueCapacity)}
+	sessionCtx, sessionCancel := context.WithCancel(s.ctx)
+	ws := &wsSession{authorization: authorization, ctx: sessionCtx, cancel: sessionCancel, server: s, conn: conn, request: r, principal: p, done: make(chan struct{}), responses: make(chan []byte, sendQueueCapacity), telemetry: make(chan [][]byte, 1), requests: make(chan client.Message, receiveQueueCapacity)}
 	s.mu.Lock()
 	if s.closed {
 		s.mu.Unlock()
+		s.opMu.Unlock()
 		ws.close()
 		return
 	}
@@ -100,6 +115,11 @@ func (s *Server) serveWebSocket(w http.ResponseWriter, r *http.Request, p princi
 	s.sockets[ws] = struct{}{}
 	s.wsMu.Unlock()
 	s.mu.Unlock()
+	s.opMu.Unlock()
+	if !authorization.expires.IsZero() {
+		expiry := time.AfterFunc(time.Until(authorization.expires), func() { authorization.invalid.Store(true) })
+		defer expiry.Stop()
+	}
 	defer func() { ws.close(); s.wsMu.Lock(); delete(s.sockets, ws); s.wsMu.Unlock() }()
 	go func() { defer s.workers.Done(); ws.writeLoop() }()
 	go func() { defer s.workers.Done(); ws.requestLoop() }()
@@ -114,6 +134,29 @@ func (s *Server) serveWebSocket(w http.ResponseWriter, r *http.Request, p princi
 		m, e := client.DecodeMessage(b)
 		if e != nil || m.Kind != client.Request && m.Kind != client.FireAndForget {
 			return
+		}
+		if m.Opcode >= 0x0100 && m.Opcode <= 0x0108 || m.Opcode == client.BucketMaintenance || m.Opcode == client.BucketScan {
+			if !ws.registerObjectContext(m.ID) {
+				return
+			}
+		}
+		if m.Opcode == 7 {
+			decoder := client.Decoder{B: m.Body}
+			id := decoder.ID()
+			if decoder.Done() != nil {
+				return
+			}
+			ws.cancelObjectContext(id)
+		}
+		// Upload chunks use TCP backpressure when staging falls behind. Closing
+		// every full queue would make a valid large upload retry forever.
+		if m.Opcode == 5 || m.Opcode == 6 || m.Opcode == 7 {
+			select {
+			case ws.requests <- m:
+			case <-ws.done:
+				return
+			}
+			continue
 		}
 		select {
 		case ws.requests <- m:
@@ -145,6 +188,20 @@ func (ws *wsSession) writeLoop() {
 }
 func (ws *wsSession) requestLoop() {
 	defer ws.close()
+	defer ws.releaseMaintenance()
+	defer func() {
+		ws.objectMu.Lock()
+		for id, r := range ws.objectContexts {
+			r.cancel()
+			delete(ws.objectContexts, id)
+		}
+		ws.objectMu.Unlock()
+	}()
+	defer func() {
+		for id := range ws.uploads {
+			ws.discardUpload(id)
+		}
+	}()
 	for {
 		select {
 		case <-ws.done:
@@ -154,7 +211,19 @@ func (ws *wsSession) requestLoop() {
 			if !ok {
 				return
 			}
-			body, _ := ws.server.dispatchAs(m, ws, p)
+			if m.Opcode == 5 || m.Opcode == 6 || m.Opcode == 7 {
+				if err := ws.objectTransfer(m, p); err != nil {
+					return
+				}
+				continue
+			}
+			body, status := ws.server.dispatchAs(m, ws, p)
+			if status == 0 {
+				continue
+			}
+			if m.Opcode >= 0x0100 && m.Opcode <= 0x0108 || m.Opcode == client.BucketMaintenance || m.Opcode == client.BucketScan {
+				ws.releaseObjectContext(m.ID)
+			}
 			if m.Kind == client.Request {
 				b := client.EncodeMessage(client.Message{Kind: client.Response, Opcode: m.Opcode, ID: m.ID, Body: body})
 				select {
@@ -190,8 +259,7 @@ func (ws *wsSession) pushStats(snapshot client.StatsSnapshot) {
 		return
 	}
 	p, ok := ws.principalNow()
-	if !ok || p.User.Role != "ADMIN" {
-		ws.close()
+	if !ok || (!p.isAdmin() && !p.isPeer()) {
 		return
 	}
 	data := client.EncodeStats(filterSnapshot(snapshot, f))

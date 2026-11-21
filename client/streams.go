@@ -269,5 +269,8 @@ func (c *Client) writePayload(ctx context.Context, opcode uint16, id ObjectID, o
 	if d.Done() != nil {
 		return AppendResult{}, ErrProtocol
 	}
+	if err := c.acceptObjectInfo(out.ObjectInfo); err != nil {
+		return AppendResult{}, err
+	}
 	return out, nil
 }

@@ -493,6 +493,18 @@ func TestBoundObjectSDKAndAdministrativeRoleBoundary(t *testing.T) {
 	if e = s.writeBlob("accounts", image); e != nil {
 		t.Fatal(e)
 	}
+	// The SDK binds and authorizes its bucket during upgrade, so this test needs
+	// an existing bucket and grant; an unknown bucket is rejected at Dial now.
+	draft, e := NewBucket(volume.ID{9}, "app-bucket")
+	if e != nil {
+		t.Fatal(e)
+	}
+	description := draft.Describe()
+	description.Grants = []BucketGrant{{UserID: image.Users[len(image.Users)-1].ID, Permissions: BucketRead}}
+	if _, e = s.buckets.Save(description, 0); e != nil {
+		t.Fatal(e)
+	}
+
 	host := httptest.NewServer(s.Handler())
 	defer host.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
@@ -502,8 +514,8 @@ func TestBoundObjectSDKAndAdministrativeRoleBoundary(t *testing.T) {
 		t.Fatal("ordinary bucket user cannot negotiate the object transport", e)
 	}
 	defer c.Close()
-	if _, _, e = c.Get(ctx, client.ObjectID{1}); !errors.Is(e, client.ErrNotImplemented) {
-		t.Fatal("native object service must explicitly remain unimplemented at this stage", e)
+	if _, _, e = c.Get(ctx, client.ObjectID{1}); !errors.Is(e, client.ErrNotFound) {
+		t.Fatal("missing object must return not found", e)
 	}
 	filter := client.Encoder{}
 	filter.U8(0)

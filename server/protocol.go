@@ -3,6 +3,7 @@ package server
 
 import (
 	"encoding/json"
+	"errors"
 	"math"
 
 	"github.com/launix-de/stqr-storage/client"
@@ -22,9 +23,13 @@ func encodeAck(op Operation) []byte {
 		state = 3
 	}
 	e.U8(state)
-	e.Bool(op.VolumeID != "")
-	if op.VolumeID != "" {
-		vid, _ := parseID(op.VolumeID)
+	entity := op.VolumeID
+	if entity == "" {
+		entity = op.BucketID
+	}
+	e.Bool(entity != "")
+	if entity != "" {
+		vid, _ := parseID(entity)
 		e.ID(client.ID(vid))
 	}
 	return e.B
@@ -39,8 +44,60 @@ func jsonText(v any) []byte {
 // Normal bucket connections can negotiate and use only object/routing messages.
 // This gate is shared by HTTP and WebSocket, not claimed by a client enum.
 func (s *Server) dispatchAs(m client.Message, ws *wsSession, p principal) ([]byte, int) {
-	if p.User.Role != "ADMIN" && m.Opcode != client.Hello && m.Opcode != client.Ping && !(m.Opcode >= 0x0100 && m.Opcode <= 0x0114) {
+	if p.connection != nil {
+		if p.connection.invalid.Load() {
+			return client.ResponseBody(403, nil, "connection authorization revoked"), 403
+		}
+		if p.connection.bucket != nil && m.Opcode != client.Hello && m.Opcode != client.Ping && !(m.Opcode >= 0x0100 && m.Opcode <= client.BucketScan) {
+			return client.ResponseBody(403, nil, "bucket connection has no administrative privileges"), 403
+		}
+	}
+	if p.isPeer() {
+		if m.Opcode == client.Hello || m.Opcode == client.Ping || m.Opcode == client.StatsGet || m.Opcode == client.StatsSubscribe || m.Opcode == client.StatsUnsubscribe || (m.Opcode >= 0x1000 && m.Opcode < 0x1100) {
+			return s.dispatch(m, ws)
+		}
+		return client.ResponseBody(403, nil, "cluster peer operation required"), 403
+	}
+
+	if !p.isAdmin() && m.Opcode != client.Hello && m.Opcode != client.Ping && !(m.Opcode >= 0x0100 && m.Opcode <= client.BucketScan) {
 		return client.ResponseBody(403, nil, "administrator required"), 403
+	}
+	// Metadata uses the authenticated connection capability, never role/rights
+	// claimed in message contents. Changes revoke cached socket grants.
+	if m.Opcode == client.BucketInfoGet {
+		result, err := s.bucketInfo(m, p)
+		if err != nil {
+			status := statusOf(err)
+			return client.ResponseBody(status, nil, err.Error()), status
+		}
+		return client.ResponseBody(200, result, ""), 200
+	}
+	if bucketAdminOpcode(m.Opcode) {
+		result, status, err := s.executeBuckets(m, p)
+		if err != nil {
+			status = statusOf(err)
+			return client.ResponseBody(status, nil, err.Error()), status
+		}
+		return client.ResponseBody(status, result, ""), status
+	}
+	if m.Opcode >= 0x0100 && m.Opcode <= 0x0108 || m.Opcode == client.BucketMaintenance || m.Opcode == client.BucketScan {
+		result, status, err := s.executeObjects(m, ws, p)
+		if errors.Is(err, errObjectStaged) {
+			return nil, 0
+		}
+		if err != nil {
+			status = objectStatus(err)
+			return client.ResponseBody(status, nil, err.Error()), status
+		}
+		return client.ResponseBody(status, result, ""), status
+	}
+	if userOpcode(m.Opcode) {
+		result, status, e := s.executeUsers(m, p)
+		if e != nil {
+			status = statusOf(e)
+			return client.ResponseBody(status, nil, e.Error()), status
+		}
+		return client.ResponseBody(status, result, ""), status
 	}
 	return s.dispatch(m, ws)
 }

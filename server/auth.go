@@ -30,8 +30,9 @@ type account struct {
 	PasswordHash string `json:"password_hash"`
 }
 type accountsImage struct {
-	Schema int       `json:"schema"`
-	Users  []account `json:"users"`
+	Schema   int              `json:"schema"`
+	Users    []account        `json:"users"`
+	Receipts []accountReceipt `json:"receipts,omitempty"`
 }
 
 func (s *Server) readBlob(name string, dst any) error {
@@ -133,6 +134,8 @@ type session struct {
 	Expires                time.Time
 }
 type principal struct {
+	connection   *connectionAuthorization
+	ClusterPeer  bool
 	User         account
 	SessionToken string
 	CSRF         string
@@ -142,7 +145,17 @@ type principal struct {
 func (s *Server) authenticate(r *http.Request) (principal, error) {
 	if name, password, ok := r.BasicAuth(); ok {
 		if strings.HasPrefix(name, "node-") {
-			return principal{}, errors.New("node authentication requires multinode support")
+			id, err := bucketID(strings.TrimPrefix(name, "node-"))
+			if err != nil {
+				return principal{}, errors.New("invalid peer identity")
+			}
+			s.mu.RLock()
+			token := s.cfg.Auth.ClusterToken
+			s.mu.RUnlock()
+			if token == "" || !constantEqual(password, token) {
+				return principal{}, errors.New("invalid peer credentials")
+			}
+			return principal{User: account{ID: id.String(), Name: name, Role: "NODE"}, ClusterPeer: true}, nil
 		}
 		u, e := s.findAccount(name)
 		if e != nil || bcrypt.CompareHashAndPassword([]byte(u.PasswordHash), []byte(password)) != nil {
@@ -175,6 +188,12 @@ func (s *Server) authenticate(r *http.Request) (principal, error) {
 }
 func constantEqual(a, b string) bool { return subtle.ConstantTimeCompare([]byte(a), []byte(b)) == 1 }
 func (s *Server) createSession(w http.ResponseWriter, p principal) {
+	s.opMu.Lock()
+	defer s.opMu.Unlock()
+	if err := s.requireAdmin(p); err != nil {
+		httpError(w, 403, err)
+		return
+	}
 	token, e := randomSecret()
 	if e != nil {
 		httpError(w, 500, e)

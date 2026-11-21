@@ -24,8 +24,10 @@ import (
 type Client struct {
 	endpoint, username, password string
 	bucket                       BucketID
+	runtime                      ID
 	mu                           sync.Mutex
 	transport                    *objectTransport
+	maintenance                  *objectTransport // pinned session; never reconnect during fsck
 	dialGate                     chan struct{}
 	closed                       bool
 	closeOnce                    sync.Once
@@ -67,6 +69,7 @@ func (c *Client) connect(ctx context.Context) (*objectTransport, error) {
 	defer cancel()
 	ctx = merged
 	headers := http.Header{}
+	headers.Set(BucketHeader, c.bucket.String())
 	headers.Set("Authorization", "Basic "+base64.StdEncoding.EncodeToString([]byte(c.username+":"+c.password)))
 	dialer := websocket.Dialer{Subprotocols: []string{"stqr.v1"}, EnableCompression: false, HandshakeTimeout: 0}
 	var stopSocket func() bool
@@ -238,6 +241,14 @@ func (c *Client) do(ctx context.Context, opcode uint16, body []byte, id RequestI
 		id = NewRequestID()
 	}
 	m := Message{Kind: Request, Opcode: opcode, ID: id, Body: body}
+	c.mu.Lock()
+	maintenance := c.maintenance
+	c.mu.Unlock()
+	if maintenance != nil {
+		// A reconnect loses exclusive ownership. Never resume a sweep against a
+		// potentially changed graph; the operator must start a fresh fsck.
+		return maintenance.roundTrip(ctx, m, mutation, upload)
+	}
 	backoff := 100 * time.Millisecond
 	for {
 		t, e := c.connection(ctx)
@@ -317,6 +328,8 @@ func (e *StatusError) Is(target error) bool {
 	switch e.Status {
 	case 404:
 		return target == ErrNotFound
+	case 410:
+		return target == ErrGone
 	case 412:
 		return target == ErrPrecondition
 	case 507:
@@ -342,3 +355,18 @@ func (e *UnknownOutcomeError) Error() string {
 	return fmt.Sprintf("client: outcome unknown for %s: %v", e.RequestID, e.Cause)
 }
 func (e *UnknownOutcomeError) Unwrap() error { return e.Cause }
+
+// acceptObjectInfo learns the single-node bucket runtime after its first reply.
+// A learned RAM identity must survive reconnects so a pre-reset retry cannot be
+// replayed as a new mutation. Multinode will bind this to learned range entries.
+func (c *Client) acceptObjectInfo(info ObjectInfo) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.runtime != (ID{}) && c.runtime != info.RuntimeID {
+		return ErrGone
+	}
+	if info.RuntimeID != (ID{}) {
+		c.runtime = info.RuntimeID
+	}
+	return nil
+}

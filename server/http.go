@@ -126,6 +126,7 @@ func (s *Server) Handler() http.Handler {
 			case "POST":
 				s.createSession(w, p)
 			case "DELETE":
+				s.opMu.Lock()
 				s.authMu.Lock()
 				token := p.SessionToken
 				if token == "" {
@@ -135,6 +136,8 @@ func (s *Server) Handler() http.Handler {
 				}
 				delete(s.sessions, token)
 				s.authMu.Unlock()
+				s.invalidateSessionConnections(token)
+				s.opMu.Unlock()
 				http.SetCookie(w, &http.Cookie{Name: "stqr_session", Path: "/", MaxAge: -1, HttpOnly: true, SameSite: http.SameSiteStrictMode})
 				writeJSON(w, 200, map[string]bool{"ok": true})
 			default:
