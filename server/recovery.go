@@ -44,6 +44,49 @@ func (s *Server) recoverOperations() error {
 		h.Close()
 		for _, op := range pending {
 			switch op.Kind {
+			case "force-disconnect":
+				id, _ := parseID(op.ID)
+				if s.completedExclusion([16]byte(id)) != nil {
+					op.State, op.Status = "fulfilled", 200
+					op.Detail = "Ausschluss beim Wiederanlauf rekonstruiert"
+				} else {
+					pending := s.controller.coordinator.requestSnapshot()
+					if pending != nil && pending.Claim.Exclusion != nil && pending.Claim.Exclusion.Operation.String() == op.ID {
+						op.State, op.Status = "running", 202
+					} else {
+						op.State, op.Status = "failed", 503
+						op.Detail = "Ausschlussauftrag vor Bindung unterbrochen"
+					}
+				}
+			case "cluster-shutdown":
+				switch {
+				case s.cfg.Node.ClusterStopID == op.ID:
+					op.State, op.Status = "fulfilled", 200
+					op.Detail = "Wiederanlauf nach Cluster-Shutdown"
+				case s.cfg.Node.ClusterShutdownRequest == op.ID:
+					op.State, op.Status = "running", 202
+				default:
+					op.State, op.Status = "failed", 503
+					op.Detail = "Shutdown-Auftrag vor Speicherung unterbrochen"
+				}
+			case "node-short":
+				if s.cfg.Node.ShortOperation == op.ID {
+					op.State = "fulfilled"
+					op.Status = 200
+					op.Detail = "Wiederanlauf nach Wartungs-Shutdown"
+				} else {
+					op.State = "failed"
+					op.Status = 503
+					op.Detail = "Wartungsauftrag vor Speicherung unterbrochen"
+				}
+			case "node-drain":
+				if s.cfg.Node.Draining {
+					op.State = "running"
+					op.Status = 202
+				} else {
+					op.State = "failed"
+					op.Status = 503
+				}
 			case "add":
 				found := false
 				for _, v := range s.cfg.Volumes {

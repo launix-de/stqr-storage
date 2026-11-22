@@ -86,12 +86,14 @@ func (s *Server) bucketQuotaCapacity(id volume.ID, strategy uint8) (bucketQuotaC
 	}
 	var used uint64
 	group := ""
+	maskVersion := uint64(0)
 	if id != (volume.ID{}) {
 		b, e := s.Bucket(id)
 		if e != nil {
 			return bucketQuotaCapacity{}, e
 		}
 		group = b.Describe().Policy.PlacementGroup
+		maskVersion = b.Describe().Policy.PlacementMaskVersion
 		var err error
 		used, err = b.logicalUsage()
 		if err != nil {
@@ -99,7 +101,7 @@ func (s *Server) bucketQuotaCapacity(id volume.ID, strategy uint8) (bucketQuotaC
 		}
 	}
 	var node quotaNodeCapacity
-	for _, store := range s.placementVolumes(group) {
+	for _, store := range s.placementVolumesAt(group, maskVersion) {
 		if store.State() != volume.Active {
 			continue
 		}
@@ -168,7 +170,7 @@ func (s *Server) executeBucketQuotaCapacity(m client.Message, p principal) ([]by
 		}
 		ppm, _ = volume.EstimatePutOverheadPPM(objectSizeProfiles[profile].Size)
 	}
-	c, err := s.bucketQuotaCapacity(id, strategy)
+	c, err := s.administrativeQuotaCapacity(id, strategy, p)
 	if err != nil {
 		return nil, 0, err
 	}

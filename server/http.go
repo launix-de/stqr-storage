@@ -84,6 +84,10 @@ func (s *Server) Handler() http.Handler {
 			httpError(w, 403, errors.New("source address is outside the allowed subnets"))
 			return
 		}
+		if r.URL.Path == "/s3" || strings.HasPrefix(r.URL.Path, "/s3/") {
+			s.serveS3(w, r)
+			return
+		}
 		if r.URL.Path == "/" && r.Method == http.MethodGet {
 			b, _ := dashboard.ReadFile("dashboard/index.html")
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -147,6 +151,8 @@ func (s *Server) Handler() http.Handler {
 			default:
 				w.WriteHeader(405)
 			}
+		case strings.HasPrefix(r.URL.Path, "/api/users/"):
+			s.serveS3Keys(w, r, p)
 		case r.URL.Path == "/api/health" && r.Method == "GET":
 			writeJSON(w, 200, map[string]string{"state": "active", "mode": "single-node"})
 		case r.URL.Path == "/api/ws" && r.Method == "GET":

@@ -26,7 +26,20 @@ func marshalControlClaim(c controlClaim) ([]byte, error) {
 		return nil, err
 	}
 	e := client.Encoder{}
-	e.U16(controlWireSchema)
+	schema := controlWireSchema
+	if len(c.FrozenBuckets) > 0 {
+		schema = 2
+	}
+	if c.Exclusion != nil {
+		schema = 3
+		if c.Exclusion.ExpectedMembership != 0 {
+			schema = 4
+		}
+		if len(c.Exclusion.AlreadyRetired) > 0 {
+			schema = 5
+		}
+	}
+	e.U16(schema)
 	e.Blob(membership)
 	e.U64(c.Base.Sequence)
 	e.B = append(e.B, c.Base.Head[:]...)
@@ -40,6 +53,15 @@ func marshalControlClaim(c controlClaim) ([]byte, error) {
 	e.V(uint64(len(c.Required)))
 	for _, id := range c.Required {
 		e.ID(id)
+	}
+	if schema >= 2 {
+		e.V(uint64(len(c.FrozenBuckets)))
+		for _, id := range c.FrozenBuckets {
+			e.ID(id)
+		}
+	}
+	if c.Exclusion != nil {
+		encodeControlExclusion(&e, c.Exclusion)
 	}
 	if _, err := decodeControlClaim(e.B); err != nil {
 		return nil, err
@@ -67,7 +89,45 @@ func decodeControlClaim(body []byte) (controlClaim, error) {
 			return controlClaim{}, client.ErrProtocol
 		}
 	}
-	if schema != controlWireSchema || err != nil || d.Done() != nil || len(body) > client.MaxMessage-20 || membership.ControlSequence != 0 || membership.MapRevision != 0 || membership.Generation != 1 || c.Base.Membership.Epoch == 0 || c.Round.Membership != c.Base.Membership.Epoch || c.Round.Generation != c.Base.Generation || c.Round.Initiator == (client.ID{}) || c.Round.Attempt == 0 {
+	if schema >= 2 {
+		n := d.Count(64)
+		if schema == 2 && n == 0 || n > len(d.B)/16 {
+			return controlClaim{}, client.ErrProtocol
+		}
+		if n > 0 {
+			c.FrozenBuckets = make([]client.ID, n)
+		}
+		for i := range c.FrozenBuckets {
+			c.FrozenBuckets[i] = d.ID()
+			id := c.FrozenBuckets[i]
+			if id == (client.ID{}) || id == client.ID(systemBucket) || i > 0 && bytes.Compare(c.FrozenBuckets[i-1][:], id[:]) >= 0 {
+				return controlClaim{}, client.ErrProtocol
+			}
+		}
+	}
+	if schema >= 3 && schema <= 5 {
+		c.Exclusion = decodeControlExclusion(&d)
+		if schema >= 4 {
+			c.Exclusion.ExpectedMembership = d.U64()
+			if c.Exclusion.ExpectedMembership == 0 {
+				return controlClaim{}, client.ErrProtocol
+			}
+		}
+		if schema == 5 {
+			n := d.Count(10000)
+			if n == 0 || n > len(c.Exclusion.Nodes) || n > len(d.B)/16 {
+				return controlClaim{}, client.ErrProtocol
+			}
+			c.Exclusion.AlreadyRetired = make([]client.ID, n)
+			for i := range c.Exclusion.AlreadyRetired {
+				c.Exclusion.AlreadyRetired[i] = d.ID()
+			}
+		}
+		if !validExclusionClaim(c) {
+			return controlClaim{}, client.ErrProtocol
+		}
+	}
+	if (schema < controlWireSchema || schema > 5) || err != nil || d.Done() != nil || len(body) > client.MaxMessage-20 || membership.ControlSequence != 0 || membership.MapRevision != 0 || membership.Generation != 1 || c.Base.Membership.Epoch == 0 || c.Round.Membership != c.Base.Membership.Epoch || c.Round.Generation != c.Base.Generation || c.Round.Initiator == (client.ID{}) || c.Round.Attempt == 0 {
 		return controlClaim{}, client.ErrProtocol
 	}
 	return c, nil
@@ -110,7 +170,7 @@ func decodeControlProposal(body []byte) (controlProposal, error) {
 		}
 		p.NextMembership = &ack.Membership
 	}
-	if schema != controlWireSchema || err != nil || d.Done() != nil || len(body) > client.MaxMessage-20 || p.Image == ([32]byte{}) || p.Kind != controlAdministration && p.Kind != controlMembership || p.Kind == controlAdministration && p.NextMembership != nil || p.Kind == controlMembership && p.NextMembership == nil {
+	if schema != controlWireSchema || err != nil || d.Done() != nil || len(body) > client.MaxMessage-20 || p.Image == ([32]byte{}) || !validControlKind(p.Kind, p.Claim) || (p.Kind == controlAdministration || p.Kind == controlShutdown) && p.NextMembership != nil || (p.Kind == controlMembership || p.Kind == controlForceDisconnect) && p.NextMembership == nil {
 		return controlProposal{}, client.ErrProtocol
 	}
 	return p, nil

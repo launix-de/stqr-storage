@@ -43,6 +43,10 @@ type Server struct {
 	cancel                 context.CancelFunc
 	workers                sync.WaitGroup
 	closeOnce              sync.Once
+	stopRequest            chan struct{}
+	stopOnce               sync.Once
+	shortStopping          atomic.Bool
+	drainClosing           atomic.Bool
 	closed                 bool
 	boot                   client.ID
 	started                time.Time
@@ -51,6 +55,7 @@ type Server struct {
 	systemMu               sync.Mutex
 	authMu                 sync.Mutex
 	sessions               map[string]session
+	frontendGrants         map[client.ID]frontendGrant
 	wsMu                   sync.Mutex
 	sockets                map[*wsSession]struct{}
 	latest                 atomic.Pointer[client.StatsSnapshot]
@@ -62,6 +67,11 @@ type Server struct {
 	placementGroups        atomic.Pointer[placementGroupImage]
 	control                *controlRuntime // initialized before accepting control RPCs
 	metadataPreview        bool            // isolated metadata draft; never owns data volumes
+	controller             *clusterController
+	currentSystem          atomic.Pointer[systemView]
+	placement              atomic.Pointer[placementImage]
+	quotas                 *quotaManager
+	scopes                 *rangeManager
 }
 
 func Open(opts Options) (s *Server, err error) {
@@ -84,7 +94,7 @@ func Open(opts Options) (s *Server, err error) {
 		return nil, errors.New("this node configuration is already in use")
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	s = &Server{configPath: path, lock: lock, ctx: ctx, cancel: cancel, volumes: map[string]*managedVolume{}, sessions: map[string]session{}, sockets: map[*wsSession]struct{}{}, started: time.Now(), statsWake: make(chan struct{}, 1)}
+	s = &Server{configPath: path, lock: lock, ctx: ctx, cancel: cancel, volumes: map[string]*managedVolume{}, sessions: map[string]session{}, sockets: map[*wsSession]struct{}{}, started: time.Now(), statsWake: make(chan struct{}, 1), stopRequest: make(chan struct{})}
 	defer func() {
 		if err != nil {
 			s.Close()
@@ -96,6 +106,9 @@ func Open(opts Options) (s *Server, err error) {
 	}
 	s.cfg = c
 	s.running = c
+	if c.Node.DrainComplete {
+		return s, ErrNodeDrained
+	}
 	if e = saveConfig(path, c); e != nil {
 		return s, e
 	}
@@ -183,7 +196,11 @@ func Open(opts Options) (s *Server, err error) {
 			s.system = v
 		}
 		if vc.State == "draining" {
-			v.SetState(volume.Draining)
+			if opts.transportOnly {
+				v.SetState(volume.Draining)
+			} else {
+				v.SetState(volume.Active)
+			}
 		} else {
 			v.SetState(volume.Active)
 			vc.State = "active"
@@ -209,7 +226,12 @@ func Open(opts Options) (s *Server, err error) {
 	if e = s.bootstrapPlacementGroups(); e != nil {
 		return s, e
 	}
-	if c.JoinPending {
+	if !opts.transportOnly {
+		if e = s.initClusterControl(dataDir); e != nil {
+			return s, e
+		}
+	}
+	if s.cfg.JoinPending {
 		// No second bootstrap administrator and no stale local account authority.
 		// The pending node accepts peer traffic and delegated local-volume admin
 		// only; ordinary authentication waits for committed system bootstrap.
@@ -233,14 +255,41 @@ func Open(opts Options) (s *Server, err error) {
 	if e = s.initPeerDirectory(); e != nil {
 		return s, e
 	}
+	if s.controller != nil {
+		if e = s.initQuota(dataDir); e != nil {
+			return s, e
+		}
+		if e = s.controller.initialCheckpoint(); e != nil {
+			return s, e
+		}
+		if e = s.initRanges(dataDir); e != nil {
+			return s, e
+		}
+	}
 	if e = s.recoverOperations(); e != nil {
 		return s, e
+	}
+	// A durable STOP received by the preceding process is fulfilled by this
+	// restart. A merely prepared/paused process must continue waiting for STOP.
+	if s.cfg.Node.ClusterStopID != "" {
+		s.cfg.Node.ClusterResumedID = s.cfg.Node.ClusterStopID
+		if s.cfg.Node.ClusterShutdownRequest == s.cfg.Node.ClusterStopID {
+			s.cfg.Node.ClusterShutdownRequest = ""
+		}
 	}
 	if e = saveConfig(path, s.cfg); e != nil {
 		return s, e
 	}
 	s.running = s.cfg
 	s.publishStats()
+	// All local journals/placement are restored before announcing return. A
+	// paused marker never means a membership change or an implicit drain.
+	if s.cfg.Node.Paused {
+		s.cfg.Node.Paused = false
+		if err := saveConfig(s.configPath, s.cfg); err != nil {
+			return nil, err
+		}
+	}
 	s.workers.Add(1)
 	go s.statsLoop()
 	for _, d := range s.bucketSnapshots() {
@@ -258,7 +307,16 @@ func Open(opts Options) (s *Server, err error) {
 			s.startDrain(id, v.ID)
 		}
 	}
+	if s.quotas != nil {
+		s.startQuotaWorker()
+	}
 	s.startKnownPeers()
+	if s.controller != nil {
+		s.controller.start()
+	}
+	if s.scopes != nil && !opts.manualRanges {
+		s.scopes.start()
+	}
 	if hint := opts.values["connect"]; hint != "" {
 		// An explicit helper is attempted once as a contact source. Only verified
 		// discovered identities enter the durable directory; this is not a primary.
@@ -290,6 +348,15 @@ func (s *Server) Close() error {
 				result = errors.Join(result, e)
 			}
 		}
+		if s.control != nil {
+			result = errors.Join(result, s.control.ledger.journal.close())
+		}
+		if s.quotas != nil {
+			result = errors.Join(result, s.quotas.ledger.journal.close())
+		}
+		if s.scopes != nil {
+			result = errors.Join(result, s.scopes.close())
+		}
 		if s.lock != nil {
 			result = errors.Join(result, s.lock.Close())
 		}
@@ -298,6 +365,9 @@ func (s *Server) Close() error {
 }
 func Run(ctx context.Context, opts Options, output io.Writer) error {
 	s, e := Open(opts)
+	if errors.Is(e, ErrNodeDrained) {
+		return nil
+	}
 	if e != nil {
 		return e
 	}
@@ -317,12 +387,16 @@ func Run(ctx context.Context, opts Options, output io.Writer) error {
 			return nil
 		}
 		return e
+	case <-s.stopRequest:
+		s.cancel()
+		return h.Shutdown(context.Background())
 	case <-ctx.Done():
 		// Process/supervisor/system shutdown is always SHORT (wait for return).
 		// Never infer a drain from cancellation; only explicit admin intent may
 		// initiate evacuation. An existing persisted drain remains resumable.
-		// TODO(multinode): announce persistent SHORT and coordinate RESUME_STATE.
-		// Do not implement a failure timeout or evict peers on process shutdown.
+		if err := s.prepareShortShutdown(context.Background()); err != nil {
+			return err
+		}
 		s.cancel()
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()

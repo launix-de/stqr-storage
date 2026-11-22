@@ -74,6 +74,9 @@ func (s *Server) growthInfo(vid string) (volumeGrowInfo, error) {
 func (s *Server) GrowVolume(id, vid string, sizeBytes int64) (Operation, error) {
 	s.opMu.Lock()
 	defer s.opMu.Unlock()
+	if s.forceFrozen() {
+		return Operation{}, fail(503, "administration is frozen for exclusion")
+	}
 	s.mu.RLock()
 	closed := s.closed
 	s.mu.RUnlock()

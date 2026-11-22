@@ -404,7 +404,7 @@ func TestBucketPlacementDrainAndRestartPreserveRetries(t *testing.T) {
 	c.Close()
 	host.Close()
 	s.Close()
-	reopened, err := Open(Options{ConfigPath: path})
+	reopened, err := openTransportTestNode(Options{ConfigPath: path})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -500,7 +500,7 @@ func TestBucketDeletionIntentResumesOnRestart(t *testing.T) {
 	id := b.ID()
 	path := s.configPath
 	s.Close()
-	reopened, err := Open(Options{ConfigPath: path})
+	reopened, err := openTransportTestNode(Options{ConfigPath: path})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -553,7 +553,7 @@ func TestBucketRAMResetRejectsLearnedClientRuntime(t *testing.T) {
 	path := s.configPath
 	s.Close()
 	host.Close()
-	reopened, err := Open(Options{ConfigPath: path})
+	reopened, err := openTransportTestNode(Options{ConfigPath: path})
 	if err != nil {
 		t.Fatal(err)
 	}

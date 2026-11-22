@@ -8,6 +8,7 @@ import (
 	"io"
 	"reflect"
 	"sync"
+	"sync/atomic"
 
 	"github.com/launix-de/stqr-storage/client"
 	"github.com/launix-de/stqr-storage/volume"
@@ -27,11 +28,17 @@ const (
 	controlRequestPrepared
 	controlRequestFinished
 	controlRequestCancelled
+	controlForceBuildStarted
+	controlForceRequestBegin
+	controlForceReserve
+	controlForceSlotStarted
 )
 
 const (
-	controlMembership     uint16 = 1
-	controlAdministration uint16 = 2
+	controlMembership      uint16 = 1
+	controlAdministration  uint16 = 2
+	controlShutdown        uint16 = 3
+	controlForceDisconnect uint16 = 4
 )
 
 // Global membership/admin control is ALL of the bound membership, independently
@@ -45,9 +52,11 @@ type controlBase struct {
 }
 
 type controlClaim struct {
-	Round    client.RoundID
-	Base     controlBase
-	Required []client.ID
+	FrozenBuckets []client.ID
+	Exclusion     *controlExclusion `json:",omitempty"`
+	Round         client.RoundID
+	Base          controlBase
+	Required      []client.ID
 }
 
 type controlProposal struct {
@@ -58,6 +67,8 @@ type controlProposal struct {
 }
 
 type controlSlot struct {
+	Suspended                 *controlSlot `json:",omitempty"`
+	ConstructionStarted       bool
 	Claim                     controlClaim
 	Proposal                  *controlProposal
 	Decision                  client.Decision
@@ -66,6 +77,7 @@ type controlSlot struct {
 }
 
 type controlLedger struct {
+	activity      atomic.Pointer[controlActivity]
 	mu            sync.Mutex
 	journal       *controlJournal
 	cluster, node client.ID
@@ -80,8 +92,10 @@ type controlLedger struct {
 	initialized       bool
 	lastRelease       *controlCertificateRecord
 	completed         map[client.Decision]controlCompletion
+	ancestors         map[client.Decision]controlSlot
 	lastReleasedProof client.Proof
 	request           *controlRequest
+	suspendedRequest  *controlRequest
 	attempt           uint64
 }
 
@@ -90,11 +104,12 @@ type controlLedger struct {
 // receiving all final acknowledgements. Neither crash window may strand peers.
 // Only prepared references and public results are stored, never raw passwords.
 type controlRequest struct {
-	Claim       controlClaim
-	Kind        uint16
-	Proposal    *controlProposal
-	Result      []byte
-	ResultReady bool
+	ConstructionStarted bool
+	Claim               controlClaim
+	Kind                uint16
+	Proposal            *controlProposal
+	Result              []byte
+	ResultReady         bool
 }
 
 type controlRequestResult struct {
@@ -172,7 +187,7 @@ func equalControlBase(a, b controlBase) bool {
 }
 
 func equalControlClaim(a, b controlClaim) bool {
-	return a.Round == b.Round && equalControlBase(a.Base, b.Base) && reflect.DeepEqual(a.Required, b.Required)
+	return a.Round == b.Round && equalControlBase(a.Base, b.Base) && reflect.DeepEqual(a.Required, b.Required) && reflect.DeepEqual(a.FrozenBuckets, b.FrozenBuckets) && reflect.DeepEqual(a.Exclusion, b.Exclusion)
 }
 
 func equalControlProposal(a, b controlProposal) bool {
@@ -210,11 +225,22 @@ func (p controlProposal) decision() (client.Decision, error) {
 		}
 		e.Blob(wire)
 	}
+	if len(claim.FrozenBuckets) > 0 {
+		e.Text("bucket mutation fences v1")
+		e.V(uint64(len(claim.FrozenBuckets)))
+		for _, id := range claim.FrozenBuckets {
+			e.ID(id)
+		}
+	}
+	if claim.Exclusion != nil {
+		e.Text("externally fenced exclusion v1")
+		encodeControlExclusion(&e, claim.Exclusion)
+	}
 	return client.NewDecision(claim.Base.Membership.Epoch, claim.Base.Sequence+1, claim.Base.Head, p.Kind, e.B)
 }
 
 func openControlLedger(path string, cluster, node volume.ID, initial *controlBase) (_ *controlLedger, err error) {
-	l := &controlLedger{cluster: client.ID(cluster), node: client.ID(node), closed: make(map[client.RoundID]bool), aborted: make(map[client.RoundID]client.Proof), abortClaims: make(map[client.RoundID]controlClaim), completed: make(map[client.Decision]controlCompletion)}
+	l := &controlLedger{cluster: client.ID(cluster), node: client.ID(node), closed: make(map[client.RoundID]bool), aborted: make(map[client.RoundID]client.Proof), abortClaims: make(map[client.RoundID]controlClaim), completed: make(map[client.Decision]controlCompletion), ancestors: make(map[client.Decision]controlSlot)}
 	j, err := openControlJournal(path, cluster, node, initial != nil, l.replay)
 	if err != nil {
 		return nil, err
@@ -258,8 +284,22 @@ func (l *controlLedger) checkClaimShape(c controlClaim) bool {
 			return false
 		}
 	}
-	for _, id := range membershipIDs(c.Base.Membership) {
-		if !hasControlNode(c.Required, id) {
+	if c.Exclusion != nil {
+		if !validExclusionClaim(c) {
+			return false
+		}
+	} else {
+		for _, id := range membershipIDs(c.Base.Membership) {
+			if !hasControlNode(c.Required, id) {
+				return false
+			}
+		}
+	}
+	if len(c.FrozenBuckets) > 64 {
+		return false
+	}
+	for i, id := range c.FrozenBuckets {
+		if id == (client.ID{}) || id == client.ID(systemBucket) || i > 0 && bytes.Compare(c.FrozenBuckets[i-1][:], id[:]) >= 0 {
 			return false
 		}
 	}
@@ -270,6 +310,12 @@ func (l *controlLedger) checkClaim(c controlClaim) bool {
 	if !l.checkClaimShape(c) || l.closed[c.Round] {
 		return false
 	}
+	if c.Exclusion != nil && c.Exclusion.ExpectedMembership != 0 && c.Exclusion.ExpectedMembership != c.Base.Membership.Epoch && !l.knownObservedMembership(c.Exclusion.ExpectedMembership, c.Base.Membership) {
+		return false
+	}
+	if c.Exclusion != nil && len(c.Exclusion.AlreadyRetired) > 0 && !reflect.DeepEqual(c.Exclusion.AlreadyRetired, l.retiredVictims(c.Exclusion.ExpectedMembership, c.Exclusion.Nodes, c.Base.Membership)) {
+		return false
+	}
 	if l.current.Membership.Epoch == 0 {
 		return !hasControlNode(membershipIDs(c.Base.Membership), l.node)
 	}
@@ -277,11 +323,16 @@ func (l *controlLedger) checkClaim(c controlClaim) bool {
 }
 
 func (l *controlLedger) checkProposal(p controlProposal) bool {
-	if !l.checkClaim(p.Claim) || p.Image == ([32]byte{}) || p.Claim.Base.Sequence == ^uint64(0) {
+	if !l.checkClaim(p.Claim) || !validControlKind(p.Kind, p.Claim) || p.Image == ([32]byte{}) || p.Claim.Base.Sequence == ^uint64(0) {
 		return false
 	}
 	switch p.Kind {
-	case controlAdministration:
+	case controlForceDisconnect:
+		next, err := exclusionMembership(p.Claim.Base.Membership, p.Claim.Exclusion)
+		if err != nil || p.NextMembership == nil || !equalControlMembership(next, *p.NextMembership) {
+			return false
+		}
+	case controlAdministration, controlShutdown:
 		if p.NextMembership != nil || len(p.Claim.Required) != len(p.Claim.Base.Membership.Members) {
 			return false
 		}
@@ -323,12 +374,18 @@ func (l *controlLedger) reserve(claim controlClaim) error {
 		if equalControlClaim(l.slot.Claim, claim) {
 			return nil
 		}
+		if claim.Exclusion != nil && l.canSuspendSlot() && l.checkClaim(claim) {
+			_, err := l.persist(controlForceReserve, claim)
+			return err
+		}
 		return errControlConflict
 	}
 	if l.request != nil && l.request.Claim.Round != claim.Round && l.lastRelease != nil && l.request.Proposal != nil {
 		decision, _ := l.request.Proposal.decision()
 		if l.lastRelease.Decision == decision {
-			return errControlConflict
+			if claim.Exclusion == nil || !l.canSuspendRequest() {
+				return errControlConflict
+			}
 		}
 	}
 	if !l.checkClaim(claim) {
@@ -434,17 +491,24 @@ func (l *controlLedger) releasedProof(decision client.Decision) (client.Proof, e
 	return prior.Proof, nil
 }
 
-func (l *controlLedger) beginRequest(kind uint16, required []client.ID) (controlClaim, error) {
+func (l *controlLedger) beginRequest(kind uint16, required []client.ID, frozen ...client.ID) (controlClaim, error) {
+	return l.beginRequestWithExclusion(kind, required, nil, frozen...)
+}
+func (l *controlLedger) beginRequestWithExclusion(kind uint16, required []client.ID, exclusion *controlExclusion, frozen ...client.ID) (controlClaim, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	if l.request != nil || l.attempt == ^uint64(0) || l.current.Membership.Epoch == 0 || !hasControlNode(membershipIDs(l.current.Membership), l.node) {
+	if l.request != nil && (exclusion == nil || !l.canSuspendRequest()) || l.attempt == ^uint64(0) || l.current.Membership.Epoch == 0 || !hasControlNode(membershipIDs(l.current.Membership), l.node) {
 		return controlClaim{}, errControlConflict
 	}
-	claim := controlClaim{Round: client.RoundID{Membership: l.current.Membership.Epoch, Generation: l.current.Generation, Initiator: l.node, Attempt: l.attempt + 1}, Base: cloneControlBase(l.current), Required: append([]client.ID{}, required...)}
-	if !l.checkClaim(claim) || kind != controlMembership && kind != controlAdministration {
+	claim := controlClaim{Round: client.RoundID{Membership: l.current.Membership.Epoch, Generation: l.current.Generation, Initiator: l.node, Attempt: l.attempt + 1}, Base: cloneControlBase(l.current), Required: append([]client.ID{}, required...), Exclusion: exclusion, FrozenBuckets: append([]client.ID(nil), frozen...)}
+	if !l.checkClaim(claim) || !validControlKind(kind, claim) {
 		return controlClaim{}, errControlConflict
 	}
-	if _, err := l.persist(controlRequestBegin, controlRequest{Claim: claim, Kind: kind}); err != nil {
+	record := uint16(controlRequestBegin)
+	if l.request != nil {
+		record = controlForceRequestBegin
+	}
+	if _, err := l.persist(record, controlRequest{Claim: claim, Kind: kind}); err != nil {
 		return controlClaim{}, err
 	}
 	return claim, nil
@@ -489,7 +553,7 @@ func (l *controlLedger) abort(round client.RoundID) error {
 		}
 		return errControlConflict
 	}
-	if l.slot == nil || l.slot.Claim.Round != round || l.slot.Committed.RecordSequence != 0 {
+	if l.slot == nil || l.slot.Claim.Round != round || l.slot.Committed.RecordSequence != 0 || l.slot.ConstructionStarted {
 		return errControlConflict
 	}
 	_, err := l.persist(controlAbort, l.slot.Claim)
@@ -511,7 +575,10 @@ func (l *controlLedger) abortClaim(claim controlClaim) (client.Proof, error) {
 	if l.closed[claim.Round] || !l.checkClaimShape(claim) {
 		return client.Proof{}, errControlConflict
 	}
-	if l.slot != nil && l.slot.Claim.Round == claim.Round && (!equalControlClaim(l.slot.Claim, claim) || l.slot.Committed.RecordSequence != 0) {
+	if l.slot != nil && l.slot.Claim.Round == claim.Round && (!equalControlClaim(l.slot.Claim, claim) || l.slot.Committed.RecordSequence != 0 || l.slot.ConstructionStarted) {
+		return client.Proof{}, errControlConflict
+	}
+	if l.slot != nil && l.slot.Suspended != nil && l.slot.Suspended.Claim.Round == claim.Round && (!equalControlClaim(l.slot.Suspended.Claim, claim) || l.slot.Suspended.Committed.RecordSequence != 0 || l.slot.Suspended.ConstructionStarted) {
 		return client.Proof{}, errControlConflict
 	}
 	return l.persist(controlAbort, claim)
@@ -576,6 +643,18 @@ func (l *controlLedger) replay(record controlRecord) error {
 			return bad()
 		}
 		l.slot = &controlSlot{Claim: claim}
+	case controlForceReserve:
+		var claim controlClaim
+		if decodeControlRecord(record.Data, &claim) != nil || claim.Exclusion == nil || !l.canSuspendSlot() || !l.checkClaim(claim) {
+			return bad()
+		}
+		l.slot = &controlSlot{Claim: claim, Suspended: l.slot}
+	case controlForceSlotStarted:
+		var claim controlClaim
+		if decodeControlRecord(record.Data, &claim) != nil || claim.Exclusion == nil || l.slot == nil || !equalControlClaim(l.slot.Claim, claim) || l.slot.ConstructionStarted {
+			return bad()
+		}
+		l.slot.ConstructionStarted = true
 	case controlPrepare:
 		var proposal controlProposal
 		if decodeControlRecord(record.Data, &proposal) != nil || l.slot == nil || l.slot.Proposal != nil || !equalControlClaim(l.slot.Claim, proposal.Claim) || !l.checkProposal(proposal) {
@@ -595,6 +674,23 @@ func (l *controlLedger) replay(record controlRecord) error {
 			return bad()
 		}
 		l.slot.Committed, l.slot.Certificate = record.Proof, r.Certificate
+		if l.slot.Claim.Exclusion != nil {
+			if old := l.slot.Suspended; old != nil {
+				if old.Committed.RecordSequence != 0 && old.Applied.RecordSequence != 0 {
+					l.ancestors[old.Decision] = *old
+				}
+				l.closed[old.Claim.Round] = true
+				l.slot.Suspended = nil
+			}
+			if l.request != nil && l.request.Claim.Round != l.slot.Claim.Round {
+				l.closed[l.request.Claim.Round] = true
+				l.request = nil
+			}
+			if l.suspendedRequest != nil {
+				l.closed[l.suspendedRequest.Claim.Round] = true
+				l.suspendedRequest = nil
+			}
+		}
 	case controlApplied:
 		var d client.Decision
 		if decodeControlRecord(record.Data, &d) != nil || l.slot == nil || l.slot.Committed.RecordSequence == 0 || l.slot.Applied.RecordSequence != 0 || l.slot.Decision != d {
@@ -623,21 +719,41 @@ func (l *controlLedger) replay(record controlRecord) error {
 			return bad()
 		}
 		if l.slot != nil && l.slot.Claim.Round == claim.Round {
-			if !equalControlClaim(l.slot.Claim, claim) || l.slot.Committed.RecordSequence != 0 {
+			if !equalControlClaim(l.slot.Claim, claim) || l.slot.Committed.RecordSequence != 0 || l.slot.ConstructionStarted {
 				return bad()
 			}
-			l.slot = nil
+			l.slot = l.slot.Suspended
+		}
+		if l.slot != nil && l.slot.Suspended != nil && l.slot.Suspended.Claim.Round == claim.Round {
+			if !equalControlClaim(l.slot.Suspended.Claim, claim) || l.slot.Suspended.Committed.RecordSequence != 0 {
+				return bad()
+			}
+			l.slot.Suspended = nil
 		}
 		l.closed[claim.Round] = true
 		l.aborted[claim.Round] = record.Proof
 		l.abortClaims[claim.Round] = claim
-	case controlRequestBegin:
+	case controlRequestBegin, controlForceRequestBegin:
 		var request controlRequest
-		if decodeControlRecord(record.Data, &request) != nil || l.request != nil || request.Proposal != nil || request.ResultReady || len(request.Result) != 0 || request.Claim.Round.Initiator != l.node || request.Claim.Round.Attempt != l.attempt+1 || !l.checkClaim(request.Claim) || (request.Kind != controlMembership && request.Kind != controlAdministration) {
+		if decodeControlRecord(record.Data, &request) != nil || request.ConstructionStarted || request.Proposal != nil || request.ResultReady || len(request.Result) != 0 || request.Claim.Round.Initiator != l.node || request.Claim.Round.Attempt != l.attempt+1 || !l.checkClaim(request.Claim) || !validControlKind(request.Kind, request.Claim) {
+			return bad()
+		}
+		if record.Kind == controlForceRequestBegin {
+			if request.Claim.Exclusion == nil || !l.canSuspendRequest() {
+				return bad()
+			}
+			l.suspendedRequest = l.request
+		} else if l.request != nil {
 			return bad()
 		}
 		l.attempt = request.Claim.Round.Attempt
 		l.request = &request
+	case controlForceBuildStarted:
+		var claim controlClaim
+		if decodeControlRecord(record.Data, &claim) != nil || claim.Exclusion == nil || l.request == nil || l.request.ConstructionStarted || !equalControlClaim(l.request.Claim, claim) || l.request.ResultReady || l.slot == nil || !equalControlClaim(l.slot.Claim, claim) {
+			return bad()
+		}
+		l.request.ConstructionStarted = true
 	case controlRequestPrepared:
 		var r controlRequestResult
 		if decodeControlRecord(record.Data, &r) != nil || l.request == nil || l.request.Claim.Round != r.Round || l.request.Proposal == nil || l.request.ResultReady {
@@ -660,9 +776,10 @@ func (l *controlLedger) replay(record controlRecord) error {
 		if decodeControlRecord(record.Data, &r) != nil || l.request == nil || l.request.Claim.Round != r.Round || !r.Aborted.Covers(l.request.Claim.Required) || !containsOwnProof(r.Aborted, l.aborted[r.Round]) {
 			return bad()
 		}
-		l.request = nil
+		l.request, l.suspendedRequest = l.suspendedRequest, nil
 	default:
 		return bad()
 	}
+	l.publishControlActivity()
 	return nil
 }

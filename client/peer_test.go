@@ -101,3 +101,34 @@ func FuzzPeerIdentityPayloads(f *testing.F) {
 		}
 	})
 }
+
+func TestNodeHelloAckOptionalProcessIdentity(t *testing.T) {
+	base := NodeHelloAck{Membership: Membership{Epoch: 1, Cluster: ID{1}, Members: []Member{{ID: ID{2}}}}, Generation: 1}
+	canonical, err := base.MarshalBinary()
+	if err != nil {
+		t.Fatal(err)
+	}
+	base.Boot = ID{3}
+	wire, err := base.MarshalBinary()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(wire) != len(canonical)+16 {
+		t.Fatal("process identity changed canonical membership fields")
+	}
+	ack, err := DecodeNodeHelloAck(wire)
+	if err != nil || ack.Boot != base.Boot {
+		t.Fatal("process identity missing", err)
+	}
+	for length := 1; length < 16; length++ {
+		if _, err := DecodeNodeHelloAck(wire[:len(canonical)+length]); err == nil {
+			t.Fatal("partial boot accepted", length)
+		}
+	}
+	if _, err := DecodeNodeHelloAck(append(canonical, make([]byte, 16)...)); err == nil {
+		t.Fatal("zero boot accepted")
+	}
+	if _, err := DecodeNodeHelloAck(append(wire, 0)); err == nil {
+		t.Fatal("extra fields accepted")
+	}
+}

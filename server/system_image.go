@@ -4,6 +4,7 @@ package server
 import (
 	"bytes"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"reflect"
@@ -21,6 +22,8 @@ import (
 // Local volume configuration, local admin-operation receipts and the mergeable
 // discovery directory are not copied into another node's configuration.
 type systemManifest struct {
+	Quotas               []quotaAllocation `json:",omitempty"`
+	Shutdown             *clusterShutdown  `json:",omitempty"`
 	Schema               uint16
 	Cluster              client.ID
 	Sequence             uint64
@@ -110,8 +113,10 @@ func (s *Server) captureSystemImage(membership client.Membership, sequence, gene
 	if err := validateSystemAccounts(accounts); err != nil {
 		return nil, err
 	}
-	groupObject := s.placementGroups.Load().object
-	raw, err := json.Marshal(groupObject)
+	// Decode into a fresh value: unmarshalling over a shallow slice copy would
+	// reuse and mutate the immutable image published to telemetry/routing.
+	raw, err := json.Marshal(s.placementGroups.Load().object)
+	var groupObject placementGroupsObject
 	if err != nil {
 		return nil, err
 	}
@@ -155,6 +160,9 @@ func (s *Server) captureSystemImage(membership client.Membership, sequence, gene
 	}
 	bundle := &systemBundle{Objects: make(map[volume.ObjectID][]byte)}
 	manifest := systemManifest{Schema: 1, Cluster: membership.Cluster, Sequence: sequence, Membership: membership, Generation: generation, Revision: revision}
+	if view := s.currentSystem.Load(); view != nil {
+		manifest.Shutdown = view.manifest.Shutdown
+	}
 	raw, err = json.Marshal(accounts)
 	if err != nil {
 		return nil, err
@@ -217,12 +225,23 @@ func validateSystemAccounts(accounts accountsImage) error {
 	}
 	ids, names := map[string]bool{}, map[string]bool{}
 	admin := false
+	accessKeys := map[string]bool{}
 	for _, user := range accounts.Users {
 		if _, err := bucketID(user.ID); err != nil || !validUsername(user.Name) || ids[user.ID] || names[user.Name] || user.PasswordHash == "" || user.Role != "ADMIN" && user.Role != "USER" {
 			return ErrBucketCatalogCorrupt
 		}
 		if _, err := bcrypt.Cost([]byte(user.PasswordHash)); err != nil {
 			return ErrBucketCatalogCorrupt
+		}
+		if len(user.S3Keys) > 32 {
+			return ErrBucketCatalogCorrupt
+		}
+		for _, key := range user.S3Keys {
+			sealed, err := base64.StdEncoding.DecodeString(key.Sealed)
+			if !validS3AccessID(key.ID) || accessKeys[key.ID] || err != nil || len(sealed) < 28 {
+				return ErrBucketCatalogCorrupt
+			}
+			accessKeys[key.ID] = true
 		}
 		ids[user.ID], names[user.Name] = true, true
 		admin = admin || user.Role == "ADMIN" && !user.Disabled
@@ -257,6 +276,9 @@ func decodeSystemView(root volume.ObjectID, load func(volume.ObjectID) ([]byte, 
 	}
 	m := view.manifest
 	if m.Schema != 1 || m.Sequence == 0 || m.Generation == 0 || m.Revision == 0 || m.Cluster != m.Membership.Cluster || !validateControlMembership(m.Membership) || m.Membership.Epoch == 0 {
+		return nil, volume.ErrCorrupt
+	}
+	if stop := m.Shutdown; stop != nil && (stop.ID == (client.ID{}) || stop.Coordinator == (client.ID{}) || stop.Sequence == 0 || stop.Sequence > m.Sequence || stop.Membership == 0 || stop.Membership > m.Membership.Epoch) {
 		return nil, volume.ErrCorrupt
 	}
 	view.accounts, err = read(m.Accounts)
@@ -296,6 +318,11 @@ func decodeSystemView(root volume.ObjectID, load func(volume.ObjectID) ([]byte, 
 		if err != nil {
 			return nil, err
 		}
+		for _, policy := range []*BucketPolicy{&d.Policy, d.DesiredPolicy} {
+			if !d.DeletionComplete && policy != nil && policy.PlacementGroup != "" && policy.PlacementMaskVersion != 0 && view.groupImage.versions[policy.PlacementGroup][policy.PlacementMaskVersion] == nil {
+				return nil, volume.ErrCorrupt
+			}
+		}
 		if ids[d.ID] || names[d.Name] && !d.DeletionComplete || len(d.LocalVolumes) != 0 {
 			return nil, volume.ErrCorrupt
 		}
@@ -309,7 +336,7 @@ func decodeSystemView(root volume.ObjectID, load func(volume.ObjectID) ([]byte, 
 				return nil, volume.ErrCorrupt
 			}
 		}
-		if d.Policy.PlacementGroup != "" && view.groupImage.filters[d.Policy.PlacementGroup] == nil {
+		if !d.DeletionComplete && d.Policy.PlacementGroup != "" && view.groupImage.filters[d.Policy.PlacementGroup] == nil {
 			return nil, volume.ErrCorrupt
 		}
 		view.descriptions = append(view.descriptions, d)
@@ -361,6 +388,9 @@ func decodeSystemView(root volume.ObjectID, load func(volume.ObjectID) ([]byte, 
 		if !ok || f.mode != VolumesWhitelist || len(f.volumes) != 1 {
 			return nil, volume.ErrCorrupt
 		}
+	}
+	if err := validateQuotaAllocations(view); err != nil {
+		return nil, err
 	}
 	return view, nil
 }
@@ -452,12 +482,45 @@ func (s *Server) validateSystemProposal(view *systemView, proposal controlPropos
 // A READY proof is issued only after every referenced child has been received,
 // checked, flushed, and validated against the prospective membership and PG.
 func (s *Server) prepareSystemImage(ledger *controlLedger, proposal controlProposal) (client.Proof, error) {
+	// A repeated PREPARE must not repeat exclusion cleanup after APPLIED/
+	// RELEASE, when new full PUTs may already have repaired lost objects.
+	decision, err := proposal.decision()
+	if err != nil {
+		return client.Proof{}, err
+	}
+	ledger.mu.Lock()
+	if done, ok := ledger.completed[decision]; ok && equalControlProposal(*done.Slot.Proposal, proposal) {
+		ledger.mu.Unlock()
+		return done.Slot.Ready, nil
+	}
+	if slot := ledger.slot; slot != nil && slot.Proposal != nil && slot.Ready.RecordSequence != 0 && equalControlProposal(*slot.Proposal, proposal) {
+		proof := slot.Ready
+		ledger.mu.Unlock()
+		return proof, nil
+	}
+	ledger.mu.Unlock()
 	view, err := s.loadSystemView(volume.ObjectID(proposal.Image))
 	if err != nil {
 		return client.Proof{}, err
 	}
 	if err := s.validateSystemProposal(view, proposal, ledger.node); err != nil {
 		return client.Proof{}, err
+	}
+	if proposal.Kind == controlForceDisconnect {
+		if err := s.prepareExclusionImage(view, proposal); err != nil {
+			return client.Proof{}, err
+		}
+	}
+	if proposal.Kind == controlShutdown {
+		stop := view.manifest.Shutdown
+		if stop == nil || stop.ID == (client.ID{}) || stop.Coordinator != proposal.Claim.Round.Initiator || stop.Sequence != view.manifest.Sequence || stop.Membership != view.manifest.Membership.Epoch {
+			return client.Proof{}, volume.ErrCorrupt
+		}
+		s.opMu.Lock()
+		defer s.opMu.Unlock()
+		if err := s.syncVolumes(); err != nil {
+			return client.Proof{}, err
+		}
 	}
 	return ledger.prepare(proposal)
 }

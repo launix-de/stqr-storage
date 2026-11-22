@@ -53,10 +53,15 @@ type objectTransport struct {
 	once    sync.Once
 	workers sync.WaitGroup
 	cause   error
+	node    ID // identity from this authenticated transport's HELLO
+	goAway  func(Message) error
 }
 
-func newObjectTransport(conn *websocket.Conn) *objectTransport {
+func newObjectTransport(conn *websocket.Conn, goAway ...func(Message) error) *objectTransport {
 	t := &objectTransport{conn: conn, pending: map[ID]*pendingObject{}, send: make(chan outboundObject, objectSendQueue), done: make(chan struct{})}
+	if len(goAway) != 0 {
+		t.goAway = goAway[0]
+	}
 	conn.SetReadLimit(MaxMessage)
 	t.workers.Add(2)
 	go func() { defer t.workers.Done(); t.readLoop() }()
@@ -237,6 +242,16 @@ func (t *objectTransport) readLoop() {
 			return
 		}
 		if m.Kind == Push {
+			if m.Opcode == 0x0003 {
+				if t.goAway != nil {
+					if err := t.goAway(m); err != nil {
+						t.fail(err)
+						return
+					}
+				}
+				t.fail(ErrClosed)
+				return
+			}
 			if m.Opcode >= 5 && m.Opcode <= 6 || m.Opcode == 13 {
 				if e = t.streamMessage(m); e != nil {
 					t.fail(e)

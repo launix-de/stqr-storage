@@ -10,7 +10,9 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 
+	"github.com/launix-de/stqr-storage/client"
 	"github.com/launix-de/stqr-storage/volume"
 )
 
@@ -120,6 +122,13 @@ func (s *Server) operation(id string) (Operation, error) {
 	}
 	e := s.readBlob("admin-op/"+id, &op)
 	if errors.Is(e, volume.ErrNotFound) {
+		parsed, _ := parseID(id)
+		if s.completedExclusionProposal(client.ID(parsed)) != nil {
+			return Operation{ID: id, Kind: "force-disconnect", State: "fulfilled", Status: 200}, nil
+		}
+		if s.pendingExclusionClaim(client.ID(parsed)) != nil {
+			return Operation{ID: id, Kind: "force-disconnect", State: "running", Status: 202}, nil
+		}
 		for _, d := range s.bucketSnapshots() {
 			for _, r := range d.Receipts {
 				if r.ID == id {
@@ -164,6 +173,9 @@ var validName = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
 func (s *Server) AddVolume(id string, r AddVolumeRequest) (op Operation, err error) {
 	s.opMu.Lock()
 	defer s.opMu.Unlock()
+	if s.forceFrozen() {
+		return op, fail(503, "administration is frozen for exclusion")
+	}
 	s.mu.RLock()
 	closed := s.closed
 	s.mu.RUnlock()
@@ -322,6 +334,9 @@ func (s *Server) AddVolume(id string, r AddVolumeRequest) (op Operation, err err
 func (s *Server) RemoveVolume(id, vid string) (Operation, error) {
 	s.opMu.Lock()
 	defer s.opMu.Unlock()
+	if s.forceFrozen() {
+		return Operation{}, fail(503, "administration is frozen for exclusion")
+	}
 	s.mu.RLock()
 	closed := s.closed
 	s.mu.RUnlock()
@@ -355,8 +370,10 @@ func (s *Server) RemoveVolume(id, vid string) (Operation, error) {
 	if e = saveConfig(s.configPath, c); e != nil {
 		return s.finishOperation(op, e)
 	}
-	if e = m.store.SetState(volume.Draining); e != nil {
-		return s.finishOperation(op, e)
+	if s.controller == nil {
+		if e = m.store.SetState(volume.Draining); e != nil {
+			return s.finishOperation(op, e)
+		}
 	}
 	s.mu.Lock()
 	s.cfg = c
@@ -387,11 +404,31 @@ func (s *Server) configView() map[string]any {
 	} else if len(c.Peers) > 0 {
 		mode = "cluster-preparation"
 	}
-	return map[string]any{"config": c, "config_path": s.configPath, "active_listen": s.running.Node.Listen, "active_volumes_dir": s.volumesDir, "restart_required": restart, "mode": mode, "system_bucket_placement": "everywhere"}
+	view := map[string]any{"config": c, "config_path": s.configPath, "active_listen": s.running.Node.Listen, "active_volumes_dir": s.volumesDir, "restart_required": restart, "mode": mode, "system_bucket_placement": "everywhere"}
+	if image := s.currentSystem.Load(); image != nil {
+		members, excluded := []string{}, []string{}
+		for _, member := range image.manifest.Membership.Members {
+			members = append(members, member.ID.String())
+		}
+		for _, node := range image.manifest.Membership.Excluded {
+			excluded = append(excluded, node.String())
+		}
+		view["member_nodes"], view["excluded_nodes"] = members, excluded
+		view["membership_epoch"] = strconv.FormatUint(image.manifest.Membership.Epoch, 10)
+		if len(members) > 1 {
+			view["mode"] = "cluster"
+		} else {
+			view["mode"] = "single-node"
+		}
+	}
+	return view
 }
 func (s *Server) updateConfig(patch map[string]json.RawMessage) error {
 	s.opMu.Lock()
 	defer s.opMu.Unlock()
+	if s.forceFrozen() {
+		return fail(503, "administration is frozen for exclusion")
+	}
 	s.mu.RLock()
 	c := copyConfig(s.cfg)
 	closed := s.closed
@@ -453,6 +490,9 @@ func (s *Server) updateConfig(patch map[string]json.RawMessage) error {
 func (s *Server) RescanVolume(id, vid string) (op Operation, err error) {
 	s.opMu.Lock()
 	defer s.opMu.Unlock()
+	if s.forceFrozen() {
+		return op, fail(503, "administration is frozen for exclusion")
+	}
 	s.mu.RLock()
 	closed := s.closed
 	s.mu.RUnlock()

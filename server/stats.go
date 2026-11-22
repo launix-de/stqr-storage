@@ -12,15 +12,55 @@ import (
 	"github.com/launix-de/stqr-storage/client"
 )
 
-// CollectStats is the single collector for the dashboard and future generation
-// builder. TODO(multinode): push these exact bytes as STATS_FRAGMENT; aggregate
-// peer snapshots by Node/BootID/Sequence without inferring membership failures.
+// CollectStats is shared by dashboard and placement planning. The peer transport
+// pushes these same source-bound snapshots; liveness never changes membership.
 func (s *Server) CollectStats(filter client.StatsFilter) client.StatsSnapshot {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	node, _ := parseID(s.cfg.Node.ID)
 	snap := client.StatsSnapshot{Schema: 1, Node: client.ID(node), BootID: s.boot, Sequence: s.sequence.Add(1), CapturedUnixNS: uint64(time.Now().UnixNano()), WindowNS: uint64(3 * time.Second), MembershipEpoch: 1, Generation: s.cfg.Generation, MapRevision: s.cfg.Generation, Volumes: []client.VolumeStats{}, Buckets: []client.BucketStats{}, Ranges: []client.RangeStats{}}
 	snap.IO = s.retiredIO
+	if s.scopes != nil {
+		if activity := s.scopes.activity.Load(); activity != nil && activity.Active > 0 {
+			snap.NeedRebuild = true
+			snap.ReasonBits |= 1 << 4
+			snap.Coordinator = activity.Coordinator
+			snap.Round = activity.Round
+		}
+	}
+	if s.control != nil {
+		if activity := s.control.ledger.activity.Load(); activity != nil && activity.Busy {
+			snap.NeedRebuild = true
+			snap.ReasonBits |= 1 << 9 // a durable global control decision is pending
+			snap.Coordinator, snap.Round = activity.Coordinator, activity.Round
+		}
+	}
+	if s.cfg.Node.Paused {
+		snap.NodeState = 2
+	}
+	if s.cfg.Node.Draining && !s.cfg.Node.Paused {
+		snap.NodeState = 1
+		snap.NeedRebuild = true
+		snap.ReasonBits |= 1 << 1
+	}
+	if view := s.currentSystem.Load(); view != nil {
+		if stop := view.manifest.Shutdown; stop != nil && stop.Membership == view.manifest.Membership.Epoch && s.cfg.Node.ClusterResumedID != stop.ID.String() {
+			snap.NodeState = 2
+		}
+		snap.MembershipEpoch = view.manifest.Membership.Epoch
+		snap.Generation = view.manifest.Generation
+		snap.MapRevision = view.manifest.Revision
+		for _, description := range view.descriptions {
+			if description.DesiredPolicy != nil {
+				snap.NeedRebuild = true
+				snap.ReasonBits |= 1 << 6
+			}
+			if description.State == BucketDeleting && !description.DeletionComplete {
+				snap.NeedRebuild = true
+				snap.ReasonBits |= 1 << 8
+			}
+		}
+	}
 	if s.cfg.JoinPending {
 		snap.NodeState = 4
 		snap.MembershipEpoch, snap.Generation, snap.MapRevision = 0, 0, 0
@@ -54,6 +94,9 @@ func (s *Server) CollectStats(filter client.StatsFilter) client.StatsSnapshot {
 		id := client.ID(v.Identity.VolumeID)
 		io := client.IOStats{PhysicalReadBytes: v.IO.ReadBytes, PhysicalWriteBytes: v.IO.WriteBytes, Errors: v.IO.Errors, Flushes: v.IO.SyncOps, FlushNS: v.IO.SyncNanoseconds}
 		state := uint8(m.store.State())
+		if s.controller != nil && m.config.State == "draining" {
+			state = 2
+		}
 		health := uint8(0)
 		if state == 4 {
 			health = 2

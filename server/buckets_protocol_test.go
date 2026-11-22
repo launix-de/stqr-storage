@@ -220,7 +220,7 @@ func TestBucketCatalogServerMigrationAndRestart(t *testing.T) {
 	if err := saveConfig(path, cfg); err != nil {
 		t.Fatal(err)
 	}
-	reopened, err := Open(Options{ConfigPath: path})
+	reopened, err := openTransportTestNode(Options{ConfigPath: path})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -242,7 +242,7 @@ func TestBucketCatalogServerMigrationAndRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 	reopened.Close()
-	if _, err = Open(Options{ConfigPath: path}); !errors.Is(err, ErrBucketCatalogMissing) {
+	if _, err = openTransportTestNode(Options{ConfigPath: path}); !errors.Is(err, ErrBucketCatalogMissing) {
 		t.Fatal("lost catalog was silently replaced", err)
 	}
 }
@@ -264,7 +264,7 @@ func TestBucketCatalogServerUpgradeFromAccountsOnly(t *testing.T) {
 	if err = saveConfig(path, cfg); err != nil {
 		t.Fatal(err)
 	}
-	upgraded, err := Open(Options{ConfigPath: path})
+	upgraded, err := openTransportTestNode(Options{ConfigPath: path})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -299,7 +299,7 @@ func TestBucketInfoUsesRAMAndStartupRejectsCorruption(t *testing.T) {
 	bucketReplyResult(t, reply, 200)
 	path := s.configPath
 	s.Close()
-	if _, err = Open(Options{ConfigPath: path}); !errors.Is(err, ErrBucketCatalogCorrupt) {
+	if _, err = openTransportTestNode(Options{ConfigPath: path}); !errors.Is(err, ErrBucketCatalogCorrupt) {
 		t.Fatal("corrupt catalog not rejected during startup", err)
 	}
 }

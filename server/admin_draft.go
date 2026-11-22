@@ -28,7 +28,7 @@ func (d *adminDraft) close() error {
 }
 
 func globalAdminMutation(opcode uint16) bool {
-	return userOpcode(opcode) && opcode != client.UserList || bucketAdminOpcode(opcode) && opcode != client.BucketList && opcode != client.BucketQuotaCapacity
+	return userOpcode(opcode) && opcode != client.UserList && opcode != client.UserS3KeyList || bucketAdminOpcode(opcode) && opcode != client.BucketList && opcode != client.BucketQuotaCapacity || placementAdminOpcode(opcode) && opcode != placementGroupList
 }
 
 // The caller binds a global round before preparing a draft. opMu gives a
@@ -40,6 +40,10 @@ func (s *Server) prepareAdminDraft(m client.Message, actor principal) (_ *adminD
 		return nil, fail(400, "global administrative mutation required")
 	}
 	s.opMu.Lock()
+	if err := s.requireAdmin(actor); err != nil {
+		s.opMu.Unlock()
+		return nil, err
+	}
 	preview, err := s.newAdminPreview()
 	s.opMu.Unlock()
 	if err != nil {
@@ -52,13 +56,16 @@ func (s *Server) prepareAdminDraft(m client.Message, actor principal) (_ *adminD
 		}
 	}()
 	current, err := preview.findAccount(actor.User.Name)
-	if err != nil || current.ID != actor.User.ID || current.Role != "ADMIN" || current.Disabled || !constantEqual(current.PasswordHash, actor.User.PasswordHash) {
+	if err != nil || current.ID != actor.User.ID || current.Role != "ADMIN" || current.Disabled || (actor.connection == nil && !constantEqual(current.PasswordHash, actor.User.PasswordHash) || actor.connection != nil && (actor.connection.accountID != current.ID || actor.connection.accountRevision != frontendAccountRevision(current))) {
 		return nil, fail(403, "current administrator required")
 	}
-	// Revalidate the account rather than trusting a cached socket capability or
-	// binding the source's live bucket pointers into the private preview.
+	// Socket verifiers are deliberately erased after upgrade. requireAdmin above
+	// validates their revocable capability under opMu; the preview then resolves
+	// that same current account. Plain HTTP principals still bind their verifier.
 	identity := principal{User: current}
-	if userOpcode(m.Opcode) {
+	if placementAdminOpcode(m.Opcode) {
+		draft.result, draft.status, err = preview.executePlacementAdmin(m, identity)
+	} else if userOpcode(m.Opcode) {
 		draft.result, draft.status, err = preview.executeUsers(m, identity)
 	} else {
 		draft.result, draft.status, err = preview.executeBuckets(m, identity)

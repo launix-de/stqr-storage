@@ -2,12 +2,14 @@
 package server
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"math"
 	"sort"
+	"time"
 
 	"github.com/launix-de/stqr-storage/client"
 	"github.com/launix-de/stqr-storage/volume"
@@ -106,8 +108,12 @@ func (s *Server) bucketReceipt(p principal, m client.Message) (BucketReceipt, *B
 	return receipt, nil, nil
 }
 func (s *Server) executeBuckets(m client.Message, p principal) ([]byte, int, error) {
-	s.opMu.Lock()
-	defer s.opMu.Unlock()
+	// Telemetry queries may wait for a required remote owner; they must never
+	// hold the node's mutation lock while doing so.
+	if m.Opcode != client.BucketList && m.Opcode != client.BucketQuotaCapacity {
+		s.opMu.Lock()
+		defer s.opMu.Unlock()
+	}
 	s.mu.RLock()
 	closed := s.closed
 	s.mu.RUnlock()
@@ -121,6 +127,8 @@ func (s *Server) executeBuckets(m client.Message, p principal) ([]byte, int, err
 		if err := s.requireAdmin(p); err != nil {
 			return nil, 0, err
 		}
+		usageContext, cancelUsage := context.WithTimeout(s.ctx, 3*time.Second)
+		defer cancelUsage()
 		d := client.Decoder{B: m.Body}
 		after := d.Text()
 		limit := d.U32()
@@ -151,7 +159,7 @@ func (s *Server) executeBuckets(m client.Message, p principal) ([]byte, int, err
 				if e != nil {
 					return nil, 0, e
 				}
-				used, e := bucket.logicalUsage()
+				used, e := bucket.administrativeUsage(usageContext, p)
 				if e != nil {
 					entry.UsageError = e.Error()
 				} else {
@@ -221,6 +229,7 @@ func (s *Server) executeBuckets(m client.Message, p principal) ([]byte, int, err
 				// The existing object-client Policy wire schema does not edit PG
 				// references. Preserve the committed mask on ordinary policy changes.
 				policy.PlacementGroup = description.Policy.PlacementGroup
+				policy.PlacementMaskVersion = description.Policy.PlacementMaskVersion
 				if description.DesiredPolicy != nil {
 					return nil, 0, ErrBucketConflict
 				}
@@ -243,7 +252,7 @@ func (s *Server) executeBuckets(m client.Message, p principal) ([]byte, int, err
 					if usage != 0 && (description.Policy.StorageStrategy == "ram") != (policy.StorageStrategy == "ram") {
 						return nil, 0, fail(501, "nonempty RAM/disk policy conversion is not implemented")
 					}
-					if usage == 0 && len(description.LocalVolumes) == 0 {
+					if usage == 0 && len(description.LocalVolumes) == 0 && !s.metadataPreview {
 						description.Policy = policy
 						description.DesiredPolicy = nil
 					} else {

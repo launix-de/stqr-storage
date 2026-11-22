@@ -112,7 +112,7 @@ func TestPlacementGroupConstrainsWritesAndSurvivesRestart(t *testing.T) {
 	if err := s.Close(); err != nil {
 		t.Fatal(err)
 	}
-	reopened, err := Open(Options{ConfigPath: path})
+	reopened, err := openTransportTestNode(Options{ConfigPath: path})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -164,7 +164,7 @@ func TestEstablishedMetadataPGDoesNotFallBackOrReinitialize(t *testing.T) {
 	if err := s.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if reopened, err := Open(Options{ConfigPath: path}); err == nil {
+	if reopened, err := openTransportTestNode(Options{ConfigPath: path}); err == nil {
 		reopened.Close()
 		t.Fatal("invalid metadata PG silently fell back to the bootstrap volume")
 	}

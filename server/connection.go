@@ -15,11 +15,16 @@ import (
 // revoke the capability instead of making data requests reread account/ACL data.
 type connectionAuthorization struct {
 	admin, clusterPeer bool
+	accountID          string
+	accountRevision    [32]byte
 	bucket             *Bucket
 	bucketID           volume.ID
 	permissions        BucketPermissions
+	frontendPermission BucketPermissions // private node frontend retains the original HTTP grant
+	frontendIssuer     client.ID
 	invalid            atomic.Bool
 	peerVerified       atomic.Bool
+	peerBoot           client.ID // fixed by NODE_HELLO before peerVerified publication
 	expires            time.Time
 }
 
@@ -69,7 +74,12 @@ func (s *Server) authorizeConnection(r *http.Request, p principal) (*connectionA
 		if current.Role != "ADMIN" && current.Role != "USER" {
 			return nil, p, ErrBucketForbidden
 		}
+		if p.frontendPermission != 0 && frontendAccountRevision(current) != frontendAccountRevision(p.User) {
+			return nil, p, ErrBucketForbidden
+		}
 		p.User = current
+		auth.accountID = current.ID
+		auth.accountRevision = frontendAccountRevision(current)
 		auth.admin = current.Role == "ADMIN"
 	}
 	if p.Cookie {
@@ -110,6 +120,13 @@ func (s *Server) authorizeConnection(r *http.Request, p principal) (*connectionA
 		auth.bucket = b
 		auth.bucketID = id
 		auth.permissions = info.Permissions
+		if p.frontendPermission != 0 {
+			if info.Permissions&p.frontendPermission == 0 {
+				return nil, p, ErrBucketForbidden
+			}
+			auth.frontendPermission = p.frontendPermission
+			auth.frontendIssuer = p.frontendIssuer
+		}
 	} else if !auth.admin && !auth.clusterPeer {
 		return nil, p, fail(400, "a bucket ID is required for client connections")
 	}

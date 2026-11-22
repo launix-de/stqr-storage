@@ -10,12 +10,13 @@ import (
 	"strings"
 	"time"
 
+	"github.com/launix-de/stqr-storage/client"
 	"github.com/launix-de/stqr-storage/volume"
 	"golang.org/x/crypto/bcrypt"
 )
 
-// The stable system bucket/object IDs identify ordinary objects. TODO(multinode):
-// replicate this bucket EVERYWHERE before enabling accounts on a joining node.
+// Stable system IDs identify ordinary objects. ALL admission publishes their
+// immutable system graph through the EVERYWHERE placement group before use.
 var systemBucket = volume.ID{0x53, 0x54, 0x51, 0x52, 0x53, 0x59, 0x53, 1}
 
 func systemKey(name string) volume.Key {
@@ -23,11 +24,12 @@ func systemKey(name string) volume.Key {
 }
 
 type account struct {
-	ID           string `json:"id"`
-	Name         string `json:"name"`
-	Role         string `json:"role"`
-	Disabled     bool   `json:"disabled"`
-	PasswordHash string `json:"password_hash"`
+	ID           string        `json:"id"`
+	Name         string        `json:"name"`
+	Role         string        `json:"role"`
+	Disabled     bool          `json:"disabled"`
+	PasswordHash string        `json:"password_hash"`
+	S3Keys       []s3AccessKey `json:"s3_keys,omitempty"`
 }
 type accountsImage struct {
 	Schema   int              `json:"schema"`
@@ -151,16 +153,23 @@ type session struct {
 	Expires                time.Time
 }
 type principal struct {
-	connection   *connectionAuthorization
-	ClusterPeer  bool
-	User         account
-	SessionToken string
-	CSRF         string
-	Cookie       bool
+	// Internal S3 operations retain the original HTTP operation grant, including
+	// write-only/delete-only users. Native clients cannot set this field.
+	frontendPermission BucketPermissions
+	frontendIssuer     client.ID
+	connection         *connectionAuthorization
+	ClusterPeer        bool
+	User               account
+	SessionToken       string
+	CSRF               string
+	Cookie             bool
 }
 
 func (s *Server) authenticate(r *http.Request) (principal, error) {
 	if name, password, ok := r.BasicAuth(); ok {
+		if strings.HasPrefix(name, frontendCredentialPrefix) {
+			return s.authenticateFrontend(r, name, password)
+		}
 		if strings.HasPrefix(name, "node-") {
 			id, err := bucketID(strings.TrimPrefix(name, "node-"))
 			if err != nil {

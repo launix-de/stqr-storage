@@ -16,8 +16,8 @@ import (
 
 // Account mutations and their retry receipts share one atomic system object.
 // No plaintext password or unkeyed password digest is persisted. opMu serializes
-// read/modify/write with other local administrative commits. TODO(multinode):
-// publish account changes through CONTROL_CHANGE / EVERYWHERE before ACK.
+// read/modify/write with other local administrative commits. The cluster path
+// prepares this mutation on a private draft and publishes it through ALL.
 type accountReceipt struct {
 	ID     string `json:"id"`
 	Actor  string `json:"actor"`
@@ -26,7 +26,7 @@ type accountReceipt struct {
 }
 
 func userOpcode(op uint16) bool {
-	return op == client.UserList || op == client.UserCreate || op == client.UserUpdate || op == client.UserSetPassword || op == client.UserDelete
+	return op == client.UserS3KeyList || op == client.UserS3KeySet || op == client.UserS3KeyDelete || op == client.UserList || op == client.UserCreate || op == client.UserUpdate || op == client.UserSetPassword || op == client.UserDelete
 }
 func encodeUser(e *client.Encoder, u account) {
 	id, _ := parseID(u.ID)
@@ -82,6 +82,23 @@ func (s *Server) executeUsers(m client.Message, p principal) ([]byte, int, error
 		}
 		return e.B, 200, nil
 	}
+	if m.Opcode == client.UserS3KeyList {
+		target := d.ID()
+		if d.Done() != nil {
+			return nil, 0, fail(400, "invalid key list request")
+		}
+		for _, u := range image.Users {
+			if u.ID == target.String() {
+				e := client.Encoder{}
+				e.V(uint64(len(u.S3Keys)))
+				for _, k := range u.S3Keys {
+					e.Text(k.ID)
+				}
+				return e.B, 200, nil
+			}
+		}
+		return nil, 0, fail(404, "user not found")
+	}
 	if m.ID == (client.ID{}) {
 		return nil, 0, fail(400, "a nonzero operation ID is required")
 	}
@@ -100,7 +117,7 @@ func (s *Server) executeUsers(m client.Message, p principal) ([]byte, int, error
 		}
 	}
 	target := d.ID()
-	var name, password string
+	var name, password, accessID, accessSecret string
 	var role uint8
 	var disabled bool
 	if m.Opcode == client.UserCreate || m.Opcode == client.UserUpdate {
@@ -112,6 +129,11 @@ func (s *Server) executeUsers(m client.Message, p principal) ([]byte, int, error
 		}
 	} else if m.Opcode == client.UserSetPassword {
 		password = d.Text()
+	} else if m.Opcode == client.UserS3KeySet || m.Opcode == client.UserS3KeyDelete {
+		accessID = d.Text()
+		if m.Opcode == client.UserS3KeySet {
+			accessSecret = d.Text()
+		}
 	}
 	if e := d.Done(); e != nil {
 		return nil, 0, fail(400, "invalid user message")
@@ -158,6 +180,21 @@ func (s *Server) executeUsers(m client.Message, p principal) ([]byte, int, error
 			return nil, 0, e
 		}
 	}
+	if m.Opcode == client.UserS3KeySet || m.Opcode == client.UserS3KeyDelete {
+		if !validS3AccessID(accessID) {
+			return nil, 0, fail(400, "access key must contain 16 to 128 ASCII letters, digits, hyphens or underscores")
+		}
+		if m.Opcode == client.UserS3KeySet && (len(accessSecret) < 16 || len(accessSecret) > 128 || !utf8.ValidString(accessSecret)) {
+			return nil, 0, fail(400, "secret must contain 16 to 128 UTF-8 bytes")
+		}
+		for _, u := range image.Users {
+			for _, k := range u.S3Keys {
+				if k.ID == accessID && u.ID != target.String() {
+					return nil, 0, fail(409, "access key already belongs to another user")
+				}
+			}
+		}
+	}
 	status := 200
 	switch m.Opcode {
 	case client.UserCreate:
@@ -184,6 +221,39 @@ func (s *Server) executeUsers(m client.Message, p principal) ([]byte, int, error
 				image.Users[i].PasswordHash = string(hash)
 			}
 		}
+	case client.UserS3KeySet, client.UserS3KeyDelete:
+		for i := range image.Users {
+			u := &image.Users[i]
+			if u.ID != target.String() {
+				continue
+			}
+			found := -1
+			for j, k := range u.S3Keys {
+				if k.ID == accessID {
+					found = j
+					break
+				}
+			}
+			if m.Opcode == client.UserS3KeyDelete {
+				if found >= 0 {
+					u.S3Keys = append(u.S3Keys[:found], u.S3Keys[found+1:]...)
+				}
+			} else {
+				if found < 0 && len(u.S3Keys) >= 32 {
+					return nil, 0, fail(400, "at most 32 access keys per user")
+				}
+				sealed, e := s.sealS3Secret(u.ID, accessID, accessSecret)
+				if e != nil {
+					return nil, 0, e
+				}
+				key := s3AccessKey{ID: accessID, Sealed: sealed}
+				if found < 0 {
+					u.S3Keys = append(u.S3Keys, key)
+				} else {
+					u.S3Keys[found] = key
+				}
+			}
+		}
 	case client.UserDelete:
 		for i := range image.Users {
 			if image.Users[i].ID == target.String() {
@@ -196,7 +266,7 @@ func (s *Server) executeUsers(m client.Message, p principal) ([]byte, int, error
 	if e := s.writeBlob("accounts", image); e != nil {
 		return nil, 0, e
 	}
-	if m.Opcode != client.UserCreate {
+	if m.Opcode != client.UserCreate && m.Opcode != client.UserS3KeySet && m.Opcode != client.UserS3KeyDelete {
 		s.invalidateUserConnections(target.String())
 		s.authMu.Lock()
 		for key, ss := range s.sessions {

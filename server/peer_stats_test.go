@@ -114,7 +114,7 @@ func TestPeerStatsPushDashboardAndReconnect(t *testing.T) {
 	if err = target.Close(); err != nil {
 		t.Fatal(err)
 	}
-	restarted, err := Open(Options{ConfigPath: path})
+	restarted, err := openTransportTestNode(Options{ConfigPath: path})
 	if err != nil {
 		t.Fatal(err)
 	}

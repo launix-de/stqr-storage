@@ -16,6 +16,10 @@ import (
 )
 
 func objectStatus(err error) int {
+	var redirect *objectRedirect
+	if errors.As(err, &redirect) {
+		return 301
+	}
 	if errors.Is(err, syscall.ENOSPC) || errors.Is(err, syscall.EDQUOT) {
 		return 507
 	}
@@ -100,7 +104,27 @@ func (s *Server) parseObject(m client.Message, ws *wsSession, p principal) (*obj
 	if bucketID == systemBucket {
 		return nil, d, ErrBucketForbidden
 	}
-	if revision != 0 {
+	if s.controller != nil {
+		permission := BucketRead
+		switch m.Opcode {
+		case 0x0102, 0x0103, 0x0105, 0x0108:
+			permission = BucketWrite
+		case 0x0104:
+			permission = BucketAppend
+		case 0x0106:
+			permission = BucketDelete
+		}
+		if _, err := b.authorize(p, permission); err != nil {
+			return nil, d, err
+		}
+		if err := s.checkObjectOwner(bucketID, oid); err != nil {
+			return nil, d, err
+		}
+		patch, _ := s.routingPatch(bucketID, oid)
+		if epoch != 0 && epoch != patch.Entries[0].OwnerEpoch {
+			return nil, d, &objectRedirect{patch: patch}
+		}
+	} else if revision != 0 {
 		s.mu.RLock()
 		generation := s.cfg.Generation
 		s.mu.RUnlock()
@@ -108,11 +132,16 @@ func (s *Server) parseObject(m client.Message, ws *wsSession, p principal) (*obj
 			return nil, d, fail(503, "stale placement map")
 		}
 	}
-	if epoch > 1 {
+	if s.controller == nil && epoch > 1 {
 		return nil, d, fail(503, "unknown ownership epoch")
 	}
 	if description.Policy.StorageStrategy == "ram" {
-		if runtime != (client.ID{}) && runtime != s.boot {
+		currentRuntime := s.boot
+		if s.controller != nil {
+			patch, _ := s.routingPatch(bucketID, oid)
+			currentRuntime = patch.Entries[0].Runtime
+		}
+		if runtime != (client.ID{}) && runtime != currentRuntime {
 			return nil, d, fail(410, "RAM runtime reset")
 		}
 	} else if runtime != (client.ID{}) {
@@ -129,11 +158,20 @@ func (s *Server) executeObjects(m client.Message, ws *wsSession, p principal) ([
 	if ws != nil {
 		ctx = ws.objectContext(m.ID)
 	}
+	if m.Opcode == 0x0100 || m.Opcode == 0x0101 || m.Opcode == 0x0107 {
+		ctx = bindObjectRequest(ctx, m)
+	}
 	runtime := client.ID{}
 	if op.bucket.Describe().Policy.StorageStrategy == "ram" {
 		runtime = s.boot
+		if s.controller != nil {
+			patch, _ := s.routingPatch(op.bucket.ID(), op.object)
+			runtime = patch.Entries[0].Runtime
+		}
 	}
 	switch m.Opcode {
+	case client.BucketObjectList:
+		return s.executeObjectList(ctx, op, d, p, runtime)
 	case client.BucketMaintenance, client.BucketScan:
 		return s.executeMaintenance(ctx, op, d, ws, p, runtime)
 	case 0x0100, 0x0101:
@@ -260,6 +298,7 @@ func encodeObjectTransfer(e *client.Encoder, mode uint8, length uint64, digest [
 	e.Blob(data)
 }
 func (op *objectMutation) commit(ctx context.Context, p principal, src io.Reader, runtime client.ID) ([]byte, int, error) {
+	ctx = bindObjectRequest(ctx, op.message)
 	var result volume.Result
 	var err error
 	switch op.message.Opcode {

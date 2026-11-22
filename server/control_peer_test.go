@@ -21,6 +21,11 @@ import (
 func TestPeerControlSystemCommit(t *testing.T) {
 	source := testServer(t)
 	target := peerTestNode(t, source.running)
+	// This fixture installs an epoch-zero candidate ledger below; its HELLO
+	// must explicitly identify it as pending, just as production admission does.
+	target.mu.Lock()
+	target.cfg.JoinPending = true
+	target.mu.Unlock()
 	sourceID, _ := parseID(source.running.Node.ID)
 	targetID, _ := parseID(target.running.Node.ID)
 	cluster, _ := parseID(source.running.ClusterID)

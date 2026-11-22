@@ -59,11 +59,39 @@ func (r *controlRuntime) execute(op uint16, body []byte, actor client.ID) ([]byt
 		if decodeErr != nil {
 			return nil, decodeErr
 		}
+		if claim.Exclusion != nil && op == client.PeerControlReserve {
+			if err := r.server.validateExclusionActor(claim); err != nil {
+				return nil, err
+			}
+		}
 		if claim.Round.Initiator != actor {
 			return nil, fail(403, "control requester identity mismatch")
 		}
 		if op == client.PeerControlReserve {
+			if r.server.clusterPaused() && claim.Exclusion == nil {
+				r.ledger.mu.Lock()
+				continuing := r.ledger.slot != nil && equalControlClaim(r.ledger.slot.Claim, claim)
+				r.ledger.mu.Unlock()
+				if !continuing {
+					return nil, fail(503, "cluster shutdown is pending")
+				}
+			}
+			r.server.opMu.Lock()
+			defer r.server.opMu.Unlock()
+			if claim.Exclusion == nil && len(r.server.pendingQuotaGrants()) != 0 {
+				return nil, fail(503, "quota grants must settle before global control")
+			}
+			if scopes := r.server.scopes; scopes != nil {
+				scopes.mu.Lock()
+				defer scopes.mu.Unlock()
+				if scopes.busyLocked() && claim.Exclusion == nil {
+					return nil, fail(503, "range handoff must finish before global control")
+				}
+			}
 			err = r.ledger.reserve(claim)
+			if err == nil && claim.Exclusion != nil {
+				r.server.closeExcludedTransports(client.Membership{Excluded: claim.Exclusion.Nodes})
+			}
 			return nil, err
 		}
 		proof, err = r.ledger.abortClaim(claim)
@@ -186,6 +214,9 @@ func (r *controlRuntime) restore() error {
 	if slot := r.ledger.slot; slot != nil && slot.Decision == head.Decision && slot.Applied.RecordSequence != 0 {
 		proven = true
 	}
+	if slot := r.ledger.slot; slot != nil && slot.Suspended != nil && slot.Suspended.Decision == head.Decision && slot.Suspended.Applied.RecordSequence != 0 {
+		proven = true
+	}
 	r.ledger.mu.Unlock()
 	if !proven {
 		return volume.ErrCorrupt
@@ -219,6 +250,51 @@ func (p peerControlParticipants) call(ctx context.Context, node client.ID, opcod
 		return nil, err
 	}
 	if node == p.runtime.ledger.node {
+		if opcode == peerForceAdoptCommit {
+			return p.runtime.server.receiveForceAdoptCommit(body, node)
+		}
+		if opcode == peerForceConstruction {
+			return nil, p.runtime.server.receiveForceConstruction(body, node)
+		}
+		if opcode == peerForceControlState {
+			return p.runtime.server.receiveForceControlState(body, node)
+		}
+		if opcode == peerForceScopes {
+			return p.runtime.server.receiveForceScopes(body, node)
+		}
+		if opcode == peerForceScopeEnvelope {
+			return p.runtime.server.receiveForceScopeEnvelope(body, node, p.runtime.server.boot)
+		}
+		if opcode == peerForceAdmin {
+			return p.runtime.server.receiveForceAdmin(ctx, body, node)
+		}
+		if opcode == peerBucketUsage {
+			return p.runtime.server.receiveBucketUsage(ctx, body, node)
+		}
+		if quotaPeerOpcode(opcode) {
+			return p.runtime.server.quotaPeerMessage(client.Message{Kind: client.Request, Opcode: opcode, Body: body}, node)
+		}
+		if opcode == peerVerifyFrontend {
+			return p.runtime.server.verifyFrontend(body, node)
+		}
+		if opcode == peerBucketInventory {
+			return p.runtime.server.receiveBucketInventory(ctx, body, node)
+		}
+		if opcode == peerClusterStop {
+			return p.runtime.server.receiveClusterStop(body, node)
+		}
+		if opcode == peerBucketCodec {
+			return p.runtime.server.applyBucketCodec(body, p.runtime.ledger.node)
+		}
+		if opcode == peerBucketPurge {
+			return p.runtime.server.purgeDeletedBucket(body, p.runtime.ledger.node)
+		}
+		if opcode == peerFrozenBucketUsage {
+			return p.runtime.server.frozenBucketUsage(body, p.runtime.ledger.node)
+		}
+		if opcode == peerControlInfo || opcode == peerSystemChunk {
+			return p.runtime.server.systemPeerMessage(client.Message{Kind: client.Request, Opcode: opcode, Body: body})
+		}
 		return p.runtime.execute(opcode, body, node)
 	}
 	s := p.runtime.server

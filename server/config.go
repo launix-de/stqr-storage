@@ -21,11 +21,20 @@ import (
 )
 
 type NodeConfig struct {
-	ID        string `yaml:"id" json:"id"`
-	Name      string `yaml:"name" json:"name"`
-	Listen    string `yaml:"listen" json:"listen"`
-	Advertise string `yaml:"advertise" json:"advertise"`
-	DataDir   string `yaml:"data_dir" json:"data_dir"`
+	ClusterStopID          string `yaml:"cluster_stop_id,omitempty" json:"-"`
+	ClusterResumedID       string `yaml:"cluster_resumed_id,omitempty" json:"-"`
+	ClusterShutdownRequest string `yaml:"cluster_shutdown_request,omitempty" json:"-"`
+	ShortOperation         string `yaml:"short_operation,omitempty" json:"short_operation"`
+	DrainOperation         string `yaml:"drain_operation,omitempty" json:"drain_operation"`
+	DrainComplete          bool   `yaml:"drain_complete,omitempty" json:"drain_complete"`
+	LeaveCoordinator       string `yaml:"leave_coordinator,omitempty" json:"leave_coordinator"`
+	Paused                 bool   `yaml:"paused,omitempty" json:"paused"`
+	Draining               bool   `yaml:"draining,omitempty" json:"draining"`
+	ID                     string `yaml:"id" json:"id"`
+	Name                   string `yaml:"name" json:"name"`
+	Listen                 string `yaml:"listen" json:"listen"`
+	Advertise              string `yaml:"advertise" json:"advertise"`
+	DataDir                string `yaml:"data_dir" json:"data_dir"`
 }
 type BootstrapAdmin struct {
 	Username string `yaml:"username" json:"username"`
@@ -57,6 +66,9 @@ type Config struct {
 	JoinPending            bool           `yaml:"join_pending,omitempty" json:"join_pending"`
 	PeerDirectoryVersion   uint16         `yaml:"peer_directory_version,omitempty" json:"-"`
 	PlacementGroupsVersion uint16         `yaml:"placement_groups_version,omitempty" json:"-"`
+	ControlVersion         uint16         `yaml:"control_version,omitempty" json:"-"`
+	QuotaVersion           uint16         `yaml:"quota_version,omitempty" json:"-"`
+	RangeVersion           uint16         `yaml:"range_version,omitempty" json:"-"`
 	Auth                   AuthConfig     `yaml:"auth" json:"auth"`
 	VolumesDir             string         `yaml:"volumes_dir" json:"volumes_dir"`
 	SystemVolumeBytes      int64          `yaml:"system_volume_bytes" json:"system_volume_bytes"`
@@ -71,8 +83,10 @@ type Config struct {
 // Only explicitly supplied flags override persistent settings. Runtime changes
 // are saved atomically so the next start does not silently undo them.
 type Options struct {
-	ConfigPath string
-	values     map[string]string
+	ConfigPath    string
+	values        map[string]string
+	transportOnly bool // isolated legacy/transport tests; never a daemon flag
+	manualRanges  bool // integration fixtures select explicit plans instead of auto planning
 }
 
 func ParseOptions(args []string, output io.Writer) (Options, error) {
@@ -294,7 +308,7 @@ func validateConfig(c Config) error {
 	if c.SystemVolumeBytes < volume.MinVolumeSize || c.RAMBytes < 0 || c.RAMCacheBytes < 0 {
 		return errors.New("invalid storage budget")
 	}
-	if c.Auth.ClusterToken == "" || !c.JoinPending && (c.Auth.BootstrapAdmin.Username == "" || c.Auth.BootstrapAdmin.Password == "") {
+	if c.Auth.ClusterToken == "" || !c.JoinPending && c.ControlVersion == 0 && (c.Auth.BootstrapAdmin.Username == "" || c.Auth.BootstrapAdmin.Password == "") {
 		return errors.New("existing cluster credentials are missing; refusing to recreate them")
 	}
 	for _, s := range c.AllowSubnets {

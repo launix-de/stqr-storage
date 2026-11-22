@@ -289,6 +289,44 @@ type PartialMap struct {
 	segments   map[ID][]mapSegment
 }
 
+// ForgetNode removes only routes whose primary departed in this membership.
+// Newer membership information and independent ranges remain usable.
+func (m *PartialMap) ForgetNode(node ID, membership uint64) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for bucket, segments := range m.segments {
+		kept := segments[:0]
+		for _, segment := range segments {
+			remove := false
+			if segment.patch.Membership <= membership {
+				for _, location := range segment.patch.Entries[0].Locations {
+					if location.Role == 0 && location.Node == node {
+						remove = true
+					}
+				}
+			}
+			if !remove {
+				kept = append(kept, segment)
+			}
+		}
+		m.segments[bucket] = kept
+	}
+}
+
+// ForgetObject asks the next retry to refresh this object's routing segment.
+// Losing a connection invalidates cache knowledge, never cluster membership.
+func (m *PartialMap) ForgetObject(bucket ID, object ObjectID) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	segments := m.segments[bucket]
+	for i, segment := range segments {
+		if compareObject(object, segment.begin) >= 0 && beforeEnd(object, segment.end, segment.toEnd) {
+			m.segments[bucket] = append(segments[:i], segments[i+1:]...)
+			return
+		}
+	}
+}
+
 func beforeEnd(value, end ObjectID, toEnd bool) bool { return toEnd || compareObject(value, end) < 0 }
 
 func learnedSegments(p MapPatch) []mapSegment {

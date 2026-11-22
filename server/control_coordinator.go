@@ -50,10 +50,13 @@ func (c *controlCoordinator) requestSnapshot() *controlRequest {
 // Claim.Required is canonical/sorted and remains fixed throughout the request.
 // Partial reservation failure leaves a recoverable cancellation, not an
 // implicit timeout-based release at any participant.
-func (c *controlCoordinator) begin(ctx context.Context, kind uint16, required []client.ID) (controlClaim, error) {
+func (c *controlCoordinator) begin(ctx context.Context, kind uint16, required []client.ID, frozen ...client.ID) (controlClaim, error) {
+	return c.beginWithExclusion(ctx, kind, required, nil, frozen...)
+}
+func (c *controlCoordinator) beginWithExclusion(ctx context.Context, kind uint16, required []client.ID, exclusion *controlExclusion, frozen ...client.ID) (controlClaim, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	claim, err := c.ledger.beginRequest(kind, required)
+	claim, err := c.ledger.beginRequestWithExclusion(kind, required, exclusion, frozen...)
 	if err != nil {
 		return controlClaim{}, err
 	}
@@ -107,7 +110,7 @@ func (c *controlCoordinator) cancelBuilding(ctx context.Context) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	r := c.requestSnapshot()
-	if r != nil && r.ResultReady {
+	if r != nil && (r.ResultReady || r.Claim.Exclusion != nil && r.ConstructionStarted) {
 		return errControlConflict
 	}
 	c.building = false
@@ -121,6 +124,9 @@ func (c *controlCoordinator) resumeLocked(ctx context.Context) ([]byte, error) {
 		return nil, nil
 	}
 	if !r.ResultReady {
+		if r.Claim.Exclusion != nil && r.ConstructionStarted {
+			return nil, errControlConflict // only the cluster builder can resume it
+		}
 		aborted, err := collectControlProofs(ctx, r.Claim.Required, func(ctx context.Context, node client.ID) (client.Proof, error) {
 			return c.participants.Abort(ctx, node, r.Claim)
 		})
@@ -224,3 +230,20 @@ func collectControlProofs(ctx context.Context, nodes []client.ID, run func(conte
 	}
 	return client.NewCertificate(proofs)
 }
+
+// Force requests retain only node IDs and explicit administrative loss consent,
+// so their unprepared construction can resume without raw credentials.
+func (c *controlCoordinator) rebindBuilding(claim controlClaim) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.building {
+		return errControlConflict
+	}
+	r := c.requestSnapshot()
+	if r == nil || r.ResultReady || !equalControlClaim(r.Claim, claim) {
+		return errControlConflict
+	}
+	c.building = true
+	return nil
+}
+func (c *controlCoordinator) suspendBuilding() { c.mu.Lock(); c.building = false; c.mu.Unlock() }

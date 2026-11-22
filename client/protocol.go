@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-only
-// Package client contains the public STQR SDK scaffold and shared wire codec.
+// Package client contains the public STQR bucket SDK and shared wire codec.
 package client
 
 import (
@@ -20,30 +20,39 @@ const (
 	Push
 )
 const (
-	Hello                uint16 = 0x0001
-	Ping                 uint16 = 0x0002
-	Event                uint16 = 0x0004
-	StatsGet             uint16 = 0x0008
-	StatsSubscribe       uint16 = 0x0009
-	StatsUnsubscribe     uint16 = 0x000a
-	StatsSnapshotMessage uint16 = 0x000b
-	BucketInfoGet        uint16 = 0x010c
-	BucketMaintenance    uint16 = 0x0115
-	BucketScan           uint16 = 0x0116
-	BucketCreate         uint16 = 0x2003
-	BucketSetPolicy      uint16 = 0x2004
-	BucketSetQuota       uint16 = 0x2005
-	BucketRename         uint16 = 0x2006
-	BucketLock           uint16 = 0x2007
-	BucketDelete         uint16 = 0x2008
-	BucketGrant          uint16 = 0x2009
-	BucketRevoke         uint16 = 0x200a
-	BucketList           uint16 = 0x2022
-	BucketQuotaCapacity  uint16 = 0x2023
-	AdminGet             uint16 = 0x2000
-	VolumeAdd            uint16 = 0x2001
-	VolumeRemove         uint16 = 0x2002
-	AdminOperationStatus uint16 = 0x2019
+	Hello                   uint16 = 0x0001
+	Ping                    uint16 = 0x0002
+	Event                   uint16 = 0x0004
+	StatsGet                uint16 = 0x0008
+	StatsSubscribe          uint16 = 0x0009
+	StatsUnsubscribe        uint16 = 0x000a
+	StatsSnapshotMessage    uint16 = 0x000b
+	BucketInfoGet           uint16 = 0x010c
+	BucketMaintenance       uint16 = 0x0115
+	BucketScan              uint16 = 0x0116
+	BucketObjectList        uint16 = 0x0117
+	BucketCreate            uint16 = 0x2003
+	BucketSetPolicy         uint16 = 0x2004
+	BucketSetQuota          uint16 = 0x2005
+	BucketRename            uint16 = 0x2006
+	BucketLock              uint16 = 0x2007
+	BucketDelete            uint16 = 0x2008
+	BucketGrant             uint16 = 0x2009
+	BucketRevoke            uint16 = 0x200a
+	BucketList              uint16 = 0x2022
+	BucketQuotaCapacity     uint16 = 0x2023
+	PlacementGroupList      uint16 = 0x2030
+	PlacementGroupSet       uint16 = 0x2031
+	PlacementGroupDelete    uint16 = 0x2032
+	BucketSetPlacementGroup uint16 = 0x2033
+	AdminGet                uint16 = 0x2000
+	VolumeAdd               uint16 = 0x2001
+	VolumeRemove            uint16 = 0x2002
+	NodeDrain               uint16 = 0x2010
+	NodeShutdown            uint16 = 0x2011
+	ClusterShutdown         uint16 = 0x2012
+	ForceDisconnect         uint16 = 0x2013
+	AdminOperationStatus    uint16 = 0x2019
 	// Local configuration and candidate discovery extend the administration range.
 	NodeConfigGet     uint16 = 0x201a
 	NodeConfigSet     uint16 = 0x201b
@@ -52,6 +61,9 @@ const (
 	VolumeCapacityGet uint16 = 0x201e
 	VolumeGrowInfo    uint16 = 0x201f
 	VolumeGrow        uint16 = 0x2020
+	UserS3KeyList     uint16 = 0x2025
+	UserS3KeySet      uint16 = 0x2026
+	UserS3KeyDelete   uint16 = 0x2027
 	UserList          uint16 = 0x2021
 	UserCreate        uint16 = 0x200b
 	UserUpdate        uint16 = 0x200c

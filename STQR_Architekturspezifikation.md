@@ -26,14 +26,14 @@
 8. **Gleichberechtigte Nodes:** Kein dauerhaft bevorzugter Master. Ein nur für die Generation gewählter Plan-Koordinator; der laufende Datenpfad ist unabhängig von ihm.
 9. **Buckets und Multi-Tenancy:** Admin-gesteuerte Bucket-Policies, User-Freigaben, Quotas, HDD-/SSD-/RAM-Basisspeicher, optionale RAM-Read-Caches und später Erasure Coding.
 10. **HTTP-Daemon mit Basic Auth**, integriertem Dashboard, administrativer HTTP-API und WebSocket-Upgrade. Jede binäre WebSocket-Nachricht enthält genau eine STQR-Nachricht; ein gemeinsamer Codec dient Clients, Admin und Nodes.
-11. **Go-Implementierung** mit C-, Rust- und Go-Clientbibliotheken, FUSE-Frontend, lokal betreibbarem S3-Gateway, einer Blockdevice-Library zur späteren QEMU-Einbindung, optionalem NBD-Frontend sowie Admin-Dashboard.
+11. **Go-Implementierung** mit C-, Rust- und Go-Clientbibliotheken, FUSE-Frontend, direkt integriertem S3-HTTP-Endpunkt, einer Blockdevice-Library zur späteren QEMU-Einbindung, optionalem NBD-Frontend sowie Admin-Dashboard.
 12. **Umfassende automatisierte Verifikation:** Unit-, Property-, Recovery-, Fault-Injection-, Last- und Stresstests einschließlich sehr kleiner Test-Volumes im MiB-Bereich.
 
 ### 1.2 Nichtziele der ersten Iteration
 
 - STQR ist **keine SQL-/KV-Datenbank** und bietet keine Abfrage- oder Multi-Object-Transaktionsengine.
 - Keine verteilten Transaktionen über mehrere Objekte/Buckets.
-- Eigene optimierte FUSE-/S3-/Blockdevice-Libs sind verbindlicher Umfang. Fremde Storage-ABI-/Wire-Drop-in-Kompatibilität ist kein Projektziel. S3 umfasst bereits im ersten Frontend-Release LIST und Multipart neben PUT/GET/HEAD/DELETE.
+- Eigene optimierte FUSE-/S3-/Blockdevice-Libs sind verbindlicher Umfang. Fremde Storage-ABI-/Wire-Drop-in-Kompatibilität ist kein Projektziel. Der integrierte S3-Endpunkt umfasst zunächst PUT/GET/HEAD/DELETE und LIST einschließlich Prefix/Pagination sowie Range-GET. Multipart und weitergehende S3-Funktionen sind optionale spätere Erweiterungen.
 - Keine Garantie unbegrenzter Schreibverfügbarkeit bei Netzwerkpartitionen (Konsistenz und Durable Ownership haben Vorrang).
 - Erasure Coding, komplexe Multi-Reader-Cache-Kohärenz und vollständige POSIX-Semantik sind zunächst **vorbereitet**, aber nicht Voraussetzung für ein erstes Release.
 - „Zero Overhead“ ist ein **Optimierungsziel**, kein wörtlich erreichbarer Zustand: Authentifizierung, Framing, Checksummen, Index, Kopiergrenzen und Persistenz verursachen unvermeidliche Kosten.
@@ -63,7 +63,7 @@
 ```text
                        native apps / databases / VMs
                          |       |       |
-                       Go SDK  C/Rust   S3/FUSE/NBD gateways
+                       Go SDK  C/Rust   S3 (Node-HTTP) / FUSE / NBD
                          \       |       /
                           STQR native client
                                  |
@@ -1099,7 +1099,7 @@ SubscriptionDescriptor = subscription:ID,client_session:ID,object:ObjectRef,
                          version:u64,principal:ID,control_revision:u64
 ```
 
-Enums: NodeState `0 ACTIVE,1 DRAINING,2 PAUSED,3 STOPPING,4 JOINING,5 EXCLUDED`; VolumeState `0 PENDING,1 ACTIVE,2 DRAINING,3 DETACHED,4 FAILED`; Class `0 HDD,1 SSD,2 RAM,3 RAMCACHE`; StorageStrategy `0 HDD,1 SSD,2 RAM,3 CACHE`; Role `0 PRIMARY,1 REPLICA,2 READ_CACHE,3 EC_DATA,4 EC_PARITY`; RangeState `0 STABLE,1 PREPARED,2 COPYING,3 CATCHING_UP,4 FENCED,5 LOST`; Compression `0 RAW,1 GZIP,2 LZ4,3 XZ`; PlacementMode `0 COUNT,1 EVERYWHERE`; Accounting `0 LOGICAL,1 PHYSICAL`; Redundancy `0 SINGLE,1 REPLICATION,2 ERASURE`; UserRole `0 USER,1 ADMIN,2 NODE`; Health `0 OK,1 WARN,2 ERROR`; Scope `0 LOCAL,1 CLUSTER`; AdminAck-State `0 REQUESTED,1 RUNNING,2 FULFILLED,3 FAILED`; ReasonBits `bit0 JOIN,1 DRAIN,2 VOLUME_ADD,3 VOLUME_REMOVE,4 LOAD,5 CAPACITY,6 POLICY,7 FORCE_DISCONNECT,8 ADMIN_TRIGGER`; Purpose `0 GUARANTEE,1 INFLIGHT,2 MIGRATION,3 OPERATING`; Bucket-State `0 ACTIVE,1 LOCKED,2 DELETING`; RebuildPhase `0 IDLE,1 ELECTING,2 COLLECTING,3 SEALED,4 PREPARED,5 MIGRATING,6 FINALIZING`; shutdown `0 DRAIN,1 SHORT,2 CLUSTER`. Permissions Bits ab 0: READ, WRITE, APPEND, DELETE, ADMIN_READ. Keine native LIST-Berechtigung. `Grant` kann nur Admin vergeben; eine Rolle ergibt sich niemals aus einem vom Client behaupteten Enum.
+Enums: NodeState `0 ACTIVE,1 DRAINING,2 PAUSED,3 STOPPING,4 JOINING,5 EXCLUDED`; VolumeState `0 PENDING,1 ACTIVE,2 DRAINING,3 DETACHED,4 FAILED`; Class `0 HDD,1 SSD,2 RAM,3 RAMCACHE`; StorageStrategy `0 HDD,1 SSD,2 RAM,3 CACHE`; Role `0 PRIMARY,1 REPLICA,2 READ_CACHE,3 EC_DATA,4 EC_PARITY`; RangeState `0 STABLE,1 PREPARED,2 COPYING,3 CATCHING_UP,4 FENCED,5 LOST`; Compression `0 RAW,1 GZIP,2 LZ4,3 XZ`; PlacementMode `0 COUNT,1 EVERYWHERE`; Accounting `0 LOGICAL,1 PHYSICAL`; Redundancy `0 SINGLE,1 REPLICATION,2 ERASURE`; UserRole `0 USER,1 ADMIN,2 NODE`; Health `0 OK,1 WARN,2 ERROR`; Scope `0 LOCAL,1 CLUSTER`; AdminAck-State `0 REQUESTED,1 RUNNING,2 FULFILLED,3 FAILED`; ReasonBits `bit0 JOIN,1 DRAIN,2 VOLUME_ADD,3 VOLUME_REMOVE,4 LOAD,5 CAPACITY,6 POLICY,7 FORCE_DISCONNECT,8 ADMIN_TRIGGER,9 GLOBAL_CONTROL`; Purpose `0 GUARANTEE,1 INFLIGHT,2 MIGRATION,3 OPERATING`; Bucket-State `0 ACTIVE,1 LOCKED,2 DELETING`; RebuildPhase `0 IDLE,1 ELECTING,2 COLLECTING,3 SEALED,4 PREPARED,5 MIGRATING,6 FINALIZING`; shutdown `0 DRAIN,1 SHORT,2 CLUSTER`. Permissions Bits ab 0: READ, WRITE, APPEND, DELETE, ADMIN_READ. Keine native LIST-Berechtigung. `Grant` kann nur Admin vergeben; eine Rolle ergibt sich niemals aus einem vom Client behaupteten Enum.
 
 Statistik-Layouts sind exakt §7.1; insbesondere die verschachtelten IOStats-Felder und festen Arrays sind Teil des binären Schemas. `StatsPart.data` ist eine Partition der vollständig serialisierten StatsSnapshot-Bytefolge, kein JSON. Location.volume darf Null sein, wenn die Node das konkrete Volume innerhalb ihrer reservierten Kontingente lokal wählt; tatsächliche Volume-Zuordnung erscheint im StatsSnapshot. Bei expliziter Reservierung/Pinning muss die ID übereinstimmen.
 
@@ -1135,7 +1135,7 @@ GOAWAY-Reason `0 DRAINED,1 SHORT_SHUTDOWN,2 CLUSTER_SHUTDOWN,3 EXCLUDED,4 PROTOC
 
 ### 13.5 Client-Objektnachrichten
 
-Normale Clients bekommen ausschließlich Objektzugriff und die dafür nötigen Routing-/Bucketinformationen. Kein Cluster-Stats, Volume-/Userzugriff oder serverseitiger Dateisystem-/S3-Namespace.
+Normale Clients bekommen ausschließlich Objektzugriff und die dafür nötigen Routing-/Bucketinformationen. Kein Cluster-Stats oder Volume-/Userzugriff über die native Bucket-Verbindung. Der integrierte S3-HTTP-Endpunkt bildet seinen Key-Namespace separat auf normale Bucket-Objekte ab.
 
 | Code | Name / Modus | Body und erfolgreiche Antwort |
 |---|---|---|
@@ -1159,6 +1159,7 @@ Normale Clients bekommen ausschließlich Objektzugriff und die dafür nötigen R
 | 0x0114 | SUBSCRIPTION_ACK / F, später | `subscription:ID,through_cursor:u64` |
 | 0x0115 | BUCKET_MAINTENANCE / Q, Single-Node | `object:ObjectRef` (OID=0, nur Bucket relevant) => leer; exklusive Wartung an die Bucket-WebSocket-Sitzung binden |
 | 0x0116 | BUCKET_SCAN / Q, Single-Node | `object:ObjectRef` (OID=0), `after:Opt(OID),limit:u32` (1..1000) => `count:u32,(id:OID,info:ObjectInfo)*,next:Opt(OID)`; nur in eigener Wartungssitzung |
+| 0x0117 | BUCKET_OBJECT_LIST / Q | `object:ObjectRef` (OID=0), `after:Opt(OID),limit:u32` (1..1000) => `count:u32,(id:OID,info:ObjectInfo)*,next:Opt(OID)`; normale READ-Inventur ohne Wartungssperre, aktuelle Sicht in OID-Reihenfolge, keine Namen-/Prefix-Sortierung |
 
 CAS-Scope `0 RANGE,1 OBJECT`; OP_STATUS-State `0 UNKNOWN,1 PENDING,2 COMMITTED,3 FAILED,4 EXPIRED`. UNKNOWN/EXPIRED ist keine Zusicherung „nie ausgeführt“. ObjectUpdate-Change `0 REPLACE,1 RANGE_WRITE,2 APPEND,3 TRUNC,4 DELETE,5 RESYNC_REQUIRED`. SUBSCRIBE/UNSUBSCRIBE/ACK sind in v1 reserviert: Q => 501; F-Varianten werden mangels ausgehandeltem Feature nicht gesendet.
 
@@ -1233,6 +1234,259 @@ Nur authentifizierte NODE-Rolle, gebunden an Membership-Epoch. In der Tabelle be
 | 0x1043 | GLOBAL_APPLY / Q | `schema:u16=1,decision:Decision` => `proof:Proof`; erst nach dauerhaftem COMMIT, Veröffentlichung des System-Heads und Installation der Laufzeitsicht |
 | 0x1044 | GLOBAL_RELEASE / Q | `schema:u16=1,decision:Decision,applied:Blob(Certificate)` => `proof:Proof`; genau ALL-APPLIED, wiederholbar auch nach Freigabe |
 | 0x1045 | GLOBAL_ABORT / Q | `claim:GlobalClaim` => `proof:Proof`; persistierte Absage einer nicht committed Runde, auch ohne vorherige Reservierung |
+| 0x1046 | GLOBAL_NODE_INFO / Q | `schema:u16=1` => `schema:u16=1,node:ID,metadata_volume:ID,class:u8,current:Blob(NodeHelloAck),head:Digest,system_image:Digest` |
+| 0x1047 | GLOBAL_SYSTEM_CHUNK / Q | `schema:u16=1,object:Digest,offset:u64,total:u64,data:Blob,final:Bool` => `next_offset:u64`; höchstens 1 MiB Daten, finaler Inhalt gegen Objekt-Digest geprüft |
+| 0x1048 | FROZEN_BUCKET_USAGE / Q | `claim:Blob(GlobalClaim),bucket:ID` => `logical_live_bytes:u64`; nur für die im eigenen dauerhaft reservierten Slot eingefrorenen Buckets, gebundener Absender muss Initiator sein |
+| 0x1049 | PURGE_DELETED_BUCKET / Q | `claim:Blob(GlobalClaim),bucket:ID,description_revision:u64` => leer nach Entfernung aller lokalen Objekt-/Retry-Einträge; nur bereits committed DELETE-Intents, Mutationslock zwischen begrenzten Seiten freigeben |
+| 0x104a | VOLUNTARY_LEAVE / Q | `node:ID` => leer erst nach ALL-RELEASED und dauerhaft abgeschlossenem Koordinatorauftrag; der gebundene Absender muss selbst ausscheiden |
+| 0x104b | APPLY_BUCKET_CODEC / Q | `claim:Blob(GlobalClaim),bucket:ID,description_revision:u64,compression:u8` => leer nach atomaren physischen Umschreibungen aller eigenen Live-Objekte; Versionen und Retry-Ergebnisse bleiben unverändert |
+| 0x104c | CLUSTER_STOP_CERT / Q | `schema:u16=1,decision:Decision,applied:Blob(Certificate)` => leer nach dauerhafter Übernahme des STOP; alle Mitglieder müssen im Zertifikat vertreten sein und der eigene APPLIED-Beleg muss exakt übereinstimmen |
+| 0x104d | BUCKET_OWNER_INVENTORY / Q | `schema:u16=1,bucket:ID,user:ID,username:Text,required_permission:u32,owner_map_digest:Digest,after:Opt(OID),limit:u32` => `records:Vec(oid:OID,version:u64,length:u64,compression:u8),more:Bool,[next:OID]`; höchstens 1000 Records, aktuelle Account-/ACL-Prüfung, nur lokale autoritative Objekte, System-Bucket ausgeschlossen |
+| 0x104e | VERIFY_FRONTEND_OPERATION / Q | `operation:ID,binding_digest:Digest` => leer bei tatsächlich aktivem, bereits authentifiziertem Frontend-Auftrag; Ursprungsnode prüft Context, Bucket und ursprüngliche Berechtigung erneut |
+| 0x1050 | RANGE_RESERVE / Q | `plan:RangeHandoffPlan` => leer; dauerhafte Reservierung der vollständigen bisherigen Parent-Range und physischer Zielkapazität |
+| 0x1051 | RANGE_SNAPSHOT_BEGIN / Q | `schema:u16=1,plan:Digest,final:Bool` => leer |
+| 0x1052 | RANGE_OBJECT_BEGIN / Q | `schema:u16=1,plan:Digest,transfer:ID,record:RangeObjectRecord` => leer |
+| 0x1053 | RANGE_OBJECT_CHUNK / Q | `schema:u16=1,plan:Digest,transfer:ID,offset:u64,data:Blob` => leer; höchstens 1 MiB je Chunk, Sparse-Lücken werden ausgelassen |
+| 0x1054 | RANGE_OBJECT_END / Q | `schema:u16=1,plan:Digest,transfer:ID,digest:Digest` => leer; kanonische Version vor Import-Memo dauerhaft schreiben |
+| 0x1055 | RANGE_REQUEST_RECORDS / Q | `schema:u16=1,plan:Digest,records:Vec(RangeRequestRecord)` => leer; maximal 64 Records |
+| 0x1056 | RANGE_SNAPSHOT_END / Q | `schema:u16=1,plan:Digest,digest:Digest` => `digest:Digest` für Bulk bzw. `proof:Proof` für finalen READY-Stand |
+| 0x1057 | RANGE_COMMIT / Q | `commit:RangeHandoffCommit` => `proof:Proof`; bindet exakt beide READY-Belege |
+| 0x1058 | RANGE_DONE / Q | `schema:u16=1,plan:Digest` => `proof:Proof`; Ziel erst nach Source-Cleanup, Source beendet nach Zielbeleg |
+| 0x1059 | RANGE_OBSERVE / Q/F | `plan:Blob(RangeHandoffPlan),commit:Blob(RangeHandoffCommit)` => leer bei Q; nicht beteiligte Nodes vereinigen committed Map-Ausschnitte |
+| 0x105a | RANGE_ARCHIVE / Q | `offset:u64` => `next_offset:u64,done:Bool,records:Vec(Blob(plan:Blob,commit:Blob))`; maximal 24 Records bzw. 1 MiB |
+| 0x105b | RANGE_OBJECT_PROBE / Q | `schema:u16=1,plan:Digest,record:RangeObjectRecord` => `present:Bool,[digest:Digest]`; Memo und aktuelle kanonische Version prüfen |
+| 0x105c | RANGE_ABORT / Q | `plan:RangeHandoffPlan` => leer; vor FENCE/READY/COMMIT auf beiden Teilnehmern dauerhaft absagen, auch ohne vorheriges RESERVE; verspätete RESERVE derselben Runden-ID bleiben abgewiesen |
+| 0x105d | RANGE_RAM_STATE / Q | `schema:u16=1,plan:Digest` => `schema:u16=2,holding_boot:ID,source_boot:ID,live_ready:Bool,committed:Bool,digest:Digest,ready_proof:Opt(Proof),logical_used:u64`; READY ist nur im haltenden RAM-Prozess live |
+| 0x105e | RANGE_RAM_LOST_OFFER / Q | `plan:Blob(RangeHandoffPlan),old_source_boot:ID,new_source_boot:ID` => leer; schließt einen nicht committed RAM-Offer nach bestätigtem Prozesswechsel und ohne überlebenden versiegelten Zielstand |
+| 0x105f | RANGE_RAM_LOST_COMMIT / Q | `commit:Blob(RangeHandoffCommit),old_source_boot:ID,new_source_boot:ID` => `proof:Proof`; übernimmt ausschließlich die historische Commit-Entscheidung bei Verlust beider alten RAM-Kopien und hält die verlorene Runtime unlesbar |
+
+
+| 0x1060 | QUOTA_CHECKPOINT / Q | `schema:u16=1,claim:Blob(GlobalClaim),buckets:Vec(bucket:ID,measure_usage:Bool)` => JSON `QuotaNodeSnapshot` (siehe unten); nur unter exakt eigenem ALL-Slot, Nutzungszählung nur unter Bucket-Fence oder für einen noch nicht angelegten Bucket |
+| 0x1061 | QUOTA_REQUEST / Q | `schema:u16=1,transfer:ID,bucket:ID,quota_epoch:ID,needed:u64` => `granted:Bool,[grant:Blob(QuotaGrant)]`; Spender bucht freie Credits vor der Antwort dauerhaft aus |
+| 0x1062 | QUOTA_GRANT / Q | `grant:QuotaGrant` => `received:Proof`; Empfänger schreibt die Gutschrift vor der Antwort dauerhaft, Wiederholung bleibt idempotent |
+| 0x1063 | QUOTA_ACK / Q | `schema:u16=1,transfer:ID,received:Proof` => leer; nur der gebundene Empfänger bestätigt den Transfer |
+| 0x1064 | BUCKET_OWNER_USAGE / Q | `schema:u16=1,bucket:ID,user:ID,username:Text,owner_map_digest:Digest` => `used:u64`; nur delegierte aktuelle Admins, pro Owner inkrementell gepflegte Live-Bytes; Map-Abweichung oder notwendiger unerreichbarer Owner liefert 503 statt Teilmessung |
+| 0x1065 | FORCE_ADMIN_REQUEST / Q | `schema:u16=1,user:ID,username:Text,operation:ID,body:Blob(FORCE_DISCONNECT)` => `status:u16,result:Blob`; Empfänger prüft aktuellen Admin selbst und koordiniert nur als niedrigste verbleibende Node-ID |
+| 0x1066 | FORCE_RANGE_ENVELOPE / Q | `schema:u16=1,claim:Blob(GlobalClaim),opcode:u16,body:Blob` => Antwort des inneren Range-Kommandos; ausschließlich unter exakt eigenem FORCE-Slot und mit gebundenem Peer, nur Snapshot-/Probe-/State-/Commit-Recovery |
+| 0x1067 | FORCE_RANGE_RECOVERY / Q | `schema:u16=1,claim:Blob(GlobalClaim),action:u8,payload`; `0:offset:u64` => JSON `{Next,Done,Reports}` (max. 24 Teilnehmerstände); `1:plan:Blob(RangeHandoffPlan)` bricht unbestätigtes Angebot ab; `2:plan:Blob` beendet einen durch Ausschluss unvollendbaren committed Teilnehmerclaim; `3:plan:Blob` vervollständigt einen bestehenden Source-COMMIT am überlebenden Ziel; `4:plan:Blob` sichert einen versiegelten Zielstand zur Übernahme durch den FORCE-Systemgraph; Aktionen 1..4 => leer |
+| 0x1068 | FORCE_CONTROL_STATE / Q | `schema:u16=1` => JSON `{Schema,Node,Current,Slot,Committed}`; COMMIT samt Proposal, ALL-READY und eigenem durable COMMIT-Proof; nur gebundene Kontrollteilnehmer |
+| 0x1069 | FORCE_CONSTRUCTION / Q | `claim:Blob(GlobalClaim)` => leer nach dauerhafter Konstruktionsbarriere; nur Initiator des exakt reservierten FORCE-Slots |
+| 0x1070 | FORCE_ADOPT_COMMIT / Q | `schema:u16=1,user:ID,username:Text,request:Blob(FORCE_DISCONNECT-Body),proposal:Blob(GlobalProposal),ready:Blob(Certificate),witness:Proof` => `applied:Proof`; übernimmt ausschließlich eine bereits verbindliche, lokal vorbereitete Elternentscheidung |
+
+
+
+Die zusätzlichen Q-Übergabepfade beschreiben den konkreten Single-Primary-Prototyp.
+Sie setzen NODE_HELLO voraus und ersetzen die gesondert geplanten P-Varianten
+nicht stillschweigend. Der Plan-Digest ist SHA-256 seiner Binärdarstellung.
+
+
+Die PG-Administration verwendet eigene Nachrichten; die bestehende Objektclient-
+Policy wird dadurch nicht stillschweigend erweitert:
+
+| Opcode | Nachricht | Body / Antwort |
+|---|---|---|
+| 0x2030 | PLACEMENT_GROUP_LIST / Q | `schema:u16=1,after_group_id:Text,limit:u32` => `Text(JSON{groups,next})`, maximal 1000 Gruppen |
+| 0x2031 | PLACEMENT_GROUP_SET / Q | `schema:u16=1,group:ID,expected_revision:u64,name:Text,nodes:Blob(JSON PlacementNode[])` => vorhandenes Admin-ACK; Revision 0 legt an; geänderte benutzte Maske erhält zunächst Desired-Status (202) |
+| 0x2032 | PLACEMENT_GROUP_DELETE / Q | `schema:u16=1,group:ID,expected_revision:u64` => Admin-ACK; referenzierte/gerade umgestellte Gruppen liefern 409 |
+| 0x2033 | BUCKET_SET_PLACEMENT_GROUP / Q | `schema:u16=1,bucket:ID,expected_policy_version:u64,group:Opt(ID)` => Admin-ACK; Änderung läuft über Desired-Policy |
+
+Bestehende Ranges behalten ihre effektive Maskenversion, bis ihre Daten sicher
+übergeben wurden. Erst nach allen betroffenen Bucket-Übergängen aktiviert eine
+ALL-Änderung die neue PG-Maske. Die System-PG wird ausschließlich durch die
+Membership gepflegt. Lokale Node-Admin-Wrapper dürfen diese globalen Nachrichten
+nicht ausführen; NODE_SHUTDOWN erlaubt dort nur DRAIN/SHORT (0/1), kein CLUSTER (2).
+
+Der konkrete globale Kontrollpfad verwendet zusätzlich Kind `3=CLUSTER_SHUTDOWN`.
+Sein unveränderlicher System-Manifest bindet Shutdown-ID, Initiator, Membership-Epoch
+und Kontrollsequenz. PREPARE hält neue Objektmutationen an und flusht alle lokalen
+Volumes vor READY. Der Slot erhält diese Sperre über Abstürze; nach Veröffentlichung
+erhält sie der committed Manifest bis zum tatsächlichen Prozessneustart. STOP wird
+erst nach ALL-APPLIED/ALL-RELEASE verteilt. Eine Node ohne STOP bleibt angehalten;
+das gespeicherte Zertifikat wird nach Reconnect nachgeliefert. Der lokale STOP-Marker
+kennzeichnet beim nächsten Prozessstart die erfüllte Shutdown-ID. Alte Zertifikate
+dürfen diesen neuen Prozess nicht erneut beenden. Membership und Placement ändern
+sich dabei nicht. Eine Zustell-Deadline für STOP kann nur die Nachlieferung verzögern,
+niemals eine fehlende READY-Bestätigung ersetzen.
+
+```text
+RangeHandoffPlan = schema:u16=2,before:Blob(MapPatch),after:Blob(MapPatch),
+                   source:ID,target:ID,volume:ID,moving_start:OID,
+                   moving_prefix:u16,compression:u8,physical_reserve:u64,attempt:ID
+RangeHandoffCommit = schema:u16=2,plan:Digest,snapshot:Digest,
+                     source_ready:Proof,target_ready:Proof,logical_used:u64
+RangeObjectRecord = bucket:ID,object:OID,version:u64,length:u64,
+                    compression:u8,deleted:Bool
+RangeRequestRecord = request:ID,record:RangeObjectRecord,
+                     fingerprint:Digest,offset:u64
+```
+
+`attempt` ist eine vor der ersten Reservierung erzeugte, von Retries unverändert
+übernommene Runden-ID. Nach bestätigter Absage darf derselbe Parent mit einer
+neuen Runden-ID erneut geplant werden. Plan-Schema 1 ohne `attempt` wird nur für
+ältere Journalbelege dekodiert. Ein vor FENCE abgelehntes Ziel darf keinen
+unauflösbaren aktiven Source-Slot zurücklassen. Ungeclaimte Kopierfragmente
+abgebrochener Angebote werden seitenweise aufgeräumt; aktuelle lokale Eigentümer
+und neue aktive Übergaben haben dabei Vorrang vor der Bereinigung.
+
+Globale Quota-/Policy-Änderungen verwenden Claim-Schema 2: Hinter `required`
+folgt `frozen_buckets:Vec(ID)` (1..64, kanonisch sortiert und eindeutig).
+Diese Liste ist Bestandteil des Entscheidungsdigests und des Kontrolljournals.
+RESERVE wartet unter dem lokalen Mutationslock laufende Writes ab; danach dürfen
+nur diese Buckets bis RELEASE/ABORT keine neuen Writes bestätigen. Reads und
+andere Buckets bleiben zugänglich. Quota-Verkleinerungen summieren unter dieser
+ALL-Barriere frische autoritative Nutzung aller Teilnehmer; eine lokal leere
+Admin-Node darf daher keine zu kleine globale Quota bestätigen. Claim-Schema 1
+bleibt die Darstellung ohne Bucket-Fence.
+
+Der ausdrückliche FORCE-Pfad verwendet Kind `4` und Claim-Schema `3`.
+Nach `required` folgen `frozen_buckets:Vec(ID)` (auch leer), dann
+`operation:ID,administrator:ID,username:Text,accept_data_loss:Bool,external_fencing_confirmed:Bool,nodes:Vec(ID)`.
+Die Ausschlussliste ist nichtleer, eindeutig und nach Node-ID sortiert; beide
+Freigaben müssen wahr sein. Alle verbleibenden Mitglieder sind erforderlich.
+Der Entscheidungsdigest bindet diese Felder einschließlich des administrativen
+Auftrags. Ein FORCE-Slot sperrt neue lokale Objektmutationen und normale
+Range-Übergänge. Aufräumarbeiten prüfen diese Sperre unmittelbar vor jeder
+physischen Löschung unter demselben Mutationslock erneut.
+
+Unter ALL-Survivor-Reservierung werden unterbrochene Übergaben abgeglichen:
+Unbestätigte Angebote mit lebender Quelle können dauerhaft abgesagt werden,
+auch nach READY; das Ziel wird zuerst geschlossen. Existierende COMMITs werden
+niemals zurückgenommen. Überleben beide Teilnehmer, wird der bestehende COMMIT
+am Ziel vervollständigt, bevor Quota-Wasserstände erfasst werden. Ist ein
+committed Ziel ausgeschlossen, ist seine obsolete Quellkopie kein Ersatz für
+möglicherweise neuere Ziel-Writes. Ein überlebender versiegelter Zielstand einer
+ausgeschlossenen Quelle wird privat festgehalten und erst durch den neuen
+Systemgraph autoritativ. Unversiegelte Fragmente begründen keine Autorität.
+
+Vor Änderungen an Range-Daten wird unter ALL-Survivor-Reservierung zusätzlich
+auf jeder verbleibenden Node die dauerhafte Konstruktionsbarriere 0x1069 gesetzt.
+Eine davor abgebrochene Ausschlussrunde stellt den vorherigen Kontrollslot und
+Koordinatorauftrag wieder her; nach Beginn der Konstruktion wird dieselbe Runde
+wiederaufgenommen, statt vorbereitete Übernahmen stillschweigend zu verwerfen.
+
+Claim-Schema `4` erweitert Schema 3 am Ende um `expected_membership:u64`:
+Dies ist die ursprünglich vom Administrator beobachtete Epoch. Wird vorher ein
+bereits verbindlicher Membership-COMMIT rekonstruiert, bleibt die ursprüngliche
+Anfrage einschließlich Operations-ID daran gebunden. Schema `5` ergänzt danach
+`already_retired:Vec(ID)` für Opfer, deren normales kooperatives Ausscheiden durch
+einen bekannten vorangegangenen COMMIT bereits entschieden war. Diese Liste
+benötigt einen lokal vorhandenen Membership-Beleg und darf keine beliebigen
+historischen oder bereits ausgeschlossenen IDs einschleusen. Schema-3-Digests
+bleiben unverändert.
+
+0x1068 sammelt tatsächliche globale COMMIT-Belege einschließlich des exakten
+ALL-READY-Zertifikats; READY allein wird niemals als COMMIT ausgegeben. Über
+0x1070 übernehmen überlebende Teilnehmer dieselbe bereits verbindliche
+Entscheidung vor der neuen Ausschlussrunde. Das umfasst Administration,
+Cluster-Shutdown, Beitritt, kooperativen Austritt und einen früheren FORCE-COMMIT.
+Ein nur auf dem gebundenen Beitrittskandidaten vorhandener COMMIT wird ebenfalls
+berücksichtigt. Ein bereits durch den Eltern-COMMIT entzogener Adminzugriff bleibt
+entzogen. Überlagerte angewendete Elternentscheidungen werden als dauerhafte
+Vorfahren archiviert; frühere Operations-IDs bleiben nach weiterem FORCE und
+Neustart beantwortbar. Dies ersetzt keine fehlenden Belege ausgeschlossener Nodes.
+
+Noch nicht vollständig umgesetzt ist die Ablösung einer **uncommitted** früheren
+FORCE-Konstruktion sowie eines gebundenen, noch uncommitted Beitritts. Diese Fälle
+blockieren bzw. antworten 409; private versiegelte Daten dürfen nicht zur bloßen
+Fortsetzung der Administration verworfen werden.
+
+
+Für diese Neuzuordnung ergänzt QUOTA_CHECKPOINT Schema `2` nach dem Claim um
+`planned_system_image:Digest`. Die Messung benutzt genau diesen vorab übertragenen
+Kandidaten, ohne ihn zu veröffentlichen. Neu als LOST markierte Ranges zählen
+keine zu löschenden alten Kopien; übernommene versiegelte Zielobjekte zählen mit.
+FORCE erzeugt neue Quota-Epochen aus dieser Belegung. Unbestätigte Transfers alter
+Epochen bleiben historische Debits; sie werden weder erstattet noch erneut
+anwendbar und blockieren keine spätere Administration. Bereits reparierte
+LOST-Ranges werden durch verspätete historische PREPAREs nicht erneut bereinigt.
+
+
+
+Der konkrete logische Quota-Pfad verteilt eine endliche Absolute-Quota als
+Schreibbudgets auf die Nodes. Die Summe aller Budgets entspricht der Bucket-Grenze.
+Eine Node bestätigt Wachstum ausschließlich aus ihrem eigenen Budget; bereits
+vorhandenes Budget benötigt keinen erreichbaren zentralen Koordinator. Bei Mangel
+sammelt ein unabhängiger Worker freie Credits anderer Mitglieder ein. Kleine
+APPENDs erhalten nach Möglichkeit wiederverwendbare Budgets von mindestens 64 KiB.
+Sind alle befragten Mitglieder erreichbar und keine ausreichenden Credits frei,
+folgt 507. Eine unerreichbare erforderliche Credit-Quelle wird nicht durch einen
+Timeout für verloren erklärt; der Schreibzugriff wartet mit 503/Retry.
+
+Ein Credit-Transfer hat kein automatisches Rückbuchungsdatum: erst DEBIT beim
+Spender flushen, dann RECEIVE beim Empfänger flushen, dann ACK beim Spender.
+Verlorene Antworten werden durch erneutes Senden desselben Grants geheilt.
+Dauerhafte Transfers stehen im lokalen `quota.stqr`-Journal. Ein globaler
+Checkpoint darf erst beginnen, wenn alle ausgegebenen Grants bestätigt und alle
+Range-Übergaben abgeschlossen sind. Der System-Manifest enthält je endlichem
+Bucket eine `quota_epoch:ID`, die Grenze und je Node `bytes`, `grants` und `ranges`:
+Die letzten beiden Felder sind Journal-Sequenz-Watermarks. Historische Transfers
+werden nach dem Checkpoint nicht erneut verrechnet. Änderungen der Grenze erzeugen
+eine neue Quota-Epoch; auch A→B→A darf keine alten Grants wieder gültig machen.
+Quota-Verkleinerungen verwenden die bestehende ALL-Bucket-Fence.
+
+`RangeHandoffCommit.logical_used` zählt die Live-Objektlängen des versiegelten
+Snapshots; Tombstones und Retry-Records zählen nicht. Quelle und Ziel berechnen
+diesen Wert selbst und binden ihn in ihre READY-Journale. Die Quelle gibt dieses
+Budget erst mit ihrem COMMIT ab; das Ziel erhält es erst mit seinem COMMIT. Bei
+Migration innerhalb derselben Node bleibt das Gesamtbudget unverändert.
+Commit-Schema 1 wird für alte Belege mit `logical_used=0` dekodiert; aktuelle
+Übergaben schreiben Schema 2. Das Objektclient-Policy-/Map-Format ändert sich nicht.
+
+```text
+QuotaGrant = schema:u16=1,transfer:ID,bucket:ID,quota_epoch:ID,
+             source:ID,target:ID,bytes:u64,debit:Proof
+QuotaNodeSnapshot (JSON) = {"Node":ID,"Grants":u64,"Ranges":u64,
+  "Buckets":[{"Bucket":ID,"Allowance":u64,"Used":u64},...]}
+```
+
+Die lokale logische Belegung wird pro Bucket als einzelner Zähler gecacht und
+mit erfolgreichen Storage-Commits fortgeschrieben. Retry-Ergebnisse verändern ihn
+nicht erneut. Ein neues Placement bzw. ein Neustart erzwingt eine frische Zählung.
+Der administrative Messpfad liest diese Werte mit gebundenem Owner-Map-Digest;
+er ist kein Credit-/Aufnahmebeleg. Warme Messungen laufen ohne Objektindex-Scan.
+
+Auf Volume-Ebene gibt `GuaranteedAllowance` ein begrenztes physisches Budget aus
+der eigenen Bucket-Reserve frei. Es ist unabhängig von `InFlightAllowance` und darf
+keine fremde Bucket-Reserve verbrauchen. Der Verbrauch wird innerhalb des physischen
+Commits anhand des Netto-Wachstums verrechnet; ein Retry belastet ihn nicht erneut.
+Das alte `UseGuaranteed` erlaubt dem vertrauenswürdigen Besitzer den Zugriff auf die
+gesamte Volume-Reserve und eignet sich deshalb nicht für geteilte Bucket-Garantien.
+Persistente Bucket-Reserveverteilung und Wiederherstellung benötigen zusätzlich
+entsprechende Allokationsbelege; das Budget-Argument allein ersetzt diese nicht.
+
+Die physische Aufnahme kann unabhängig davon 507 melden. Garantierte physische
+Kapazität und endliche physische Bucket-Quotas werden durch logische Credits
+nicht zugesichert; sie benötigen eigene physische Reservierungen.
+
+Der Snapshot-Digest bindet in Übertragungsreihenfolge je Objekt
+`u8=0,RangeObjectRecord,Objektdigest` und je Retry `u8=1,RangeRequestRecord`.
+Der Objektdigest bindet `RangeObjectRecord` sowie je vorhandenem Payload-Chunk
+`offset:u64,Blob(data)`. Leere/Sparse-Objekte benötigen keine Null-Payload-Chunks.
+Bei einer committed Desired-Policy darf nur die bewegte Child-Range auf deren
+Policy-Version voranschreiten; unveränderte Geschwister behalten ihre bisherige
+Version. Reads wählen anhand dieser Range-Version die passende effektive bzw.
+Desired-Klasse und PG. Der globale Abschluss darf erst erfolgen, wenn sämtliche
+Ranges die gewünschte Version erreicht haben und die Scope-Übergaben beendet
+sind. Bereits passende lokale Ziele werden bevorzugt; eigene kanonische Daten
+werden niemals zur Umkodierung gelöscht, sondern atomar mit ihrer eigenen
+Import-Allowance umgeschrieben. Kompressionsänderungen ohne Placement-Änderung
+benötigen keine Datenwanderung; alle Teilnehmer bestätigen die physischen
+Umschreibungen vor Veröffentlichung der neuen Policy.
+
+Import-Memos liegen im privaten lokalen Index; sie ersetzen keine READY- oder
+COMMIT-Belege. Nach DONE werden sie seitenweise entfernt. Der Kontrolllog wächst
+nicht um einen dauerhaft aufzubewahrenden JSON-Eintrag für jedes kopierte Objekt.
+
+Physische Import-Reserven werden vor dem Zugriff durch Clients aus dem
+persistierten Plan und den Zielindizes rekonstruiert. Sie sind getrennt von
+garantierten Bucket-Reserven; ein Import darf nur seine eigene physische
+Allowance konsumieren. Source-Cleanup entfernt eine bestätigte physische Version,
+ohne eine logische DELETE-Version zu erfinden. Native RAM-Schreibrequests binden
+die erste Range-Runtime vor dem Senden; nach Totalverlust der einzigen RAM-Kopie
+bestätigt ein lokaler Scope erst die neue leere Runtime. Eine vorhandene Replica
+darf dadurch niemals durch einen leeren Ersatz unterschlagen werden.
+
+
 
 Diese Q-Nachrichten bilden den explizit bestätigten Teilnehmerpfad für **globale** Membership-/Admin-Entscheidungen. Sie ersetzen keinen Range-Scope und legen dessen späteren Race-/Wahlalgorithmus nicht fest. Sie sind nur nach NODE_HELLO zulässig; der gebundene Absender muss der Initiator der referenzierten Runde sein. Ein noch nicht aktivierter dauerhafter Controller antwortet 503. Unvollständiger oder widersprüchlicher Zustand erzeugt keine Erfolgsantwort. P-Nachrichten des Katalogs bleiben die gesonderten Push-Varianten; Q und P werden nicht stillschweigend als identische Feldfolgen interpretiert.
 
@@ -1314,6 +1568,9 @@ ADMIN oder ausdrücklich ADMIN_READ für reine Leseoperationen. `C` bedeutet glo
 | 0x2023 | BUCKET_QUOTA_CAPACITY / Q | `bucket:ID,strategy:u8,object_size_profile:u8,previous_overhead_ppm:u32` => `used:u64,available_physical:u64,reserved_other_physical:u64,maximum:u64,nodes:u32,overhead_ppm:u32,profiles:Vec(key:u8,label:Text,typical_bytes:u64,overhead_ppm:u32)`; ID null = neuer Bucket; Profil 255 bewahrt eine bestehende Pauschale, sonst wird sie aus dem Format berechnet |
 | 0x201e | VOLUME_CAPACITY_GET / Q / L | leer => `filesystem_available:u64,ram_available:u64,ram_limit:u64`; Available-Wert für das aktive Volume-Verzeichnis, verfügbarer System-RAM und wirksame RAM-Grenze nach optionalem Budget |
 | 0x2024 | NODE_ADMIN_REQUEST / Q/F / L | `target:ID,opcode:u16,body:Blob` => Status/Folgeheader/result des inneren Befehls; Operations-ID bleibt die ID des äußeren Requests; kein beliebiges URL-Ziel |
+| 0x2025 | USER_S3_KEY_LIST / Q | `user_id:ID` => `access_key_ids:Vec(Text)`; nur IDs, keine Secrets |
+| 0x2026 | USER_S3_KEY_SET / Q | `user_id:ID, access_key:Text, secret_key:Text` => ACK; anlegen/rotieren, eindeutige ID, idempotente Operation-ID |
+| 0x2027 | USER_S3_KEY_DELETE / Q | `user_id:ID, access_key:Text` => ACK; idempotent widerrufen |
 
 `NODE_ADMIN_REQUEST` erlaubt ausschließlich Volume-Anlegen/-Entfernen/-Rescan/
 -Vergrößern, Volume-Kandidaten/Kapazität/Wachstumsgrenzen, lokale Config-Ansicht/
@@ -1324,6 +1581,15 @@ unterscheidet Transporterfolg (äußere Antwort) und den vollständigen inneren
 Admin-Response-Body; der Dashboard-Proxy reicht dessen Status unverändert durch,
 insbesondere 201, 202 und Fehler. Das Ziel ermittelt die Rolle aus seinem
 System-Bucket, niemals aus einer mitgesendeten Rollenbehauptung.
+
+NODE_HELLO_ACK darf nach den bisherigen Feldern genau eine nichtleere `holding_boot:ID`
+als optionalen Transportzusatz enthalten. Globale Membership-/Digest-Codecs
+lassen diesen Zusatz weg. Er bindet auch rückwärts laufende Peer-Aufträge an
+den authentifizierten Prozess; ein bloßer Statistikwert ersetzt die Bindung nicht.
+Die Capabilities `8` (globaler Kontrollpfad), `16` (Range-Übergaben), `32`
+(retiring Node), `64` (FORCE-Range-Recovery) und `128` (globale FORCE-Kontroll-Recovery) ergänzen die folgenden Bits.
+Delegierte FORCE-Administration erhält einen eigenen begrenzten Dispatch-Worker,
+damit die normale Peer-Queue erforderliche Rückfragen weiter beantworten kann.
 
 HELLO-Capabilities: Bit 0 (`1`) bezeichnet Peer-Identitätsbindung/Telemetrie;
 Bit 1 (`2`) bezeichnet gezielte Node-Administration. Bit 2 (`4`) kennzeichnet einen noch nicht aufgenommenen Beitrittsknoten. Dieser liefert in HELLO und NODE_HELLO_ACK Membership-Epoch/Generation/Map-Revision 0 und eine leere Mitgliederliste; Cluster-ID und Transportidentität bleiben vorhanden. NODE_HELLO darf deshalb für die reine Vorbeitritts-Identitätsbindung membership=0 tragen. Das bestätigt keine Aufnahme oder Objekt-Autorität. Diese Bits behaupten weder
@@ -1414,7 +1680,7 @@ Ein Transport-ACK bestätigt Empfang, niemals durable Speicherung. Nach Reconnec
 
 ### 14.1 Gemeinsame Semantik
 
-Der native Store kennt ausschließlich Buckets und 256-Bit-Objekte samt vollständigen/ranged Reads/Writes, APPEND, TRUNC und CAS. FUSE-, S3- und Blockdevice-Libs **kodieren ihre Metadaten in geeigneten normalen Objekten** und verwenden dafür dieselben GET/PUT/CAS-Operationen wie für Nutzdaten. Keine gesonderte MDS-, Namensindex-, Manifest- oder S3-Metadaten-API im Daemon.
+Der native Store kennt ausschließlich Buckets und 256-Bit-Objekte samt vollständigen/ranged Reads/Writes, APPEND, TRUNC und CAS. FUSE-, S3- und Blockdevice-Libs **kodieren ihre Metadaten in geeigneten normalen Objekten** und verwenden dafür dieselben GET/PUT/CAS-Operationen wie für Nutzdaten. Keine gesonderte MDS-, Namensindex- oder Manifest-Operation im nativen Storage-Protokoll. Der im Cluster-Server integrierte S3-HTTP-Adapter verwendet dieselben normalen Objektoperationen für seine Metadaten.
 
 Die Clients besitzen eine segmentierte adaptive Map und lernen über 301/Map-Patches (§6.4). Ein bekannter beliebiger Kontakt genügt; keine vollständige Map oder Agent-Installation zum Start nötig. Langlebige Clients können relevante Patches vorladen. Zustands-/Servernamenauflösung ist Protokollhilfe, keine privilegierte fachliche Metadatenengine.
 
@@ -1466,12 +1732,17 @@ Metadaten-Copy-up speichert nur Attribute und einen Lower-Inode-Verweis mit erwa
 
 `--fsck` mit beiden Bucket-Optionen sperrt exklusiv nur den Upper, prüft dessen sichtbaren Graphen und alle verwendeten Lower-Versionen, entfernt unerreichbare Overlay-Directory-Records und sammelt unreferenzierte Upper-Objekte. Es löscht niemals Lower-Objekte. Die geöffnete reine Lower-Verbindung verhindert gleichzeitig eine Lower-Bereinigung während dieser Prüfung. Fehlerhafte/veraltete Basisreferenzen brechen vor dem Sweep ab. Automatische Online-Speicherfreigabe bleibt ausstehend. Nach abgeschlossener Lower-Wartung entfernt Upper-fsck redundante Whiteouts, deren Name im aktuellen Lower-Verzeichnis fehlt, sowie Whiteouts in opaque Verzeichnissen. Bereits im Lower vorhandene Namen bleiben maskiert; nach Entfernung eines redundanten Whiteouts wird ein später neu angelegter Lower-Name wieder sichtbar. Währenddessen keine parallelen Lower-Writes, da die Upper-Wartungssitzung den Lower nicht einfriert. Unerreichbar gewordene, aber nicht als entfernt markierte Upper-Verzeichnisrecords werden bei Lower-Verzeichniswechseln als ESTALE gemeldet und mit ihren lokalen Daten erhalten. Vollständiges Rebase und das Erfassen offline gespeicherter Upper-Abhängigkeiten durch Lower-fsck sind weiterhin offen; diese Fälle dürfen nicht als automatische Reparatur versprochen werden. Readonly-Opens erlauben mmap für PHP; PHP-`LOCK_EX` funktioniert innerhalb desselben Mounts über lokale Kernel-Locks, ohne ein verteiltes Lock-Versprechen. `touch` kann atime/mtime ausdrücklich setzen; normale Reads persistieren atime nicht.
 
-### 14.5 Eigene S3-Library und lokales Gateway
+### 14.5 Direkt integrierter S3-HTTP-Endpunkt
 
-- Die S3-Library im Package `client` implementiert den zugesagten S3-Umfang auf nativen Objekten. Ein lokaler HTTP-Gateway-Adapter ist ein optionaler Betriebsmodus desselben Daemon-Binaries, kein zusätzlicher Admin-Dienst.
-- Objektinhalte, Key-/Prefix-Index, ETags, Multipart- und Uploadzustände sind normale STQR-Objekte. LIST liest einen vom S3-Client gepflegten Index; der Storage-Server bietet keine native lexikographische Listing-Engine.
-- Das erste S3-Frontend-Release umfasst **PUT/GET/HEAD/DELETE, LIST (einschließlich Prefix/Pagination) und Multipart (Initiate/UploadPart/ListParts/Complete/Abort)**. Keyindex und Uploadzustand liegen in normalen Objekten; Konflikte werden über CAS-/Intent-Objekte aufgelöst. Vor SUBSCRIBE darf das Testfrontend den vereinbarten veralteten Cachestand nutzen, danach gilt konsistente Aktualisierung. S3-Signatur-/Credential-Mapping muss native Bucket-Rechte erhalten.
-- Standardmäßig Bind an localhost; Remote-Bind explizit auf das vorgesehene Intranet. Ein verteiltes Deployment kann mehrere Gatewayinstanzen auf denselben Buckets betreiben, sobald deren Metadatenkonflikte korrekt über CAS gelöst sind.
+- S3 ist ein integrierter Zugriffspfad des Cluster-Servers und wird unter `/s3/` im vorhandenen HTTP-Server eingebunden. Es gibt keinen separaten Gateway-Prozess und keinen zusätzlichen Listener. Anwendungen können `http://localhost:7419/s3` direkt verwenden; Apache/nginx können denselben Pfad an einem TLS-Endpunkt veröffentlichen. Proxies müssen den signierten Host, Pfad und Query unverändert weiterreichen. Die vorhandene Listen-/Subnetzkonfiguration gilt auch für S3.
+- Die fachliche Library im Package `client` bildet den S3-Namespace auf normale STQR-Objekte ab. Der HTTP-Adapter im Package `server` übernimmt Routing, SigV4 und die vorhandenen Bucket-Grants. Der native Volume-Layer benötigt keine S3-Sonderoperationen.
+- Der anfängliche, an FOP orientierte Umfang ist **PUT/GET/HEAD/DELETE, Range-GET und LIST v1/v2 einschließlich Prefix, Delimiter und Pagination**. PUT unterstützt Streams, private ACL, Content-Type, ETag, Änderungszeit und benutzerdefinierte Metadaten. Multipart, Versionierung, öffentliche ACLs, Lifecycle, CopyObject und weitere S3-Sonderfunktionen sind nicht Teil dieses ersten Umfangs und werden ausdrücklich als nicht unterstützt beantwortet.
+- Jeder S3-Key besitzt genau ein deterministisch adressiertes natives Objekt: `SHA256("stqr:s3:meta:v1:" || NUL || UTF8(key))`. Binärheader, variable Metadaten und Payload liegen gemeinsam darin. PUT staged und prüft den Inhalt vorab und veröffentlicht alles atomar per versionsgeprüftem nativen PUT. Überschreiben und DELETE geben alte Payload-Allokationen in der Volume-Transaktion frei; es gibt keine abgetrennten Payload-Objekte oder auf eine spätere S3-GC verschobene Speicherfreigabe.
+- Objektformat **STS3 v2**, Little Endian, feste Feldbreiten ohne Padding: Magic bei Offset 0 (4 Byte), Version=2 bei 4 (u16), reserviert bei 6 (u16), Statusflags bei 8 (u32), eigene native OID bei 12 (32 Byte), Payload-Länge bei 44 (u64), mtime in Unix-Nanosekunden bei 52 (u64), MD5-ETag bei 60 (16 Byte), variable Metadatenlänge bei 76 (u32). Der feste Header ist 80 Byte groß. Es folgen Key und sortierte Header-/Metadatenpaare mit Text-/Varint-Codec, anschließend die Payload. Header und variable Metadaten sind gemeinsam höchstens 64 KiB groß. Feste Felder sind direkt adressierbar; C/Rust beachten Byteordnung/unaligned Zugriffe. Range-CAS kann feste Felder ändern. DELETE ist eine native atomare Löschung samt Speicherfreigabe, keine verbleibende Löschflagge mit Payload.
+- LIST verwendet die native, nur mit READ erlaubte Objektinventur BUCKET_OBJECT_LIST (0x0117) und wertet die S3-Header/Keys der lebenden Objekte im Frontend aus. Es gibt keinen getrennten dauerhaft wachsenden Namensindex und keine Index-Einträge verwaister Uploads. Die Inventur ist nach nativer OID paginiert; Key-/Prefix-Sortierung erfolgt im S3-Layer. Ein effizienterer lexikographischer Index ist eine spätere Optimierung, keine Voraussetzung für Speicherfreigabe.
+- S3-Access-Keys werden als Unterarray im bestehenden User persistiert, nicht in einem zweiten User-/Credential-Katalog. IDs sind clusterweit eindeutig; ein User hat höchstens 32 Keys. Signing-Secrets werden mit AES-GCM unter einem aus dem Cluster-Token abgeleiteten Schlüssel versiegelt und an User-ID/Access-Key-ID gebunden. Admin-Listen und Retry-Antworten enthalten keine Secrets. Ein Cluster-Token-Wechsel benötigt eine Neuversiegelung beziehungsweise Neuerstellung der Keys. Sperren/Löschen eines Users und Entziehen eines Bucket-Grants gelten auch für S3. GET/HEAD/LIST erfordern READ, PUT WRITE, DELETE DELETE; interne Metadatenzugriffe erweitern nicht die externen Rechte.
+- Der HTTP-Adapter prüft AWS SigV4 für Header- und Query-Signaturen; FOP verwendet Pfad-URLs und die Region `eu-west-1`. Die Region ist Teil des Signing-Scopes und kein Placement-Schalter. Der Endpunkt ist für TLS-Terminierung am Proxy oder den lokalen HTTP-Zugriff vorgesehen. AWS-spezifische signierte Chunk-Transfers sind zunächst nicht unterstützt. Uploads werden vor Veröffentlichung in sofort unbenannte lokale Dateien gestaged; Abbruch, Fehler oder Prozessende geben deren Speicher frei. Für GET wird die native Version vor der Ausgabe unter demselben Volume-Handle geprüft und der Bereich in eine sofort unbenannte Snapshot-Datei kopiert (wie native GET zunächst höchstens 1 GiB pro Bereich). Der Volume-Lock wird vor Netzwerk-Backpressure freigegeben. Versionswechsel zwischen Head und Copy werden vor Ausgabe von Headern/Daten wiederholt; laufende Downloads behalten ihre lokale Kopie, während native Löschung den Storage bereits freigeben darf.
+- Mehrere Serverinstanzen können denselben Namespace über native CAS verwalten, sobald die jeweiligen nativen Objektpfade das gemeinsame Placement bedienen. Die HTTP-Integration selbst implementiert keine zusätzliche Replikation, keine verteilten Locks und keine Subscription-Kohärenz. LIST bietet Pagination über den jeweils gelesenen Stand, keinen transaktionalen Snapshot mehrerer HTTP-Anfragen.
 
 ### 14.6 Native Frontends als verbindlicher Umfang
 
@@ -1526,6 +1797,23 @@ Dashboard-JS-Wrapper erzeugen binäre Nachrichten nach §13.7. Skripte verwenden
 - Token-Rotation: neue/alte Cluster-Token-Version in einer kontrollierten Übergangsphase; kompromittierter Token ist ein Incident, der Node-Impersonation ermöglichen kann.
 - Admin-Aktionen werden mit Actor, Timestamp, alter/neuer Policy, Generation und Outcome auditiert.
 
+Der interne S3-Frontend-Zugriff verwendet bei mehreren Nodes dieselbe native
+Objektverbindung und ihre Streaming-/Routing-Funktionen. Das reservierte
+Basic-Auth-Namensprofil `node-frontend-` kodiert Base64url von
+`schema:u16=1,issuer:ID,cluster:ID,bucket:ID,user:ID,original_permission:u32,account_revision:Digest,operation:ID`;
+der Cluster-Token authentifiziert dabei ausschließlich den Node-Dienst.
+Die Account-Revision ist SHA-256 der vollständigen kanonischen Account-JSON-Struktur.
+Vor einem WebSocket-Upgrade prüft das Ziel die aktuelle Membership, den genauen
+Bucket-Header, Account/ACL und über `VERIFY_FRONTEND_OPERATION` den lebenden Auftrag
+beim Issuer. Ein Cluster-Token samt bekannten Account-IDs allein erzeugt somit keine
+User-Session. Das Profil gilt nur für `GET /api/ws`, niemals für Dashboard, Cookies
+oder administrative HTTP-Aufrufe. Die Verbindung bleibt objekt- und bucketgebunden;
+interne Metadaten-Reads/CAS behalten die ursprünglich authentifizierte
+HTTP-Berechtigung. Auftrag und Verbindungen enden mit dem HTTP-Context; pro Node
+sind höchstens 256 solche aktiven Aufträge registriert. Account-/ACL-Widerruf und
+Membership-Ausschluss invalidieren bestehende Verbindungen. Vor freiwilligem
+Membership-Austritt beendet der Issuer erst seine laufenden Frontend-Aufträge.
+
 ### 16.2 Isolation
 
 - Bucket-spezifische Namespaces, Quotas, Backpressure und I/O-Scheduling verhindern, dass ein Kunde unbegrenzt den gesamten Cluster blockiert.
@@ -1565,7 +1853,7 @@ stqr/
     map.go                 # segmentierte Client-Map
     blockdevice.go         # Image-/Chunk-/Manifest-Library
     filesystem.go          # CAS-basierte FS-Metadaten, FUSE-Anbindung
-    s3.go                  # S3-Objekt-/Index-Library und Gateway-Handler
+    s3.go                  # binäre S3-Envelope-/Inventur-Library; HTTP-Adapter im server
     *_test.go
   server/
     server.go              # HTTP/Basic, gemeinsamer Message-Dispatcher
@@ -1623,7 +1911,7 @@ Die FUSE-/S3-/Blockdevice-Dateien sind fachliche Libraries im Package client. Op
 | Replica | ALL-ACK, Replica-Failures, in-order replay, exact durable commit, degraded states |
 | Auth | Node-Token-Prüfung, HTTP-Basic-/Session-Auth, Replay, RBAC, Bucket-Zugriff, Admin-only |
 | Protocol | Status-Varints inkl. 301/401/507, variable Folgeheader, Teilframes, Mehrfachframes, Fuzzing, Backpressure, Stream-Abbruch, Redirect-Ziele und GOAWAY beim Drain |
-| Frontends | S3-Key-Handling/Listing, FUSE-1-MiB-Grenzen/fsync/truncate, Blockdevice-Library mit Sub-MiB-Zugriffen über Objektgrenzen, NBD-FLUSH/TRIM, Go-SDK-Retries |
+| Frontends | S3-Key-Handling/Listing/Range-CAS, FUSE-1-MiB-Grenzen/fsync/truncate, Blockdevice-Library mit Sub-MiB-Zugriffen über Objektgrenzen, NBD-FLUSH/TRIM, Go-SDK-Retries |
 
 ### 18.3 Property-Based-/Fuzz-Tests
 
@@ -1674,7 +1962,7 @@ Mit künstlich kleinen Volumes (z. B. **4, 8, 16, 32 und 64 MiB**) und determini
 - Replica-Reads: Primary offline/SHORT, erreichbare gültige Replikate liefern committed Daten ohne Primary-Warteblockade; keine vorbereiteten Records/Restore-Zwischenstände. Writes ändern dabei nicht ihren ALL-/Ownership-Vertrag.
 - Sparse/Codecs: PUT_RANGE erzeugt fehlende Objekte/Null-Lücken, TRUNC vergrößert ohne physische Nullfüllung; riesige ZERO-Extents bei kleinen Volumes, teilweise Überschreibung, Crash-Replay und Migration. raw/gzip/lz4/xz mit ranged I/O, kleinen Appends und Codecwechsel, ohne logische Versions-/Offsetänderung.
 - EVERYWHERE/System: Join/Leave/SHORT, vollständige Systemobjektkopie je Mitglied, automatische Config-Credentials/System-Volume, Hashablage weiterer Accounts und Authentifizierung aus erreichbaren System-Replikaten. Ungeeigneter physischer Platz bei Join => 507.
-- S3/FUSE: LIST/Prefix/Pagination und Multipart-Complete/Abort im ersten Frontend-Release; Testphase darf stale Caches haben, Einführung von SUBSCRIBE benötigt danach konsistente Cache-/Update-Verarbeitung.
+- S3/FUSE: LIST/Prefix/Pagination und Range-GET im ersten S3-Umfang; Multipart später; Testphase darf stale Caches haben, Einführung von SUBSCRIBE benötigt danach konsistente Cache-/Update-Verarbeitung.
 - Später ENet: Paketverlust/Duplikation/Reordering, isolierte Ordered-Streams, unabhängige Request-IDs, verspätete END-Nachrichten, Latest-Snapshot-Verwerfung ohne Mischstände, Channel-Erschöpfung, Reconnect mit gleichen Operations-IDs und keinerlei automatischer Membership-Ausschluss durch Transport-Timeout.
 - Später: Snapshot+SUBSCRIBE ohne Registrierungslücke, cursorbasiertes Replay, Range-Updates/TRUNC/DELETE und Übernahme aktiver Subscriptions bei Cutover/Drain.
 
@@ -1719,8 +2007,8 @@ Mit künstlich kleinen Volumes (z. B. **4, 8, 16, 32 und 64 MiB**) und determini
 
 ### Phase 5 – Frontends, Dashboard, Performance
 
-- C/Rust-SDK, FUSE mit 1-MiB-Chunks, Blockdevice-Library mit 1-MiB-Objekten und kleineren ranged Transfers, lokales S3-Gateway, Admin-Dashboard mit Echtzeit-Node-/Volume-Tabelle und Bucket-Verwaltung; NBD auf derselben Library nach Bedarf, spätere QEMU-Anbindung vorbereitet.
-- **Abnahme:** Multi-Mount-FUSE mit CAS-Konflikten und zunächst erlaubten Testcaches; S3 inkl. LIST/Multipart und Blockdevice-Semantik, End-to-End-Tests mit gemeinsamen Objektoperationen.
+- C/Rust-SDK, FUSE mit 1-MiB-Chunks, Blockdevice-Library mit 1-MiB-Objekten und kleineren ranged Transfers, integrierter S3-HTTP-Endpunkt, Admin-Dashboard mit Echtzeit-Node-/Volume-Tabelle und Bucket-Verwaltung; NBD auf derselben Library nach Bedarf, spätere QEMU-Anbindung vorbereitet.
+- **Abnahme:** Multi-Mount-FUSE mit CAS-Konflikten und zunächst erlaubten Testcaches; S3 inkl. LIST/Range-GET und Blockdevice-Semantik, End-to-End-Tests mit gemeinsamen Objektoperationen.
 
 ### Phase 6 – Erweiterungen
 
@@ -1754,7 +2042,7 @@ Hier stehen nur noch nicht entschiedene Details. Bereits geklärt sind: Intranet
 ### 20.4 Frontends und spätere Features
 
 - Multi-Mount-FUSE: CAS-/Intent-Protokolle für Rename/Link/Unlink über mehrere Metadatenobjekte und Recovery. Alte Testcaches sind bis SUBSCRIBE erlaubt; bei dessen Einführung müssen Cache-/Kernel-Sichtbarkeit konsistent umgesetzt werden.
-- S3: Objektformate für Key-/Prefix-Index, Pagination und Multipart-Uploadzustände/Complete/Abort. LIST und Multipart gehören zum ersten Frontend-Release; ihr Umfang wird nicht erneut zur Disposition gestellt. Blockdevice: ABI, Flush-/Trim-/Resize-Vertrag und QEMU-Adapter.
+- S3: binäre Objektformate mit Metadaten-/Payload-Envelope und native Inventur für LIST sowie Prefix/Pagination. LIST und Range-GET gehören zum ersten integrierten Umfang; Multipart ist eine spätere optionale Erweiterung. Blockdevice: ABI, Flush-/Trim-/Resize-Vertrag und QEMU-Adapter.
 - SUBSCRIBE/UNSUBSCRIBE: Journal-Retention, Resync für langsame Leser, Relay-/Reconnect-Handoff und Ende durch Rechteentzug. Snapshot-/Versionsbarriere und Übergabe bei Migration stehen bereits fest.
 - CACHE-Strategie: Verdrängungs-/Miss-Verhalten und Klassenwahl; bis dahin reserviert und Aktivierung mit 501 ablehnen. RAM-Replikation und Replica-Restore gehören zu v1.
 - ENet: Channel-Pool, optionale cgo-Builds, HTTP-Authentifizierung zur Sessionbindung, Transportversion und Ordered-Stream-Reconnect-Barrieren; RELIABLE_UNORDERED ist kein nativer ENet-Modus (§13.9). Keine TLS-/Zertifikatsabhängigkeit hinzufügen.
@@ -1781,7 +2069,7 @@ STQR ist ein **Single-Node-First, Range-Partitioned Distributed Object Store** f
 5. **Administrativ definierte Bucket-SLAs:** Pro Bucket lassen sich HDD-/SSD-/RAM-Basisspeicher, Replikations-/EC-Strategien, Cache-Berechtigung, Quotas und Benutzerzugriff festlegen. Änderungen werden als **NEXT-Placement-Generation** umgesetzt; `desired` und `effective` dürfen nicht verwechselt werden.
 6. **Zielgerichteter kleiner Objektkern:** Ein eigenes, append-orientiertes Volumenformat mit Hash-Index und Segmentspeicherung soll für viele 2–250-KiB-Beispielobjekte weniger Dateisystem- und Metadatenoverhead erzeugen als eine Datei pro Objekt. Die tatsächlichen Vorteile sind zu benchmarken.
 7. **Durable atomisches APPEND als native Storage-Operation:** Pro Objekt serialisiertes Append, stabiler Offset, Flush vor ACK sowie persistente Retry-Deduplizierung sind Kernfunktionen für Journale und Logs; dafür braucht STQR keine verteilte Multi-Object-Transaktionsengine.
-8. **Direkt nutzbare allgemeine Clients:** Ein natives Binärprotokoll und Go-/C-/Rust-SDKs dienen beliebigen Anwendungen. FUSE, lokales S3-Gateway und NBD/Blockdevice werden als eigenständige Frontends angebunden.
+8. **Direkt nutzbare allgemeine Clients:** Ein natives Binärprotokoll und Go-/C-/Rust-SDKs dienen beliebigen Anwendungen. FUSE und NBD/Blockdevice sind eigenständige Frontends; S3 ist direkt im HTTP-Server der Nodes integriert.
 9. **Ein Transport, rollenbasierte Fähigkeiten:** Dasselbe kompakte Protokoll wird von Clients, Nodes und Administratoren verwendet; die initiale Authentifizierung und die vergebene Rolle begrenzen jeweils die erlaubten Operationen.
 
 ### 21.2 Was ausdrücklich kein Alleinstellungsmerkmal ist
@@ -1802,7 +2090,7 @@ Range-Splitting, explizite Placement-Tabellen, auf Messwerten basierende Verteil
 | Flexible Storage- und Kostenstufen | Bucket-Policies und HDD/SSD/RAMCACHE-Klassen | Erfüllung von Tier-/Quota-Vorgaben, Kosten/GB, Cache-Hit-Rate |
 | Sehr kleine Objekte effizient verwalten | Segmentbasiertes Format und lokaler Hash-Index | CPU/op, Write-Amplification, physische Bytes/Nutzbyte |
 | Zuverlässige Logs | Atomisches, idempotent wiederholbares APPEND | Crash-/Retry-Test ohne Doppel-Append, Verlust oder Offset-Überlappung |
-| Ausbaubare Zugriffspfade | Native SDKs und getrennte Gateways | End-to-End-Interoperabilität über Go/C/Rust, S3, FUSE, NBD |
+| Ausbaubare Zugriffspfade | Native SDKs, integriertes S3 und weitere Frontends | End-to-End-Interoperabilität über Go/C/Rust, S3, FUSE, NBD |
 
 **Einordnung:** Diese Stärken sind Designziele und teilweise strukturell plausibel. Ihre quantitative Wirkung muss unter identischer Hardware, Durability-Policy, Replikationsstufe, Objektgrößenverteilung und Last mit Alternativen verglichen werden.
 
@@ -1835,7 +2123,7 @@ STQR reduziert einige spezifische Zielkonflikte anderer Systeme, **beseitigt abe
 - **Zwei Generationen sind keine Transaktion:** Für garantierte linearisierbare Objektoperationen braucht es weiterhin Fencing, persistente Entscheidung über Ownership, Änderungsübernahme, Idempotenz und Crash-Recovery.
 - **ALL-Barrieren und Warten:** Ein einzelner persistenter Node ist nicht host-ausfallsicher. Bereits vor einer Rebuild-Runde fehlende Nodes blockieren unabhängiges Online-Rebalancing nicht; ihr Placement bleibt eingefroren. Fehlende erforderliche Replikate blockieren betroffene Writes, fehlende Mitglieder globale Membership-/Admin-Entscheidungen und nach Bindung ausfallende Rundenteilnehmer den laufenden Rebuild. Warten bis Reconnect oder administrativem Forceful Disconnect bleibt in diesen Fällen eine bewusste Verfügbarkeitsgrenze.
 - **Hot Objects:** Splitting isoliert ein heißes Objekt, verteilt aber dessen Writes nicht. Read-Cache-Skalierung funktioniert nur mit einer korrekten Versions-/Invalidierungsstrategie.
-- **S3/POSIX/Block:** `LIST` braucht einen Namensindex; FUSE braucht Dateisystemmetadaten und Semantik; NBD braucht Flush/Discard/partielle Writes. Diese Gateways sind nicht bloß ein Protokoll-Wrapper.
+- **S3/POSIX/Block:** `LIST` braucht eine Namenssicht (derzeit Inventur der S3-Envelopes); FUSE braucht Dateisystemmetadaten und Semantik; NBD braucht Flush/Discard/partielle Writes. Diese Gateways sind nicht bloß ein Protokoll-Wrapper.
 - **Crash-Durability:** `ACK` darf nur nach persistenter Daten- und Recovery-Information erfolgen; SSD-/HDD-Controller müssen Flush/FUA korrekt unterstützen. Group Commit kann Flush-Aufwand zusammenfassen, aber nicht umgehen.
 
 ### 23.3 Vergleich – ohne unbewiesene Überlegenheit
@@ -1861,7 +2149,7 @@ Diese Tabelle bewertet **Ausrichtung und Architektur**, nicht aktuelle Benchmark
 
 1. **Datenbanken und Suchsysteme mit ausgelagerten Payloads:** Kleine bis mittelgroße unveränderliche oder überschreibbare Binärwerte; die Anwendung verwaltet eigene fachliche Metadaten und Transaktionen.
 2. **Transaktionslogs, Journale und Event-Persistenz:** `APPEND` mit garantiertem Durable-ACK, monotoner Position und idempotenten Retries. STQR stellt keine eigene Stream-Processing-Engine oder Consumer-Offsets bereit.
-3. **Object Storage für Anwendungssysteme und SaaS:** Mandanten- beziehungsweise Bucket-Trennung, individuelle Speicherklasse, Quotas, Rechte und S3-Zugriff über lokale Gateways.
+3. **Object Storage für Anwendungssysteme und SaaS:** Mandanten- beziehungsweise Bucket-Trennung, individuelle Speicherklasse, Quotas, Rechte und S3-Zugriff über den integrierten HTTP-Endpunkt.
 4. **Skalierender Storage für kleine Deployments:** Anfang mit einem Server oder einer lokalen Datei; später Clusterbeitritt, zusätzliche Volumes und generationsweises Rebalancing ohne API-Wechsel.
 5. **Hotspot-lastige Read-Workloads:** Häufig abgefragte Binärobjekte, Vorberechnungen, Artefakte oder Mediensegmente; Hot-Range-Isolation und zusätzliche gültige Read-Caches sind besonders nützlich.
 
@@ -1925,7 +2213,7 @@ STQR SOLL reproduzierbar gegen Ceph und eine geeignete lokale beziehungsweise vo
 | Bucket-Storage-Policy-Change | Desired-Storage-Policy wird in **NEXT-Generation** umgesetzt; ACL und Quota folgen separatem Kontrollcommit |
 | Zugriff | Admin verwaltet Buckets; User bekommt Objektzugriff pro Bucket; Frontend-Metadaten sind normale Objekte |
 | Protokoll | HTTP/Basic, WebSocket-Upgrade, eine Binärmessage je Message; Q/F/P, gemeinsame Admin-/Peer-/Objektlayouts |
-| Clients | native Go/C/Rust, Multi-Mount-FUSE mit CAS, S3 inkl. LIST/Multipart und Blockdevice-Lib |
+| Clients | native Go/C/Rust, Multi-Mount-FUSE mit CAS, S3 inkl. LIST/Range-GET und Blockdevice-Lib |
 | FUSE-Testcaches | stale bis SUBSCRIBE erlaubt, mit SUBSCRIBE konsistent |
 | Replica-Reads | bei fehlendem Primary erlaubt; kein automatischer Schreib-Ownerwechsel |
 | Prozessmodell | ein Daemon mit Dashboard/API, maximal volume/server/client als Library-Packages |

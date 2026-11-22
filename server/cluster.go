@@ -17,6 +17,10 @@ import (
 // fencing, transfer replicas/dedupe/subscriptions, then publish detach. No peer
 // failure timeout or coordinator-race algorithm is invented here.
 func (s *Server) startDrain(operation, vid string) {
+	if s.controller != nil {
+		s.notifyStats()
+		return
+	}
 	s.mu.Lock()
 	if s.closed {
 		s.mu.Unlock()

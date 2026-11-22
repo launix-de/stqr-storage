@@ -45,8 +45,9 @@ type PlacementGroup struct {
 }
 
 type placementGroupsObject struct {
-	Schema uint16           `json:"schema"`
-	Groups []PlacementGroup `json:"groups"`
+	Schema   uint16                  `json:"schema"`
+	Groups   []PlacementGroup        `json:"groups"`
+	Receipts []placementGroupReceipt `json:"receipts,omitempty"`
 }
 
 type placementNodeFilter struct {
@@ -57,8 +58,9 @@ type placementNodeFilter struct {
 // Published images are immutable. Object placement does one map lookup per node
 // and volume; it never scans or copies a potentially large administrative mask.
 type placementGroupImage struct {
-	object  placementGroupsObject
-	filters map[string]map[string]placementNodeFilter
+	object   placementGroupsObject
+	filters  map[string]map[string]placementNodeFilter
+	versions map[string]map[uint64]map[string]placementNodeFilter
 }
 
 func normalizePlacementMask(mask PlacementMask) (PlacementMask, error) {
@@ -108,7 +110,25 @@ func compilePlacementGroups(object placementGroupsObject) (*placementGroupImage,
 		return nil, ErrBucketInvalid
 	}
 	object.Groups = append([]PlacementGroup{}, object.Groups...)
+	object.Receipts = append([]placementGroupReceipt(nil), object.Receipts...)
+	seenReceipts := make(map[string]bool, len(object.Receipts))
+	for _, r := range object.Receipts {
+		if _, err := bucketID(r.ID); err != nil {
+			return nil, ErrBucketInvalid
+		}
+		if _, err := bucketID(r.Target); err != nil {
+			return nil, ErrBucketInvalid
+		}
+		if _, err := bucketID(r.Actor); err != nil {
+			return nil, ErrBucketInvalid
+		}
+		if seenReceipts[r.ID] || len(r.Digest) != 64 || r.Opcode != placementGroupSet && r.Opcode != placementGroupDelete || r.Status != 200 && r.Status != 201 && r.Status != 202 || r.Running != (r.Status == 202) {
+			return nil, ErrBucketInvalid
+		}
+		seenReceipts[r.ID] = true
+	}
 	image := &placementGroupImage{filters: make(map[string]map[string]placementNodeFilter)}
+	image.versions = make(map[string]map[uint64]map[string]placementNodeFilter)
 	for i := range object.Groups {
 		g := &object.Groups[i]
 		id, err := bucketID(g.ID)
@@ -135,6 +155,18 @@ func compilePlacementGroups(object placementGroupsObject) (*placementGroupImage,
 			nodes[n.NodeID] = f
 		}
 		image.filters[g.ID] = nodes
+		image.versions[g.ID] = map[uint64]map[string]placementNodeFilter{g.Effective.Version: nodes}
+		if g.Desired != nil {
+			desired := make(map[string]placementNodeFilter)
+			for _, n := range g.Desired.Nodes {
+				f := placementNodeFilter{mode: n.Mode, volumes: make(map[string]bool)}
+				for _, id := range n.Volumes {
+					f.volumes[id] = true
+				}
+				desired[n.NodeID] = f
+			}
+			image.versions[g.ID][g.Desired.Version] = desired
+		}
 	}
 	sort.Slice(object.Groups, func(i, j int) bool { return object.Groups[i].ID < object.Groups[j].ID })
 	image.object = object
@@ -142,13 +174,21 @@ func compilePlacementGroups(object placementGroupsObject) (*placementGroupImage,
 }
 
 func (p *placementGroupImage) allows(group, node, vol string) bool {
+	return p.allowsVersion(group, 0, node, vol)
+}
+
+func (p *placementGroupImage) allowsVersion(group string, version uint64, node, vol string) bool {
 	if group == "" {
 		return true
 	}
 	if p == nil {
 		return false
 	}
-	f, ok := p.filters[group][node]
+	nodes := p.filters[group]
+	if version != 0 {
+		nodes = p.versions[group][version]
+	}
+	f, ok := nodes[node]
 	if !ok {
 		return false
 	}
@@ -164,6 +204,10 @@ func (p *placementGroupImage) allows(group, node, vol string) bool {
 }
 
 func (s *Server) placementVolumes(group string) []*volume.Volume {
+	return s.placementVolumesAt(group, 0)
+}
+
+func (s *Server) placementVolumesAt(group string, version uint64) []*volume.Volume {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	image := s.placementGroups.Load()
@@ -173,7 +217,7 @@ func (s *Server) placementVolumes(group string) []*volume.Volume {
 			if v.config.System {
 				continue // unrestricted data-volume pool
 			}
-		} else if !image.allows(group, s.cfg.Node.ID, id) {
+		} else if !image.allowsVersion(group, version, s.cfg.Node.ID, id) {
 			continue
 		}
 		result = append(result, v.store)
@@ -185,6 +229,11 @@ func (s *Server) placementVolumes(group string) []*volume.Volume {
 }
 
 func (s *Server) metadataStore() (*volume.Volume, error) {
+	// A voluntary leaver retains its bound recovery anchor solely to finish
+	// the already committed ALL barrier. It is no longer a system replica.
+	if s.retiring() {
+		return s.system, nil
+	}
 	stores := s.placementVolumes(systemPlacementGroup.String())
 	if len(stores) != 1 {
 		return nil, fail(503, "metadata placement group requires one committed local store")

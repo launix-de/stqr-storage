@@ -8,6 +8,11 @@ import "net/url"
 const CapabilityPeerTransport uint64 = 1
 const CapabilityNodeAdmin uint64 = 2
 const CapabilityPendingNode uint64 = 4
+const CapabilityClusterControl uint64 = 8
+const CapabilityRangeHandoff uint64 = 16
+const CapabilityRetiringNode uint64 = 32
+const CapabilityExclusion uint64 = 64
+const CapabilityControlRecovery uint64 = 128
 const NodeHelloMessage uint16 = 0x1000
 
 type NodeHello struct {
@@ -30,6 +35,7 @@ type Membership struct {
 	Excluded []ID
 }
 type NodeHelloAck struct {
+	Boot                                     ID // Optional transport-only responder identity; omitted in membership codecs.
 	Membership                               Membership
 	ControlSequence, Generation, MapRevision uint64
 }
@@ -126,6 +132,9 @@ func (m NodeHelloAck) MarshalBinary() ([]byte, error) {
 	e.U64(m.ControlSequence)
 	e.U64(m.Generation)
 	e.U64(m.MapRevision)
+	if m.Boot != (ID{}) {
+		e.ID(m.Boot)
+	}
 	if len(e.B) > MaxMessage-20 {
 		return nil, ErrProtocol
 	}
@@ -177,6 +186,12 @@ func DecodeNodeHelloAck(body []byte) (NodeHelloAck, error) {
 	m.ControlSequence = d.U64()
 	m.Generation = d.U64()
 	m.MapRevision = d.U64()
+	if len(d.B) == 16 {
+		m.Boot = d.ID()
+		if m.Boot == (ID{}) {
+			return m, ErrProtocol
+		}
+	}
 	if d.Done() != nil || !m.validMembership() {
 		return m, ErrProtocol
 	}

@@ -3,7 +3,7 @@
 // control channel: administrative JSON field patches are explicitly Text bodies
 // of NODE_CONFIG_GET/SET; all messages use the original STQR binary envelope.
 import {writeBucketPolicy,writeBucketQuota,parseBucketPage} from './bucket-codec.js';
-export const OP={NODE_ADMIN:0x2024,HELLO:1,PING:2,EVENT:4,STATS_GET:8,STATS_SUBSCRIBE:9,STATS_UNSUBSCRIBE:10,STATS_SNAPSHOT:11,VOLUME_ADD:0x2001,VOLUME_REMOVE:0x2002,OPERATION_STATUS:0x2019,CONFIG_GET:0x201a,CONFIG_SET:0x201b,VOLUME_CANDIDATES:0x201c,VOLUME_RESCAN:0x201d,VOLUME_CAPACITY:0x201e,VOLUME_GROW_INFO:0x201f,VOLUME_GROW:0x2020,USER_LIST:0x2021,USER_CREATE:0x200b,USER_UPDATE:0x200c,USER_SET_PASSWORD:0x200d,USER_DELETE:0x200e,BUCKET_LIST:0x2022,BUCKET_QUOTA_CAPACITY:0x2023,BUCKET_CREATE:0x2003,BUCKET_SET_POLICY:0x2004,BUCKET_SET_QUOTA:0x2005,BUCKET_RENAME:0x2006,BUCKET_LOCK:0x2007,BUCKET_DELETE:0x2008,BUCKET_GRANT:0x2009,BUCKET_REVOKE:0x200a};
+export const OP={FORCE_DISCONNECT:0x2013,CLUSTER_SHUTDOWN:0x2012,PG_LIST:0x2030,PG_SET:0x2031,PG_DELETE:0x2032,BUCKET_SET_PG:0x2033,NODE_DRAIN:0x2010,NODE_SHUTDOWN:0x2011,USER_S3_LIST:0x2025,USER_S3_SET:0x2026,USER_S3_DELETE:0x2027,NODE_ADMIN:0x2024,HELLO:1,PING:2,EVENT:4,STATS_GET:8,STATS_SUBSCRIBE:9,STATS_UNSUBSCRIBE:10,STATS_SNAPSHOT:11,VOLUME_ADD:0x2001,VOLUME_REMOVE:0x2002,OPERATION_STATUS:0x2019,CONFIG_GET:0x201a,CONFIG_SET:0x201b,VOLUME_CANDIDATES:0x201c,VOLUME_RESCAN:0x201d,VOLUME_CAPACITY:0x201e,VOLUME_GROW_INFO:0x201f,VOLUME_GROW:0x2020,USER_LIST:0x2021,USER_CREATE:0x200b,USER_UPDATE:0x200c,USER_SET_PASSWORD:0x200d,USER_DELETE:0x200e,BUCKET_LIST:0x2022,BUCKET_QUOTA_CAPACITY:0x2023,BUCKET_CREATE:0x2003,BUCKET_SET_POLICY:0x2004,BUCKET_SET_QUOTA:0x2005,BUCKET_RENAME:0x2006,BUCKET_LOCK:0x2007,BUCKET_DELETE:0x2008,BUCKET_GRANT:0x2009,BUCKET_REVOKE:0x200a};
 const utf8=new TextEncoder(),text=new TextDecoder('utf-8',{fatal:true});
 export const newID=()=>Array.from(crypto.getRandomValues(new Uint8Array(16)),b=>b.toString(16).padStart(2,'0')).join('');
 export class Writer{
@@ -35,7 +35,7 @@ export function decodeStats(data){const r=new Reader(data),s={schema:r.u16(),nod
 function ack(r){return {operation_id:r.id(),state:['requested','running','fulfilled','failed'][r.u8()],volume_id:r.bool()?r.id():null}}
 function decodeResponse(op,body){const r=new Reader(body),status=Number(r.v()),headers=new Reader(r.blob());let detail='';for(let i=0,n=headers.count(100);i<n;i++){const tag=Number(headers.v()),value=new Reader(headers.blob());if(tag===3){detail=value.text();value.done()}}headers.done();if(status>=300){const e=Error(detail||`STQR-Fehler ${status}`);e.status=status;throw e}
  let result;
- if(op===OP.BUCKET_QUOTA_CAPACITY){result={used:r.u64(),available:r.u64(),reservedOther:r.u64(),maximum:r.u64(),nodes:r.u32(),overhead:r.u32(),profiles:[]};for(let i=0,n=r.count(32);i<n;i++)result.profiles.push({key:r.u8(),label:r.text(),size:r.u64(),overhead:r.u32()})}else if(op===OP.BUCKET_LIST)result=parseBucketPage(r.text());else if(op===OP.USER_LIST){result=[];for(let i=0,n=r.count(100000);i<n;i++)result.push({id:r.id(),name:r.text(),role:r.u8(),disabled:r.bool()})}else if(op===OP.VOLUME_GROW_INFO)result={kind:r.u8(),current:r.u64(),available:r.u64(),maximum:r.u64()};else if(op===OP.VOLUME_CAPACITY)result={fileAvailable:r.u64(),ramAvailable:r.u64(),ramLimit:r.u64()};else if([OP.CONFIG_GET,OP.CONFIG_SET,OP.VOLUME_CANDIDATES].includes(op))result=JSON.parse(r.text());else if([OP.VOLUME_ADD,OP.VOLUME_REMOVE,OP.VOLUME_RESCAN,OP.VOLUME_GROW,OP.USER_CREATE,OP.USER_UPDATE,OP.USER_SET_PASSWORD,OP.USER_DELETE,OP.BUCKET_CREATE,OP.BUCKET_SET_POLICY,OP.BUCKET_SET_QUOTA,OP.BUCKET_RENAME,OP.BUCKET_LOCK,OP.BUCKET_DELETE,OP.BUCKET_GRANT,OP.BUCKET_REVOKE].includes(op))result=ack(r);else if(op===OP.OPERATION_STATUS){result=ack(r);result.status=Number(r.v());result.detail=r.text()}else if(op===OP.STATS_GET){result=decodeStats(r.take(r.b.length-r.at))}else if(op===OP.STATS_SUBSCRIBE){result=r.id()}else if(op===OP.PING){result=r.u64()}else result=r.take(r.b.length-r.at);r.done();return result}
+ if(op===OP.USER_S3_LIST){result=[];for(let i=0,n=r.count(32);i<n;i++)result.push(r.text())}else if(op===OP.BUCKET_QUOTA_CAPACITY){result={used:r.u64(),available:r.u64(),reservedOther:r.u64(),maximum:r.u64(),nodes:r.u32(),overhead:r.u32(),profiles:[]};for(let i=0,n=r.count(32);i<n;i++)result.profiles.push({key:r.u8(),label:r.text(),size:r.u64(),overhead:r.u32()})}else if(op===OP.BUCKET_LIST)result=parseBucketPage(r.text());else if(op===OP.USER_LIST){result=[];for(let i=0,n=r.count(100000);i<n;i++)result.push({id:r.id(),name:r.text(),role:r.u8(),disabled:r.bool()})}else if(op===OP.VOLUME_GROW_INFO)result={kind:r.u8(),current:r.u64(),available:r.u64(),maximum:r.u64()};else if(op===OP.VOLUME_CAPACITY)result={fileAvailable:r.u64(),ramAvailable:r.u64(),ramLimit:r.u64()};else if([OP.CONFIG_GET,OP.CONFIG_SET,OP.VOLUME_CANDIDATES,OP.PG_LIST].includes(op))result=JSON.parse(r.text());else if([OP.FORCE_DISCONNECT,OP.CLUSTER_SHUTDOWN,OP.PG_SET,OP.PG_DELETE,OP.BUCKET_SET_PG,OP.NODE_DRAIN,OP.NODE_SHUTDOWN,OP.USER_S3_SET,OP.USER_S3_DELETE,OP.VOLUME_ADD,OP.VOLUME_REMOVE,OP.VOLUME_RESCAN,OP.VOLUME_GROW,OP.USER_CREATE,OP.USER_UPDATE,OP.USER_SET_PASSWORD,OP.USER_DELETE,OP.BUCKET_CREATE,OP.BUCKET_SET_POLICY,OP.BUCKET_SET_QUOTA,OP.BUCKET_RENAME,OP.BUCKET_LOCK,OP.BUCKET_DELETE,OP.BUCKET_GRANT,OP.BUCKET_REVOKE].includes(op))result=ack(r);else if(op===OP.OPERATION_STATUS){result=ack(r);result.status=Number(r.v());result.detail=r.text()}else if(op===OP.STATS_GET){result=decodeStats(r.take(r.b.length-r.at))}else if(op===OP.STATS_SUBSCRIBE){result=r.id()}else if(op===OP.PING){result=r.u64()}else result=r.take(r.b.length-r.at);r.done();return result}
 
 // SHA-256 works on HTTP intranets where WebCrypto's secure-context-only digest
 // is unavailable. Verify complete StatsPart data before publishing a snapshot.
@@ -77,11 +77,23 @@ export class NodeConnection{
  stop(){this.stopped=true;clearTimeout(this.reconnect);clearTimeout(this.flushTimer);if(this.ws?.readyState===WebSocket.OPEN){try{this.fireAndForget(OP.STATS_UNSUBSCRIBE,new Writer().id(this.sub).bytes())}catch{}}this.ws?.close()}
  forNode(target){
   const scoped={request:(op,body=new Uint8Array,id=newID())=>this.request(OP.NODE_ADMIN,new Writer().id(target).u16(op).blob(body).bytes(),id,op)};
-  for(const name of ['getConfig','setConfig','volumeGrowInfo','growVolume','volumeCapacity','listVolumeCandidates','addVolume','removeVolume','rescanVolume','operationStatus'])scoped[name]=NodeConnection.prototype[name];
+  for(const name of ['drainNode','shortShutdown','getConfig','setConfig','volumeGrowInfo','growVolume','volumeCapacity','listVolumeCandidates','addVolume','removeVolume','rescanVolume','operationStatus'])scoped[name]=NodeConnection.prototype[name];
   return scoped;
  }
+ drainNode(target,id){return this.request(OP.NODE_DRAIN,new Writer().id(target).bytes(),id)}
+ shortShutdown(target,id){return this.request(OP.NODE_SHUTDOWN,new Writer().id(target).u8(1).bytes(),id)}
+ forceDisconnect(nodes,epoch,acceptLoss,fenced,id){
+  const ids=[...new Set(nodes)].sort(),w=new Writer().v(ids.length);
+  for(const node of ids)w.id(node);
+  return this.request(OP.FORCE_DISCONNECT,w.bool(acceptLoss).bool(fenced).u64(epoch).bytes(),id);
+ }
+ clusterShutdown(id){return this.request(OP.CLUSTER_SHUTDOWN,new Writer().u8(2).bytes(),id)}
  getConfig(){return this.request(OP.CONFIG_GET)}setConfig(fields){return this.request(OP.CONFIG_SET,new Writer().text(JSON.stringify(fields)).bytes())}
  bucketQuotaCapacity(bucket,strategy,profile=255,overhead=0){return this.request(OP.BUCKET_QUOTA_CAPACITY,new Writer().id(bucket).u8({hdd:0,ssd:1,ram:2}[strategy]).u8(profile).u32(overhead).bytes())}
+ listPlacementGroups(after='',limit=100){return this.request(OP.PG_LIST,new Writer().u16(1).text(after).u32(limit).bytes())}
+ setPlacementGroup(group,expected,name,nodes,id){return this.request(OP.PG_SET,new Writer().u16(1).id(group).u64(expected).text(name).text(JSON.stringify(nodes)).bytes(),id)}
+ deletePlacementGroup(group,expected,id){return this.request(OP.PG_DELETE,new Writer().u16(1).id(group).u64(expected).bytes(),id)}
+ setBucketPlacementGroup(bucket,expected,group,id){const w=new Writer().u16(1).id(bucket).u64(expected).bool(!!group);if(group)w.id(group);return this.request(OP.BUCKET_SET_PG,w.bytes(),id)}
  listBuckets(after='',limit=100){return this.request(OP.BUCKET_LIST,new Writer().text(after).u32(limit).bytes())}
  createBucket(bucket,id){return this.request(OP.BUCKET_CREATE,writeBucketPolicy(new Writer(),bucket).bytes(),id)}
  setBucketPolicy(bucket,expected,id){return this.request(OP.BUCKET_SET_POLICY,writeBucketPolicy(new Writer(),bucket).u64(expected).bytes(),id)}
@@ -91,6 +103,9 @@ export class NodeConnection{
  deleteBucket(bucket,id){return this.request(OP.BUCKET_DELETE,new Writer().id(bucket).bytes(),id)}
  grantBucket(bucket,user,permissions,id){return this.request(OP.BUCKET_GRANT,new Writer().id(bucket).id(user).u32(permissions).bytes(),id)}
  revokeBucket(bucket,user,id){return this.request(OP.BUCKET_REVOKE,new Writer().id(bucket).id(user).bytes(),id)}
+ listS3Keys(user){return this.request(OP.USER_S3_LIST,new Writer().id(user).bytes())}
+ setS3Key(user,access,secret,id){return this.request(OP.USER_S3_SET,new Writer().id(user).text(access).text(secret).bytes(),id)}
+ deleteS3Key(user,access,id){return this.request(OP.USER_S3_DELETE,new Writer().id(user).text(access).bytes(),id)}
  listUsers(){return this.request(OP.USER_LIST)}
  createUser(user,password,id){return this.request(OP.USER_CREATE,new Writer().id(user.id).text(user.name).u8(user.role??0).bool(false).text(password).bytes(),id)}
  setUserRole(user,role,id){return this.request(OP.USER_UPDATE,new Writer().id(user.id).text(user.name).u8(role).bool(user.disabled).bytes(),id)}

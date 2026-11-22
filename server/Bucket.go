@@ -71,14 +71,15 @@ type BucketLimits struct {
 	Unlimited          bool   `json:"absolute_unlimited"`
 }
 type BucketPolicy struct {
-	Version          uint64                 `json:"version"`
-	StorageStrategy  string                 `json:"storage_strategy"` // hdd | ssd | ram; cache reserved
-	Compression      string                 `json:"compression"`      // raw | gzip | lz4 | xz
-	PlacementMode    string                 `json:"placement_mode"`   // count | everywhere
-	Redundancy       BucketRedundancy       `json:"redundancy"`
-	ReadAcceleration BucketReadAcceleration `json:"read_acceleration"`
-	Limits           BucketLimits           `json:"limits"`
-	PlacementGroup   string                 `json:"placement_group,omitempty"`
+	Version              uint64                 `json:"version"`
+	StorageStrategy      string                 `json:"storage_strategy"` // hdd | ssd | ram; cache reserved
+	Compression          string                 `json:"compression"`      // raw | gzip | lz4 | xz
+	PlacementMode        string                 `json:"placement_mode"`   // count | everywhere
+	Redundancy           BucketRedundancy       `json:"redundancy"`
+	ReadAcceleration     BucketReadAcceleration `json:"read_acceleration"`
+	Limits               BucketLimits           `json:"limits"`
+	PlacementGroup       string                 `json:"placement_group,omitempty"`
+	PlacementMaskVersion uint64                 `json:"placement_mask_version,omitempty"`
 }
 type BucketGrant struct {
 	UserID      string            `json:"user_id"` // canonical 128-bit hex ID, not a username
@@ -112,6 +113,7 @@ type BucketDescription struct {
 // policy and placement. Standalone catalog snapshots have no attached server.
 type Bucket struct {
 	mu          sync.RWMutex
+	usage       bucketUsage
 	description BucketDescription
 	server      *Server
 	maintenance *connectionAuthorization // exclusive, socket-scoped fsck owner
@@ -184,6 +186,9 @@ func bucketEnum(value string, values ...string) (uint8, bool) {
 	return 0, false
 }
 func validateBucketPolicy(p BucketPolicy) error {
+	if p.PlacementGroup == "" && p.PlacementMaskVersion != 0 {
+		return ErrBucketInvalid
+	}
 	if p.Version == 0 {
 		return ErrBucketInvalid
 	}

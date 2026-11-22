@@ -120,7 +120,7 @@ func TestRoleUpdateRejectsSelfChangesAndPersistsOthers(t *testing.T) {
 	}
 	path := s.configPath
 	s.Close()
-	next, e3 := Open(Options{ConfigPath: filepath.Clean(path)})
+	next, e3 := openTransportTestNode(Options{ConfigPath: filepath.Clean(path)})
 	if e3 != nil {
 		t.Fatal(e3)
 	}

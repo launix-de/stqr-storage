@@ -51,10 +51,7 @@ func (c *Client) beginMaintenance(ctx context.Context) error {
 	return err
 }
 
-type fsCheckObject struct {
-	ID   ObjectID
-	Info ObjectInfo
-}
+type fsCheckObject = ObjectEntry
 type fsCheckStore interface {
 	FilesystemStore
 	Delete(context.Context, ObjectID, DeleteOptions) error
@@ -62,6 +59,9 @@ type fsCheckStore interface {
 }
 
 func (c *Client) scanFilesystemObjects(ctx context.Context, after *ObjectID, limit uint32) ([]fsCheckObject, *ObjectID, error) {
+	return c.scanObjectEntries(ctx, after, limit, BucketScan)
+}
+func (c *Client) scanObjectEntries(ctx context.Context, after *ObjectID, limit uint32, opcode uint16) ([]ObjectEntry, *ObjectID, error) {
 	e := Encoder{}
 	c.objectRef(&e, ObjectID{})
 	e.Bool(after != nil)
@@ -69,7 +69,7 @@ func (c *Client) scanFilesystemObjects(ctx context.Context, after *ObjectID, lim
 		e.B = append(e.B, after[:]...)
 	}
 	e.U32(limit)
-	r, err := c.do(ctx, BucketScan, e.B, NewRequestID(), false, nil)
+	r, err := c.do(ctx, opcode, e.B, NewRequestID(), false, nil)
 	defer r.close()
 	if err != nil {
 		return nil, nil, err

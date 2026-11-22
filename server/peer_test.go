@@ -35,7 +35,7 @@ func peerTestNode(t *testing.T, base Config) *Server {
 	if e := saveConfig(path, c); e != nil {
 		t.Fatal(e)
 	}
-	s, e := Open(Options{ConfigPath: path})
+	s, e := openTransportTestNode(Options{ConfigPath: path})
 	if e != nil {
 		t.Fatal(e)
 	}
