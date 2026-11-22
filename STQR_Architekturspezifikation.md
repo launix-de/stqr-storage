@@ -26,14 +26,14 @@
 8. **Gleichberechtigte Nodes:** Kein dauerhaft bevorzugter Master. Ein nur für die Generation gewählter Plan-Koordinator; der laufende Datenpfad ist unabhängig von ihm.
 9. **Buckets und Multi-Tenancy:** Admin-gesteuerte Bucket-Policies, User-Freigaben, Quotas, HDD-/SSD-/RAM-Basisspeicher, optionale RAM-Read-Caches und später Erasure Coding.
 10. **HTTP-Daemon mit Basic Auth**, integriertem Dashboard, administrativer HTTP-API und WebSocket-Upgrade. Jede binäre WebSocket-Nachricht enthält genau eine STQR-Nachricht; ein gemeinsamer Codec dient Clients, Admin und Nodes.
-11. **Go-Implementierung** mit C-, Rust- und Go-Clientbibliotheken, FUSE-Frontend, lokal betreibbarem S3-Gateway, einer Blockdevice-Library zur späteren QEMU-Einbindung, optionalem NBD-Frontend sowie Admin-Dashboard.
+11. **Go-Implementierung** mit C-, Rust- und Go-Clientbibliotheken, FUSE-Frontend, direkt integriertem S3-HTTP-Endpunkt, einer Blockdevice-Library zur späteren QEMU-Einbindung, optionalem NBD-Frontend sowie Admin-Dashboard.
 12. **Umfassende automatisierte Verifikation:** Unit-, Property-, Recovery-, Fault-Injection-, Last- und Stresstests einschließlich sehr kleiner Test-Volumes im MiB-Bereich.
 
 ### 1.2 Nichtziele der ersten Iteration
 
 - STQR ist **keine SQL-/KV-Datenbank** und bietet keine Abfrage- oder Multi-Object-Transaktionsengine.
 - Keine verteilten Transaktionen über mehrere Objekte/Buckets.
-- Eigene optimierte FUSE-/S3-/Blockdevice-Libs sind verbindlicher Umfang. Fremde Storage-ABI-/Wire-Drop-in-Kompatibilität ist kein Projektziel. S3 umfasst bereits im ersten Frontend-Release LIST und Multipart neben PUT/GET/HEAD/DELETE.
+- Eigene optimierte FUSE-/S3-/Blockdevice-Libs sind verbindlicher Umfang. Fremde Storage-ABI-/Wire-Drop-in-Kompatibilität ist kein Projektziel. Der integrierte S3-Endpunkt umfasst zunächst PUT/GET/HEAD/DELETE und LIST einschließlich Prefix/Pagination sowie Range-GET. Multipart und weitergehende S3-Funktionen sind optionale spätere Erweiterungen.
 - Keine Garantie unbegrenzter Schreibverfügbarkeit bei Netzwerkpartitionen (Konsistenz und Durable Ownership haben Vorrang).
 - Erasure Coding, komplexe Multi-Reader-Cache-Kohärenz und vollständige POSIX-Semantik sind zunächst **vorbereitet**, aber nicht Voraussetzung für ein erstes Release.
 - „Zero Overhead“ ist ein **Optimierungsziel**, kein wörtlich erreichbarer Zustand: Authentifizierung, Framing, Checksummen, Index, Kopiergrenzen und Persistenz verursachen unvermeidliche Kosten.
@@ -63,7 +63,7 @@
 ```text
                        native apps / databases / VMs
                          |       |       |
-                       Go SDK  C/Rust   S3/FUSE/NBD gateways
+                       Go SDK  C/Rust   S3 (Node-HTTP) / FUSE / NBD
                          \       |       /
                           STQR native client
                                  |
@@ -1135,7 +1135,7 @@ GOAWAY-Reason `0 DRAINED,1 SHORT_SHUTDOWN,2 CLUSTER_SHUTDOWN,3 EXCLUDED,4 PROTOC
 
 ### 13.5 Client-Objektnachrichten
 
-Normale Clients bekommen ausschließlich Objektzugriff und die dafür nötigen Routing-/Bucketinformationen. Kein Cluster-Stats, Volume-/Userzugriff oder serverseitiger Dateisystem-/S3-Namespace.
+Normale Clients bekommen ausschließlich Objektzugriff und die dafür nötigen Routing-/Bucketinformationen. Kein Cluster-Stats oder Volume-/Userzugriff über die native Bucket-Verbindung. Der integrierte S3-HTTP-Endpunkt bildet seinen Key-Namespace separat auf normale Bucket-Objekte ab.
 
 | Code | Name / Modus | Body und erfolgreiche Antwort |
 |---|---|---|
@@ -1159,6 +1159,7 @@ Normale Clients bekommen ausschließlich Objektzugriff und die dafür nötigen R
 | 0x0114 | SUBSCRIPTION_ACK / F, später | `subscription:ID,through_cursor:u64` |
 | 0x0115 | BUCKET_MAINTENANCE / Q, Single-Node | `object:ObjectRef` (OID=0, nur Bucket relevant) => leer; exklusive Wartung an die Bucket-WebSocket-Sitzung binden |
 | 0x0116 | BUCKET_SCAN / Q, Single-Node | `object:ObjectRef` (OID=0), `after:Opt(OID),limit:u32` (1..1000) => `count:u32,(id:OID,info:ObjectInfo)*,next:Opt(OID)`; nur in eigener Wartungssitzung |
+| 0x0117 | BUCKET_OBJECT_LIST / Q | `object:ObjectRef` (OID=0), `after:Opt(OID),limit:u32` (1..1000) => `count:u32,(id:OID,info:ObjectInfo)*,next:Opt(OID)`; normale READ-Inventur ohne Wartungssperre, aktuelle Sicht in OID-Reihenfolge, keine Namen-/Prefix-Sortierung |
 
 CAS-Scope `0 RANGE,1 OBJECT`; OP_STATUS-State `0 UNKNOWN,1 PENDING,2 COMMITTED,3 FAILED,4 EXPIRED`. UNKNOWN/EXPIRED ist keine Zusicherung „nie ausgeführt“. ObjectUpdate-Change `0 REPLACE,1 RANGE_WRITE,2 APPEND,3 TRUNC,4 DELETE,5 RESYNC_REQUIRED`. SUBSCRIBE/UNSUBSCRIBE/ACK sind in v1 reserviert: Q => 501; F-Varianten werden mangels ausgehandeltem Feature nicht gesendet.
 
@@ -1314,6 +1315,9 @@ ADMIN oder ausdrücklich ADMIN_READ für reine Leseoperationen. `C` bedeutet glo
 | 0x2023 | BUCKET_QUOTA_CAPACITY / Q | `bucket:ID,strategy:u8,object_size_profile:u8,previous_overhead_ppm:u32` => `used:u64,available_physical:u64,reserved_other_physical:u64,maximum:u64,nodes:u32,overhead_ppm:u32,profiles:Vec(key:u8,label:Text,typical_bytes:u64,overhead_ppm:u32)`; ID null = neuer Bucket; Profil 255 bewahrt eine bestehende Pauschale, sonst wird sie aus dem Format berechnet |
 | 0x201e | VOLUME_CAPACITY_GET / Q / L | leer => `filesystem_available:u64,ram_available:u64,ram_limit:u64`; Available-Wert für das aktive Volume-Verzeichnis, verfügbarer System-RAM und wirksame RAM-Grenze nach optionalem Budget |
 | 0x2024 | NODE_ADMIN_REQUEST / Q/F / L | `target:ID,opcode:u16,body:Blob` => Status/Folgeheader/result des inneren Befehls; Operations-ID bleibt die ID des äußeren Requests; kein beliebiges URL-Ziel |
+| 0x2025 | USER_S3_KEY_LIST / Q | `user_id:ID` => `access_key_ids:Vec(Text)`; nur IDs, keine Secrets |
+| 0x2026 | USER_S3_KEY_SET / Q | `user_id:ID, access_key:Text, secret_key:Text` => ACK; anlegen/rotieren, eindeutige ID, idempotente Operation-ID |
+| 0x2027 | USER_S3_KEY_DELETE / Q | `user_id:ID, access_key:Text` => ACK; idempotent widerrufen |
 
 `NODE_ADMIN_REQUEST` erlaubt ausschließlich Volume-Anlegen/-Entfernen/-Rescan/
 -Vergrößern, Volume-Kandidaten/Kapazität/Wachstumsgrenzen, lokale Config-Ansicht/
@@ -1414,7 +1418,7 @@ Ein Transport-ACK bestätigt Empfang, niemals durable Speicherung. Nach Reconnec
 
 ### 14.1 Gemeinsame Semantik
 
-Der native Store kennt ausschließlich Buckets und 256-Bit-Objekte samt vollständigen/ranged Reads/Writes, APPEND, TRUNC und CAS. FUSE-, S3- und Blockdevice-Libs **kodieren ihre Metadaten in geeigneten normalen Objekten** und verwenden dafür dieselben GET/PUT/CAS-Operationen wie für Nutzdaten. Keine gesonderte MDS-, Namensindex-, Manifest- oder S3-Metadaten-API im Daemon.
+Der native Store kennt ausschließlich Buckets und 256-Bit-Objekte samt vollständigen/ranged Reads/Writes, APPEND, TRUNC und CAS. FUSE-, S3- und Blockdevice-Libs **kodieren ihre Metadaten in geeigneten normalen Objekten** und verwenden dafür dieselben GET/PUT/CAS-Operationen wie für Nutzdaten. Keine gesonderte MDS-, Namensindex- oder Manifest-Operation im nativen Storage-Protokoll. Der im Cluster-Server integrierte S3-HTTP-Adapter verwendet dieselben normalen Objektoperationen für seine Metadaten.
 
 Die Clients besitzen eine segmentierte adaptive Map und lernen über 301/Map-Patches (§6.4). Ein bekannter beliebiger Kontakt genügt; keine vollständige Map oder Agent-Installation zum Start nötig. Langlebige Clients können relevante Patches vorladen. Zustands-/Servernamenauflösung ist Protokollhilfe, keine privilegierte fachliche Metadatenengine.
 
@@ -1466,12 +1470,17 @@ Metadaten-Copy-up speichert nur Attribute und einen Lower-Inode-Verweis mit erwa
 
 `--fsck` mit beiden Bucket-Optionen sperrt exklusiv nur den Upper, prüft dessen sichtbaren Graphen und alle verwendeten Lower-Versionen, entfernt unerreichbare Overlay-Directory-Records und sammelt unreferenzierte Upper-Objekte. Es löscht niemals Lower-Objekte. Die geöffnete reine Lower-Verbindung verhindert gleichzeitig eine Lower-Bereinigung während dieser Prüfung. Fehlerhafte/veraltete Basisreferenzen brechen vor dem Sweep ab. Automatische Online-Speicherfreigabe bleibt ausstehend. Nach abgeschlossener Lower-Wartung entfernt Upper-fsck redundante Whiteouts, deren Name im aktuellen Lower-Verzeichnis fehlt, sowie Whiteouts in opaque Verzeichnissen. Bereits im Lower vorhandene Namen bleiben maskiert; nach Entfernung eines redundanten Whiteouts wird ein später neu angelegter Lower-Name wieder sichtbar. Währenddessen keine parallelen Lower-Writes, da die Upper-Wartungssitzung den Lower nicht einfriert. Unerreichbar gewordene, aber nicht als entfernt markierte Upper-Verzeichnisrecords werden bei Lower-Verzeichniswechseln als ESTALE gemeldet und mit ihren lokalen Daten erhalten. Vollständiges Rebase und das Erfassen offline gespeicherter Upper-Abhängigkeiten durch Lower-fsck sind weiterhin offen; diese Fälle dürfen nicht als automatische Reparatur versprochen werden. Readonly-Opens erlauben mmap für PHP; PHP-`LOCK_EX` funktioniert innerhalb desselben Mounts über lokale Kernel-Locks, ohne ein verteiltes Lock-Versprechen. `touch` kann atime/mtime ausdrücklich setzen; normale Reads persistieren atime nicht.
 
-### 14.5 Eigene S3-Library und lokales Gateway
+### 14.5 Direkt integrierter S3-HTTP-Endpunkt
 
-- Die S3-Library im Package `client` implementiert den zugesagten S3-Umfang auf nativen Objekten. Ein lokaler HTTP-Gateway-Adapter ist ein optionaler Betriebsmodus desselben Daemon-Binaries, kein zusätzlicher Admin-Dienst.
-- Objektinhalte, Key-/Prefix-Index, ETags, Multipart- und Uploadzustände sind normale STQR-Objekte. LIST liest einen vom S3-Client gepflegten Index; der Storage-Server bietet keine native lexikographische Listing-Engine.
-- Das erste S3-Frontend-Release umfasst **PUT/GET/HEAD/DELETE, LIST (einschließlich Prefix/Pagination) und Multipart (Initiate/UploadPart/ListParts/Complete/Abort)**. Keyindex und Uploadzustand liegen in normalen Objekten; Konflikte werden über CAS-/Intent-Objekte aufgelöst. Vor SUBSCRIBE darf das Testfrontend den vereinbarten veralteten Cachestand nutzen, danach gilt konsistente Aktualisierung. S3-Signatur-/Credential-Mapping muss native Bucket-Rechte erhalten.
-- Standardmäßig Bind an localhost; Remote-Bind explizit auf das vorgesehene Intranet. Ein verteiltes Deployment kann mehrere Gatewayinstanzen auf denselben Buckets betreiben, sobald deren Metadatenkonflikte korrekt über CAS gelöst sind.
+- S3 ist ein integrierter Zugriffspfad des Cluster-Servers und wird unter `/s3/` im vorhandenen HTTP-Server eingebunden. Es gibt keinen separaten Gateway-Prozess und keinen zusätzlichen Listener. Anwendungen können `http://localhost:7419/s3` direkt verwenden; Apache/nginx können denselben Pfad an einem TLS-Endpunkt veröffentlichen. Proxies müssen den signierten Host, Pfad und Query unverändert weiterreichen. Die vorhandene Listen-/Subnetzkonfiguration gilt auch für S3.
+- Die fachliche Library im Package `client` bildet den S3-Namespace auf normale STQR-Objekte ab. Der HTTP-Adapter im Package `server` übernimmt Routing, SigV4 und die vorhandenen Bucket-Grants. Der native Volume-Layer benötigt keine S3-Sonderoperationen.
+- Der anfängliche, an FOP orientierte Umfang ist **PUT/GET/HEAD/DELETE, Range-GET und LIST v1/v2 einschließlich Prefix, Delimiter und Pagination**. PUT unterstützt Streams, private ACL, Content-Type, ETag, Änderungszeit und benutzerdefinierte Metadaten. Multipart, Versionierung, öffentliche ACLs, Lifecycle, CopyObject und weitere S3-Sonderfunktionen sind nicht Teil dieses ersten Umfangs und werden ausdrücklich als nicht unterstützt beantwortet.
+- Jeder S3-Key besitzt genau ein deterministisch adressiertes natives Objekt: `SHA256("stqr:s3:meta:v1:" || NUL || UTF8(key))`. Binärheader, variable Metadaten und Payload liegen gemeinsam darin. PUT staged und prüft den Inhalt vorab und veröffentlicht alles atomar per versionsgeprüftem nativen PUT. Überschreiben und DELETE geben alte Payload-Allokationen in der Volume-Transaktion frei; es gibt keine abgetrennten Payload-Objekte oder auf eine spätere S3-GC verschobene Speicherfreigabe.
+- Objektformat **STS3 v2**, Little Endian, feste Feldbreiten ohne Padding: Magic bei Offset 0 (4 Byte), Version=2 bei 4 (u16), reserviert bei 6 (u16), Statusflags bei 8 (u32), eigene native OID bei 12 (32 Byte), Payload-Länge bei 44 (u64), mtime in Unix-Nanosekunden bei 52 (u64), MD5-ETag bei 60 (16 Byte), variable Metadatenlänge bei 76 (u32). Der feste Header ist 80 Byte groß. Es folgen Key und sortierte Header-/Metadatenpaare mit Text-/Varint-Codec, anschließend die Payload. Header und variable Metadaten sind gemeinsam höchstens 64 KiB groß. Feste Felder sind direkt adressierbar; C/Rust beachten Byteordnung/unaligned Zugriffe. Range-CAS kann feste Felder ändern. DELETE ist eine native atomare Löschung samt Speicherfreigabe, keine verbleibende Löschflagge mit Payload.
+- LIST verwendet die native, nur mit READ erlaubte Objektinventur BUCKET_OBJECT_LIST (0x0117) und wertet die S3-Header/Keys der lebenden Objekte im Frontend aus. Es gibt keinen getrennten dauerhaft wachsenden Namensindex und keine Index-Einträge verwaister Uploads. Die Inventur ist nach nativer OID paginiert; Key-/Prefix-Sortierung erfolgt im S3-Layer. Ein effizienterer lexikographischer Index ist eine spätere Optimierung, keine Voraussetzung für Speicherfreigabe.
+- S3-Access-Keys werden als Unterarray im bestehenden User persistiert, nicht in einem zweiten User-/Credential-Katalog. IDs sind clusterweit eindeutig; ein User hat höchstens 32 Keys. Signing-Secrets werden mit AES-GCM unter einem aus dem Cluster-Token abgeleiteten Schlüssel versiegelt und an User-ID/Access-Key-ID gebunden. Admin-Listen und Retry-Antworten enthalten keine Secrets. Ein Cluster-Token-Wechsel benötigt eine Neuversiegelung beziehungsweise Neuerstellung der Keys. Sperren/Löschen eines Users und Entziehen eines Bucket-Grants gelten auch für S3. GET/HEAD/LIST erfordern READ, PUT WRITE, DELETE DELETE; interne Metadatenzugriffe erweitern nicht die externen Rechte.
+- Der HTTP-Adapter prüft AWS SigV4 für Header- und Query-Signaturen; FOP verwendet Pfad-URLs und die Region `eu-west-1`. Die Region ist Teil des Signing-Scopes und kein Placement-Schalter. Der Endpunkt ist für TLS-Terminierung am Proxy oder den lokalen HTTP-Zugriff vorgesehen. AWS-spezifische signierte Chunk-Transfers sind zunächst nicht unterstützt. Uploads werden vor Veröffentlichung in sofort unbenannte lokale Dateien gestaged; Abbruch, Fehler oder Prozessende geben deren Speicher frei. Für GET wird die native Version vor der Ausgabe unter demselben Volume-Handle geprüft und der Bereich in eine sofort unbenannte Snapshot-Datei kopiert (wie native GET zunächst höchstens 1 GiB pro Bereich). Der Volume-Lock wird vor Netzwerk-Backpressure freigegeben. Versionswechsel zwischen Head und Copy werden vor Ausgabe von Headern/Daten wiederholt; laufende Downloads behalten ihre lokale Kopie, während native Löschung den Storage bereits freigeben darf.
+- Mehrere Serverinstanzen können denselben Namespace über native CAS verwalten, sobald die jeweiligen nativen Objektpfade das gemeinsame Placement bedienen. Die HTTP-Integration selbst implementiert keine zusätzliche Replikation, keine verteilten Locks und keine Subscription-Kohärenz. LIST bietet Pagination über den jeweils gelesenen Stand, keinen transaktionalen Snapshot mehrerer HTTP-Anfragen.
 
 ### 14.6 Native Frontends als verbindlicher Umfang
 
@@ -1565,7 +1574,7 @@ stqr/
     map.go                 # segmentierte Client-Map
     blockdevice.go         # Image-/Chunk-/Manifest-Library
     filesystem.go          # CAS-basierte FS-Metadaten, FUSE-Anbindung
-    s3.go                  # S3-Objekt-/Index-Library und Gateway-Handler
+    s3.go                  # binäre S3-Envelope-/Inventur-Library; HTTP-Adapter im server
     *_test.go
   server/
     server.go              # HTTP/Basic, gemeinsamer Message-Dispatcher
@@ -1623,7 +1632,7 @@ Die FUSE-/S3-/Blockdevice-Dateien sind fachliche Libraries im Package client. Op
 | Replica | ALL-ACK, Replica-Failures, in-order replay, exact durable commit, degraded states |
 | Auth | Node-Token-Prüfung, HTTP-Basic-/Session-Auth, Replay, RBAC, Bucket-Zugriff, Admin-only |
 | Protocol | Status-Varints inkl. 301/401/507, variable Folgeheader, Teilframes, Mehrfachframes, Fuzzing, Backpressure, Stream-Abbruch, Redirect-Ziele und GOAWAY beim Drain |
-| Frontends | S3-Key-Handling/Listing, FUSE-1-MiB-Grenzen/fsync/truncate, Blockdevice-Library mit Sub-MiB-Zugriffen über Objektgrenzen, NBD-FLUSH/TRIM, Go-SDK-Retries |
+| Frontends | S3-Key-Handling/Listing/Range-CAS, FUSE-1-MiB-Grenzen/fsync/truncate, Blockdevice-Library mit Sub-MiB-Zugriffen über Objektgrenzen, NBD-FLUSH/TRIM, Go-SDK-Retries |
 
 ### 18.3 Property-Based-/Fuzz-Tests
 
@@ -1674,7 +1683,7 @@ Mit künstlich kleinen Volumes (z. B. **4, 8, 16, 32 und 64 MiB**) und determini
 - Replica-Reads: Primary offline/SHORT, erreichbare gültige Replikate liefern committed Daten ohne Primary-Warteblockade; keine vorbereiteten Records/Restore-Zwischenstände. Writes ändern dabei nicht ihren ALL-/Ownership-Vertrag.
 - Sparse/Codecs: PUT_RANGE erzeugt fehlende Objekte/Null-Lücken, TRUNC vergrößert ohne physische Nullfüllung; riesige ZERO-Extents bei kleinen Volumes, teilweise Überschreibung, Crash-Replay und Migration. raw/gzip/lz4/xz mit ranged I/O, kleinen Appends und Codecwechsel, ohne logische Versions-/Offsetänderung.
 - EVERYWHERE/System: Join/Leave/SHORT, vollständige Systemobjektkopie je Mitglied, automatische Config-Credentials/System-Volume, Hashablage weiterer Accounts und Authentifizierung aus erreichbaren System-Replikaten. Ungeeigneter physischer Platz bei Join => 507.
-- S3/FUSE: LIST/Prefix/Pagination und Multipart-Complete/Abort im ersten Frontend-Release; Testphase darf stale Caches haben, Einführung von SUBSCRIBE benötigt danach konsistente Cache-/Update-Verarbeitung.
+- S3/FUSE: LIST/Prefix/Pagination und Range-GET im ersten S3-Umfang; Multipart später; Testphase darf stale Caches haben, Einführung von SUBSCRIBE benötigt danach konsistente Cache-/Update-Verarbeitung.
 - Später ENet: Paketverlust/Duplikation/Reordering, isolierte Ordered-Streams, unabhängige Request-IDs, verspätete END-Nachrichten, Latest-Snapshot-Verwerfung ohne Mischstände, Channel-Erschöpfung, Reconnect mit gleichen Operations-IDs und keinerlei automatischer Membership-Ausschluss durch Transport-Timeout.
 - Später: Snapshot+SUBSCRIBE ohne Registrierungslücke, cursorbasiertes Replay, Range-Updates/TRUNC/DELETE und Übernahme aktiver Subscriptions bei Cutover/Drain.
 
@@ -1719,8 +1728,8 @@ Mit künstlich kleinen Volumes (z. B. **4, 8, 16, 32 und 64 MiB**) und determini
 
 ### Phase 5 – Frontends, Dashboard, Performance
 
-- C/Rust-SDK, FUSE mit 1-MiB-Chunks, Blockdevice-Library mit 1-MiB-Objekten und kleineren ranged Transfers, lokales S3-Gateway, Admin-Dashboard mit Echtzeit-Node-/Volume-Tabelle und Bucket-Verwaltung; NBD auf derselben Library nach Bedarf, spätere QEMU-Anbindung vorbereitet.
-- **Abnahme:** Multi-Mount-FUSE mit CAS-Konflikten und zunächst erlaubten Testcaches; S3 inkl. LIST/Multipart und Blockdevice-Semantik, End-to-End-Tests mit gemeinsamen Objektoperationen.
+- C/Rust-SDK, FUSE mit 1-MiB-Chunks, Blockdevice-Library mit 1-MiB-Objekten und kleineren ranged Transfers, integrierter S3-HTTP-Endpunkt, Admin-Dashboard mit Echtzeit-Node-/Volume-Tabelle und Bucket-Verwaltung; NBD auf derselben Library nach Bedarf, spätere QEMU-Anbindung vorbereitet.
+- **Abnahme:** Multi-Mount-FUSE mit CAS-Konflikten und zunächst erlaubten Testcaches; S3 inkl. LIST/Range-GET und Blockdevice-Semantik, End-to-End-Tests mit gemeinsamen Objektoperationen.
 
 ### Phase 6 – Erweiterungen
 
@@ -1754,7 +1763,7 @@ Hier stehen nur noch nicht entschiedene Details. Bereits geklärt sind: Intranet
 ### 20.4 Frontends und spätere Features
 
 - Multi-Mount-FUSE: CAS-/Intent-Protokolle für Rename/Link/Unlink über mehrere Metadatenobjekte und Recovery. Alte Testcaches sind bis SUBSCRIBE erlaubt; bei dessen Einführung müssen Cache-/Kernel-Sichtbarkeit konsistent umgesetzt werden.
-- S3: Objektformate für Key-/Prefix-Index, Pagination und Multipart-Uploadzustände/Complete/Abort. LIST und Multipart gehören zum ersten Frontend-Release; ihr Umfang wird nicht erneut zur Disposition gestellt. Blockdevice: ABI, Flush-/Trim-/Resize-Vertrag und QEMU-Adapter.
+- S3: binäre Objektformate mit Metadaten-/Payload-Envelope und native Inventur für LIST sowie Prefix/Pagination. LIST und Range-GET gehören zum ersten integrierten Umfang; Multipart ist eine spätere optionale Erweiterung. Blockdevice: ABI, Flush-/Trim-/Resize-Vertrag und QEMU-Adapter.
 - SUBSCRIBE/UNSUBSCRIBE: Journal-Retention, Resync für langsame Leser, Relay-/Reconnect-Handoff und Ende durch Rechteentzug. Snapshot-/Versionsbarriere und Übergabe bei Migration stehen bereits fest.
 - CACHE-Strategie: Verdrängungs-/Miss-Verhalten und Klassenwahl; bis dahin reserviert und Aktivierung mit 501 ablehnen. RAM-Replikation und Replica-Restore gehören zu v1.
 - ENet: Channel-Pool, optionale cgo-Builds, HTTP-Authentifizierung zur Sessionbindung, Transportversion und Ordered-Stream-Reconnect-Barrieren; RELIABLE_UNORDERED ist kein nativer ENet-Modus (§13.9). Keine TLS-/Zertifikatsabhängigkeit hinzufügen.
@@ -1781,7 +1790,7 @@ STQR ist ein **Single-Node-First, Range-Partitioned Distributed Object Store** f
 5. **Administrativ definierte Bucket-SLAs:** Pro Bucket lassen sich HDD-/SSD-/RAM-Basisspeicher, Replikations-/EC-Strategien, Cache-Berechtigung, Quotas und Benutzerzugriff festlegen. Änderungen werden als **NEXT-Placement-Generation** umgesetzt; `desired` und `effective` dürfen nicht verwechselt werden.
 6. **Zielgerichteter kleiner Objektkern:** Ein eigenes, append-orientiertes Volumenformat mit Hash-Index und Segmentspeicherung soll für viele 2–250-KiB-Beispielobjekte weniger Dateisystem- und Metadatenoverhead erzeugen als eine Datei pro Objekt. Die tatsächlichen Vorteile sind zu benchmarken.
 7. **Durable atomisches APPEND als native Storage-Operation:** Pro Objekt serialisiertes Append, stabiler Offset, Flush vor ACK sowie persistente Retry-Deduplizierung sind Kernfunktionen für Journale und Logs; dafür braucht STQR keine verteilte Multi-Object-Transaktionsengine.
-8. **Direkt nutzbare allgemeine Clients:** Ein natives Binärprotokoll und Go-/C-/Rust-SDKs dienen beliebigen Anwendungen. FUSE, lokales S3-Gateway und NBD/Blockdevice werden als eigenständige Frontends angebunden.
+8. **Direkt nutzbare allgemeine Clients:** Ein natives Binärprotokoll und Go-/C-/Rust-SDKs dienen beliebigen Anwendungen. FUSE und NBD/Blockdevice sind eigenständige Frontends; S3 ist direkt im HTTP-Server der Nodes integriert.
 9. **Ein Transport, rollenbasierte Fähigkeiten:** Dasselbe kompakte Protokoll wird von Clients, Nodes und Administratoren verwendet; die initiale Authentifizierung und die vergebene Rolle begrenzen jeweils die erlaubten Operationen.
 
 ### 21.2 Was ausdrücklich kein Alleinstellungsmerkmal ist
@@ -1802,7 +1811,7 @@ Range-Splitting, explizite Placement-Tabellen, auf Messwerten basierende Verteil
 | Flexible Storage- und Kostenstufen | Bucket-Policies und HDD/SSD/RAMCACHE-Klassen | Erfüllung von Tier-/Quota-Vorgaben, Kosten/GB, Cache-Hit-Rate |
 | Sehr kleine Objekte effizient verwalten | Segmentbasiertes Format und lokaler Hash-Index | CPU/op, Write-Amplification, physische Bytes/Nutzbyte |
 | Zuverlässige Logs | Atomisches, idempotent wiederholbares APPEND | Crash-/Retry-Test ohne Doppel-Append, Verlust oder Offset-Überlappung |
-| Ausbaubare Zugriffspfade | Native SDKs und getrennte Gateways | End-to-End-Interoperabilität über Go/C/Rust, S3, FUSE, NBD |
+| Ausbaubare Zugriffspfade | Native SDKs, integriertes S3 und weitere Frontends | End-to-End-Interoperabilität über Go/C/Rust, S3, FUSE, NBD |
 
 **Einordnung:** Diese Stärken sind Designziele und teilweise strukturell plausibel. Ihre quantitative Wirkung muss unter identischer Hardware, Durability-Policy, Replikationsstufe, Objektgrößenverteilung und Last mit Alternativen verglichen werden.
 
@@ -1835,7 +1844,7 @@ STQR reduziert einige spezifische Zielkonflikte anderer Systeme, **beseitigt abe
 - **Zwei Generationen sind keine Transaktion:** Für garantierte linearisierbare Objektoperationen braucht es weiterhin Fencing, persistente Entscheidung über Ownership, Änderungsübernahme, Idempotenz und Crash-Recovery.
 - **ALL-Barrieren und Warten:** Ein einzelner persistenter Node ist nicht host-ausfallsicher. Bereits vor einer Rebuild-Runde fehlende Nodes blockieren unabhängiges Online-Rebalancing nicht; ihr Placement bleibt eingefroren. Fehlende erforderliche Replikate blockieren betroffene Writes, fehlende Mitglieder globale Membership-/Admin-Entscheidungen und nach Bindung ausfallende Rundenteilnehmer den laufenden Rebuild. Warten bis Reconnect oder administrativem Forceful Disconnect bleibt in diesen Fällen eine bewusste Verfügbarkeitsgrenze.
 - **Hot Objects:** Splitting isoliert ein heißes Objekt, verteilt aber dessen Writes nicht. Read-Cache-Skalierung funktioniert nur mit einer korrekten Versions-/Invalidierungsstrategie.
-- **S3/POSIX/Block:** `LIST` braucht einen Namensindex; FUSE braucht Dateisystemmetadaten und Semantik; NBD braucht Flush/Discard/partielle Writes. Diese Gateways sind nicht bloß ein Protokoll-Wrapper.
+- **S3/POSIX/Block:** `LIST` braucht eine Namenssicht (derzeit Inventur der S3-Envelopes); FUSE braucht Dateisystemmetadaten und Semantik; NBD braucht Flush/Discard/partielle Writes. Diese Gateways sind nicht bloß ein Protokoll-Wrapper.
 - **Crash-Durability:** `ACK` darf nur nach persistenter Daten- und Recovery-Information erfolgen; SSD-/HDD-Controller müssen Flush/FUA korrekt unterstützen. Group Commit kann Flush-Aufwand zusammenfassen, aber nicht umgehen.
 
 ### 23.3 Vergleich – ohne unbewiesene Überlegenheit
@@ -1861,7 +1870,7 @@ Diese Tabelle bewertet **Ausrichtung und Architektur**, nicht aktuelle Benchmark
 
 1. **Datenbanken und Suchsysteme mit ausgelagerten Payloads:** Kleine bis mittelgroße unveränderliche oder überschreibbare Binärwerte; die Anwendung verwaltet eigene fachliche Metadaten und Transaktionen.
 2. **Transaktionslogs, Journale und Event-Persistenz:** `APPEND` mit garantiertem Durable-ACK, monotoner Position und idempotenten Retries. STQR stellt keine eigene Stream-Processing-Engine oder Consumer-Offsets bereit.
-3. **Object Storage für Anwendungssysteme und SaaS:** Mandanten- beziehungsweise Bucket-Trennung, individuelle Speicherklasse, Quotas, Rechte und S3-Zugriff über lokale Gateways.
+3. **Object Storage für Anwendungssysteme und SaaS:** Mandanten- beziehungsweise Bucket-Trennung, individuelle Speicherklasse, Quotas, Rechte und S3-Zugriff über den integrierten HTTP-Endpunkt.
 4. **Skalierender Storage für kleine Deployments:** Anfang mit einem Server oder einer lokalen Datei; später Clusterbeitritt, zusätzliche Volumes und generationsweises Rebalancing ohne API-Wechsel.
 5. **Hotspot-lastige Read-Workloads:** Häufig abgefragte Binärobjekte, Vorberechnungen, Artefakte oder Mediensegmente; Hot-Range-Isolation und zusätzliche gültige Read-Caches sind besonders nützlich.
 
@@ -1925,7 +1934,7 @@ STQR SOLL reproduzierbar gegen Ceph und eine geeignete lokale beziehungsweise vo
 | Bucket-Storage-Policy-Change | Desired-Storage-Policy wird in **NEXT-Generation** umgesetzt; ACL und Quota folgen separatem Kontrollcommit |
 | Zugriff | Admin verwaltet Buckets; User bekommt Objektzugriff pro Bucket; Frontend-Metadaten sind normale Objekte |
 | Protokoll | HTTP/Basic, WebSocket-Upgrade, eine Binärmessage je Message; Q/F/P, gemeinsame Admin-/Peer-/Objektlayouts |
-| Clients | native Go/C/Rust, Multi-Mount-FUSE mit CAS, S3 inkl. LIST/Multipart und Blockdevice-Lib |
+| Clients | native Go/C/Rust, Multi-Mount-FUSE mit CAS, S3 inkl. LIST/Range-GET und Blockdevice-Lib |
 | FUSE-Testcaches | stale bis SUBSCRIBE erlaubt, mit SUBSCRIBE konsistent |
 | Replica-Reads | bei fehlendem Primary erlaubt; kein automatischer Schreib-Ownerwechsel |
 | Prozessmodell | ein Daemon mit Dashboard/API, maximal volume/server/client als Library-Packages |

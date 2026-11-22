@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: GPL-3.0-only
 import {newID} from './protocol.js';
+import {setupS3Keys} from './s3-keys.js';
 const $=id=>document.getElementById(id);
 export function setupUserViews({connection,currentUsername,escape,toast,showView,requireLogin,openBucketCreate}){
  let users=[],createRetry,passwordRetry,selected,deleteID,loading=0;
+ const keys=setupS3Keys({connection});
  const roleRetries=new Map();
  const utf8=new TextEncoder();
  function passwordValid(input){input.setCustomValidity(utf8.encode(input.value).length>72?'Das Passwort darf maximal 72 UTF-8-Bytes lang sein.':'');return input.reportValidity()}
@@ -10,9 +12,10 @@ export function setupUserViews({connection,currentUsername,escape,toast,showView
   $('user-count').textContent=String(users.length);$('nav-users-count').textContent=String(users.length);
   $('user-rows').innerHTML=users.map(u=>{
    const self=u.name===currentUsername();
-   return `<tr data-user="${u.id}"><td><div class="user-cell"><span class="user-avatar">${escape(u.name.slice(0,1).toUpperCase())}</span><div><div class="volume-name">${escape(u.name)}${self?'<span class="system-label">DU</span>':''}</div><div class="volume-path">${escape(u.id)}</div></div></div></td><td><select class="user-role-select" data-user-role="${u.id}" ${self?'disabled title="Die eigene Rolle kann nicht geändert werden"':''} aria-label="Rolle für ${escape(u.name)}"><option value="0" ${u.role===0?'selected':''}>User</option><option value="1" ${u.role===1?'selected':''}>Administrator</option></select></td><td><span class="state-badge ${u.disabled?'detached':''}"><i></i>${u.disabled?'Deaktiviert':'Aktiv'}</span></td><td><div class="row-actions"><button class="row-action" data-user-password="${u.id}">Passwort ändern</button><button class="row-action danger-action" data-user-delete="${u.id}" ${self?'disabled title="Das eigene Konto kann nicht gelöscht werden"':''}>Löschen</button></div></td></tr>`;
+   return `<tr data-user="${u.id}"><td><div class="user-cell"><span class="user-avatar">${escape(u.name.slice(0,1).toUpperCase())}</span><div><div class="volume-name">${escape(u.name)}${self?'<span class="system-label">DU</span>':''}</div><div class="volume-path">${escape(u.id)}</div></div></div></td><td><select class="user-role-select" data-user-role="${u.id}" ${self?'disabled title="Die eigene Rolle kann nicht geändert werden"':''} aria-label="Rolle für ${escape(u.name)}"><option value="0" ${u.role===0?'selected':''}>User</option><option value="1" ${u.role===1?'selected':''}>Administrator</option></select></td><td><span class="state-badge ${u.disabled?'detached':''}"><i></i>${u.disabled?'Deaktiviert':'Aktiv'}</span></td><td><div class="row-actions"><button class="row-action" data-user-s3="${u.id}">S3-Schlüssel</button><button class="row-action" data-user-password="${u.id}">Passwort ändern</button><button class="row-action danger-action" data-user-delete="${u.id}" ${self?'disabled title="Das eigene Konto kann nicht gelöscht werden"':''}>Löschen</button></div></td></tr>`;
   }).join('')||'<tr><td colspan="4">Keine Benutzer vorhanden.</td></tr>';
   for(const select of document.querySelectorAll('[data-user-role]'))select.onchange=()=>changeRole(select);
+  for(const b of document.querySelectorAll('[data-user-s3]'))b.onclick=()=>keys.open(users.find(u=>u.id===b.dataset.userS3));
   for(const b of document.querySelectorAll('[data-user-password]'))b.onclick=()=>openPassword(b.dataset.userPassword);
   for(const b of document.querySelectorAll('[data-user-delete]'))b.onclick=()=>openDelete(b.dataset.userDelete);
  }
@@ -56,5 +59,5 @@ export function setupUserViews({connection,currentUsername,escape,toast,showView
  });
  function openDelete(id){selected=users.find(u=>u.id===id);if(!selected||selected.name===currentUsername())return;deleteID=newID();$('user-delete-description').textContent=`Soll „${selected.name}“ wirklich gelöscht werden?`;$('user-delete-error').textContent='';$('user-delete-dialog').showModal()}
  $('user-delete-form').addEventListener('submit',async e=>{e.preventDefault();e.submitter.disabled=true;$('user-delete-error').textContent='';try{await connection().deleteUser(selected.id,deleteID);$('user-delete-dialog').close();toast(`User „${selected.name}“ wurde gelöscht.`);await load()}catch(e){$('user-delete-error').textContent=e.message}finally{e.submitter.disabled=false}});
- return {load,clear(){loading++;roleRetries.clear();users=[];render()}};
+ return {load,clear(){keys.clear();loading++;roleRetries.clear();users=[];render()}};
 }

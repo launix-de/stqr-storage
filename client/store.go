@@ -115,7 +115,16 @@ func (c *Client) GetTo(ctx context.Context, id ObjectID, dst io.Writer) (ObjectI
 func (c *Client) GetRangeTo(ctx context.Context, id ObjectID, off, length uint64, dst io.Writer) (ObjectInfo, error) {
 	return c.getTo(ctx, id, off, length, true, dst)
 }
+
+// GetRangeToVersion checks the response snapshot version before writing dst.
+// It uses the existing GET_RANGE wire operation, not a racy preliminary Stat.
+func (c *Client) GetRangeToVersion(ctx context.Context, id ObjectID, off, length, version uint64, dst io.Writer) (ObjectInfo, error) {
+	return c.getToChecked(ctx, id, off, length, true, dst, &version)
+}
 func (c *Client) getTo(ctx context.Context, id ObjectID, off, length uint64, ranged bool, dst io.Writer) (ObjectInfo, error) {
+	return c.getToChecked(ctx, id, off, length, ranged, dst, nil)
+}
+func (c *Client) getToChecked(ctx context.Context, id ObjectID, off, length uint64, ranged bool, dst io.Writer, version *uint64) (ObjectInfo, error) {
 	if e := c.ready(ctx); e != nil {
 		return ObjectInfo{}, e
 	}
@@ -145,6 +154,9 @@ func (c *Client) getTo(ctx context.Context, id ObjectID, off, length uint64, ran
 		if total != info.Length {
 			d.Err = ErrProtocol
 		}
+	}
+	if version != nil && info.Version != *version {
+		return info, ErrPrecondition
 	}
 	mode, total, digest, data := decodeTransfer(&d)
 	if d.Done() != nil {

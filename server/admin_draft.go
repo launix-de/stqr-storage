@@ -28,7 +28,7 @@ func (d *adminDraft) close() error {
 }
 
 func globalAdminMutation(opcode uint16) bool {
-	return userOpcode(opcode) && opcode != client.UserList || bucketAdminOpcode(opcode) && opcode != client.BucketList && opcode != client.BucketQuotaCapacity
+	return userOpcode(opcode) && opcode != client.UserList && opcode != client.UserS3KeyList || bucketAdminOpcode(opcode) && opcode != client.BucketList && opcode != client.BucketQuotaCapacity
 }
 
 // The caller binds a global round before preparing a draft. opMu gives a

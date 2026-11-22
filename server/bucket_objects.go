@@ -42,6 +42,9 @@ func (b *Bucket) authorize(p principal, permission BucketPermissions) (BucketDes
 	if b.ID() == systemBucket {
 		return d, ErrBucketForbidden
 	}
+	if p.frontendPermission != 0 {
+		permission = p.frontendPermission
+	}
 	user, err := b.server.findAccount(p.User.Name)
 	if err != nil || user.ID != p.User.ID || user.Disabled || (user.Role != "ADMIN" && user.Role != "USER") || !constantEqual(user.PasswordHash, p.User.PasswordHash) {
 		return d, ErrBucketForbidden
@@ -213,6 +216,11 @@ func (b *Bucket) GetRange(ctx context.Context, p principal, id volume.ObjectID, 
 // CopyTo holds one snapshot handle for the complete transfer, without buffering
 // the whole object. Mutations never expose partially updated object versions.
 func (b *Bucket) CopyTo(ctx context.Context, p principal, id volume.ObjectID, offset, length uint64, dst io.Writer) (volume.Info, uint64, error) {
+	return b.copyToVersion(ctx, p, id, offset, length, dst, nil)
+}
+
+// Check while holding the same native read handle that copies the data.
+func (b *Bucket) copyToVersion(ctx context.Context, p principal, id volume.ObjectID, offset, length uint64, dst io.Writer, version *uint64) (volume.Info, uint64, error) {
 	if err := ctx.Err(); err != nil {
 		return volume.Info{}, 0, err
 	}
@@ -233,6 +241,9 @@ func (b *Bucket) CopyTo(ctx context.Context, p principal, id volume.ObjectID, of
 	info, err := h.Stat(key)
 	if err != nil {
 		return info, 0, err
+	}
+	if version != nil && info.Version != *version {
+		return info, 0, volume.ErrPrecondition
 	}
 	n, err := h.CopyTo(key, offset, length, bucketContextWriter{ctx: ctx, w: dst})
 	return info, n, err

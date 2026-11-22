@@ -30,6 +30,7 @@ const (
 	BucketInfoGet        uint16 = 0x010c
 	BucketMaintenance    uint16 = 0x0115
 	BucketScan           uint16 = 0x0116
+	BucketObjectList     uint16 = 0x0117
 	BucketCreate         uint16 = 0x2003
 	BucketSetPolicy      uint16 = 0x2004
 	BucketSetQuota       uint16 = 0x2005
@@ -52,6 +53,9 @@ const (
 	VolumeCapacityGet uint16 = 0x201e
 	VolumeGrowInfo    uint16 = 0x201f
 	VolumeGrow        uint16 = 0x2020
+	UserS3KeyList     uint16 = 0x2025
+	UserS3KeySet      uint16 = 0x2026
+	UserS3KeyDelete   uint16 = 0x2027
 	UserList          uint16 = 0x2021
 	UserCreate        uint16 = 0x200b
 	UserUpdate        uint16 = 0x200c

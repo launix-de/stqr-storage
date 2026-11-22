@@ -4,6 +4,7 @@ package server
 import (
 	"bytes"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"reflect"
@@ -217,12 +218,23 @@ func validateSystemAccounts(accounts accountsImage) error {
 	}
 	ids, names := map[string]bool{}, map[string]bool{}
 	admin := false
+	accessKeys := map[string]bool{}
 	for _, user := range accounts.Users {
 		if _, err := bucketID(user.ID); err != nil || !validUsername(user.Name) || ids[user.ID] || names[user.Name] || user.PasswordHash == "" || user.Role != "ADMIN" && user.Role != "USER" {
 			return ErrBucketCatalogCorrupt
 		}
 		if _, err := bcrypt.Cost([]byte(user.PasswordHash)); err != nil {
 			return ErrBucketCatalogCorrupt
+		}
+		if len(user.S3Keys) > 32 {
+			return ErrBucketCatalogCorrupt
+		}
+		for _, key := range user.S3Keys {
+			sealed, err := base64.StdEncoding.DecodeString(key.Sealed)
+			if !validS3AccessID(key.ID) || accessKeys[key.ID] || err != nil || len(sealed) < 28 {
+				return ErrBucketCatalogCorrupt
+			}
+			accessKeys[key.ID] = true
 		}
 		ids[user.ID], names[user.Name] = true, true
 		admin = admin || user.Role == "ADMIN" && !user.Disabled

@@ -134,6 +134,8 @@ func (s *Server) executeObjects(m client.Message, ws *wsSession, p principal) ([
 		runtime = s.boot
 	}
 	switch m.Opcode {
+	case client.BucketObjectList:
+		return s.executeObjectList(ctx, op, d, p, runtime)
 	case client.BucketMaintenance, client.BucketScan:
 		return s.executeMaintenance(ctx, op, d, ws, p, runtime)
 	case 0x0100, 0x0101:

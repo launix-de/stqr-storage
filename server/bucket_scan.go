@@ -148,3 +148,37 @@ func (b *Bucket) scan(ctx context.Context, description BucketDescription, after 
 	}
 	return out, next, more, nil
 }
+
+// Read-only native inventory: no S3 names, no maintenance capability and no
+// lexicographic key engine. Namespace frontends interpret their own records.
+func (s *Server) executeObjectList(ctx context.Context, op *objectMutation, d *client.Decoder, p principal, runtime client.ID) ([]byte, int, error) {
+	description, err := op.bucket.authorize(p, BucketRead)
+	if err != nil {
+		return nil, 0, err
+	}
+	var after *volume.ObjectID
+	if d.Bool() {
+		var id volume.ObjectID
+		copy(id[:], d.Take(32))
+		after = &id
+	}
+	limit := d.U32()
+	if d.Done() != nil || limit == 0 || limit > 1000 {
+		return nil, 0, fail(400, "invalid object scan")
+	}
+	records, next, more, err := op.bucket.scan(ctx, description, after, int(limit))
+	if err != nil {
+		return nil, 0, err
+	}
+	e := client.Encoder{}
+	e.U32(uint32(len(records)))
+	for _, r := range records {
+		e.B = append(e.B, r.Key.Object[:]...)
+		encodeObjectInfo(&e, r.Info, runtime)
+	}
+	e.Bool(more)
+	if more {
+		e.B = append(e.B, next[:]...)
+	}
+	return e.B, 200, nil
+}

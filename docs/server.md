@@ -9,7 +9,8 @@ go build -o stqr .
 
 There are no administrative CLI subcommands. `stqr` is the daemon; it serves the
 embedded dashboard and the administrative protocol on HTTP/WebSocket, default
-port 7419. TLS is intentionally absent. For remote administration use an SSH
+port 7419. The integrated [S3 endpoint](s3.md) uses `/s3/` on the same HTTP
+server, including access-key management in the user dashboard. TLS is intentionally absent. For remote administration use an SSH
 forward, for example `ssh -L 7419:127.0.0.1:7419 your-node`, then open
 `http://localhost:7419`.
 

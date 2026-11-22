@@ -23,11 +23,12 @@ func systemKey(name string) volume.Key {
 }
 
 type account struct {
-	ID           string `json:"id"`
-	Name         string `json:"name"`
-	Role         string `json:"role"`
-	Disabled     bool   `json:"disabled"`
-	PasswordHash string `json:"password_hash"`
+	ID           string        `json:"id"`
+	Name         string        `json:"name"`
+	Role         string        `json:"role"`
+	Disabled     bool          `json:"disabled"`
+	PasswordHash string        `json:"password_hash"`
+	S3Keys       []s3AccessKey `json:"s3_keys,omitempty"`
 }
 type accountsImage struct {
 	Schema   int              `json:"schema"`
@@ -151,12 +152,15 @@ type session struct {
 	Expires                time.Time
 }
 type principal struct {
-	connection   *connectionAuthorization
-	ClusterPeer  bool
-	User         account
-	SessionToken string
-	CSRF         string
-	Cookie       bool
+	// Internal S3 operations retain the original HTTP operation grant, including
+	// write-only/delete-only users. Native clients cannot set this field.
+	frontendPermission BucketPermissions
+	connection         *connectionAuthorization
+	ClusterPeer        bool
+	User               account
+	SessionToken       string
+	CSRF               string
+	Cookie             bool
 }
 
 func (s *Server) authenticate(r *http.Request) (principal, error) {
