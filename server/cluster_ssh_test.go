@@ -4,6 +4,7 @@ package server
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"net"
@@ -24,6 +25,18 @@ import (
 // belong to this test; no existing daemon, PM2 entry or user data is touched.
 // STQR_TEST_BINARY must be built from the same source as this test binary.
 func TestSSHClusterAcceptance(t *testing.T) {
+	runSSHClusterAcceptance(t, false)
+}
+
+func TestSSHPM2ClusterAcceptance(t *testing.T) {
+	if os.Getenv("STQR_TEST_PM2") != "1" {
+		t.Skip("set STQR_TEST_PM2=1 to use a disposable PM2 entry on the SSH host")
+	}
+	runSSHClusterAcceptance(t, true)
+}
+
+func runSSHClusterAcceptance(t *testing.T, usePM2 bool) {
+	t.Helper()
 	sshTarget := os.Getenv("STQR_TEST_SSH")
 	if sshTarget == "" {
 		t.Skip("set STQR_TEST_SSH, STQR_TEST_LOCAL_IP, STQR_TEST_REMOTE_IP and STQR_TEST_BINARY")
@@ -41,6 +54,7 @@ func TestSSHClusterAcceptance(t *testing.T) {
 	}
 	quote := func(s string) string { return "'" + strings.ReplaceAll(s, "'", "'\"'\"'") + "'" }
 	remoteDir := "/tmp/stqr-acceptance-" + newID()
+	pm2Name := filepath.Base(remoteDir)
 	if _, err := ssh(nil, "umask 077; mkdir "+quote(remoteDir)); err != nil {
 		t.Fatal("remote fixture directory", err)
 	}
@@ -49,7 +63,12 @@ func TestSSHClusterAcceptance(t *testing.T) {
 		cleanupCtx, stop := context.WithTimeout(context.Background(), 15*time.Second)
 		defer stop()
 		script := "import os,signal,shutil,time\np=" + strconv.Quote(remoteDir) + "\nf=p+'/pid'\nif os.path.exists(f):\n pid=int(open(f).read())\n try:\n  if os.readlink('/proc/%d/exe'%pid)==p+'/stqr': os.kill(pid,signal.SIGTERM)\n except FileNotFoundError: pass\n time.sleep(1)\n try:\n  if os.readlink('/proc/%d/exe'%pid)==p+'/stqr': os.kill(pid,signal.SIGKILL)\n except FileNotFoundError: pass\nshutil.rmtree(p)\n"
-		cmd := exec.CommandContext(cleanupCtx, "ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", sshTarget, "python3 -c "+quote(script))
+		command := "python3 -c " + quote(script)
+		if usePM2 {
+			// Delete only this test's unique entry, without saving the process list.
+			command = "pm2 delete " + quote(pm2Name) + " >/dev/null\n" + command
+		}
+		cmd := exec.CommandContext(cleanupCtx, "ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", sshTarget, command)
 		if err := cmd.Run(); err != nil {
 			t.Errorf("remote fixture cleanup: %v", err)
 		}
@@ -111,6 +130,22 @@ func TestSSHClusterAcceptance(t *testing.T) {
 	}
 	start := func() {
 		t.Helper()
+		if usePM2 {
+			config, err := json.Marshal(map[string]any{"apps": []any{map[string]any{
+				"name": pm2Name, "script": remoteDir + "/stqr", "cwd": remoteDir,
+				"args": []string{"--config", remoteDir + "/stqr.yaml"}, "interpreter": "none",
+				"autorestart": true, "stop_exit_codes": []int{0}, "kill_timeout": 30000,
+			}}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			pid := "import json,sys\napps=json.load(sys.stdin)\na=next(a for a in apps if a['name']==" + strconv.Quote(pm2Name) + ")\nassert a['pid']>0\nopen(" + strconv.Quote(remoteDir+"/pid") + ",'w').write(str(a['pid']))\n"
+			command := "set -eu\ncat > " + quote(remoteDir+"/ecosystem.json") + "\npm2 start " + quote(remoteDir+"/ecosystem.json") + " --only " + quote(pm2Name) + " > " + quote(remoteDir+"/pm2.log") + "\npm2 jlist | python3 -c " + quote(pid)
+			if _, err := ssh(config, command); err != nil {
+				t.Fatal("temporary PM2 start", err)
+			}
+			return
+		}
 		// Explicitly close SSH's descriptors. Backgrounding a compound shell
 		// command can retain the SSH channel until the daemon itself exits.
 		script := "import subprocess,os\np=" + strconv.Quote(remoteDir) + "\nwith open(p+'/server.log','ab') as log:\n child=subprocess.Popen([p+'/stqr','--config',p+'/stqr.yaml'],cwd=p,stdin=subprocess.DEVNULL,stdout=log,stderr=log,start_new_session=True,close_fds=True)\nwith open(p+'/pid','w') as f: f.write(str(child.pid))\n"

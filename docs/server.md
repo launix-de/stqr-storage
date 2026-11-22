@@ -737,3 +737,18 @@ that a missing issuer preserves 503 while invalid credentials remain rejected.
 with existing acknowledged data, restarts the join-pending node first, and checks
 shared committed membership, unchanged object bytes/versions and local volume
 ownership. The existing deployment was backed up before its matching upgrade.
+
+## PM2 shutdown behavior
+
+A supervisor must preserve a successful administrative shutdown. For PM2 use
+`stop_exit_codes: [0]` and a suitable graceful `kill_timeout` (the test uses
+30000 ms). Otherwise PM2 immediately resurrects a drained node or a cluster STOP.
+An explicit `pm2 restart stqr` still starts the process again; the terminating
+SIGINT/SIGTERM takes SHORT and retains placement/data. Nonzero failures retain
+PM2's ordinary restart policy. Save the configured entry with `pm2 save`.
+
+`TestSSHPM2ClusterAcceptance` runs the same two-host correctness checks using a
+unique temporary PM2 entry, including full STOP/restart and final node DRAIN.
+Enable it with `STQR_TEST_PM2=1` alongside the SSH test variables. Cleanup deletes
+only the test entry; the test never saves PM2's list or changes the existing
+service. This additional acceptance test passed on the supplied SSH host.
