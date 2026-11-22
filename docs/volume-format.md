@@ -213,6 +213,12 @@ pages become reusable after checkpoint publication. Ambiguous I/O errors fence
 the open volume until recovery. Nonzero RequestIDs retain independently indexed
 results until explicitly forgotten.
 
+Free-tree edits that only shift a range boundary update its key in place,
+without merging and splitting nodes unnecessarily. Finalization claims newly
+allocated tree pages before processing the next retired range, including pages
+allocated by a preceding free-tree edit. This preserves allocation accounting
+when coalescing retires a page created within the same transaction.
+
 ### Defragmentation and capacity changes
 
 Defragmentation moves allocations leftward and coalesces released ranges. A

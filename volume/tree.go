@@ -232,6 +232,41 @@ func (t *transaction) set(root *uint64, key indexKey, value uint64) error {
 	}
 	return nil
 }
+
+// replaceKeyAt changes one free-range boundary without changing the number of
+// entries. The caller has checked its global predecessor/successor bounds.
+func (t *transaction) replaceKeyAt(off uint64, key, next indexKey, value uint64) (treeEntry, error) {
+	n, e := t.node(off)
+	if e != nil {
+		return treeEntry{}, e
+	}
+	if n.kind != treeFree {
+		return treeEntry{}, ErrCorrupt
+	}
+	if n.level == 0 {
+		i := sort.Search(len(n.entries), func(i int) bool { return !lessKey(n.entries[i].key, key) })
+		if i == len(n.entries) || n.entries[i].key != key {
+			return treeEntry{}, ErrCorrupt
+		}
+		if i > 0 && !lessKey(n.entries[i-1].key, next) || i+1 < len(n.entries) && !lessKey(next, n.entries[i+1].key) {
+			return treeEntry{}, ErrCorrupt
+		}
+		n.entries[i].key = next
+		n.entries[i].value = value
+	} else {
+		if len(n.entries) == 0 {
+			return treeEntry{}, ErrCorrupt
+		}
+		i := childIndex(n, key)
+		entry, e := t.replaceKeyAt(n.entries[i].value, key, next, value)
+		if e != nil {
+			return treeEntry{}, e
+		}
+		n.entries[i] = entry
+	}
+	t.putNode(off, n)
+	return t.summary(off, n), nil
+}
 func (t *transaction) deleteAt(off uint64, key indexKey) (treeEntry, error) {
 	n, e := t.node(off)
 	if e != nil {

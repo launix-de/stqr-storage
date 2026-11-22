@@ -164,19 +164,24 @@ func (t *transaction) claim(off, n uint64) error {
 	if !found || s > off || off-s > l || n > l-(off-s) {
 		return ErrCorrupt
 	}
-	if e = t.remove(&t.sb.FreeRoot, x.key); e != nil {
-		return e
-	}
+	// Keep the tree's entry count stable for a boundary shift. Removing the
+	// old key first can merge the root, only to split it again on reinsertion.
 	if off > s {
-		if e = t.set(&t.sb.FreeRoot, spaceKey(s), off-s); e != nil {
+		if e = t.set(&t.sb.FreeRoot, x.key, off-s); e != nil {
 			return e
 		}
+		if off+n < s+l {
+			return t.set(&t.sb.FreeRoot, spaceKey(off+n), s+l-off-n)
+		}
+		return nil
 	}
-	if off+n < s+l {
-		return t.set(&t.sb.FreeRoot, spaceKey(off+n), s+l-off-n)
+	if n < l {
+		_, e = t.replaceKeyAt(t.sb.FreeRoot, x.key, spaceKey(off+n), l-n)
+		return e
 	}
-	return nil
+	return t.remove(&t.sb.FreeRoot, x.key)
 }
+
 func (t *transaction) alloc(n uint64, meta bool) (uint64, error) {
 	if n == 0 {
 		return 0, nil
@@ -227,49 +232,48 @@ func (t *transaction) freeSpan(off, n uint64) error {
 	if e != nil {
 		return e
 	}
-	if hasPrevious {
-		p := keyOffset(previous.key)
-		if p+previous.value > off {
-			return ErrCorrupt
-		}
-		if p+previous.value == off {
-			if e = t.remove(&t.sb.FreeRoot, previous.key); e != nil {
-				return e
-			}
-			off = p
-			n += previous.value
-		}
+	p, q := keyOffset(previous.key), keyOffset(next.key)
+	if hasPrevious && p+previous.value > off || hasNext && off+n > q {
+		return ErrCorrupt
 	}
-	if hasNext {
-		q := keyOffset(next.key)
-		if off+n > q {
-			return ErrCorrupt
+	mergePrevious := hasPrevious && p+previous.value == off
+	mergeNext := hasNext && off+n == q
+	if mergePrevious {
+		length := previous.value + n
+		if mergeNext {
+			length += next.value
 		}
-		if off+n == q {
-			if e = t.remove(&t.sb.FreeRoot, next.key); e != nil {
-				return e
-			}
-			n += next.value
+		if e = t.set(&t.sb.FreeRoot, previous.key, length); e != nil {
+			return e
 		}
+		if mergeNext {
+			return t.remove(&t.sb.FreeRoot, next.key)
+		}
+		return nil
+	}
+	if mergeNext {
+		_, e = t.replaceKeyAt(t.sb.FreeRoot, next.key, spaceKey(off), n+next.value)
+		return e
 	}
 	return t.set(&t.sb.FreeRoot, spaceKey(off), n)
 }
 func (t *transaction) finalize() error {
 	p, r := 0, 0
 	for p < len(t.pending) || r < len(t.retired) {
-		for p < len(t.pending) {
+		// A freelist edit may allocate a tree page and a later edit may retire
+		// it again. Claim every new allocation before processing another free.
+		if p < len(t.pending) {
 			x := t.pending[p]
 			p++
 			if e := t.claim(x.off, x.n); e != nil {
 				return e
 			}
+			continue
 		}
-		for r < len(t.retired) {
-			x := t.retired[r]
-			r++
-			if e := t.freeSpan(x.off, x.n); e != nil {
-				return e
-			}
+		x := t.retired[r]
+		r++
+		if e := t.freeSpan(x.off, x.n); e != nil {
+			return e
 		}
 	}
 	return nil
