@@ -1,9 +1,11 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #include "kstqr.h"
 #include "port.h"
+#include <linux/backing-dev.h>
 #include <linux/fs_context.h>
 #include <linux/fs_parser.h>
 #include <linux/hex.h>
+#include <linux/mm.h>
 #include <linux/module.h>
 #include <linux/namei.h>
 #include <linux/nsproxy.h>
@@ -12,6 +14,7 @@
 #include <linux/seq_file.h>
 #include <linux/statfs.h>
 #include <linux/uio.h>
+#include <linux/writeback.h>
 #include <linux/xattr.h>
 #include <net/net_namespace.h>
 #define KS_MAGIC 0x53545152
@@ -55,16 +58,22 @@ static umode_t node_mode(const struct ks_node *n)
 	}
 	return type | n->mode;
 }
-static void update_inode(struct inode *i, const struct ks_node *n)
+static void update_inode(struct inode *i, const struct ks_node *n, u64 version)
 {
+	if (KS_I(i)->version && KS_I(i)->version != version)
+		WRITE_ONCE(KS_I(i)->invalidate, true);
+	KS_I(i)->version = version;
 	i->i_mode = node_mode(n);
 	set_nlink(i, n->removed ? 0 : n->links);
 	i_uid_write(i, n->uid);
 	i_gid_write(i, n->gid);
-	i_size_write(i, n->size);
-	inode_set_mtime_to_ts(i, ns_to_timespec64(n->mtime));
-	inode_set_atime_to_ts(i, ns_to_timespec64(n->atime));
-	inode_set_ctime_to_ts(i, ns_to_timespec64(n->ctime));
+	if (!mapping_tagged(i->i_mapping, PAGECACHE_TAG_DIRTY) &&
+	    !mapping_tagged(i->i_mapping, PAGECACHE_TAG_WRITEBACK)) {
+		i_size_write(i, n->size);
+		inode_set_mtime_to_ts(i, ns_to_timespec64(n->mtime));
+		inode_set_atime_to_ts(i, ns_to_timespec64(n->atime));
+		inode_set_ctime_to_ts(i, ns_to_timespec64(n->ctime));
+	}
 	i->i_blocks = DIV_ROUND_UP_ULL(n->size, 512);
 }
 static int inode_match(struct inode *i, void *data) { return !memcmp(KS_I(i)->id.bytes, data, 32); }
@@ -73,7 +82,8 @@ static int inode_set(struct inode *i, void *data)
 	memcpy(KS_I(i)->id.bytes, data, 32);
 	return 0;
 }
-static struct inode *get_inode(struct super_block *sb, stqr_object_id id, const struct ks_node *n)
+static struct inode *get_inode(struct super_block *sb, stqr_object_id id, const struct ks_node *n,
+			       u64 version)
 {
 	struct inode *i;
 	unsigned long hash = 0;
@@ -90,12 +100,13 @@ static struct inode *get_inode(struct super_block *sb, stqr_object_id id, const 
 					 : &ks_file_ops;
 		i->i_fop = n->kind == 2 ? &ks_dir_fops : &ks_file_fops;
 		i->i_mapping->a_ops = &ks_aops;
+		mapping_set_stable_writes(i->i_mapping);
 		if (n->kind == 4 || n->kind == 5)
 			init_special_inode(i, node_mode(n), 0);
-		update_inode(i, n);
+		update_inode(i, n, version);
 		unlock_new_inode(i);
 	} else
-		update_inode(i, n);
+		update_inode(i, n, version);
 	return i;
 }
 static int refresh_inode(struct inode *i)
@@ -103,7 +114,7 @@ static int refresh_inode(struct inode *i)
 	struct ks_snapshot s;
 	int err = ks_snapshot(i->i_sb->s_fs_info, KS_I(i)->id, &s);
 	if (!err) {
-		update_inode(i, &s.node);
+		update_inode(i, &s.node, s.info.version);
 		ks_snapshot_free(&s);
 	}
 	return err;
@@ -128,7 +139,8 @@ static struct dentry *ks_lookup(struct inode *parent, struct dentry *d, unsigned
 				if (!err && child.node.removed)
 					err = -ENOENT;
 				if (!err) {
-					i = get_inode(parent->i_sb, entries[k].id, &child.node);
+					i = get_inode(parent->i_sb, entries[k].id, &child.node,
+						      child.info.version);
 					if (IS_ERR(i)) {
 						err = PTR_ERR(i);
 						i = NULL;
@@ -168,15 +180,20 @@ static int ks_iterate(struct file *file, struct dir_context *ctx)
 	err = ks_snapshot(f, KS_I(i)->id, &s);
 	if (!err)
 		err = ks_directory(f, &s.node, &entries, &n);
+	leave_fs(f, saved);
 	if (!err)
 		for (k = ctx->pos - 2; k < n; k++) {
 			struct ks_snapshot child = {0};
 			struct inode *ci;
+			saved = enter_fs(f);
 			err = ks_snapshot(f, entries[k].id, &child);
-			if (err)
+			if (err) {
+				leave_fs(f, saved);
 				break;
-			ci = get_inode(i->i_sb, entries[k].id, &child.node);
+			}
+			ci = get_inode(i->i_sb, entries[k].id, &child.node, child.info.version);
 			ks_snapshot_free(&child);
+			leave_fs(f, saved);
 			if (IS_ERR(ci)) {
 				err = PTR_ERR(ci);
 				break;
@@ -191,7 +208,6 @@ static int ks_iterate(struct file *file, struct dir_context *ctx)
 		}
 	ks_snapshot_free(&s);
 	sq_free(entries);
-	leave_fs(f, saved);
 	return err;
 }
 static int create_common(struct mnt_idmap *idmap, struct inode *parent, struct dentry *d,
@@ -217,7 +233,7 @@ static int create_common(struct mnt_idmap *idmap, struct inode *parent, struct d
 	if (!err) {
 		err = ks_snapshot(f, id, &s);
 		if (!err) {
-			i = get_inode(parent->i_sb, id, &s.node);
+			i = get_inode(parent->i_sb, id, &s.node, s.info.version);
 			ks_snapshot_free(&s);
 			if (IS_ERR(i))
 				err = PTR_ERR(i);
@@ -278,7 +294,7 @@ static int ks_link_vfs(struct dentry *old, struct inode *parent, struct dentry *
 	if (!err) {
 		err = ks_snapshot(f, KS_I(d_inode(old))->id, &s);
 		if (!err) {
-			i = get_inode(parent->i_sb, s.id, &s.node);
+			i = get_inode(parent->i_sb, s.id, &s.node, s.info.version);
 			ks_snapshot_free(&s);
 			if (IS_ERR(i))
 				err = PTR_ERR(i);
@@ -410,6 +426,7 @@ static int ks_setattr_vfs(struct mnt_idmap *idmap, struct dentry *d, struct iatt
 {
 	struct inode *i = d_inode(d);
 	struct ks_fs *f = i->i_sb->s_fs_info;
+	bool resize = attr->ia_valid & ATTR_SIZE;
 	unsigned saved;
 	int err;
 	if (idmap != &nop_mnt_idmap)
@@ -417,65 +434,86 @@ static int ks_setattr_vfs(struct mnt_idmap *idmap, struct dentry *d, struct iatt
 	err = setattr_prepare(idmap, d, attr);
 	if (err)
 		return err;
+	if (resize) {
+		filemap_invalidate_lock(i->i_mapping);
+		err = filemap_write_and_wait(i->i_mapping);
+		if (err)
+			goto out_resize;
+	}
 	saved = enter_fs(f);
 	err = ks_setattr(f, KS_I(i)->id, attr);
 	if (!err)
 		err = refresh_inode(i);
 	leave_fs(f, saved);
-	if (!err && (attr->ia_valid & ATTR_SIZE))
+	if (!err && resize) {
 		truncate_setsize(i, attr->ia_size);
+		saved = enter_fs(f);
+		WRITE_ONCE(KS_I(i)->invalidate, false);
+		leave_fs(f, saved);
+	}
+out_resize:
+	if (resize)
+		filemap_invalidate_unlock(i->i_mapping);
+	return err;
+}
+/* Refresh ordinary reads without discarding locally dirty mmap data. No RPC
+ * mutex is held while waiting for writeback or locking page-cache folios.
+ */
+static int ks_revalidate_cache(struct file *file)
+{
+	struct inode *i = file_inode(file);
+	struct ks_fs *f = i->i_sb->s_fs_info;
+	struct address_space *mapping = i->i_mapping;
+	unsigned saved;
+	int err;
+	if (mapping_tagged(mapping, PAGECACHE_TAG_DIRTY) ||
+	    mapping_tagged(mapping, PAGECACHE_TAG_WRITEBACK))
+		return 0;
+	saved = enter_fs(f);
+	err = refresh_inode(i);
+	leave_fs(f, saved);
+	if (err || !READ_ONCE(KS_I(i)->invalidate))
+		return err;
+	inode_lock(i);
+	filemap_invalidate_lock(mapping);
+	err = filemap_write_and_wait(mapping);
+	if (!err) {
+		truncate_inode_pages(mapping, 0);
+		saved = enter_fs(f);
+		err = refresh_inode(i);
+		if (!err)
+			WRITE_ONCE(KS_I(i)->invalidate, false);
+		leave_fs(f, saved);
+	}
+	filemap_invalidate_unlock(mapping);
+	inode_unlock(i);
 	return err;
 }
 static ssize_t ks_read_iter(struct kiocb *iocb, struct iov_iter *to)
 {
-	struct inode *i = file_inode(iocb->ki_filp);
-	struct ks_fs *f = i->i_sb->s_fs_info;
-	struct ks_snapshot s = {0};
-	unsigned saved;
-	void *buffer;
-	ssize_t total = 0;
 	int err;
 	if (iocb->ki_flags & IOCB_NOWAIT)
 		return -EAGAIN;
-	if (iocb->ki_pos < 0)
-		return -EINVAL;
-	buffer = sq_alloc(65536);
-	if (!buffer)
-		return -ENOMEM;
-	saved = enter_fs(f);
-	err = ks_snapshot(f, KS_I(i)->id, &s);
-	if (!err)
-		update_inode(i, &s.node);
-	while (!err && iov_iter_count(to) && iocb->ki_pos < s.node.size) {
-		size_t n = min_t(u64, min_t(size_t, 65536, iov_iter_count(to)),
-				 s.node.size - iocb->ki_pos),
-		       copied;
-		err = ks_read(f, &s.node, buffer, n, iocb->ki_pos);
-		if (err)
-			break;
-		copied = copy_to_iter(buffer, n, to);
-		total += copied;
-		iocb->ki_pos += copied;
-		if (copied != n) {
-			err = -EFAULT;
-			break;
-		}
-	}
-	ks_snapshot_free(&s);
-	leave_fs(f, saved);
-	sq_free(buffer);
-	return total ? total : err;
+	if (iocb->ki_flags & IOCB_DIRECT)
+		return -EOPNOTSUPP;
+	if (!iov_iter_count(to))
+		return 0;
+	err = ks_revalidate_cache(iocb->ki_filp);
+	return err ? err : generic_file_read_iter(iocb, to);
 }
 static ssize_t ks_write_iter(struct kiocb *iocb, struct iov_iter *from)
 {
 	struct inode *i = file_inode(iocb->ki_filp);
 	struct ks_fs *f = i->i_sb->s_fs_info;
+	struct address_space *mapping = i->i_mapping;
 	unsigned saved;
 	void *buffer;
 	ssize_t total = 0, checked;
 	int err = 0;
 	if (iocb->ki_flags & IOCB_NOWAIT)
 		return -EAGAIN;
+	if (iocb->ki_flags & IOCB_DIRECT)
+		return -EOPNOTSUPP;
 	if (f->readonly)
 		return -EROFS;
 	buffer = sq_alloc(65536);
@@ -483,37 +521,55 @@ static ssize_t ks_write_iter(struct kiocb *iocb, struct iov_iter *from)
 		return -ENOMEM;
 	inode_lock(i);
 	checked = generic_write_checks(iocb, from);
+	if (checked > 0)
+		err = file_remove_privs(iocb->ki_filp);
+	inode_unlock(i);
 	if (checked <= 0) {
 		total = checked;
 		goto out;
 	}
-	err = file_remove_privs(iocb->ki_filp);
 	if (err)
 		goto out;
-	saved = enter_fs(f);
 	while (iov_iter_count(from)) {
-		size_t n = min_t(size_t, 65536, iov_iter_count(from));
+		size_t n = min_t(size_t, 65536, iov_iter_count(from)), copied;
 		u64 position = iocb->ki_pos;
-		if (copy_from_iter(buffer, n, from) != n) {
+		/* The source can itself be a kstqr mapping. Fault it before taking
+		 * inode/invalidation/RPC locks needed by its fault handler.
+		 */
+		copied = copy_from_iter(buffer, n, from);
+		if (copied != n) {
+			iov_iter_revert(from, copied);
 			err = -EFAULT;
 			break;
 		}
-		err = ks_write(f, KS_I(i)->id, &position, buffer, n,
-			       !!(iocb->ki_flags & IOCB_APPEND));
+		inode_lock(i);
+		filemap_invalidate_lock(mapping);
+		err = filemap_write_and_wait(mapping);
+		if (!err) {
+			saved = enter_fs(f);
+			err = ks_write(f, KS_I(i)->id, &position, buffer, n,
+				       !!(iocb->ki_flags & IOCB_APPEND));
+			if (!err) {
+				iocb->ki_pos = position;
+				total += n;
+				refresh_inode(i);
+			}
+			leave_fs(f, saved);
+		}
+		if (!err) {
+			truncate_inode_pages(mapping, 0);
+			saved = enter_fs(f);
+			WRITE_ONCE(KS_I(i)->invalidate, false);
+			leave_fs(f, saved);
+		}
+		filemap_invalidate_unlock(mapping);
+		inode_unlock(i);
 		if (err) {
 			iov_iter_revert(from, n);
 			break;
 		}
-		iocb->ki_pos = position;
-		total += n;
 	}
-	if (total)
-		refresh_inode(i);
-	leave_fs(f, saved);
-	if (total)
-		truncate_inode_pages(i->i_mapping, 0);
 out:
-	inode_unlock(i);
 	sq_free(buffer);
 	return total ? total : err;
 }
@@ -548,16 +604,120 @@ static int ks_read_folio(struct file *file, struct folio *folio)
 	folio_unlock(folio);
 	return err;
 }
+static int ks_writepages(struct address_space *mapping, struct writeback_control *wbc)
+{
+	struct inode *i = mapping->host;
+	struct ks_fs *f = i->i_sb->s_fs_info;
+	struct folio *folio = NULL;
+	int error = 0;
+	while ((folio = writeback_iter(mapping, wbc, folio, &error))) {
+		loff_t size = i_size_read(i), offset = folio_pos(folio);
+		size_t n = offset < size ? min_t(u64, folio_size(folio), size - offset) : 0,
+		       pos = 0;
+		void *buffer = NULL;
+		unsigned saved;
+		error = 0;
+		if (n)
+			buffer = sq_alloc(min_t(size_t, n, 65536));
+		if (n && !buffer) {
+			error = -ENOMEM;
+			folio_redirty_for_writepage(wbc, folio);
+			mapping_set_error(mapping, error);
+			folio_unlock(folio);
+			continue;
+		}
+		folio_start_writeback(folio);
+		saved = enter_fs(f);
+		while (pos < n) {
+			size_t count = min_t(size_t, n - pos, 65536);
+			u64 position = offset + pos;
+			memcpy_from_folio(buffer, folio, pos, count);
+			error = ks_write(f, KS_I(i)->id, &position, buffer, count, false);
+			if (error)
+				break;
+			pos += count;
+		}
+		leave_fs(f, saved);
+		if (error) {
+			folio_redirty_for_writepage(wbc, folio);
+			mapping_set_error(mapping, error);
+		} else if (n < folio_size(folio))
+			folio_zero_range(folio, n, folio_size(folio) - n);
+		sq_free(buffer);
+		folio_end_writeback(folio);
+		folio_unlock(folio);
+	}
+	return error;
+}
+static vm_fault_t ks_page_mkwrite(struct vm_fault *vmf)
+{
+	struct file *file = vmf->vma->vm_file;
+	struct inode *i = file_inode(file);
+	struct address_space *mapping = i->i_mapping;
+	struct folio *folio = page_folio(vmf->page);
+	vm_fault_t result = VM_FAULT_NOPAGE;
+	int err;
+	if (sb_rdonly(i->i_sb))
+		return VM_FAULT_SIGBUS;
+	sb_start_pagefault(i->i_sb);
+	balance_dirty_pages_ratelimited(mapping);
+	err = file_update_time(file);
+	if (err) {
+		result = vmf_error(err);
+		goto out;
+	}
+	filemap_invalidate_lock_shared(mapping);
+	if (folio_lock_killable(folio))
+		goto out_invalidate;
+	if (folio->mapping != mapping || folio_mkwrite_check_truncate(folio, i) < 0)
+		goto out_folio;
+	if (folio_wait_writeback_killable(folio))
+		goto out_folio;
+	if (!folio_test_uptodate(folio)) {
+		result = VM_FAULT_SIGBUS;
+		goto out_folio;
+	}
+	folio_mark_dirty(folio);
+	result = VM_FAULT_LOCKED;
+	goto out_invalidate;
+out_folio:
+	folio_unlock(folio);
+out_invalidate:
+	filemap_invalidate_unlock_shared(mapping);
+out:
+	sb_end_pagefault(i->i_sb);
+	return result;
+}
+static const struct vm_operations_struct ks_vm_ops = {
+    .fault = filemap_fault, .map_pages = filemap_map_pages, .page_mkwrite = ks_page_mkwrite};
+static int ks_mmap(struct file *file, struct vm_area_struct *vma)
+{
+	struct inode *i = file_inode(file);
+	int err;
+	if ((vma->vm_flags & VM_SHARED) && (vma->vm_flags & VM_WRITE) && sb_rdonly(i->i_sb))
+		return -EROFS;
+	if ((vma->vm_flags & VM_SHARED) && (vma->vm_flags & VM_MAYWRITE)) {
+		inode_lock(i);
+		err = file_remove_privs(file);
+		inode_unlock(i);
+		if (err)
+			return err;
+	}
+	err = ks_revalidate_cache(file);
+	if (err)
+		return err;
+	err = generic_file_mmap(file, vma);
+	if (!err)
+		vma->vm_ops = &ks_vm_ops;
+	return err;
+}
 static int ks_fsync(struct file *file, loff_t start, loff_t end, int datasync)
 {
-	(void)file;
-	(void)start;
-	(void)end;
 	(void)datasync;
-	/* Every write is already acknowledged by a durable object CAS. */
-	return 0;
+	return file_write_and_wait_range(file, start, end);
 }
-static const struct address_space_operations ks_aops = {.read_folio = ks_read_folio};
+static const struct address_space_operations ks_aops = {
+    .read_folio = ks_read_folio, .writepages = ks_writepages, .dirty_folio = filemap_dirty_folio};
 static const struct file_operations ks_file_fops = {
     .owner = THIS_MODULE,
     .open = generic_file_open,
@@ -565,7 +725,7 @@ static const struct file_operations ks_file_fops = {
     .read_iter = ks_read_iter,
     .write_iter = ks_write_iter,
     .fsync = ks_fsync,
-    .mmap = generic_file_readonly_mmap,
+    .mmap = ks_mmap,
 };
 static const struct file_operations ks_dir_fops = {
     .owner = THIS_MODULE,
@@ -707,6 +867,9 @@ static int ks_fill_super(struct super_block *sb, struct fs_context *fc)
 		return -EINVAL;
 	if (current->nsproxy->net_ns != &init_net)
 		return -EOPNOTSUPP;
+	err = super_setup_bdi(sb);
+	if (err)
+		return err;
 	f = kzalloc(sizeof(*f), GFP_KERNEL);
 	if (!f)
 		return -ENOMEM;
@@ -748,7 +911,7 @@ static int ks_fill_super(struct super_block *sb, struct fs_context *fc)
 		if (root.node.kind != 2 || root.node.removed)
 			err = -ENOTDIR;
 		else {
-			inode = get_inode(sb, ks_root_id, &root.node);
+			inode = get_inode(sb, ks_root_id, &root.node, root.info.version);
 			if (IS_ERR(inode))
 				err = PTR_ERR(inode);
 			else {

@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"os"
@@ -74,8 +75,9 @@ func TestKSTQRVirtualMachine(t *testing.T) {
 	copyFile(filepath.Join(root, "kstqr.ko"), "kstqr.ko", 0600)
 	run("cc", "-static", "-std=c11", "-Wall", "-Wextra", "-Werror", "-O2", "-o", filepath.Join(initrdRoot, "mount.kstqr"), filepath.Join(root, "mount.c"))
 	run("cc", "-static", "-std=c11", "-Wall", "-Wextra", "-Werror", "-O2", "-o", filepath.Join(initrdRoot, "smoke"), filepath.Join(root, "tests/smoke.c"))
+	run("cc", "-static", "-std=c11", "-Wall", "-Wextra", "-Werror", "-O2", "-o", filepath.Join(initrdRoot, "mmap-test"), filepath.Join(root, "tests/mmap.c"), "-lsqlite3", "-lm", "-ldl", "-lpthread")
 	s := testServer(t)
-	addTestVolume(t, s, "kernel-vm", "hdd", 64<<20)
+	addTestVolume(t, s, "kernel-vm", "hdd", 192<<20)
 	b, _ := createProtocolBucket(t, s, "kernel-vm")
 	empty, _ := createProtocolBucket(t, s, "kernel-empty")
 	corrupt, _ := createProtocolBucket(t, s, "kernel-corrupt")
@@ -88,9 +90,25 @@ func TestKSTQRVirtualMachine(t *testing.T) {
 	if _, status, _ := adminBucketMessage(t, s, client.BucketGrant, grant.B); status != 200 {
 		t.Fatal(status)
 	}
-	host := httptest.NewServer(s.Handler())
-	defer host.Close()
 	admin := s.cfg.Auth.BootstrapAdmin
+	handler := s.Handler()
+	host := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/__kstqr_test/lock" || r.URL.Path == "/__kstqr_test/unlock" {
+			body := client.Encoder{}
+			body.ID(client.ID(b.ID()))
+			body.Bool(r.URL.Path == "/__kstqr_test/lock")
+			message := client.Message{Kind: client.Request, Opcode: client.BucketLock, ID: client.NewRequestID(), Body: body.B}
+			req := httptest.NewRequest(http.MethodPost, "http://localhost/api/message", bytes.NewReader(client.EncodeMessage(message)))
+			req.RemoteAddr = "127.0.0.1:12345"
+			req.SetBasicAuth(admin.Username, admin.Password)
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, req)
+			w.WriteHeader(response.Code)
+			return
+		}
+		handler.ServeHTTP(w, r)
+	}))
+	defer host.Close()
 	conn, err := client.Dial(ctx, host.URL, admin.Username, admin.Password, client.ID(b.ID()))
 	if err != nil {
 		t.Fatal(err)
@@ -231,6 +249,7 @@ echo initialized-by-kernel > /fresh/new.txt
 umount /fresh
 if pidof mount.kstqr; then exit 1; fi
 /smoke
+/mmap-test @@URL@@
 ls -l /mnt
 if grep 'password=' /proc/mounts; then exit 1; fi
 umount /readonly
@@ -240,6 +259,7 @@ rmmod kstqr
 insmod /kstqr.ko
 /mount.kstqr --uri @@URL@@ --bucket @@BUCKET@@ --credentials /readonly-credentials --readonly /readonly
 test "$(cat /readonly/kernel.txt)" = 'written by kstqr'
+/mmap-test verify
 umount /readonly
 rmmod kstqr
 if dmesg | grep -E 'BUG:|WARNING: CPU:|Oops:|KASAN:'; then exit 1; fi

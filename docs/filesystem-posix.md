@@ -101,5 +101,7 @@ STQR_TEST_KERNEL=1 STQR_KERNEL_IMAGE=/path/to/matching/vmlinuz \
   go test -race ./server -run '^TestKSTQRVirtualMachine$' -count=1
 ```
 
-Shared writable mmap and full home-application compatibility remain separate
-work. Readonly mmap and local kernel file locks retain their existing behavior.
+The kernel client supports shared writable mmap, including explicit sync and
+background writeback; see [kstqr semantics and tests](kstqr.md). The FUSE client
+still uses direct I/O for writable opens and does not provide shared writable
+mmap. Full home-application compatibility and POSIX ACLs remain separate work.

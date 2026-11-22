@@ -116,28 +116,37 @@ can be helped after interruption without recursive kernel-stack traversal.
 Data and index objects are immutable. A version-checked inode CAS publishes each
 new content image. Partial writes preserve unmodified segment references; sparse
 extensions store zero spans. Open-unlinked files remain usable until close.
-All successful write chunks are acknowledged by the server before returning;
-fsync has no deferred userspace buffer to flush. A transport interruption during
-CAS is retried once with the same request ID after reconnect, preserving server
+All successful `write`/`pwrite` chunks are acknowledged by the server before
+returning. Shared writable mappings use the kernel page cache: `msync(MS_SYNC)`
+and `fsync` flush dirty pages through the same durable object CAS path. Background
+writeback and unmount also flush these pages; `munmap` alone is not a durability
+barrier. Failed writeback reports an error and retains dirty pages for retry.
+A transport interruption during CAS is retried once with the same request ID
+after reconnect, preserving server
 retry deduplication. An unresolved outcome is returned as an I/O error.
 
 The module currently serializes RPCs within each mount. Multiple mounts use
 independent connections and CAS conflicts are retried against fresh snapshots.
 Large read/write syscalls are processed in 64-KiB chunks. Competing multi-chunk
 append syscalls may interleave at those boundaries; they do not reserve an entire
-large append as one operation. Readonly mmap is supported; shared writable mmap
-is not. Locks are local kernel locks, not distributed locks.
+large append as one operation. `MAP_SHARED` supports reads and writes;
+`MAP_PRIVATE` uses normal copy-on-write pages without modifying stored content.
+Mappings and ordinary I/O share the page cache within a mount. Truncation flushes
+dirty data before resizing; access to pages beyond the new EOF raises `SIGBUS`.
+`O_DIRECT` is unsupported. Locks are local kernel locks, not distributed locks.
 
-Ordinary reads fetch a fresh inode snapshot, and dentries are revalidated through
-lookup rather than claiming subscription coherence. Normal reads do not persist
-atime. Readonly mmap pages can remain cached after a change through another
-mount; cross-host/page-cache invalidation still needs subscriptions. An update
-through the same mount invalidates its cached file pages.
+Ordinary reads of clean files fetch a fresh inode snapshot and invalidate cached
+pages when its version changes. Reads of locally dirty mappings preserve those
+changes. Dentries are revalidated through lookup. Normal reads do not persist
+atime. Long-lived mmap pages can remain cached after a change through another
+mount; cross-host/page-cache invalidation still needs subscriptions. Applications
+sharing writable mappings must use the same mount, or coordinate updates
+externally; this does not provide distributed shared memory.
 
 ## Current boundaries
 
-- **This is not yet a complete developer-home filesystem.** Shared writable mmap,
-  POSIX ACLs and application compatibility testing remain. User/trusted xattrs
+- **This is not yet a complete developer-home filesystem.** POSIX ACLs and broader
+  application compatibility testing remain. User/trusted xattrs
   work; security/capability xattrs and device nodes are not implemented. Keep a
   real home on its existing filesystem while evaluating this client.
 - Native overlay buckets require lower/upper handling and are currently rejected
@@ -181,7 +190,7 @@ capacity; the mount does not create storage space.
 The opt-in integration test builds a small initramfs and starts QEMU. It never
 loads the module into the host kernel, changes `/home`, or uses existing buckets.
 It requires a matching readable kernel image, headers, QEMU, a static BusyBox,
-cpio and a C toolchain with static libc.
+cpio and a C toolchain with static libc and SQLite development libraries.
 
 ```sh
 STQR_TEST_KERNEL=1 \
@@ -196,8 +205,11 @@ needs builtin virtio PCI/network, IPv4, devtmpfs, SHA-1 and SHA-256 support.
 
 Tests include an existing Go filesystem, a kernel-initialized filesystem,
 readonly-only server grants, interrupted intent recovery, concurrent append
-through independent mounts, readonly mmap, sparse 1-TiB logical files,
-permissions, symlink/hardlink/xattr interoperability, local sockets/FIFOs,
+through independent mounts, readonly/private/shared writable mmap, sparse
+1-TiB logical files, permissions, symlink/hardlink/xattr interoperability, local sockets/FIFOs,
 open-unlink, rename flags, rmdir, remount and clean module unload.
+Mmap tests cover forked shared updates, SQLite WAL with concurrent processes,
+I/O buffers backed by mappings, truncation/EOF, writeback failure and recovery,
+explicit sync and unmount persistence.
 After the VM exits, the Go client reads the kernel-written data and its fsck
 validates and cleans the published object graph.

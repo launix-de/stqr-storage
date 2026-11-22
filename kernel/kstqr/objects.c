@@ -51,7 +51,9 @@ static int cas_object(struct ks_fs *f, stqr_object_id id, const void *p, size_t 
 	if (err)
 		return err;
 	err = stqr_cas(f->client, id, 1, 0, NULL, 0, p, n, &o, &info);
-	if (err == -EINPROGRESS) {
+	if (err == -EINPROGRESS || err == -EACCES) {
+		// A bucket unlock/grant change may leave this socket with its old
+		// read-only capability. Reauthenticate before one same-ID retry.
 		if (!stqr_reconnect(f->client))
 			err = stqr_cas(f->client, id, 1, 0, NULL, 0, p, n, &o, &info);
 		if (err == -EINPROGRESS)

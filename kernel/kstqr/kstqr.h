@@ -34,6 +34,8 @@ struct ks_fs {
 	bool readonly, failed;
 };
 struct ks_inode {
+	u64 version;
+	bool invalidate;
 	stqr_object_id id;
 	struct inode inode;
 };
