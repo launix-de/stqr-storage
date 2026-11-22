@@ -268,7 +268,20 @@ func (h *Handle) ForgetRequest(id ID) error {
 
 // Recompress changes physical encoding, preserving logical versions and retries.
 func (h *Handle) Recompress(k Key, codec Compression) error {
-	return h.do(true, func(v *Volume) error { return v.recompressLocked(k, codec) })
+	return h.RecompressWithOptions(k, codec, Options{})
+}
+
+// RecompressWithOptions permits a trusted handoff to consume its own physical
+// import allowance. Logical versions and original retry results stay unchanged;
+// failed encodings leave the previous canonical object readable. Only reserve
+// fields are accepted; logical mutation/precondition options return ErrRange.
+func (h *Handle) RecompressWithOptions(k Key, codec Compression, opts Options) error {
+	return h.do(true, func(v *Volume) error {
+		if opts.RequestID != (ID{}) || opts.Compression != nil || opts.ExpectedVersion != nil || opts.ExpectedLength != nil || opts.CreateOnly || opts.WholeObject {
+			return ErrRange
+		}
+		return v.recompressLocked(k, codec, opts)
+	})
 }
 
 // Restore installs a trusted object snapshot while preserving version/tombstone.

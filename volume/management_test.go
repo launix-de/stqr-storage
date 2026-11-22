@@ -285,3 +285,58 @@ func TestInFlightAllowanceCannotConsumeOtherImportsOrGuarantees(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestRecompressConsumesOnlyItsOwnImportAllowance(t *testing.T) {
+	v, _ := memoryVolume(t, 4<<20)
+	defer v.Close()
+	h, err := v.Open(true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := testKey(5)
+	request := testID(80)
+	payload := bytes.Repeat([]byte{0x11}, 1<<20)
+	first, err := h.Put(key, payload, Options{RequestID: request})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := h.Recompress(key, Gzip); err != nil {
+		t.Fatal(err)
+	}
+	h.Close()
+	free := v.Stats().AdmissionFreePhysical
+	reserve := free - (64 << 10)
+	if err := v.SetInFlightReserve(reserve); err != nil {
+		t.Fatal(err)
+	}
+	h, err = v.Open(true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer h.Close()
+	if err := h.RecompressWithOptions(key, Raw, Options{}); !errors.Is(err, ErrFull) {
+		t.Fatal("recompression stole pending import space", err)
+	}
+	if got, info, err := h.Get(key); err != nil || !bytes.Equal(got, payload) || info.Version != first.Version || info.Compression != Gzip {
+		t.Fatal("failed rewrite damaged source", info, err)
+	}
+	if err := h.RecompressWithOptions(key, Raw, Options{InFlightAllowance: 2 << 20}); err != nil {
+		t.Fatal("own reserve did not fund rewrite", err)
+	}
+	if got, info, err := h.Get(key); err != nil || !bytes.Equal(got, payload) || info.Version != first.Version || info.Compression != Raw {
+		t.Fatal("rewrite changed logical state", info, err)
+	}
+	original, found, err := h.OperationStatus(request)
+	if err != nil || !found || original.Info != first {
+		t.Fatal("physical rewrite changed retry result", original, err)
+	}
+	version := first.Version
+	if err := h.RecompressWithOptions(key, Gzip, Options{ExpectedVersion: &version}); !errors.Is(err, ErrRange) {
+		t.Fatal("logical precondition silently ignored", err)
+	}
+	h.Close()
+	after := v.Stats().InFlightReservedPhysical
+	if after >= reserve || reserve-after > 2<<20 {
+		t.Fatal("rewrite consumed another import's allowance", reserve, after)
+	}
+}
