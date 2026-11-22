@@ -286,6 +286,78 @@ func TestInFlightAllowanceCannotConsumeOtherImportsOrGuarantees(t *testing.T) {
 	}
 }
 
+func TestGuaranteedAllowanceProtectsOtherBucketsAndImports(t *testing.T) {
+	v, _ := memoryVolume(t, 1<<20)
+	defer v.Close()
+	initial := v.Stats().AdmissionFreePhysical
+	guarantee := uint64(192 << 10)
+	if err := v.SetGuaranteedReserve(guarantee); err != nil {
+		t.Fatal(err)
+	}
+	importReserve := initial - guarantee - PageSize
+	if err := v.SetInFlightReserve(importReserve); err != nil {
+		t.Fatal(err)
+	}
+	payload := bytes.Repeat([]byte{0x71}, 64<<10)
+	for _, allowance := range []uint64{0, PageSize} {
+		if _, err := testPut(v, testKey(1), payload, Options{GuaranteedAllowance: allowance}); !errors.Is(err, ErrFull) {
+			t.Fatal("write consumed someone else's guarantee", allowance, err)
+		}
+		if _, err := v.Stat(testKey(1)); !errors.Is(err, ErrNotFound) {
+			t.Fatal("rejected write became visible", err)
+		}
+		if stats := v.Stats(); stats.GuaranteedRemainingPhysical != guarantee || stats.InFlightReservedPhysical != importReserve {
+			t.Fatal("rejected write consumed reservations", stats)
+		}
+	}
+	before := v.Stats()
+	id := ID{0xf1}
+	if _, err := testPut(v, testKey(1), payload, Options{RequestID: id, GuaranteedAllowance: 128 << 10}); err != nil {
+		t.Fatal("own guaranteed budget", err)
+	}
+	after := v.Stats()
+	growth := after.AllocatedPhysical - before.AllocatedPhysical
+	if growth == 0 || guarantee-after.GuaranteedRemainingPhysical != growth || after.GuaranteedRemainingPhysical < 64<<10 || after.InFlightReservedPhysical != importReserve {
+		t.Fatal("incorrect guarantee debit", before, after)
+	}
+	if after.AdmissionFreePhysical+after.GuaranteedRemainingPhysical+after.InFlightReservedPhysical+after.AllocatedPhysical+after.OperatingReservePhysical != after.CapacityPhysical {
+		t.Fatal("physical capacity no longer balances", after)
+	}
+	// A durable request replay returns its original outcome without consuming
+	// the guarantee a second time, even with no remaining caller allowance.
+	if _, err := testPut(v, testKey(1), payload, Options{RequestID: id}); err != nil {
+		t.Fatal("guaranteed retry", err)
+	}
+	if v.Stats().GuaranteedRemainingPhysical != after.GuaranteedRemainingPhysical {
+		t.Fatal("retry debited the guarantee twice")
+	}
+}
+
+func TestCombinedImportAndGuaranteeAllowanceChargesOnce(t *testing.T) {
+	v, _ := memoryVolume(t, 1<<20)
+	defer v.Close()
+	initial := v.Stats().AdmissionFreePhysical
+	guarantee := uint64(128 << 10)
+	if err := v.SetGuaranteedReserve(guarantee); err != nil {
+		t.Fatal(err)
+	}
+	reserved := initial - guarantee - PageSize
+	if err := v.SetInFlightReserve(reserved); err != nil {
+		t.Fatal(err)
+	}
+	before := v.Stats()
+	if _, err := testPut(v, testKey(1), bytes.Repeat([]byte{2}, 64<<10), Options{InFlightAllowance: 32 << 10, GuaranteedAllowance: 64 << 10}); err != nil {
+		t.Fatal(err)
+	}
+	after := v.Stats()
+	growth := after.AllocatedPhysical - before.AllocatedPhysical
+	importDebit := before.InFlightReservedPhysical - after.InFlightReservedPhysical
+	guaranteeDebit := before.GuaranteedRemainingPhysical - after.GuaranteedRemainingPhysical
+	if importDebit != 32<<10 || guaranteeDebit == 0 || importDebit+guaranteeDebit != growth {
+		t.Fatal("combined allowance counted bytes twice", growth, importDebit, guaranteeDebit)
+	}
+}
+
 func TestRecompressConsumesOnlyItsOwnImportAllowance(t *testing.T) {
 	v, _ := memoryVolume(t, 4<<20)
 	defer v.Close()

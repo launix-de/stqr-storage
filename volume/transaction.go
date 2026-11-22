@@ -360,27 +360,31 @@ func (t *transaction) patch(off uint64, b []byte) error {
 	return t.spillPages()
 }
 func (t *transaction) commit(useGuaranteed bool) error {
-	return t.commitReserved(useGuaranteed, 0)
+	return t.commitReserved(useGuaranteed, 0, 0)
 }
-func (t *transaction) commitReserved(useGuaranteed bool, allowance uint64) error {
+func (t *transaction) commitReserved(useGuaranteed bool, allowance, guaranteedAllowance uint64) error {
 	defer t.close()
 	if e := t.finalize(); e != nil {
 		return e
 	}
 	allowance = min(allowance, t.v.inFlightReserved)
-	protected := t.v.inFlightReserved - allowance
-	if !useGuaranteed {
-		if t.v.guaranteed > ^uint64(0)-protected {
-			return ErrFull
-		}
-		protected += t.v.guaranteed
+	guaranteedAllowance = min(guaranteedAllowance, t.v.guaranteed)
+	if useGuaranteed {
+		guaranteedAllowance = t.v.guaranteed
 	}
+	protected := t.v.inFlightReserved - allowance
+	if t.v.guaranteed-guaranteedAllowance > ^uint64(0)-protected {
+		return ErrFull
+	}
+	protected += t.v.guaranteed - guaranteedAllowance
 	if t.sb.FreeBytes < protected {
 		return ErrFull
 	}
-	consumed := uint64(0)
+	consumed, guaranteedConsumed := uint64(0), uint64(0)
 	if t.sb.FreeBytes < t.v.sb.FreeBytes {
-		consumed = min(allowance, t.v.sb.FreeBytes-t.sb.FreeBytes)
+		growth := t.v.sb.FreeBytes - t.sb.FreeBytes
+		consumed = min(allowance, growth)
+		guaranteedConsumed = min(guaranteedAllowance, growth-consumed)
 	}
 	t.sb.Generation++
 	t.sb.Sequence++
@@ -524,6 +528,7 @@ func (t *transaction) commitReserved(useGuaranteed bool, allowance uint64) error
 	}
 	t.v.sb = t.sb
 	t.v.inFlightReserved -= consumed
+	t.v.guaranteed -= guaranteedConsumed
 	for off := range all {
 		b, err := t.page(off)
 		if err != nil {

@@ -317,6 +317,10 @@ func (v *Volume) Close() error {
 	return e
 }
 
+// SetGuaranteedReserve protects aggregate physical capacity for bucket guarantees.
+// The counter is volatile and must be restored from committed allocation metadata
+// before accepting writes after reopen. Mutations consume only their explicitly
+// granted GuaranteedAllowance; the owner accounts that exact physical decrease.
 func (v *Volume) SetGuaranteedReserve(n uint64) error {
 	v.mu.Lock()
 	defer v.mu.Unlock()

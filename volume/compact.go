@@ -121,7 +121,7 @@ func (v *Volume) rewriteObject(k Key, old *object, codec Compression, opts Optio
 	if e = t.saveObject(k, o); e != nil {
 		return e
 	}
-	if e = t.commitReserved(opts.UseGuaranteed, opts.InFlightAllowance); e != nil {
+	if e = t.commitReserved(opts.UseGuaranteed, opts.InFlightAllowance, opts.GuaranteedAllowance); e != nil {
 		return e
 	}
 	v.cache.put(k, o)
