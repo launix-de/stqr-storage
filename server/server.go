@@ -61,6 +61,7 @@ type Server struct {
 	directory              atomic.Pointer[peerDirectoryImage]
 	placementGroups        atomic.Pointer[placementGroupImage]
 	control                *controlRuntime // initialized before accepting control RPCs
+	metadataPreview        bool            // isolated metadata draft; never owns data volumes
 }
 
 func Open(opts Options) (s *Server, err error) {

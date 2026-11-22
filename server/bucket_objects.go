@@ -280,6 +280,9 @@ func (b *Bucket) mutate(ctx context.Context, p principal, id volume.ObjectID, op
 		return volume.Result{}, fail(503, "bucket not attached")
 	}
 	s := b.server
+	if s.metadataPreview {
+		return volume.Result{}, fail(503, "metadata preview cannot mutate user objects")
+	}
 	s.opMu.Lock()
 	defer s.opMu.Unlock()
 	if b.underMaintenance() && opcode != 0x0108 && opcode != 0x0106 {

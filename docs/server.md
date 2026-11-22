@@ -455,6 +455,16 @@ handlers yet: bootstrap/recovery, runtime installation, global admin mutations
 and automatic candidate admission must be connected together first. Unactivated
 control RPCs return 503; this work does not advertise data authority.
 
+`admin_draft.go` prepares native user/bucket mutations on a private metadata
+volume before they become proposed system objects. Native validation, password
+hashing and retry receipts are reused, with current-account authorization rather
+than a stale socket role. The draft preserves source description revisions and
+maintenance exclusion, can grow privately, and never saves the node config.
+Borrowed data volumes are read only: object mutation and cleanup are prohibited;
+deletion/policy intents do not start workers. Closing the draft closes only its
+private metadata root. Routing live global administration through this helper
+and the ALL controller is still pending daemon integration.
+
 Validation separates journal/coordinator recovery from actual transport:
 
 - `TestControlCoordinatorRecoversLostAcknowledgements` reopens real journals
@@ -469,6 +479,10 @@ Validation separates journal/coordinator recovery from actual transport:
   after head publication before APPLIED, finishes the same durable decision,
   and reinstalls an already applied image into fresh runtime memory. Missing
   heads/children and a head contradicting the journal are rejected.
+- `TestAdminDraftUserMutationDoesNotPublish` and
+  `TestAdminDraftBucketDeletionCannotTouchData` cover private hashing/receipts,
+  private root growth, stale-admin rejection, maintenance exclusion and the
+  absence of live metadata/data/config changes or cleanup workers.
 
 The client `PartialMap` merges overlapping portions by OwnerEpoch and then
 compatible policy advancement. Disjoint updates do not compete through a global

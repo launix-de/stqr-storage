@@ -12,6 +12,9 @@ import (
 // desired policy. Resumable workers retain those intents until local copies and
 // metadata are committed. Reads remain possible during a policy transition.
 func (s *Server) startBucketCleanup(id volume.ID) {
+	if s.metadataPreview {
+		return
+	}
 	s.mu.Lock()
 	if s.closed {
 		s.mu.Unlock()
@@ -62,6 +65,9 @@ func (s *Server) startBucketCleanup(id volume.ID) {
 	}()
 }
 func (s *Server) bucketLifecycleOnce(id volume.ID) error {
+	if s.metadataPreview {
+		return fail(503, "metadata preview cannot run data cleanup")
+	}
 	b, err := s.Bucket(id)
 	if errors.Is(err, ErrBucketNotFound) {
 		return nil

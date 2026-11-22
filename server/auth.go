@@ -100,7 +100,9 @@ func (s *Server) metadataWrite(write func(*volume.Handle) error) error {
 			}
 		}
 		s.cfg = c
-		e = saveConfig(s.configPath, c)
+		if !s.metadataPreview {
+			e = saveConfig(s.configPath, c)
+		}
 		s.mu.Unlock()
 		if e != nil {
 			return e
