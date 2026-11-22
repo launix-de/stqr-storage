@@ -138,6 +138,7 @@ type Options struct {
 	CreateOnly                      bool
 	WholeObject                     bool
 	UseGuaranteed                   bool
+	InFlightAllowance               uint64 // trusted physical allowance; never consumes bucket guarantees
 	restoreSameVersion              bool
 	restoreSegmented                bool
 }

@@ -12,11 +12,18 @@ func (h *Handle) ScanBucketObjects(bucket ID, after *ObjectID, limit int) ([]Obj
 		}
 		out := make([]ObjectRecord, 0, limit)
 		stop := errors.New("bucket scan page complete")
-		var cursor indexKey
+		cursor := objectKey(Key{Bucket: bucket})
+		upper := cursor
+		for i := 16; i >= 0; i-- {
+			upper[i]++
+			if upper[i] != 0 {
+				break
+			}
+		}
 		if after != nil {
 			cursor = objectKey(Key{Bucket: bucket, Object: *after})
 		}
-		err := v.walkIndex(func(x indexEntry) error {
+		err := v.walkIndexBounds(cursor, upper, func(x indexEntry) error {
 			if x.Key[0] != 0 {
 				return nil
 			}
@@ -29,6 +36,45 @@ func (h *Handle) ScanBucketObjects(bucket ID, after *ObjectID, limit int) ([]Obj
 				return err
 			}
 			out = append(out, ObjectRecord{Key: k, Info: o.Info})
+			if len(out) == limit {
+				return stop
+			}
+			return nil
+		})
+		if errors.Is(err, stop) {
+			err = nil
+		}
+		return out, err
+	})
+}
+
+// ScanRequestRecords pages retry metadata without scanning preceding requests
+// or the payload-object namespace. The optional cursor is strictly exclusive.
+func (h *Handle) ScanRequestRecords(after *ID, limit int) ([]RequestRecord, error) {
+	return withHandle(h, false, func(v *Volume) ([]RequestRecord, error) {
+		if limit < 1 || limit > 4096 {
+			return nil, ErrRange
+		}
+		lower, upper := indexKey{1}, indexKey{2}
+		if after != nil {
+			lower = requestKey(*after)
+		}
+		var out []RequestRecord
+		stop := errors.New("request scan page complete")
+		err := v.walkIndexBounds(lower, upper, func(x indexEntry) error {
+			if after != nil && !lessKey(lower, x.Key) {
+				return nil
+			}
+			var id ID
+			copy(id[:], x.Key[1:17])
+			receipt, found, err := v.loadDedupe(id)
+			if err != nil {
+				return err
+			}
+			if !found {
+				return ErrCorrupt
+			}
+			out = append(out, RequestRecord{ID: id, Key: receipt.Key, Fingerprint: receipt.Fingerprint, Result: receipt.Result})
 			if len(out) == limit {
 				return stop
 			}

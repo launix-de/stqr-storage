@@ -109,13 +109,13 @@ func (v *Volume) restoreLocked(k Key, info Info, source ExtentSource, opts Optio
 	if e = t.saveReceipt(opts.RequestID, dedupe{k, fp, Result{Info: info}}); e != nil {
 		return e
 	}
-	if e = t.commit(opts.UseGuaranteed); e != nil {
+	if e = t.commitReserved(opts.UseGuaranteed, opts.InFlightAllowance); e != nil {
 		return e
 	}
 	v.cache.put(k, o)
 	return nil
 }
-func (v *Volume) restoreRequestLocked(x RequestRecord) error {
+func (v *Volume) restoreRequestLocked(x RequestRecord, opts Options) error {
 	if x.ID == (ID{}) || !x.Result.Info.Compression.valid() {
 		return ErrRange
 	}
@@ -133,7 +133,7 @@ func (v *Volume) restoreRequestLocked(x RequestRecord) error {
 	if e = t.saveReceipt(x.ID, dedupe{x.Key, x.Fingerprint, x.Result}); e != nil {
 		return e
 	}
-	return t.commit(false)
+	return t.commitReserved(opts.UseGuaranteed, opts.InFlightAllowance)
 }
 func (v *Volume) scanRequestsLocked(fn func(RequestRecord) error) error {
 	return v.walkIndex(func(x indexEntry) error {

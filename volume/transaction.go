@@ -360,12 +360,27 @@ func (t *transaction) patch(off uint64, b []byte) error {
 	return t.spillPages()
 }
 func (t *transaction) commit(useGuaranteed bool) error {
+	return t.commitReserved(useGuaranteed, 0)
+}
+func (t *transaction) commitReserved(useGuaranteed bool, allowance uint64) error {
 	defer t.close()
 	if e := t.finalize(); e != nil {
 		return e
 	}
-	if !useGuaranteed && t.sb.FreeBytes < t.v.guaranteed {
+	allowance = min(allowance, t.v.inFlightReserved)
+	protected := t.v.inFlightReserved - allowance
+	if !useGuaranteed {
+		if t.v.guaranteed > ^uint64(0)-protected {
+			return ErrFull
+		}
+		protected += t.v.guaranteed
+	}
+	if t.sb.FreeBytes < protected {
 		return ErrFull
+	}
+	consumed := uint64(0)
+	if t.sb.FreeBytes < t.v.sb.FreeBytes {
+		consumed = min(allowance, t.v.sb.FreeBytes-t.sb.FreeBytes)
 	}
 	t.sb.Generation++
 	t.sb.Sequence++
@@ -508,6 +523,7 @@ func (t *transaction) commit(useGuaranteed bool) error {
 		return e
 	}
 	t.v.sb = t.sb
+	t.v.inFlightReserved -= consumed
 	for off := range all {
 		b, err := t.page(off)
 		if err != nil {

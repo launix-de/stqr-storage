@@ -249,3 +249,39 @@ func TestPhysicalIOCounters(t *testing.T) {
 		t.Fatalf("physical counters %+v => %+v", before, after)
 	}
 }
+
+func TestInFlightAllowanceCannotConsumeOtherImportsOrGuarantees(t *testing.T) {
+	v, _ := memoryVolume(t, 1<<20)
+	defer v.Close()
+	initial := v.Stats().AdmissionFreePhysical
+	guarantee := uint64(64 << 10)
+	if err := v.SetGuaranteedReserve(guarantee); err != nil {
+		t.Fatal(err)
+	}
+	reserved := initial - guarantee - PageSize
+	if err := v.SetInFlightReserve(reserved); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := testPut(v, testKey(1), bytes.Repeat([]byte{1}, 64<<10), Options{}); !errors.Is(err, ErrFull) {
+		t.Fatal("ordinary write consumed imports", err)
+	}
+	if _, err := testPut(v, testKey(1), bytes.Repeat([]byte{1}, 64<<10), Options{InFlightAllowance: PageSize}); !errors.Is(err, ErrFull) {
+		t.Fatal("import consumed another import", err)
+	}
+	if _, err := testPut(v, testKey(1), bytes.Repeat([]byte{1}, 64<<10), Options{InFlightAllowance: 128 << 10}); err != nil {
+		t.Fatal("own import allowance", err)
+	}
+	stats := v.Stats()
+	if stats.GuaranteedRemainingPhysical != guarantee || stats.InFlightReservedPhysical >= reserved {
+		t.Fatal("wrong reserve accounting", stats)
+	}
+	if stats.AdmissionFreePhysical+stats.GuaranteedRemainingPhysical+stats.InFlightReservedPhysical+stats.MetadataPhysical+stats.DataPhysical+stats.OperatingReservePhysical != stats.CapacityPhysical {
+		t.Fatal("physical accounting does not sum to capacity")
+	}
+	if err := v.SetInFlightReserve(initial); !errors.Is(err, ErrFull) {
+		t.Fatal("accepted over-reservation", err)
+	}
+	if err := v.SetInFlightReserve(0); err != nil {
+		t.Fatal(err)
+	}
+}
