@@ -290,6 +290,7 @@ func Open(opts Options) (s *Server, err error) {
 			return nil, err
 		}
 	}
+	s.startS3Maintenance()
 	s.workers.Add(1)
 	go s.statsLoop()
 	for _, d := range s.bucketSnapshots() {

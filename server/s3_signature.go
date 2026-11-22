@@ -2,6 +2,7 @@
 package server
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
@@ -106,10 +107,8 @@ func (s *Server) authenticateS3(r *http.Request) (principal, string, error) {
 	} else if stamp.Before(now.Add(-15*time.Minute)) || stamp.After(now.Add(15*time.Minute)) {
 		return denied()
 	}
-	if strings.HasPrefix(payload, "STREAMING-") {
-		return principal{}, "", fail(501, "aws-chunked streaming signatures are not supported")
-	}
-	if payload != "UNSIGNED-PAYLOAD" {
+	streaming := payload == "STREAMING-AWS4-HMAC-SHA256-PAYLOAD" || payload == "STREAMING-AWS4-HMAC-SHA256-PAYLOAD-TRAILER" || payload == "STREAMING-UNSIGNED-PAYLOAD-TRAILER"
+	if payload != "UNSIGNED-PAYLOAD" && !streaming {
 		v, e := hex.DecodeString(payload)
 		if e != nil || len(v) != 32 || payload != strings.ToLower(payload) {
 			return denied()
@@ -161,6 +160,9 @@ func (s *Server) authenticateS3(r *http.Request) (principal, string, error) {
 	sig, err := hex.DecodeString(signature)
 	if err != nil || !hmac.Equal(sig, s3HMAC(key, toSign)) {
 		return denied()
+	}
+	if streaming {
+		*r = *r.WithContext(context.WithValue(r.Context(), s3SigningKey{}, s3Signing{key: key, date: date, scope: scope, seed: signature}))
 	}
 	if payload == "UNSIGNED-PAYLOAD" {
 		payload = ""

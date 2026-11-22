@@ -8,11 +8,13 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/launix-de/stqr-storage/client"
+	"github.com/launix-de/stqr-storage/volume"
 )
 
 func TestDaemonS3ExtendsAndReadsThroughEitherNode(t *testing.T) {
@@ -231,5 +233,121 @@ func TestNodeDrainLetsActiveFrontendFinishBeforeMembershipLeave(t *testing.T) {
 	case <-source.node.stopRequest:
 	case <-ctx.Done():
 		t.Fatal("drain did not finish after frontend released", ctx.Err())
+	}
+}
+
+func TestDaemonS3MultipartCopyAndExpiryAfterMigration(t *testing.T) {
+	source, target := startAutomaticDaemonPair(t, false)
+	addTestVolume(t, source.node, "data", "hdd", 16<<20)
+	remote := addTestVolume(t, target.node, "data", "hdd", 16<<20)
+	bucket, _ := createProtocolBucket(t, source.node, "fop-files")
+	user := bucketProtocolUser(t, source.node)
+	uid, _ := parseID(user.ID)
+	e := client.Encoder{}
+	e.ID(client.ID(bucket.ID()))
+	e.ID(client.ID(uid))
+	e.U32(uint32(BucketAllPermissions))
+	if _, status, _ := adminBucketMessage(t, source.node, client.BucketGrant, e.B); status != 200 {
+		t.Fatal(status)
+	}
+	e = client.Encoder{}
+	e.ID(client.ID(uid))
+	e.Text(testS3Access)
+	e.Text(testS3Secret)
+	if _, status := source.node.dispatchAs(userMessage(client.UserS3KeySet, e), nil, userPrincipal(t, source.node)); status != 200 {
+		t.Fatal(status)
+	}
+	upload := startS3Multipart(t, source.node, "moved", nil)
+	payload := bytes.Repeat([]byte{0x76}, 2<<20)
+	part := s3TestRequest(t, source.node, "PUT", "/s3/fop-files/moved?uploadId="+upload+"&partNumber=1", payload, nil)
+	requireS3Status(t, part, 200)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	before, _ := source.node.routingPatch(bucket.ID(), volume.ObjectID{})
+	vid, _ := parseID(remote.VolumeID)
+	plan, err := planRangeMove(before, before.Entries[0], target.node.control.ledger.node, vid, uint8(volume.HDD), volume.Raw, 4<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = source.node.scopes.move(ctx, plan); err != nil {
+		t.Fatal(err)
+	}
+	completion := completeS3XML(client.S3CompletedPart{Number: 1, ETag: part.Header().Get("ETag")})
+	requireS3Status(t, s3TestRequest(t, source.node, "POST", "/s3/fop-files/moved?uploadId="+upload, completion, nil), 200)
+	requireS3Status(t, s3TestRequest(t, source.node, "PUT", "/s3/fop-files/copied", nil, map[string]string{"X-Amz-Copy-Source": "/fop-files/moved"}), 200)
+	for _, n := range []*daemonTestNode{source, target} {
+		got := s3TestRequest(t, n.node, "GET", "/s3/fop-files/copied", nil, nil)
+		requireS3Status(t, got, 200)
+		if !bytes.Equal(got.Body.Bytes(), payload) {
+			t.Fatal("remote copy changed bytes")
+		}
+	}
+	owner, err := source.node.findAccount(user.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	connection, err := source.node.openFrontend(ctx, bucket.ID(), principal{User: owner, frontendPermission: BucketWrite})
+	if err != nil {
+		t.Fatal(err)
+	}
+	faulted := client.NewS3(multipartBeforePublishStore{S3Store: connection, target: client.S3MetadataID("recovered")})
+	pending, err := faulted.CreateMultipart(ctx, "recovered", owner.ID, "", "", client.S3PutOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	recoveryData := "recover through the remote owner"
+	recoveryPart, err := faulted.UploadPart(ctx, pending.ID, 1, strings.NewReader(recoveryData), uint64(len(recoveryData)), client.S3PutOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = faulted.CompleteMultipart(ctx, pending.ID, []client.S3CompletedPart{{Number: 1, ETag: recoveryPart.ETag}}, client.S3PutOptions{}); err == nil {
+		t.Fatal("publication failure was not injected")
+	}
+	connection.Close()
+	source = restartDaemonTestNode(t, source)
+	if err = source.node.maintainS3(ctx, time.Now()); err != nil {
+		t.Fatal("remote completion recovery after frontend restart", err)
+	}
+	recovered := s3TestRequest(t, target.node, "GET", "/s3/fop-files/recovered", nil, nil)
+	requireS3Status(t, recovered, 200)
+	if recovered.Body.String() != recoveryData {
+		t.Fatal("multipart recovery changed payload")
+	}
+	abandoned := startS3Multipart(t, source.node, "expired", nil)
+	requireS3Status(t, s3TestRequest(t, source.node, "PUT", "/s3/fop-files/expired?uploadId="+abandoned+"&partNumber=1", payload, nil), 200)
+	allocated := target.node.volumes[remote.VolumeID].store.Stats().DataPhysical
+	// Cleanup runs on the node which no longer owns any object in this bucket.
+	if err = source.node.maintainS3(ctx, time.Now().Add(25*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	requireS3Status(t, s3TestRequest(t, source.node, "GET", "/s3/fop-files/expired?uploadId="+abandoned, nil, nil), 404)
+	if target.node.volumes[remote.VolumeID].store.Stats().DataPhysical >= allocated {
+		t.Fatal("remote expiry did not reclaim upload data")
+	}
+	requireS3Status(t, s3TestRequest(t, target.node, "GET", "/s3/fop-files/copied", nil, nil), 200)
+}
+
+func TestFrontendIssuerOfflineRemainsRetryable(t *testing.T) {
+	source, target := startAutomaticDaemonPair(t, false)
+	addTestVolume(t, source.node, "data", "hdd", 4<<20)
+	bucket, _ := createProtocolBucket(t, source.node, "issuer-wait")
+	p := userPrincipal(t, source.node)
+	p.frontendPermission = BucketRead
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	name, password, release, err := source.node.frontendCredentials(ctx, bucket.ID(), p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	source.close()
+	request := httptest.NewRequest("GET", "http://localhost/api/ws", nil)
+	request.RemoteAddr = "127.0.0.1:1234"
+	request.SetBasicAuth(name, password)
+	request.Header.Set(client.BucketHeader, bucket.ID().String())
+	response := httptest.NewRecorder()
+	target.node.Handler().ServeHTTP(response, request)
+	if response.Code != 503 {
+		t.Fatal("unreachable issuer reported as invalid credentials", response.Code, response.Body.String())
 	}
 }

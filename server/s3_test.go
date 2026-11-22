@@ -62,6 +62,9 @@ func s3TestSetup(t *testing.T) (*Server, *Bucket, account) {
 func signS3Test(req *http.Request, body []byte, secret string) {
 	hash := sha256.Sum256(body)
 	payload := hex.EncodeToString(hash[:])
+	signS3Payload(req, payload, secret)
+}
+func signS3Payload(req *http.Request, payload, secret string) {
 	stamp := time.Now().UTC().Format("20060102T150405Z")
 	day := stamp[:8]
 	req.Header.Set("X-Amz-Date", stamp)

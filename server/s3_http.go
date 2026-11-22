@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -30,6 +29,16 @@ func s3Error(w http.ResponseWriter, status int, code, message string) {
 }
 func s3Failure(w http.ResponseWriter, err error) {
 	switch {
+	case errors.Is(err, client.ErrS3Upload):
+		s3Error(w, 404, "NoSuchUpload", "The multipart upload does not exist")
+	case errors.Is(err, client.ErrS3Part):
+		s3Error(w, 400, "InvalidPart", "A part or ETag does not match")
+	case errors.Is(err, client.ErrS3PartOrder):
+		s3Error(w, 400, "InvalidPartOrder", "Parts must be ordered")
+	case errors.Is(err, client.ErrS3PartSmall):
+		s3Error(w, 400, "EntityTooSmall", "All but the last part must contain at least 5 MiB")
+	case errors.Is(err, client.ErrS3UploadBusy):
+		s3Error(w, 409, "OperationAborted", "Multipart completion is in progress")
 	case errors.Is(err, client.ErrNotFound), errors.Is(err, ErrBucketNotFound):
 		s3Error(w, 404, "NoSuchKey", "The specified key does not exist")
 	case errors.Is(err, client.ErrPrecondition):
@@ -52,7 +61,13 @@ func s3Failure(w http.ResponseWriter, err error) {
 		if errors.As(err, &native) {
 			status = native.Status
 		}
-		if status == 403 {
+		if status == 501 {
+			s3Error(w, 501, "NotImplemented", err.Error())
+		} else if status == 507 {
+			s3Error(w, 507, "InsufficientStorage", err.Error())
+		} else if status == 400 {
+			s3Error(w, 400, "InvalidArgument", err.Error())
+		} else if status == 403 {
 			s3Error(w, 403, "AccessDenied", "Access denied")
 		} else if status == 409 || status == 410 || status == 503 || status == 504 {
 			s3Error(w, 503, "ServiceUnavailable", "Bucket is unavailable")
@@ -88,7 +103,7 @@ func (s *Server) serveS3(w http.ResponseWriter, r *http.Request) {
 	}
 	path := strings.TrimPrefix(r.URL.Path, "/s3/")
 	if r.URL.Path == "/s3" || path == "" {
-		s3Error(w, 501, "NotImplemented", "Use a bucket path")
+		s.s3ListBuckets(w, r, p)
 		return
 	}
 	name, key, _ := strings.Cut(path, "/")
@@ -97,38 +112,69 @@ func (s *Server) serveS3(w http.ResponseWriter, r *http.Request) {
 		s3Error(w, 404, "NoSuchBucket", "The specified bucket does not exist")
 		return
 	}
+	q := r.URL.Query()
 	permission := BucketRead
-	if r.Method == http.MethodPut {
+	if r.Method == http.MethodPut || r.Method == http.MethodPost {
 		permission = BucketWrite
 	} else if r.Method == http.MethodDelete {
 		permission = BucketDelete
+		if q.Get("uploadId") != "" {
+			permission = BucketWrite
+		}
 	} else if r.Method != http.MethodGet && r.Method != http.MethodHead {
 		s3Error(w, 501, "NotImplemented", "Unsupported S3 operation")
 		return
+	}
+	if _, ok := q["delete"]; ok {
+		permission = BucketDelete
 	}
 	if _, err = b.authorize(p, permission); err != nil {
 		s3Failure(w, err)
 		return
 	}
-	// This is an internal frontend capability, not the caller's native grant.
-	p.frontendPermission = permission
-	api := client.NewS3(s3Store{b: b, p: p})
-	if view := s.currentSystem.Load(); s.controller != nil && view != nil && len(view.manifest.Membership.Members) > 1 {
-		connection, err := s.openFrontend(r.Context(), b.ID(), p)
-		if err != nil {
-			s3Failure(w, err)
+	if r.Method == http.MethodPut || r.Method == http.MethodPost {
+		staged, n, e := s3StageRequest(r, bodySHA)
+		if e != nil {
+			s3Failure(w, e)
 			return
 		}
-		defer connection.Close()
-		api = client.NewS3(connection)
+		defer staged.Close()
+		r.Body = io.NopCloser(staged)
+		r.ContentLength = n
+		bodySHA = ""
 	}
-	q := r.URL.Query()
-	for _, unsupported := range []string{"uploads", "uploadId", "partNumber", "acl", "versionId", "versions", "delete", "tagging", "location", "policy", "lifecycle"} {
+	p.frontendPermission = permission
+	api, closeAPI, err := s.openS3(r.Context(), b, p)
+	if err != nil {
+		s3Failure(w, err)
+		return
+	}
+	defer closeAPI()
+	if s.serveS3Multipart(w, r, p, api, name, key) {
+		return
+	}
+	if key == "" && s.s3BucketProbe(w, r, name) {
+		return
+	}
+	if _, ok := q["delete"]; ok {
+		if r.Method != "POST" || key != "" {
+			s3Error(w, 400, "InvalidRequest", "Invalid multi-object delete")
+			return
+		}
+		s.s3DeleteObjects(w, r, api)
+		return
+	}
+	if _, ok := q["tagging"]; ok && key != "" {
+		s3EmptyTagging(w, r, api, key)
+		return
+	}
+	for _, unsupported := range []string{"acl", "versionId", "versions", "policy", "lifecycle"} {
 		if _, ok := q[unsupported]; ok {
 			s3Error(w, 501, "NotImplemented", "Unsupported S3 subresource")
 			return
 		}
 	}
+
 	if key == "" {
 		if r.Method == http.MethodHead {
 			w.WriteHeader(200)
@@ -143,6 +189,10 @@ func (s *Server) serveS3(w http.ResponseWriter, r *http.Request) {
 	}
 	switch r.Method {
 	case http.MethodPut:
+		if r.Header.Get("X-Amz-Copy-Source") != "" {
+			s.s3Copy(w, r, p, api, key, "", 0)
+			return
+		}
 		s.serveS3Put(w, r, api, key, bodySHA)
 	case http.MethodDelete:
 		if err = api.Delete(r.Context(), key); err != nil {
@@ -316,34 +366,22 @@ func s3Range(header string, size uint64) (uint64, uint64, error) {
 	}
 	return start, end - start + 1, nil
 }
-func (s *Server) serveS3Put(w http.ResponseWriter, r *http.Request, api *client.S3, key, bodySHA string) {
-	if r.Header.Get("X-Amz-Copy-Source") != "" {
-		s3Error(w, 501, "NotImplemented", "CopyObject is not supported")
-		return
-	}
+func s3PutOptions(r *http.Request) (client.S3PutOptions, error) {
+	opt := client.S3PutOptions{Headers: map[string]string{}, Metadata: map[string]string{}, Checksums: map[string]string{}, IfMatch: r.Header.Get("If-Match")}
 	if acl := r.Header.Get("X-Amz-Acl"); acl != "" && acl != "private" {
-		s3Error(w, 501, "NotImplemented", "Only private ACL is supported")
-		return
+		return opt, fail(501, "only private ACL is supported")
 	}
-	if r.Header.Get("Content-Encoding") == "aws-chunked" {
-		s3Error(w, 501, "NotImplemented", "aws-chunked is not supported")
-		return
-	}
-	for _, h := range []string{"X-Amz-Server-Side-Encryption", "X-Amz-Server-Side-Encryption-Customer-Algorithm", "X-Amz-Tagging", "X-Amz-Object-Lock-Mode", "X-Amz-Object-Lock-Retain-Until-Date", "X-Amz-Object-Lock-Legal-Hold", "X-Amz-Checksum-Crc64nvme"} {
+	for _, h := range []string{"X-Amz-Server-Side-Encryption", "X-Amz-Server-Side-Encryption-Customer-Algorithm", "X-Amz-Tagging", "X-Amz-Object-Lock-Mode", "X-Amz-Object-Lock-Retain-Until-Date", "X-Amz-Object-Lock-Legal-Hold"} {
 		if r.Header.Get(h) != "" {
-			s3Error(w, 501, "NotImplemented", "Unsupported S3 header: "+h)
-			return
+			return opt, fail(501, "unsupported S3 header")
 		}
 	}
-	if storage := r.Header.Get("X-Amz-Storage-Class"); storage != "" && storage != "STANDARD" {
-		s3Error(w, 501, "NotImplemented", "Configure storage strategy through the STQR bucket")
-		return
+	if v := r.Header.Get("X-Amz-Storage-Class"); v != "" && v != "STANDARD" {
+		return opt, fail(501, "configure storage strategy through the STQR bucket")
 	}
-	opt := client.S3PutOptions{Headers: map[string]string{}, Metadata: map[string]string{}, SHA256: bodySHA, IfMatch: r.Header.Get("If-Match")}
-	if value := r.Header.Get("If-None-Match"); value != "" {
-		if value != "*" {
-			s3Error(w, 400, "InvalidArgument", "PUT supports If-None-Match: *")
-			return
+	if v := r.Header.Get("If-None-Match"); v != "" {
+		if v != "*" {
+			return opt, client.ErrRange
 		}
 		opt.IfNoneMatch = true
 	}
@@ -352,71 +390,51 @@ func (s *Server) serveS3Put(w http.ResponseWriter, r *http.Request, api *client.
 			opt.Headers[k] = v
 		}
 	}
+	size := 0
 	for k, vs := range r.Header {
 		if strings.HasPrefix(strings.ToLower(k), "x-amz-meta-") {
-			opt.Metadata[strings.ToLower(k[len("x-amz-meta-"):])] = strings.Join(vs, ",")
+			name := strings.ToLower(k[len("x-amz-meta-"):])
+			value := strings.Join(vs, ",")
+			size += len(name) + len(value)
+			opt.Metadata[name] = value
 		}
 	}
-	opt.Checksums = map[string]string{}
-	for _, algorithm := range []string{"CRC32", "CRC32C", "SHA1", "SHA256"} {
-		header := "X-Amz-Checksum-" + strings.ToLower(algorithm)
+	if size > 2048 {
+		return opt, client.ErrRange
+	}
+	for _, algo := range []string{"CRC32", "CRC32C", "CRC64NVME", "SHA1", "SHA256"} {
+		header := "X-Amz-Checksum-" + strings.ToLower(algo)
 		if v := r.Header.Get(header); v != "" {
-			opt.Checksums[algorithm] = v
+			opt.Checksums[algo] = v
 			opt.Headers[header] = v
 		}
 	}
-	if algorithm := r.Header.Get("X-Amz-Sdk-Checksum-Algorithm"); algorithm != "" && opt.Checksums[algorithm] == "" {
-		s3Error(w, 501, "NotImplemented", "A supported checksum header is required")
-		return
-	}
-	metadataSize := 0
-	for k, v := range opt.Metadata {
-		metadataSize += len(k) + len(v)
-	}
-	if metadataSize > 2048 {
-		s3Error(w, 400, "MetadataTooLarge", "User metadata exceeds 2 KiB")
-		return
-	}
-	if md := r.Header.Get("Content-MD5"); md != "" {
-		v, e := base64.StdEncoding.DecodeString(md)
+	if value := r.Header.Get("Content-MD5"); value != "" {
+		v, e := base64.StdEncoding.DecodeString(value)
 		if e != nil || len(v) != 16 {
-			s3Error(w, 400, "InvalidDigest", "Invalid Content-MD5")
-			return
+			return opt, client.ErrS3Checksum
 		}
 		opt.ContentMD5 = hex.EncodeToString(v)
 	}
-	var src io.Reader = r.Body
-	length := r.ContentLength
-	// Unknown-length HTTP bodies are counted on local disk first. The library
-	// verifies and stages the body before atomically publishing its envelope.
-	if length < 0 {
-		f, e := os.CreateTemp("", "stqr-s3-upload-*")
-		if e != nil {
-			s3Failure(w, e)
-			return
-		}
-		if e = os.Remove(f.Name()); e != nil {
-			f.Close()
-			s3Failure(w, e)
-			return
-		}
-		defer f.Close()
-		length, e = io.Copy(f, r.Body)
-		if e != nil {
-			s3Error(w, 400, "IncompleteBody", "Upload interrupted")
-			return
-		}
-		if _, e = f.Seek(0, 0); e != nil {
-			s3Failure(w, e)
-			return
-		}
-		src = f
-	}
-	o, err := api.Put(r.Context(), key, src, uint64(length), opt)
-	if err != nil {
-		s3Failure(w, err)
+	return opt, nil
+}
+func (s *Server) serveS3Put(w http.ResponseWriter, r *http.Request, api *client.S3, key, bodySHA string) {
+	opt, e := s3PutOptions(r)
+	if e != nil {
+		s3Failure(w, e)
 		return
 	}
-	w.Header().Set("ETag", "\""+o.ETag+"\"")
+	opt.SHA256 = bodySHA
+	result, e := api.Put(r.Context(), key, r.Body, uint64(r.ContentLength), opt)
+	if e != nil {
+		s3Failure(w, e)
+		return
+	}
+	w.Header().Set("ETag", "\""+result.ETag+"\"")
+	for k, v := range result.Headers {
+		if strings.HasPrefix(strings.ToLower(k), "x-amz-checksum-") {
+			w.Header().Set(k, v)
+		}
+	}
 	w.WriteHeader(200)
 }

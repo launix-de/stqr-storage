@@ -346,9 +346,10 @@ object itself, rather than an unconditional bucket-ID/physical-volume override.
 Existing system descriptions are migrated once without replacing user accounts
 or payloads. Missing/corrupt established PG metadata is an error, never a reset.
 
-PG editing in the dashboard and cross-node desired/effective PG commits still
-need the durable control/rebuild implementation. These filters do not claim
-that global PG replication, migration or membership is complete.
+Cross-node desired/effective PG changes use the durable global control path;
+range handoffs evacuate placements before the desired mask becomes effective.
+Native PG list/set/delete and bucket-PG messages are available. A dedicated
+PG editor in the dashboard remains pending.
 
 ## Multinode acceptance gate
 
@@ -714,3 +715,25 @@ under the node configuration lock.
 The dashboard's explicit exclusion dialog uses native 0x2013, requires both
 loss and external-fencing confirmations, retains its operation ID/observed epoch
 on ambiguous outcomes, and polls the original operation while it is running.
+
+
+## Integrated multipart and copy routing
+
+The merged S3 implementation uses `openS3` for ordinary HTTP operations,
+CopyObject/UploadPartCopy sources and background multipart recovery/expiration.
+Every path routes through bucket objects when there are multiple members;
+private frontend credentials keep the original account/permission and are
+released at the end of the operation. A temporarily unreachable credential
+issuer returns 503 instead of a false 401 during SHORT/reconnect.
+
+`TestDaemonS3MultipartCopyAndExpiryAfterMigration` moves an open multipart upload
+to the other node, completes it through the former owner, copies its content,
+recovers an interrupted publication after frontend restart, and expires staged
+parts on the remote owner. Payloads, successful completion and reclaimed remote
+physical bytes are checked. `TestFrontendIssuerOfflineRemainsRetryable` checks
+that a missing issuer preserves 503 while invalid credentials remain rejected.
+
+`TestDaemonUpgradeFromDiscoveryOnlyCluster` opens a prior discovery-only setup
+with existing acknowledged data, restarts the join-pending node first, and checks
+shared committed membership, unchanged object bytes/versions and local volume
+ownership. The existing deployment was backed up before its matching upgrade.

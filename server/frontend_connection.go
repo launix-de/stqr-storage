@@ -132,7 +132,16 @@ func (s *Server) authenticateFrontend(r *http.Request, name, password string) (p
 	digest := sha256.Sum256(wire)
 	e.B = append(e.B, digest[:]...)
 	verified, err := (peerControlParticipants{runtime: s.control}).call(r.Context(), issuer, peerVerifyFrontend, e.B)
-	if err != nil || len(verified) != 0 {
+	if err != nil {
+		if status := statusOf(err); status == 401 || status == 403 {
+			return denied()
+		}
+		// Immediately after SHORT/restart the authenticated issuer's peer
+		// connection may still be reconnecting. That is unavailable evidence,
+		// not a rejected credential; preserve 503 so the SDK can wait/retry.
+		return principal{}, fail(503, "frontend issuer verification is unavailable")
+	}
+	if len(verified) != 0 {
 		return denied()
 	}
 	var image accountsImage

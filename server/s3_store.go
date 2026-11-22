@@ -19,12 +19,29 @@ type s3Store struct {
 	p principal
 }
 
+// All S3 operations, including copy and background multipart recovery, use
+// bucket-object routing. The cleanup bounds private credentials to this caller.
+func (s *Server) openS3(ctx context.Context, b *Bucket, p principal) (*client.S3, func(), error) {
+	if view := s.currentSystem.Load(); s.controller != nil && view != nil && len(view.manifest.Membership.Members) > 1 {
+		connection, err := s.openFrontend(ctx, b.ID(), p)
+		if err != nil {
+			return nil, nil, err
+		}
+		return client.NewS3(connection), func() { _ = connection.Close() }, nil
+	}
+	return client.NewS3(s3Store{b: b, p: p}), func() {}, nil
+}
+
 func s3NativeError(err error) error {
 	switch {
 	case errors.Is(err, volume.ErrNotFound):
 		return client.ErrNotFound
 	case errors.Is(err, volume.ErrPrecondition):
 		return client.ErrPrecondition
+	case errors.Is(err, volume.ErrFull):
+		return client.ErrFull
+	case err != nil && objectStatus(err) == 507:
+		return client.ErrFull
 	case errors.Is(err, volume.ErrRange):
 		return client.ErrRange
 	}
@@ -64,7 +81,7 @@ func (s s3Store) GetRangeToVersion(ctx context.Context, id client.ObjectID, off,
 		return client.ObjectInfo{}, e
 	}
 	defer snapshot.Close()
-	i, _, e := s.b.copyToVersion(ctx, s.p, volume.ObjectID(id), off, n, &objectBudgetWriter{dst: snapshot, remaining: maxObjectStagingBytes}, &version)
+	i, _, e := s.b.copyToVersion(ctx, s.p, volume.ObjectID(id), off, n, snapshot, &version)
 	if e != nil {
 		return s3Info(i), s3NativeError(e)
 	}

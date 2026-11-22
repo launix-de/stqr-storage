@@ -5,13 +5,11 @@ import (
 	"context"
 	"crypto/hmac"
 	"crypto/md5"
-	"crypto/sha1"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"errors"
 	"hash"
-	"hash/crc32"
 	"io"
 	"os"
 	"sort"
@@ -53,6 +51,11 @@ type S3PutOptions struct {
 	SHA256, ContentMD5 string            // lowercase hex; empty means no supplied checksum
 	IfMatch            string
 	IfNoneMatch        bool
+	// Used by durable multipart completion: all fields and native preconditions
+	// remain identical across recovery, including after a later overwrite.
+	Publication *PutOptions
+	Modified    time.Time
+	ETag        string
 }
 
 var ErrS3Format = errors.New("client: corrupt S3 metadata")
@@ -110,6 +113,9 @@ func (s *S3) Put(ctx context.Context, key string, src io.Reader, size uint64, op
 	if !validS3Key(key) {
 		return S3Object{}, ErrRange
 	}
+	opt.Headers = copyS3Map(opt.Headers)
+	opt.Metadata = copyS3Map(opt.Metadata)
+	opt.Checksums = copyS3Map(opt.Checksums)
 	// Stage before touching the native object. Checksums and the complete header
 	// are known before publication; cancellation/failure removes staging only.
 	staged, err := os.CreateTemp("", "stqr-s3-body-*")
@@ -127,18 +133,9 @@ func (s *S3) Put(ctx context.Context, key string, src io.Reader, size uint64, op
 	writers := []io.Writer{md, sha}
 	checks := map[string]hash.Hash{}
 	for algorithm := range opt.Checksums {
-		var h hash.Hash
-		switch algorithm {
-		case "CRC32":
-			h = crc32.NewIEEE()
-		case "CRC32C":
-			h = crc32.New(crc32.MakeTable(crc32.Castagnoli))
-		case "SHA1":
-			h = sha1.New()
-		case "SHA256":
-			h = sha256.New()
-		default:
-			return S3Object{}, ErrRange
+		h, e := S3Checksum(algorithm)
+		if e != nil {
+			return S3Object{}, e
 		}
 		checks[algorithm] = h
 		writers = append(writers, h)
@@ -158,9 +155,13 @@ func (s *S3) Put(ctx context.Context, key string, src io.Reader, size uint64, op
 	}
 	for algorithm, h := range checks {
 		expected, e := base64.StdEncoding.DecodeString(opt.Checksums[algorithm])
-		if e != nil || !hmac.Equal(expected, h.Sum(nil)) {
+		if opt.Checksums[algorithm] != "" && (e != nil || !hmac.Equal(expected, h.Sum(nil))) {
 			return S3Object{}, ErrS3Checksum
 		}
+		if opt.Headers == nil {
+			opt.Headers = map[string]string{}
+		}
+		opt.Headers["X-Amz-Checksum-"+strings.ToLower(algorithm)] = base64.StdEncoding.EncodeToString(h.Sum(nil))
 	}
 	etag := hex.EncodeToString(md.Sum(nil))
 	digest := hex.EncodeToString(sha.Sum(nil))
@@ -168,9 +169,27 @@ func (s *S3) Put(ctx context.Context, key string, src io.Reader, size uint64, op
 		return S3Object{}, ErrS3Checksum
 	}
 	o := S3Object{Schema: 2, Key: key, Payload: S3MetadataID(key), Size: size, ETag: etag, Modified: time.Now().UTC(), Headers: opt.Headers, Metadata: opt.Metadata}
+	if opt.ETag != "" {
+		o.ETag = opt.ETag
+	}
+	if !opt.Modified.IsZero() {
+		o.Modified = opt.Modified
+	}
 	raw, err := encodeS3Object(o)
 	if err != nil {
 		return o, err
+	}
+	if opt.Publication != nil {
+		if opt.Publication.RequestID == (ID{}) || opt.Modified.IsZero() {
+			return o, ErrRange
+		}
+		if _, err = staged.Seek(0, io.SeekStart); err != nil {
+			return o, err
+		}
+		info, e := s.store.PutFrom(ctx, o.Payload, io.MultiReader(strings.NewReader(string(raw)), staged), uint64(len(raw))+size, *opt.Publication)
+		o.Version = info.Version
+		o.PayloadOffset = uint64(len(raw))
+		return o, e
 	}
 	for attempt := 0; attempt < 128; attempt++ {
 		old, info, err := s.load(ctx, key)
