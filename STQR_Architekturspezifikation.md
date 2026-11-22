@@ -24,7 +24,7 @@
 6. **Adaptive Hash-Ranges:** Binäres Splitten, Zusammenführen benachbarter Ranges, bytegenaue Kapazitäts- und lastbasierte Placement-Entscheidungen.
 7. **Lazy Migration und Generationen:** Maximal `CURRENT` und `NEXT`; ohne Rebuild-Grund keine Migration. Rebalancing bezieht nur Online-Nodes ein; das Placement von Offline-Nodes bleibt unverändert. Während eines Rebuilds sammelt der Koordinator weitere Gründe in `needrebuild`. Ausführbare Folgegründe starten nach Abschluss den nächsten Lauf; von Offline-Nodes abhängige Gründe bleiben bis zu deren Wiederkehr vorgemerkt. Nur ein administrativer Forceful Disconnect darf die Mitgliedschaft unter Verlustannahme ändern.
 8. **Gleichberechtigte Nodes:** Kein dauerhaft bevorzugter Master. Ein nur für die Generation gewählter Plan-Koordinator; der laufende Datenpfad ist unabhängig von ihm.
-9. **Buckets und Multi-Tenancy:** Admin-gesteuerte Bucket-Policies, User-Freigaben, Quotas, HDD-/SSD-/RAM-Basisspeicher, optionale RAM-Read-Caches und später Erasure Coding.
+9. **Buckets und Multi-Tenancy:** Admin-gesteuerte zentrale PG-Storage-Policies, Bucket-bezogene User-Freigaben und Quotas, HDD-/SSD-/RAM-Basisspeicher, optionale RAM-Read-Caches und später Erasure Coding.
 10. **HTTP-Daemon mit Basic Auth**, integriertem Dashboard, administrativer HTTP-API und WebSocket-Upgrade. Jede binäre WebSocket-Nachricht enthält genau eine STQR-Nachricht; ein gemeinsamer Codec dient Clients, Admin und Nodes.
 11. **Go-Implementierung** mit C-, Rust- und Go-Clientbibliotheken, FUSE-Frontend, direkt integriertem S3-HTTP-Endpunkt, einer Blockdevice-Library zur späteren QEMU-Einbindung, optionalem NBD-Frontend sowie Admin-Dashboard.
 12. **Umfassende automatisierte Verifikation:** Unit-, Property-, Recovery-, Fault-Injection-, Last- und Stresstests einschließlich sehr kleiner Test-Volumes im MiB-Bereich.
@@ -50,7 +50,8 @@
 | **Range** | Zusammenhängendes Hashintervall, beschrieben durch den **inklusiven Startwert**; das Ende ergibt sich aus dem nächsten Startwert. |
 | **Range-Group** | Alle Locations/Replikate/Fragmente/Caches derselben Range. |
 | **Placement-Map** | Versionierte, sortierte Zuordnung von (Bucket, Range) zu einer Storage-Policy und ihren Locations. |
-| **Generation** | Geplanter, kontrollierter Wechsel von Placement und Bucket-Policies, einschließlich Migration. |
+| **Generation** | Geplanter, kontrollierter Wechsel von Placement und wirksamen PG-Storage-Policy-Versionen, einschließlich Migration. |
+| **Placement Group (PG)** | Zentrale versionierte Storage-Policy mit Node-/Volume-Maske, gemeinsam von vielen Buckets referenziert. |
 | **Ownership Epoch** | Monoton steigender Fencing-Stand für die Schreibautorität einer Range. |
 | **CURRENT/NEXT** | Gegenwärtige autoritative Placement-Generation und vorbereitete Zielgeneration. |
 | **Durable Replica** | Persistente Kopie, die zur zugesagten Redundanz zählt. |
@@ -160,7 +161,7 @@ ramcache_bytes: 0
 
 ### 3.4 Failure Domains
 
-Node, Host, Rack und Zone sind optionale, administrativ gesetzte Failure-Domain-Tags. Repliken bzw. EC-Fragmente müssen entsprechend der Bucket-Policy auf verschiedene Failure Domains verteilt werden. Ein Node mit mehreren HDDs liefert dadurch nicht automatisch Host-Redundanz.
+Node, Host, Rack und Zone sind optionale, administrativ gesetzte Failure-Domain-Tags. Repliken bzw. EC-Fragmente müssen entsprechend der wirksamen PG-Policy auf verschiedene Failure Domains verteilt werden. Ein Node mit mehreren HDDs liefert dadurch nicht automatisch Host-Redundanz.
 
 ---
 
@@ -272,13 +273,33 @@ IDLE -> OFFER/COLLECT -> SEALED -> PLAN -> PREPARE_ALL
 - Frontends speichern Namen und fachliche Metadaten bei Bedarf selbst in normalen Objekten; das native Disk-/Wire-Format benötigt dafür keinen vollständigen Key.
 - Standardmäßig besitzt jeder Bucket seinen **eigenen logischen 256-Bit-Hashraum** (initial eine Range ab 0), damit Policies und Lastbalancing unabhängig bleiben. Leere Buckets können intern Default-Maps teilen; nach außen bleibt die Semantik bucketbezogen.
 
-### 5.2 Bucket-Policy
+### 5.2 Bucket-Konfiguration und zentrale PG-Storage-Policy
 
 ```yaml
 bucket:
   id: "a3446c68-7593-4fda-a684-0da84b1e3737"
   name: "application-data"
   state: active
+  placement_group: "b7446c68-7593-4fda-a684-0da84b1e3737"
+  limits:
+    quota_accounting: logical # logical | physical; Volume-Admission immer physical
+    metadata_reserve_ppm: 150000 # Schätzaufschlag für logische Zusicherungen
+    guaranteed_quota_bytes: 2TiB # Zusicherung in quota_accounting-Einheiten
+    absolute_quota_bytes: 10TiB  # harte Grenze in quota_accounting-Einheiten; unlimited erlaubt
+  access:
+    users:
+      - id: "user-17"
+        permissions: [read, write, append]
+  policy_version: 12
+```
+
+Die Storage-Einstellungen liegen zentral in der referenzierten PG, nicht als unabhängige Werte oder Overrides im Bucket:
+
+```yaml
+placement_group:
+  id: "b7446c68-7593-4fda-a684-0da84b1e3737"
+  name: "hosting-db"
+  version: 7
   storage_strategy: ssd  # hdd | ssd | ram | cache
   compression: raw  # raw | gzip | lz4 | xz
   placement_mode: count # count | everywhere; everywhere = eine Kopie auf jeder Mitgliedsnode
@@ -293,26 +314,27 @@ bucket:
     cache_class: ramcache
     max_copies_per_hot_range: 4
     cache_bytes_budget: 8GiB
-  limits:
-    quota_accounting: logical # logical | physical; Volume-Admission immer physical
-    metadata_reserve_ppm: 150000 # Schätzaufschlag für logische Zusicherungen
-    guaranteed_quota_bytes: 2TiB # Zusicherung in quota_accounting-Einheiten
-    absolute_quota_bytes: 10TiB  # harte Grenze in quota_accounting-Einheiten; unlimited erlaubt
-  access:
-    users:
-      - id: "user-17"
-        permissions: [read, write, append]
-  policy_version: 12
+  failure_domains: [host]
+  node_selection: all # all | list; list verwendet die Node-/Volume-Maske aus §5.8
+  nodes: []
 ```
+
+**Zuständigkeiten:** Die PG definiert Speicherklasse, Platzierungsmodus, Replikation/ACK bzw. später EC, Failure Domains, Kompression und Read-Cache-Einstellungen sowie die Node-/Volume-Auswahl. Beim Bucket bleiben ID, Name, optionale Kundenzuordnung, Zustand, PG-Referenz, individuelle Quotas und Zugriffsrechte. Das Cache-Budget der PG ist eine gemeinsame Obergrenze für alle zugeordneten Buckets und wird nicht mit deren Anzahl multipliziert. Es gibt zunächst weder Storage-Overrides pro Bucket/Range noch eine zusätzliche Storage-Profil-Ebene. Die Range-Map enthält die tatsächlich wirksamen Layouts, Locations und zugehörigen PG-Versionen.
+
+**Zentraler Hosting-Betrieb:** Hunderte oder tausende Kunden-Buckets können dieselbe PG referenzieren. Beispielsweise verwenden PHP-Dateien die PG `hosting-php` und direkt durch memcp verwendete Datenbanken `hosting-db`. Pro Kunde können zwei Buckets bestehen; alternativ liegen PHP-Dateien in einem gemeinsamen Bucket, während jede Datenbank einen eigenen Bucket erhält. Eine Änderung an `hosting-db` gilt für alle dort zugeordneten Datenbank-Buckets, ohne Einzelkonfigurationen nachzuführen. Abweichende Storage-Verträge werden durch eine andere PG ausgedrückt.
 
 **Nur Administratoren** dürfen Buckets erstellen, löschen, umbenennen oder konfigurieren, einschließlich Rechte, Quotas und Tier-/Redundanz-Policies. Normale Benutzer bekommen **explizite Einzel-Bucket-Freigaben**. Administrative Benutzer können ergänzend nur lesende Dashboard-Rechte besitzen; v1 kennt mindestens `ADMIN` und `USER`.
 
 ### 5.3 Policy-Änderungen
 
-- Admin schreibt **Desired Policy** mit neuer `policy_version` und auslösendem Rebuild-Grund.
+- Admin schreibt eine neue **Desired-PG-Version** mit auslösendem Rebuild-Grund. Eine PG-Änderung erfasst alle referenzierenden Buckets; deren Konfiguration wird nicht einzeln überschrieben. Auch ein Wechsel der PG-Referenz eines Buckets ist eine Storage-Policy-Änderung. Globale Freigaben folgen §4.5; ihre physische Umsetzung folgt den jeweiligen Rebuild-Scopes.
 - Die `CURRENT Storage Policy` bleibt für existierende Daten maßgeblich, bis die nächste Generation erfolgreich umgesetzt ist. Rechte/Sperren (§4.5) und die gesonderte Quota-Admission (§5.5) folgen ihren eigenen Wirksamkeitsregeln.
 - Während HDD→SSD, Replication→EC oder `copies=2→3` können `CURRENT` und `NEXT` unterschiedliche Layouts haben; Storage-Locations tragen eindeutig kodierte Layout-/Fragmentversionsinformationen.
 - Die Änderung wird erst als **erfüllt** gemeldet, wenn alle notwendigen Payloads/Kopien/Fragmente gemäß Zielstrategie gesichert (HDD/SSD persistent, RAM auf allen erforderlichen lebenden Kopien) und die Cutovers veröffentlicht sind.
+- Gewünschte und wirksame PG-ID/-Version werden je Bucket und bei teilweise umgestellten Buckets je Range eindeutig geführt. Die alte PG-Version bleibt für noch nicht umgestellte Bereiche verfügbar; neue Zielwerte dürfen deren ACK-, Layout- oder Kompressionsvertrag nicht rückwirkend ändern. Bucket-Konfigurationsrevision und PG-Version sind getrennte Zähler.
+- Eine PG-Änderung ist erst insgesamt erfüllt, wenn alle betroffenen Buckets/Ranges die Zielversion sicher umgesetzt haben. Online-Bereiche dürfen vorangehen; wegen Offline-Nodes eingefrorene Bereiche behalten ihre wirksame Version und einen persistenten Rebuild-Grund (§4.3). Das Dashboard zeigt den Fortschritt pro PG und Bucket einschließlich wartender Bereiche. Während einer Umstellung neu angelegte Buckets referenzieren die freigegebene Zielversion; ihre Aktivierung erfordert deren vollständige Erfüllung.
+- PGs und Versionen dürfen nicht gelöscht werden, solange sie wirksam oder als Ziel referenziert werden. Ein PG-Wechsel eines Buckets entfernt keine noch benötigte Quellversion.
+- Änderungen an Klasse, Redundanz oder Maske prüfen die physischen Garantiereserven aller betroffenen Buckets sowie den Übergangsbedarf. Bestehende individuelle Quotas werden nicht automatisch erhöht oder abgesenkt; eine nicht erfüllbare Zielversion darf nicht als erfüllt veröffentlicht werden (§5.5).
 - Verfügbarkeits- und Abrechnungszusagen müssen zwischen `requested`, `migrating`, `fulfilled`, `degraded` unterscheiden.
 
 ### 5.4 Sicherheits- und Quota-Regeln
@@ -337,7 +359,7 @@ bucket:
 
 ### 5.6 Kompression und Platzierungsmodus
 
-- Bucket-Option **`compression`**: `raw`, `gzip`, `lz4`, `xz`; Standard `raw`. Das Volumeformat trägt das tatsächlich gewählte Verfahren je Objektversion, zusätzlich Block-/Extent-Metadaten zur unabhängigen Dekodierung (§9.8). Die native API liest/schreibt immer logische unkomprimierte Bytes.
+- Zentrale PG-Option **`compression`**: `raw`, `gzip`, `lz4`, `xz`; Standard `raw`. Das Volumeformat trägt das tatsächlich gewählte Verfahren je Objektversion, zusätzlich Block-/Extent-Metadaten zur unabhängigen Dekodierung (§9.8). Die native API liest/schreibt immer logische unkomprimierte Bytes.
 - Änderungen des Verfahrens sind Storage-Policy-Änderungen für NEXT. Bei Migration werden Quellbytes dekodiert und gemäß Zielpolicy neu kodiert; `raw` bedeutet dabei gegebenenfalls Dekompression. Erst danach ist die Zielpolicy erfüllt. Reine Re-Kompression darf Objektversion, logische Länge, APPEND-Offsets oder Request-ID-Ergebnisse nicht ändern.
 - **`placement_mode=count`** nutzt die konfigurierte Replikationsanzahl. **`placement_mode=everywhere`** bedeutet eine vollständige Kopie auf **jeder** aktiven Mitgliedsnode, einschließlich datenhaltender Nodes ohne sonstiges Bucket-Placement. Dies ist die explizite Darstellung von „replication=unendlich“, kein numerischer Überlauf/Sentinel in replicas.
 - EVERYWHERE behält einen Primary zur Mutationsordnung; alle Nodes sind lesefähige Replikate. ALL-ACK umfasst alle aktiven erforderlichen Mitglieder. Join baut die neue Kopie vor ihrer verbindlichen Aktivierung auf, Leave entfernt sie erst mit dem Membership-Wechsel. Temporärer Ausfall entfernt sie nicht. Ein Join muss auf jeder neuen Node genügend passenden physischen Disk-/RAM-Platz reservieren oder wird mit 507 abgelehnt.
@@ -365,7 +387,7 @@ bucket:
 
 ### 5.8 Placement Groups und Volume-Filter
 
-Eine **Placement Group (PG)** bezeichnet in STQR eine administrativ definierte Platzierungsmaske mit stabiler ID und einer Liste erlaubter Nodes. Pro aufgeführter Node kann die Auswahl ihrer Datenvolumes eingeschränkt werden. Ein Bucket kann eine PG referenzieren oder ohne PG auf allen geeigneten Nodes/Volumes platziert werden. Die Maske bestimmt zulässige Ziele; Speicherklasse, Redundanz, Failure Domains und Kapazitätsgrenzen gelten zusätzlich. Sie verlangt allein keine Kopie auf jeder aufgeführten Node.
+Eine **Placement Group (PG)** bezeichnet in STQR eine zentrale, versionierte Storage-Policy einschließlich Platzierungsmaske (§5.2). Jeder Bucket referenziert genau eine PG. Die Node-Auswahl kann uneingeschränkt (`node_selection=all`) sein oder eine explizite Liste erlaubter Nodes verwenden (`node_selection=list`); eine leere explizite Node-Liste erlaubt keine Node. Pro aufgeführter Node kann die Auswahl ihrer Datenvolumes eingeschränkt werden. Eine uneingeschränkte Maske bedeutet weiterhin eine zentrale PG-Storage-Policy, nicht das Fehlen einer PG. Für den einfachen Start existiert eine Standard-PG mit uneingeschränkter Datenvolume-Auswahl. Die Maske bestimmt zulässige Ziele; die übrigen PG-Einstellungen und die Bucket-Quotas gelten zusätzlich. Die Node-Liste allein verlangt keine Kopie auf jeder aufgeführten Node.
 
 Pro Node-Eintrag besitzt der Volume-Filter einen expliziten Modus und eine Liste stabiler Volume-IDs:
 
@@ -377,11 +399,15 @@ Pro Node-Eintrag besitzt der Volume-Filter einen expliziten Modus und eine Liste
 
 Eine leere Blacklist schließt kein Volume aus; eine leere Whitelist erlaubt kein Volume. Neu hinzugefügte Volumes sind bei Alle und Blacklist grundsätzlich zugelassen, bei Whitelist erst nach expliziter Aufnahme. Bei Alle ist die Liste nicht wirksam. Kein Platzmangel oder Offline-Zustand erlaubt ein Ausweichen außerhalb der Maske. Änderungen folgen dem Desired-/Effective- und NEXT-Generationenmodell (§5.3); für Offline-Placement und vorgemerkte Rebuild-Gründe gilt §4.3. Der reservierte System-Bucket behält seine clusterweite EVERYWHERE-Platzierung.
 
-**Systemdaten und Bootstrap:** Auch der System-Bucket referenziert eine PG. Seine EVERYWHERE-Policy bestimmt weiterhin eine Kopie auf jeder erforderlichen Node; die PG wählt dort das konkrete persistente Metadatenvolume per Whitelist stabiler Volume-IDs. Es gibt keine gesonderte Laufzeitregel „Bucket-ID system ⇒ physisches Admin-Volume“. Die lokale Volume-Konfiguration liefert nur den minimalen Bootstrap-Anker zum Lesen der PG- und Systemobjekte. Anschließend gelten die persistierten effektiven Masken. Ein fehlender Node-Eintrag, eine leere Whitelist oder ein widersprüchlicher Bootstrap-/PG-Stand führt zum Anhalten, niemals zum Ausweichen auf ein anderes Volume. Neue Mitglieder benötigen ihren Metadatenvolume-Eintrag vor Aktivierung der Systemkopie. Die clusterweite PG-Aktualisierung folgt denselben Kontroll-/Generationsbarrieren wie andere Platzierungsänderungen.
+**Systemdaten und Bootstrap:** Auch der System-Bucket referenziert eine PG. Die EVERYWHERE-Policy seiner System-PG bestimmt weiterhin eine Kopie auf jeder erforderlichen Node; die PG wählt dort das konkrete persistente Metadatenvolume per Whitelist stabiler Volume-IDs. Es gibt keine gesonderte Laufzeitregel „Bucket-ID system ⇒ physisches Admin-Volume“. Die lokale Volume-Konfiguration liefert nur den minimalen Bootstrap-Anker zum Lesen der PG- und Systemobjekte. Anschließend gelten die persistierten effektiven Masken. Ein fehlender Node-Eintrag, eine leere Whitelist oder ein widersprüchlicher Bootstrap-/PG-Stand führt zum Anhalten, niemals zum Ausweichen auf ein anderes Volume. Neue Mitglieder benötigen ihren Metadatenvolume-Eintrag vor Aktivierung der Systemkopie. Die clusterweite PG-Aktualisierung folgt denselben Kontroll-/Generationsbarrieren wie andere Platzierungsänderungen.
 
-PG-Beschreibungen werden als normales Systemobjekt mit stabiler Group-ID, Name, Revision sowie `effective:{version,nodes}` und optional `desired:{version,nodes}` geführt. Ein Node-Eintrag enthält `node_id`, `volume_filter` und `volumes`. Die serverseitige Bucket-Policy speichert die optionale `placement_group`-ID. Objektclients benötigen die PG-Maske nicht; ihre bestehenden Objekt-/Policy-Response-Bytes werden dafür nicht still erweitert. Die administrative PG-Editor-/Nachrichtenoberfläche wird gesondert versioniert. Der Volume- und Quota-Auswahlpfad muss dieselbe effektive Maske benutzen.
+PG-Beschreibungen werden als normale Systemobjekte mit stabiler Group-ID, Name, Revision und unveränderlichen Storage-Policy-Versionen geführt. Jede Version enthält sämtliche Storage-Einstellungen aus §5.2 einschließlich `node_selection` und `nodes`; ein Node-Eintrag enthält `node_id`, `volume_filter` und `volumes`. Freigegebene Zielversion und die noch wirksamen Vorgängerversionen bleiben parallel adressierbar (§5.3). Der Bucket speichert seine `placement_group`-ID und die getrennten Desired-/Effective-Bezüge. Objektclients benötigen die vollständige PG-Maske nicht; bestehende Objekt-/Policy-Response-Bytes werden nicht still erweitert. Die administrative PG-Editor-/Nachrichtenoberfläche wird gesondert versioniert. Der Volume- und Quota-Auswahlpfad muss die jeweils wirksame PG-Version und dieselbe effektive Maske benutzen.
 
-**Dashboard:** Der Bucket bietet eine PG-Auswahl einschließlich „Keine Einschränkung“. Im PG-Editor erhält jeder Node-Eintrag ein Dropdown **„Alle / Blacklist / Whitelist“**. Nur bei **Blacklist** oder **Whitelist** erscheint die editierbare Volume-Liste mit **Hinzufügen** und **Entfernen**; bei **Alle** ist sie ausgeblendet. Volumes werden mit lesbarer Bezeichnung ausgewählt und über ihre stabile ID gespeichert. Bereits ausgewählte Offline-Volumes bleiben sichtbar und entfernbar; ihre Nichterreichbarkeit ändert den Filter nicht. Dies beschreibt den vorgesehenen PG-Ausbau, nicht bereits implementierte Dashboard-Funktionen.
+**Dashboard:** Der Bucket bietet eine PG-Auswahl einschließlich der Standard-PG. Speicherklasse, Kompression, Replikation und Cache-Einstellungen erscheinen dort als aus der PG abgeleitete Werte; geändert werden sie zentral im PG-Editor. Dieser bietet außerdem die Node-Auswahl „Alle / Liste“. Bei „Liste“ erhält jeder Node-Eintrag ein Dropdown **„Alle / Blacklist / Whitelist“**. Nur bei **Blacklist** oder **Whitelist** erscheint die editierbare Volume-Liste mit **Hinzufügen** und **Entfernen**; bei **Alle** ist sie ausgeblendet. Volumes werden mit lesbarer Bezeichnung ausgewählt und über ihre stabile ID gespeichert. Bereits ausgewählte Offline-Volumes bleiben sichtbar und entfernbar; ihre Nichterreichbarkeit ändert den Filter nicht. Dies beschreibt den vorgesehenen PG-Ausbau, nicht bereits implementierte Dashboard-Funktionen.
+
+**Volume hinzufügen und bestehende Filter ergänzen:** Beim Hinzufügen eines Datenvolumes zeigt das Formular zusätzlich die bestehenden PG-/Node-Einträge mit explizitem Blacklist- oder Whitelist-Modus, deren Node das neue Volume gehört. Die Auswahl ist nach PG und Node beschriftet und bietet je Zielliste eine Checkbox. Einträge mit Modus Alle benötigen keine Checkbox; Listen anderer Nodes dürfen keine fremde Volume-ID aufnehmen. Für jede angekreuzte Zielliste wird die stabile ID des neu hinzugefügten Volumes aufgenommen. Die Auswahl ändert den Listenmodus nicht: Aufnahme in eine Whitelist erlaubt das Volume dort, Aufnahme in eine Blacklist schließt es dort aus. Ohne Haken bleibt die jeweilige Liste unverändert; die normalen Regeln für neue Volumes gelten weiter.
+
+Die ausgewählten Listenergänzungen werden vor der erstmaligen Placement-Zuweisung an das neue Volume berücksichtigt. Volume-Anlage und nötige PG-Kontrolländerungen folgen ihren jeweiligen Commitwegen; die Oberfläche darf einen nur teilweise abgeschlossenen Vorgang nicht als vollständig erfolgreich melden. Bereits erfolgreich angelegte Volumes bleiben bei einem Fehler sichtbar; fehlende Listenergänzungen können ohne doppelte Volume-Anlage wiederholt werden. Ist eine erforderliche PG-Änderung noch ausstehend, bleibt das neue Volume bis zu deren Abschluss für neue Placement-Zuweisungen gesperrt.
 
 ## 6. Placement-Map: Binärmodell und Ranges
 
@@ -453,12 +479,12 @@ Bei **1 PB** logischer Daten und **10 GB** je Range entstehen näherungsweise **
 | Rolle | Bedeutung | Durable? |
 |---|---|---|
 | `PRIMARY` | Schreibautorität/Koordinator einer replizierten Range | Ja, wenn auf Persistent Volume |
-| `REPLICA` | Vollständige Kopie gemäß Bucket-Strategie | HDD/SSD: persistent; RAM: Prozesslebensdauer mit Replica-Restore |
+| `REPLICA` | Vollständige Kopie gemäß wirksamer PG-Strategie | HDD/SSD: persistent; RAM: Prozesslebensdauer mit Replica-Restore |
 | `EC_DATA_i` | Kodiertes Datenfragment `i` | Ja, im definierten EC-Profil |
 | `EC_PARITY_i` | Paritätsfragment `i` | Ja, im definierten EC-Profil |
 | `READ_CACHE` | Zusätzliche ausfallsichere oder flüchtige Lesekopie | **Nein**, zählt nicht als Redundanz |
 
-Replikationsfaktor, EC-Parameter, Basis-Storage-Class und Read-Cache-Budget sind **Bucket-Policies**; die Range-Map beschreibt die **konkreten** Locations und Layout-Versionen. Falls Policies geändert werden, kann NEXT bereits ein neues Layout enthalten, während CURRENT noch maßgeblich ist.
+Replikationsfaktor, EC-Parameter, Basis-Storage-Class, Kompression und Read-Cache-Budget sind **zentrale PG-Policies**; der Bucket referenziert die PG. Die Range-Map beschreibt die **konkreten** Locations, Layout-Versionen und wirksamen PG-ID/-Version-Bezüge. Falls Policies geändert werden, kann NEXT bereits ein neues Layout enthalten, während CURRENT noch maßgeblich ist.
 
 ---
 
@@ -590,7 +616,7 @@ Diese Zielfunktion ist ein Planungsmodell, keine zugesagte globale optimale Lös
 - **RAM-Pool:** autoritative prozessgebundene Daten von RAM-Buckets, kein On-Disk-Format.
 - **RAMCACHE:** zusätzliche flüchtige Read-Kopie; kein normales persistentes Volume.
 
-Persistente Volume-Klassen sind `hdd` und `ssd`; daneben verwaltet der Daemon flüchtige RAM-Pools. Die **Bucket-Strategie** ist davon getrennt:
+Persistente Volume-Klassen sind `hdd` und `ssd`; daneben verwaltet der Daemon flüchtige RAM-Pools. Die **über die PG gewählte Storage-Strategie eines Buckets** ist davon getrennt:
 
 | Strategie | Platzierung und Haltbarkeit | Umfang |
 |---|---|---|
@@ -836,7 +862,7 @@ CAS gehört bereits zur Basis-API (§10.6). SUBSCRIBE/UNSUBSCRIBE sind für eine
 - `APPEND(bucket, key, bytes)` hängt Bytes **atomar und ungeteilt** am Ende genau eines logischen Objekts an. Existiert das Objekt noch nicht, legt APPEND es atomar an; der erste Offset ist 0. Bei einem vorhandenen leeren Objekt ist der erste Offset ebenfalls 0.
 - Mehrere parallele Appends an dasselbe Objekt erhalten eine **totale Reihenfolge**; keine Byte-Interleavings, keine verlorenen Appends.
 - Der Return-Wert enthält mindestens **Anfangsoffset, neue logische Länge und Objektsequenz/Commit-Index**.
-- Nach `SUCCESS` sind die angehängten Bytes einschließlich notwendiger Metadaten entsprechend der Bucket-Strategie gesichert: HDD/SSD **dauerhaft**, RAM solange mindestens eine gültige Kopie in einem laufenden Prozess erhalten bleibt. Der Retry-/Runtime-Vertrag gilt gemäß §8.1.1.
+- Nach `SUCCESS` sind die angehängten Bytes einschließlich notwendiger Metadaten entsprechend der wirksamen PG-Strategie gesichert: HDD/SSD **dauerhaft**, RAM solange mindestens eine gültige Kopie in einem laufenden Prozess erhalten bleibt. Der Retry-/Runtime-Vertrag gilt gemäß §8.1.1.
 - Ein `GET` nach bestätigtem Append von einer gültigen autoritativen oder Replica-Readquelle sieht den gesamten bestätigten Präfix; jeder Read-Cache muss dieselbe Konsistenzgarantie erfüllen oder darf dafür nicht verwendet werden.
 - Mutationen einschließlich `APPEND` werden **pro Objekt am Primary atomar und total geordnet** ausgeführt. Replica-Reads sind nicht allgemein linearizierbar: Während einer laufenden Mutation dürfen verschiedene Replikate unterschiedliche lokal committed Versionen liefern; beim Replikawechsel sind dann auch Versionsrückschritte möglich. Liveness und lesbare Hot Objects haben Vorrang vor einer global synchronisierten Read-Sicht. Strengere Sichtbarkeit koordinieren Anwendungen bei Bedarf selbst, etwa durch MOSI mit Freigabe des M-Locks erst nach erfolgreichem Storage-Commit; Multi-Object-/TX-Transaktionen bleiben Aufgabe höherer Schichten.
 - `APPEND` mit leerem Payload ändert ein vorhandenes Objekt nicht; bei fehlendem Objekt wird ein leeres Objekt angelegt. Es ist kein Ersatz für einen expliziten Sync-Barrier-Befehl.
@@ -943,7 +969,7 @@ Der Ablauf gilt für alle v1-Strategien: HDD/SSD flushen Daten und Commitbelege 
 - `hdd` oder `ssd`: dauerhafter Basis-Storage je Bucket; HDD darf SSD nutzen, SSD niemals HDD.
 - `ram`: autoritativer replizierbarer Laufzeitspeicher ohne Eviction; `cache`: spätere Strategie mit beliebiger Verdrängung.
 - `ramcache`: Premium-Read-Replica-Tier, Kapazität via Budget/Quota und Lastregeln.
-- HDD-/SSD-basierte Cache-Locations können später optional ergänzt werden; die Bucket-Strategien HDD/SSD/RAM und die reservierte CACHE-Strategie bleiben davon getrennt.
+- HDD-/SSD-basierte Cache-Locations können später optional ergänzt werden; die PG-Storage-Strategien HDD/SSD/RAM und die reservierte CACHE-Strategie bleiben davon getrennt.
 
 ---
 
@@ -995,7 +1021,7 @@ STABLE -> PREPARED -> COPYING -> CATCHING_UP -> CUTOVER -> CLEANUP -> STABLE
 | Netzpartition | Keine neue Ownership/Membership durch Timeout; unveränderte unabhängige I/O kann weiterlaufen, abhängige Operationen warten; Forceful Disconnect erfordert administrative Verlustfreigabe und externes Fencing |
 | Abmeldewunsch während Migration | Intern `DRAINING` vormerken, bei nächster Statistikabfrage melden, Entleerung im nächsten darauf aufbauenden Plan; keine unsichere sofortige Deletion |
 | Lost ACK nach APPEND | Request-ID dedupliziert; kein doppeltes Log-Append |
-| Bucket-Policy-Change parallel | NEXT wird committed; weitere Änderungen bis zur Folgegeneration in Queue |
+| PG-Policy-Change oder Bucket-PG-Wechsel parallel | NEXT bindet die freigegebene Zielversion; weitere Änderungen bis zur Folgegeneration in Queue |
 
 ---
 
@@ -1299,6 +1325,20 @@ nicht stillschweigend. Der Plan-Digest ist SHA-256 seiner Binärdarstellung.
 Die PG-Administration verwendet eigene Nachrichten; die bestehende Objektclient-
 Policy wird dadurch nicht stillschweigend erweitert:
 
+**Umstellung auf zentrale PG-Storage-Policies (§5.2):** Die folgende Tabelle mit
+`schema=1` sowie das bisherige flache `Policy`-Layout dokumentieren den bisherigen
+Stand. Für das Zielmodell sind PG-Beschreibungen und SET-Nachrichten ausdrücklich
+zu versionieren: Sie übertragen die vollständige PG-Storage-Policy einschließlich
+Node-Auswahl und binden unveränderliche PG-Versionen. Bucket-Anlage und PG-Wechsel
+müssen eine konkrete PG-ID referenzieren; ein bisheriges `group=null` wird beim
+Upgrade auf eine explizite Standard-PG abgebildet. Vorhandene abweichende
+Bucket-Storage-Verträge werden in entsprechende PGs überführt und dabei erhalten.
+`BUCKET_SET_POLICY` darf im Zielmodell keine Storage-Overrides mehr erzeugen.
+Clientseitig aus der PG aufgelöste effektive Storage-Werte sind reine Projektionen,
+keine zweite Konfigurationsquelle. Die versionierte Range-/Map-Repräsentation muss
+PG-ID und wirksame PG-Version auch bei teilweise umgestellten Buckets eindeutig
+binden. Bestehende Frames dürfen weder still umgedeutet noch erweitert werden.
+
 | Opcode | Nachricht | Body / Antwort |
 |---|---|---|
 | 0x2030 | PLACEMENT_GROUP_LIST / Q | `schema:u16=1,after_group_id:Text,limit:u32` => `Text(JSON{groups,next})`, maximal 1000 Gruppen |
@@ -1306,9 +1346,10 @@ Policy wird dadurch nicht stillschweigend erweitert:
 | 0x2032 | PLACEMENT_GROUP_DELETE / Q | `schema:u16=1,group:ID,expected_revision:u64` => Admin-ACK; referenzierte/gerade umgestellte Gruppen liefern 409 |
 | 0x2033 | BUCKET_SET_PLACEMENT_GROUP / Q | `schema:u16=1,bucket:ID,expected_policy_version:u64,group:Opt(ID)` => Admin-ACK; Änderung läuft über Desired-Policy |
 
-Bestehende Ranges behalten ihre effektive Maskenversion, bis ihre Daten sicher
-übergeben wurden. Erst nach allen betroffenen Bucket-Übergängen aktiviert eine
-ALL-Änderung die neue PG-Maske. Die System-PG wird ausschließlich durch die
+Bestehende Ranges behalten ihre effektive PG-Version, bis ihre Daten sicher
+übergeben bzw. gemäß Zielpolicy umgestellt wurden. Freigegebene Zielversionen
+werden pro Range wirksam; erst nach allen betroffenen Bucket-Übergängen gilt die
+PG-Änderung insgesamt als erfüllt (§5.3). Die System-PG wird ausschließlich durch die
 Membership gepflegt. Lokale Node-Admin-Wrapper dürfen diese globalen Nachrichten
 nicht ausführen; NODE_SHUTDOWN erlaubt dort nur DRAIN/SHORT (0/1), kein CLUSTER (2).
 
@@ -1645,7 +1686,7 @@ VOLUME_ADD-Source `0 FILE,1 BLOCKDEVICE`; UI-Textgrößen werden vor dem Aufruf 
 
 Das Dashboard bietet die Menüpunkte **Volumes, Buckets, User, Einstellungen**. Volumes, Buckets und User zeigen jeweils einen Badge mit ihrer Anzahl; Bucket-/User-Zähler werden bereits bei Anmeldung geladen und nach lokalen Änderungen aktualisiert. Die Benutzerliste zeigt Rolle/Zustand und pro Zeile Passwortänderung und Löschen. Das eigene Konto ist vom Löschen ausgeschlossen, sowohl im Dashboard als auch bei direktem USER_DELETE. Der letzte Listeneintrag öffnet „User anlegen“ mit Benutzername und Passwort; neue Konten erhalten standardmäßig Rolle USER, optional über den Haken „Administrator“ Rolle ADMIN. In der Rollen-Spalte ist die Rolle unmittelbar per Dropdown änderbar; die Änderung verwendet USER_UPDATE (0x200c). Der angemeldete User darf sich weder selbst löschen noch die eigene Rolle ändern oder das eigene Konto deaktivieren. Das eigene Rollen-Dropdown ist sichtbar, aber deaktiviert; dieselbe Regel gilt serverseitig, unabhängig von der Zahl weiterer Administratoren. Rollenänderungen entziehen bestehende Sessions und Verbindungscapabilities des betroffenen Users; die eigene Rolle ist nicht änderbar. Eine Dashboard-Anmeldung mit korrektem Passwort, aber Rolle USER, zeigt den fehlenden Administratorzugriff ausdrücklich an. Der optionale Haken „Gleichnamigen Bucket anlegen“ öffnet nach erfolgreichem USER_CREATE das mit Name und Benutzer-ID vorbelegte Bucket-Formular. Die Bestätigung erzeugt den Bucket und gibt dem ausgewählten User Lesen/Schreiben/Anhängen/Löschen frei. Schlägt die Freigabe nach erfolgreicher Anlage fehl, bleibt dieser Teilzustand sichtbar; ein erneuter Versuch wiederholt nur die fehlende Freigabe mit derselben Request-ID. Abbrechen löscht einen bereits angelegten Bucket nicht. Die UI-Beschriftung des Hakens enthält nur „Gleichnamigen Bucket anlegen“.
 
-Die Bucket-Ansicht zeigt Speicherklasse, Kompression, absolutes Kontingent, Freigaben und Zustand. Sie bietet Anlegen, Policy-/Kontingentänderung, Umbenennen, Sperren/Entsperren, Löschen sowie Freigaben je User mit einzelnen READ/WRITE/APPEND/DELETE-Rechten. Der System-Bucket ist schreibgeschützt in der Administration. Reine Kontingentänderungen verwenden BUCKET_SET_QUOTA ohne Datenmigration; laufende Umstellungen/Löschungen werden bis zum Abschluss aktualisiert. Der aktuelle Single-Node-Stand bietet eine Kopie bzw. EVERYWHERE auf der einzigen Node, HDD/SSD/RAM und raw/gzip/lz4/xz. Weitere Node-Replikate, garantierte Reservierungen und begrenzte physische Kontingente werden erst bei verfügbarer Server-Unterstützung angeboten. JavaScript erhält bei Listen und Policyänderungen alle u64-Werte exakt; Kontingente dürfen auch null oder kleiner als die Volume-Mindestgröße sein.
+Die Bucket-Ansicht zeigt PG, daraus abgeleitete Speicherklasse/Kompression, absolutes Kontingent, Freigaben und Zustand. Im Zielmodell aus §5.2/§5.8 werden Storage-Einstellungen ausschließlich im zentralen PG-Editor geändert; die folgende Beschreibung vorhandener direkter Bucket-Policy-Operationen dokumentiert den bisherigen Implementierungsstand und ist entsprechend umzustellen. Sie bietet Anlegen, Policy-/Kontingentänderung, Umbenennen, Sperren/Entsperren, Löschen sowie Freigaben je User mit einzelnen READ/WRITE/APPEND/DELETE-Rechten. Der System-Bucket ist schreibgeschützt in der Administration. Reine Kontingentänderungen verwenden BUCKET_SET_QUOTA ohne Datenmigration; laufende Umstellungen/Löschungen werden bis zum Abschluss aktualisiert. Der aktuelle Single-Node-Stand bietet eine Kopie bzw. EVERYWHERE auf der einzigen Node, HDD/SSD/RAM und raw/gzip/lz4/xz. Weitere Node-Replikate, garantierte Reservierungen und begrenzte physische Kontingente werden erst bei verfügbarer Server-Unterstützung angeboten. JavaScript erhält bei Listen und Policyänderungen alle u64-Werte exakt; Kontingente dürfen auch null oder kleiner als die Volume-Mindestgröße sein.
 
 Benutzernamen: 1–128 UTF-8-Bytes, keine Leer-/Steuerzeichen oder Doppelpunkte; Präfix `node-` bleibt Node-Authentifizierung vorbehalten. Passwörter: 1–72 UTF-8-Bytes (bcrypt-Grenze), im Admin-Volume nur als bcrypt-Verifier. USER_CREATE nimmt eine nichtleere, vom Sender erzeugte User-ID und UserRole USER/ADMIN an. Benutzername und ID müssen eindeutig sein (409). Nach Passwortwechsel/Löschen werden bestehende Sessions ungültig und offene Verbindungen bei der nächsten Nachricht/Prüfung abgewiesen; beim eigenen Passwortwechsel fordert das Dashboard eine neue Anmeldung. Lokale Accountmutation und Wiederholungsbeleg werden als ein atomares Systemobjekt gespeichert; wiederholte identische Request-IDs erzeugen keine weiteren Konten oder Passwortwechsel. Belege enthalten keine Klartextpasswörter; Request-Digests sind mit dem Cluster-Secret authentifiziert. Eine künftige Cluster-Token-Rotation muss die Gültigkeit vorhandener Belege berücksichtigen. Multinode-Accountänderungen benötigen später den CONTROL_CHANGE-/EVERYWHERE-Commit.
 
@@ -1854,6 +1895,7 @@ Membership-Austritt beendet der Issuer erst seine laufenden Frontend-Aufträge.
 - Bucket-spezifische Namespaces, Quotas, Backpressure und I/O-Scheduling verhindern, dass ein Kunde unbegrenzt den gesamten Cluster blockiert.
 - Objekt-Checksummen und optional AEAD-Verschlüsselung-at-Rest; wenn vorgesehen, Schlüsselmanagement getrennt vom Volume-Datenformat.
 - Der Admin kann Bucket-Policies verwalten, ohne die direkten Client-I/O-Pfade zu verändern.
+- Zentrale Storage-Einstellungen werden im PG-Editor verwaltet; Bucket-Ansichten zeigen die abgeleiteten Werte, PG-Zuordnung und den Umstellungsfortschritt. Eine Änderung muss alle referenzierenden Buckets erfassen.
 
 ### 16.3 Hardware-/Datenfehler
 
@@ -1978,6 +2020,7 @@ Mit künstlich kleinen Volumes (z. B. **4, 8, 16, 32 und 64 MiB**) und determini
 - 95–99 % Füllstand, GCs und Rebalancing, neue leere Ziel-Volumes, kritische Backfill-Situation.
 - Hot-Range durch 90 % Reads auf einem Schlüssel; Split-Isolation und Cache-Replikation; separate hohe Write-/Append-Last.
 - Tausende kleine Buckets, viele leere Ranges, aggressive Merge-Folgen.
+- Tausende Kunden-Buckets mit gemeinsam referenzierten PGs: eine zentrale Änderung an Kompression/Replikation erfasst alle zugeordneten Buckets, erhält individuelle Quotas und ACLs und erzeugt keine Bucket-Overrides. Gemischte wirksame PG-Versionen während einer Umstellung einschließlich Offline-Bereichen, Reconnect, neu angelegten Buckets und PG-Wechseln prüfen; das gemeinsame Cache-Budget darf nicht je Bucket vervielfacht werden.
 - Map mit simulierten Hunderttausenden Ranges (ohne große Datenvolumes) für Memory-/Lookup-Benchmark.
 - Benchmark-Metriken: IOPS, Durchsatz, P50/P95/P99, CPU/Operation, System Calls, Copy Bytes, Flush/Commit-Latenz, Write Amplification, Map-Größe, Recovery-Zeit.
 
@@ -2101,7 +2144,7 @@ STQR ist ein **Single-Node-First, Range-Partitioned Distributed Object Store** f
 2. **Explizite, extrem kompakte Hash-Range-Map:** Der 256-Bit-Hash dient nur der stabilen logischen Adressierung. Die tatsächliche Position ist durch veränderbare, sortierte Range-Starts und Locations festgelegt. Neue Hardware erzwingt nicht automatisch eine CRUSH-artige Neuzuordnung aller betroffenen Ranges.
 3. **Split/Merge unabhängig vom Kopieren:** Eine Range kann zunächst rein logisch halbiert oder mit einer kompatiblen Nachbarrange vereinigt werden; erst ein davon unabhängiger Placement-Entscheid verursacht Datenbewegungen. Das erlaubt kontrolliertes, priorisiertes und möglichst spätes Rebalancing.
 4. **Eine Placement-Abstraktion für mehrere Ziele:** Tatsächliche Bytes, Read-/Write-/Append-IOPS, Auslastung, Volume-Klasse, Redundanz und Hotspot-Isolation fließen in dieselbe Planner-Schnittstelle ein. Ein getrennter Request-Router kann Reads zusätzlich auf gültige Replikate/Caches verteilen.
-5. **Administrativ definierte Bucket-SLAs:** Pro Bucket lassen sich HDD-/SSD-/RAM-Basisspeicher, Replikations-/EC-Strategien, Cache-Berechtigung, Quotas und Benutzerzugriff festlegen. Änderungen werden als **NEXT-Placement-Generation** umgesetzt; `desired` und `effective` dürfen nicht verwechselt werden.
+5. **Zentrale Storage-Verträge für viele Buckets:** PGs definieren HDD-/SSD-/RAM-Basisspeicher, Replikations-/EC-Strategien, Kompression, Cache-Einstellungen und Platzierung für alle zugeordneten Buckets. Quotas und Benutzerzugriff bleiben individuell pro Bucket. Storage-Änderungen werden über **NEXT-Placement-Generationen** umgesetzt; `desired` und `effective` bleiben pro betroffenem Bereich unterscheidbar.
 6. **Zielgerichteter kleiner Objektkern:** Ein eigenes, append-orientiertes Volumenformat mit Hash-Index und Segmentspeicherung soll für viele 2–250-KiB-Beispielobjekte weniger Dateisystem- und Metadatenoverhead erzeugen als eine Datei pro Objekt. Die tatsächlichen Vorteile sind zu benchmarken.
 7. **Durable atomisches APPEND als native Storage-Operation:** Pro Objekt serialisiertes Append, stabiler Offset, Flush vor ACK sowie persistente Retry-Deduplizierung sind Kernfunktionen für Journale und Logs; dafür braucht STQR keine verteilte Multi-Object-Transaktionsengine.
 8. **Direkt nutzbare allgemeine Clients:** Ein natives Binärprotokoll und Go-/C-/Rust-SDKs dienen beliebigen Anwendungen. FUSE und NBD/Blockdevice sind eigenständige Frontends; S3 ist direkt im HTTP-Server der Nodes integriert.
@@ -2122,7 +2165,7 @@ Range-Splitting, explizite Placement-Tabellen, auf Messwerten basierende Verteil
 | Planbare Datenmigration | CURRENT/NEXT, Hintergrundkopie, Catch-up, Cutover | P99-Clientlatenz während Rebalance, Durchsatz, Unterbrechungszeit |
 | Kleine Client-Metadaten | Sortierte Range-Starts, segmentierte adaptive Client-Maps und Map-Pushes | Map-Größe je PB / je Bucket und Lookup-P99 |
 | Keine zentrale Datenweiterleitung | Client routet direkt anhand der Map | Zusätzliche Hops und Bytes je `GET`/`PUT` |
-| Flexible Storage- und Kostenstufen | Bucket-Policies und HDD/SSD/RAMCACHE-Klassen | Erfüllung von Tier-/Quota-Vorgaben, Kosten/GB, Cache-Hit-Rate |
+| Flexible Storage- und Kostenstufen | zentrale PG-Policies und HDD/SSD/RAMCACHE-Klassen | Erfüllung von Tier-/Quota-Vorgaben, Kosten/GB, Cache-Hit-Rate |
 | Sehr kleine Objekte effizient verwalten | Segmentbasiertes Format und lokaler Hash-Index | CPU/op, Write-Amplification, physische Bytes/Nutzbyte |
 | Zuverlässige Logs | Atomisches, idempotent wiederholbares APPEND | Crash-/Retry-Test ohne Doppel-Append, Verlust oder Offset-Überlappung |
 | Ausbaubare Zugriffspfade | Native SDKs, integriertes S3 und weitere Frontends | End-to-End-Interoperabilität über Go/C/Rust, S3, FUSE, NBD |
@@ -2226,7 +2269,7 @@ STQR SOLL reproduzierbar gegen Ceph und eine geeignete lokale beziehungsweise vo
 | Transport/Auth | Intranet HTTP/ws ohne TLS; Basic Auth, initiale Klartext-Credentials in Config |
 | System-Bucket | persistent EVERYWHERE; Account-/Admin-Verifier und ACL als normale Objekte |
 | Platzierungsmodus | count oder everywhere: vollständiger Bucket auf jeder aktiven Mitgliedsnode |
-| Kompression | raw/gzip/lz4/xz pro Bucket und Objektversion; Migration konvertiert ins Zielverfahren |
+| Kompression | raw/gzip/lz4/xz zentral pro PG; tatsächlicher Codec je Objektversion, Migration konvertiert ins Zielverfahren |
 | Sparse | ZERO-Extents für große Null-Lücken, logische Bytes ohne entsprechende Datenallokation |
 | Nodes | gleichberechtigt, Cluster-Token + bekannte HTTP-Peers bzw. --connect |
 | Generationen | maximal CURRENT/NEXT im Bulk-Balancing; nur Online-Teilnehmer umverteilen, Offline-Placement einfrieren; zurückgestellte Gründe nach Wiederkehr in neuer Generation umsetzen |
@@ -2237,15 +2280,15 @@ STQR SOLL reproduzierbar gegen Ceph und eine geeignete lokale beziehungsweise vo
 | Balancer | wirkliche Bytes sowie Read-/Write-/Append-Last pro Range |
 | Placement | flache mehrfach gleiche `from`-Werte gruppieren Locations; normierte Map für Sicherheit |
 | Volumes | Datei/Blockdevice HDD/SSD, separater autoritativer RAM-Pool und RAMCACHE nur Read |
-| Bucket-Strategien | HDD (SSD-Fallback), SSD und replizierbares RAM in v1; CACHE mit beliebiger Eviction für später reserviert |
+| PG-Storage-Strategien | HDD (SSD-Fallback), SSD und replizierbares RAM in v1; CACHE mit beliebiger Eviction für später reserviert |
 | Persistenz | atomare Einzelobjektoperationen inkl. ranged PUT, TRUNC und CAS; ACK gemäß Disk-/RAM-Vertrag auf dem wirksamen Placement |
 | Objektgröße | intern kein festes Limit; kleine Payloads sind Beispiel-Workloads |
 | Frontend-Chunks | FUSE und Blockdevice-Library: 1 MiB pro Datenobjekt, kleinere ranged Transfers |
 | Quotas | Guaranteed-Kapazität reserviert, Absolute als harte Grenze oder unlimited; Ablehnung mit 507 |
 | Antworten | HTTP-Statuszahlen als uvarint, variabler Folgeheader; 301/302 mit Routing-Ziel |
 | APPEND | linearisiert pro Objekt, Offset/Request-ID-Dedupe gemäß Disk-/RAM-Vertrag; Extent-Arenen für kleine Appends |
-| Replica/EC | Bucket-Policy, konkrete Locations in Range-Map |
-| Bucket-Storage-Policy-Change | Desired-Storage-Policy wird in **NEXT-Generation** umgesetzt; ACL und Quota folgen separatem Kontrollcommit |
+| Replica/EC | zentrale PG-Policy ohne Bucket-Overrides, konkrete Locations in Range-Map |
+| PG-Storage-Policy-Change | zentrale Desired-PG-Version für alle zugeordneten Buckets; Umsetzung pro Range in **NEXT-Generationen**, Offline-Bereiche warten; ACL und Quota bleiben beim Bucket |
 | Zugriff | Admin verwaltet Buckets; User bekommt Objektzugriff pro Bucket; Frontend-Metadaten sind normale Objekte |
 | Protokoll | HTTP/Basic, WebSocket-Upgrade, eine Binärmessage je Message; Q/F/P, gemeinsame Admin-/Peer-/Objektlayouts |
 | Clients | native Go/C/Rust, Multi-Mount-FUSE mit CAS, S3 inkl. LIST/Range-GET und Blockdevice-Lib |
@@ -2262,7 +2305,7 @@ STQR SOLL reproduzierbar gegen Ceph und eine geeignete lokale beziehungsweise vo
 
 ## 26. Schlussbild
 
-STQR verbindet eine **sehr kleine, veröffentlichte und versionierte Range-Placement-Map** mit einem schlanken lokalen Object-Store-Format. Buckets definieren isolierte Storage-Policies und Rechte. Replikation, EC und zusätzliche Read-Caches werden durch **mehrere Locations je Range-Start** ausgedrückt; der Planner verschiebt Ranges, statt die Welt durch einen reinen Hash-Neuverteilungsalgorithmus automatisch neu zu platzieren.
+STQR verbindet eine **sehr kleine, veröffentlichte und versionierte Range-Placement-Map** mit einem schlanken lokalen Object-Store-Format. Buckets definieren isolierte Namensräume, Quotas und Rechte und referenzieren zentrale PG-Storage-Policies. Replikation, EC und zusätzliche Read-Caches werden durch **mehrere Locations je Range-Start** ausgedrückt; der Planner verschiebt Ranges, statt die Welt durch einen reinen Hash-Neuverteilungsalgorithmus automatisch neu zu platzieren.
 
 Die drei wichtigsten technischen Verträge sind:
 

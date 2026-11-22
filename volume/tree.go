@@ -210,10 +210,15 @@ func (t *transaction) insertAt(off uint64, key indexKey, value uint64) (treeEntr
 	n.entries = n.entries[:mid]
 	t.putNode(off, n)
 	t.putNode(rightOff, right)
+	if n.kind == treeFree {
+		t.freeSiblings = append(t.freeSiblings, rightOff)
+	}
 	r := t.summary(rightOff, right)
 	return t.summary(off, n), &r, nil
 }
 func (t *transaction) set(root *uint64, key indexKey, value uint64) error {
+	count := len(t.freeSiblings)
+	defer func() { t.freeSiblings = t.freeSiblings[:count] }()
 	left, right, e := t.insertAt(*root, key, value)
 	if e != nil {
 		return e
@@ -261,7 +266,10 @@ func (t *transaction) deleteAt(off uint64, key indexKey) (treeEntry, error) {
 			n.entries = append(n.entries[:i], n.entries[i+1:]...)
 		} else {
 			n.entries[i] = entry
-			if len(n.entries) > 1 {
+			// A claim can replace one free extent with two remainders. Merging
+			// here and immediately splitting again creates new pending metadata
+			// claims faster than finalize can consume them.
+			if len(n.entries) > 1 && !(n.kind == treeFree && t.inClaim) {
 				j := i + 1
 				if j >= len(n.entries) {
 					j = i - 1
@@ -300,7 +308,7 @@ func (t *transaction) remove(root *uint64, key indexKey) error {
 	if e != nil {
 		return e
 	}
-	if n.level > 0 && len(n.entries) == 1 {
+	if n.level > 0 && len(n.entries) == 1 && !(n.kind == treeFree && t.inClaim) {
 		old := *root
 		*root = n.entries[0].value
 		t.release(old, PageSize, true)
