@@ -24,6 +24,9 @@ func (s *Server) installSystemView(view *systemView) error {
 	if prior := s.currentSystem.Load(); prior != nil && (prior.manifest.Sequence > view.manifest.Sequence || prior.manifest.Sequence == view.manifest.Sequence && prior.root != view.root) {
 		return errControlConflict
 	}
+	if err := s.activateRecoveredVolumesLocked(view); err != nil {
+		return err
+	}
 	var old accountsImage
 	_ = s.readBlob("accounts", &old) // mirrors may be absent/damaged during recovery
 	var next accountsImage
@@ -87,6 +90,7 @@ func (s *Server) installSystemView(view *systemView) error {
 		}
 	}
 	s.currentSystem.Store(view)
+	s.dirtyVolumeAuthority()
 	if q := s.quotas; q != nil {
 		q.mu.Lock()
 		q.balances = nil
@@ -103,6 +107,11 @@ func (s *Server) installSystemView(view *systemView) error {
 		}
 	} else {
 		s.placement.Store(view.placement)
+	}
+	if s.scopes != nil {
+		if err := s.ensureVolumeAuthorityLocked(); err != nil {
+			return err
+		}
 	}
 	s.mu.Lock()
 	s.cfg.JoinPending = !s.cfg.Node.Draining && !hasControlNode(membershipIDs(view.manifest.Membership), [16]byte(node))

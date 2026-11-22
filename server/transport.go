@@ -164,7 +164,7 @@ func (s *Server) serveWebSocket(w http.ResponseWriter, r *http.Request, p princi
 		if m.Kind != client.Request && m.Kind != client.FireAndForget {
 			return
 		}
-		if m.Opcode == peerForceAdmin && ws.controlRequests != nil && authorization.peerVerified.Load() {
+		if isControlPeerRequest(m) && ws.controlRequests != nil && authorization.peerVerified.Load() {
 			select {
 			case ws.controlRequests <- m:
 			case <-ws.done:

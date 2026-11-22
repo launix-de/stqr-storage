@@ -51,7 +51,11 @@ func (c *clusterController) markExcludedRangesLost(patches []client.MapPatch, de
 				}
 			}
 			entry.OwnerEpoch++
-			entry.State = 5
+			if x.RecoverOnly && (entry.State == 0 || entry.State == 5) && entry.Runtime == (client.ID{}) || entry.State == 4 {
+				entry.State = 4
+			} else {
+				entry.State = 5
+			}
 			entry.Locations = []client.Location{{Node: owner, Volume: client.ID(pin), Class: class}}
 			if goal.Policy.StorageStrategy == "ram" {
 				if owner == c.coordinator.ledger.node {
@@ -111,7 +115,7 @@ func (s *Server) prepareExclusionImage(view *systemView, proposal controlProposa
 				continue
 			}
 			next, known := view.placement.lookup(client.ID(bucket), entry.Start)
-			if !known || !reflect.DeepEqual(next, entry) {
+			if !known || !reflect.DeepEqual(next, entry) && !recoveryReplacement(s, view, proposal.Claim.Exclusion, client.ID(bucket), entry, next) {
 				return fail(409, "exclusion would replace an authoritative survivor range")
 			}
 		}
@@ -122,13 +126,13 @@ func (s *Server) prepareExclusionImage(view *systemView, proposal controlProposa
 				old, known := current.lookup(patch.Bucket, entry.Start)
 				if !known || !reflect.DeepEqual(old, entry) {
 					for _, location := range entry.Locations {
-						if location.Role == 0 && location.Node == l.node && !s.hasSealedExclusionRange(proposal.Claim, patch.Bucket, entry) {
+						if location.Role == 0 && location.Node == l.node && !s.hasSealedExclusionRange(proposal.Claim, patch.Bucket, entry) && !recoveryHold(view, proposal.Claim.Exclusion, patch.Bucket, entry) && !isRestoredEntry(view, proposal.Claim.Exclusion, patch.Bucket, entry) {
 							return fail(409, "new survivor ownership lacks a sealed recovery snapshot")
 						}
 					}
 				}
 			}
-			if entry.State != 5 {
+			if entry.State != 5 || isRestoredEntry(view, proposal.Claim.Exclusion, patch.Bucket, entry) {
 				continue
 			}
 			old, known := current.lookup(patch.Bucket, entry.Start)

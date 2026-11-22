@@ -22,8 +22,9 @@ import (
 // Local volume configuration, local admin-operation receipts and the mergeable
 // discovery directory are not copied into another node's configuration.
 type systemManifest struct {
-	Quotas               []quotaAllocation `json:",omitempty"`
-	Shutdown             *clusterShutdown  `json:",omitempty"`
+	VolumeRecoveries     []volumeRecoveryOrigin `json:",omitempty"`
+	Quotas               []quotaAllocation      `json:",omitempty"`
+	Shutdown             *clusterShutdown       `json:",omitempty"`
 	Schema               uint16
 	Cluster              client.ID
 	Sequence             uint64
@@ -162,6 +163,7 @@ func (s *Server) captureSystemImage(membership client.Membership, sequence, gene
 	manifest := systemManifest{Schema: 1, Cluster: membership.Cluster, Sequence: sequence, Membership: membership, Generation: generation, Revision: revision}
 	if view := s.currentSystem.Load(); view != nil {
 		manifest.Shutdown = view.manifest.Shutdown
+		manifest.VolumeRecoveries = cloneRecoveryOrigins(view.manifest.VolumeRecoveries)
 	}
 	raw, err = json.Marshal(accounts)
 	if err != nil {
@@ -389,6 +391,9 @@ func decodeSystemView(root volume.ObjectID, load func(volume.ObjectID) ([]byte, 
 			return nil, volume.ErrCorrupt
 		}
 	}
+	if err := validateRecoveryOrigins(view); err != nil {
+		return nil, err
+	}
 	if err := validateQuotaAllocations(view); err != nil {
 		return nil, err
 	}
@@ -504,6 +509,9 @@ func (s *Server) prepareSystemImage(ledger *controlLedger, proposal controlPropo
 		return client.Proof{}, err
 	}
 	if err := s.validateSystemProposal(view, proposal, ledger.node); err != nil {
+		return client.Proof{}, err
+	}
+	if err := s.prepareVolumeTakeover(view, proposal); err != nil {
 		return client.Proof{}, err
 	}
 	if proposal.Kind == controlForceDisconnect {

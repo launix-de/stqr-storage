@@ -38,7 +38,7 @@ func (s *Server) pendingExclusionClaim(id client.ID) *controlClaim {
 }
 
 func matchesExclusionRequest(claim controlClaim, request forceDisconnectRequest) bool {
-	return claim.Exclusion != nil && exclusionObservedEpoch(claim) == request.Membership && reflect.DeepEqual(claim.Exclusion.Nodes, request.Nodes) && request.AcceptDataLoss && request.ExternalFencingConfirmed
+	return claim.Exclusion != nil && exclusionObservedEpoch(claim) == request.Membership && reflect.DeepEqual(claim.Exclusion.Nodes, request.Nodes) && claim.Exclusion.RecoverOnly == request.RecoverOnly && request.AcceptDataLoss != request.RecoverOnly && request.ExternalFencingConfirmed
 }
 
 func (s *Server) resumeOwnExclusion(m client.Message, request forceDisconnectRequest, actor principal) ([]byte, int, error) {
@@ -50,7 +50,7 @@ func (s *Server) resumeOwnExclusion(m client.Message, request forceDisconnectReq
 		s.opMu.Unlock()
 		return nil, 0, err
 	}
-	op, _, err := s.beginOperation(m.ID.String(), "force-disconnect", request)
+	op, _, err := s.beginOperation(m.ID.String(), request.operationKind(), request)
 	s.opMu.Unlock()
 	if err != nil {
 		return nil, 0, err

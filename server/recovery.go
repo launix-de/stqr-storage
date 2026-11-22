@@ -44,7 +44,25 @@ func (s *Server) recoverOperations() error {
 		h.Close()
 		for _, op := range pending {
 			switch op.Kind {
-			case "force-disconnect":
+			case "recovery-stage":
+				op.State, op.Status = "failed", 503
+				for _, v := range append(append([]VolumeConfig(nil), s.cfg.RecoveryVolumes...), s.cfg.Volumes...) {
+					if v.OperationID == op.ID {
+						op.State, op.Status, op.VolumeID = "fulfilled", 201, v.ID
+					}
+				}
+			case "recovery-release":
+				op.State, op.Status = "failed", 503
+				if op.VolumeID != "" {
+					found := false
+					for _, v := range s.cfg.RecoveryVolumes {
+						found = found || v.ID == op.VolumeID
+					}
+					if !found {
+						op.State, op.Status = "fulfilled", 200
+					}
+				}
+			case "force-disconnect", "node-recovery", "volume-recovery":
 				id, _ := parseID(op.ID)
 				if s.completedExclusion([16]byte(id)) != nil {
 					op.State, op.Status = "fulfilled", 200

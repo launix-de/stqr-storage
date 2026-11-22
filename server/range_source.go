@@ -22,7 +22,7 @@ func (r *rangeManager) selectSnapshotSource(p rangePlan, key volume.Key) (*volum
 	var selected *volume.Volume
 	var latest volume.Info
 	for _, store := range b.volumesFor(description) {
-		if pin != (volume.ID{}) && store.Identity().VolumeID != pin || !bucketClass(description.Policy).Allows(store.Identity().Class) {
+		if pin != (volume.ID{}) && store.Identity().VolumeID != pin || !bucketClass(description.Policy).Allows(store.Identity().Class) || !r.server.volumeAllowedForEntry(p.Before.Bucket, p.Before.Entries[0], store.Identity().VolumeID, r.server.currentSystem.Load()) {
 			continue
 		}
 		h, err := store.Open(false)

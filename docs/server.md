@@ -752,3 +752,41 @@ unique temporary PM2 entry, including full STOP/restart and final node DRAIN.
 Enable it with `STQR_TEST_PM2=1` alongside the SSH test variables. Cleanup deletes
 only the test entry; the test never saves PM2's list or changes the existing
 service. This additional acceptance test passed on the supplied SSH host.
+
+## Rescuing data volumes from failed hardware
+
+The replacement has a fresh node ID. Permanently stop or isolate the old process
+before choosing **Node ersetzen** in the dashboard. This executes
+`NODE_RECOVERY_BEGIN` (0x2014): survivors remove the old member, preserve its disk
+range provenance and hold unavailable ranges with 503. This path does not accept
+loss. Other ranges remain available and a new replacement can join normally.
+The remaining cluster must retain its committed system state.
+
+Attach the old disks to a surviving/new node and choose **Gerettete Volumes**.
+Vormerken sends `VOLUME_RECOVERY_STAGE` (0x2015) with a name and existing absolute
+path. No creation or formatting occurs. Select the full set and take it over
+with `VOLUME_RECOVERY_COMMIT` (0x2016). Unpinned ranges can span multiple drives;
+all cohort members need matching durable ownership witnesses. Missing media,
+missing provenance or an unresolved source-migration fence are rejected with
+409. Policy or quota violations prevent activation. `VOLUME_RECOVERY_RELEASE`
+(0x2017) releases an unactivated staged drive without rebinding it.
+
+All current nodes approve the new range owner; only afterwards are the header
+owner and local provenance changed atomically and the volume activated. Payload
+is not copied. Versions, tombstones and retry receipts survive. A committed
+interrupted takeover resumes on restart. Admin operations use stable request IDs;
+ambiguous outcomes can be checked with OPERATION_STATUS. Staging and release
+receipts remain local, while recovery decisions are in the replicated system
+manifest. NODE_ADMIN can target another node for all three volume operations.
+
+Imported drives remain restricted to their imported scopes, including after
+restart. Unrelated stale objects cannot override live data or become migration
+input. Pending ranges stay unavailable until their complete media cohort is
+recovered. Old LOST semantics remain LOST after recovery. A later cooperative
+drain migrates valid scopes before discarding proven obsolete copies.
+
+This requires format-3 provenance to have been written before failure. Existing
+format-2 volumes are upgraded in place when the new daemon writes; a previously
+failed format-2 node with no provenance still needs its original recovery state.
+Upgrading is one-way: older binaries reject format 3. Back up volumes and node
+configuration before upgrading.

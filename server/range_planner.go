@@ -93,6 +93,9 @@ func (r *rangeManager) destinations(d BucketDescription) ([]rangeDestination, ma
 			continue
 		}
 		for _, v := range snapshot.Volumes {
+			if recoveredVolume(view, v.ID) {
+				continue
+			}
 			if v.State != 1 || !bucketClass(d.Policy).Allows(volume.Class(v.Class)) || !groups.allowsVersion(d.Policy.PlacementGroup, d.Policy.PlacementMaskVersion, snapshot.Node.String(), v.ID.String()) {
 				continue
 			}
@@ -183,7 +186,7 @@ func (r *rangeManager) planNext() (rangePlan, bool) {
 			}
 		}
 		for _, entry := range entries {
-			if len(entry.Locations) != 1 || entry.Locations[0].Node != r.node {
+			if entry.State == 4 || len(entry.Locations) != 1 || entry.Locations[0].Node != r.node {
 				continue
 			}
 			if entry.Runtime != (client.ID{}) && !r.ramAvailable(b.ID(), volume.ObjectID(entry.Start), entry) {
@@ -439,6 +442,64 @@ func (r *rangeManager) finishEmptyDrains() error {
 		}
 		if busy {
 			continue
+		}
+		if v.config.RecoveryOnly {
+			// Recovery media can also contain unrelated obsolete copies. Only
+			// discard those after ALL-owned scopes have left this volume and no
+			// pending recovery still needs its original witnesses.
+			view := s.currentSystem.Load()
+			if view == nil {
+				continue
+			}
+			record, err := readVolumeAuthority(v.store)
+			if err != nil {
+				return err
+			}
+			for _, origin := range view.manifest.VolumeRecoveries {
+				if origin.Complete {
+					continue
+				}
+				for _, claim := range record.Entries {
+					if claim.Bucket == origin.Before.Bucket && sameRangeAuthority(claim.Entry, origin.Before.Entries[0]) {
+						busy = true
+					}
+				}
+			}
+			for _, bucket := range s.bucketSnapshots() {
+				bid, err := bucketID(bucket.ID)
+				if err != nil {
+					return err
+				}
+				for _, entry := range image.bucketEntries(client.ID(bid)) {
+					if len(entry.Locations) == 1 && entry.Locations[0].Node == r.node && s.volumeAllowedForEntry(client.ID(bid), entry, id, view) {
+						busy = true
+					}
+				}
+			}
+			if busy {
+				continue
+			}
+			h, err := v.store.Open(true)
+			if err != nil {
+				return err
+			}
+			records, err := h.ScanObjects(nil, 128)
+			if err == nil {
+				err = h.PurgeBatch(records)
+			}
+			if err == nil && len(records) == 0 {
+				requests, readErr := h.ScanRequestRecords(nil, 128)
+				err = readErr
+				for _, request := range requests {
+					if err == nil {
+						err = h.ForgetRequest(request.ID)
+					}
+				}
+			}
+			h.Close()
+			if err != nil {
+				return err
+			}
 		}
 		h, err := v.store.Open(false)
 		if err != nil {

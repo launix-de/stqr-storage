@@ -27,6 +27,8 @@ type managedVolume struct {
 // Server currently owns one node. opMu serializes local administrative commits;
 // it is not a distributed lock or a substitute for placement authority.
 type Server struct {
+	recoveryVolumes        map[volume.ID]*stagedRecoveryVolume
+	authority              *volumeAuthorityState
 	mu                     sync.RWMutex
 	opMu                   sync.Mutex
 	cfg, running           Config
@@ -105,6 +107,8 @@ func Open(opts Options) (s *Server, err error) {
 		return s, e
 	}
 	s.cfg = c
+	s.authority = &volumeAuthorityState{records: make(map[volume.ID]volumeAuthorityRecord)}
+	s.authority.dirty.Store(true)
 	s.running = c
 	if c.Node.DrainComplete {
 		return s, ErrNodeDrained
@@ -223,6 +227,9 @@ func Open(opts Options) (s *Server, err error) {
 		s.volumes[id] = &managedVolume{config: vc, store: v}
 		s.cfg.Volumes = append(s.cfg.Volumes, vc)
 	}
+	if e = s.openStagedRecoveryVolumes(); e != nil {
+		return s, e
+	}
 	if e = s.bootstrapPlacementGroups(); e != nil {
 		return s, e
 	}
@@ -278,6 +285,12 @@ func Open(opts Options) (s *Server, err error) {
 		}
 	}
 	if e = saveConfig(path, s.cfg); e != nil {
+		return s, e
+	}
+	s.opMu.Lock()
+	e = s.ensureVolumeAuthorityLocked()
+	s.opMu.Unlock()
+	if e != nil {
 		return s, e
 	}
 	s.running = s.cfg
@@ -348,6 +361,9 @@ func (s *Server) Close() error {
 			if e := v.store.Close(); e != nil {
 				result = errors.Join(result, e)
 			}
+		}
+		for _, staged := range s.recoveryVolumes {
+			result = errors.Join(result, staged.store.Close())
 		}
 		if s.control != nil {
 			result = errors.Join(result, s.control.ledger.journal.close())

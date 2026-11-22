@@ -83,6 +83,9 @@ func (s *Server) refreshInventoryMap(ctx context.Context, bucket volume.ID) erro
 }
 
 func (b *Bucket) scanCluster(ctx context.Context, description BucketDescription, p principal, after *volume.ObjectID, limit int) ([]volume.ObjectRecord, volume.ObjectID, bool, error) {
+	if b.server.bucketAwaitingRecovery(client.ID(b.ID())) {
+		return nil, volume.ObjectID{}, false, fail(503, "bucket inventory awaits recovered volumes")
+	}
 	s := b.server
 	if s.controller == nil {
 		return b.scan(ctx, description, after, limit)

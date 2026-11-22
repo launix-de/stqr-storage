@@ -12,8 +12,10 @@ import (
 // It never represents a timeout or an inferred failure. The removed instances
 // must already be externally fenced; no packet can disable an isolated writer.
 type controlExclusion struct {
-	ExpectedMembership                       uint64      `json:",omitempty"`
-	AlreadyRetired                           []client.ID `json:",omitempty"`
+	RecoverOnly                              bool            `json:",omitempty"`
+	Restore                                  *volumeTakeover `json:",omitempty"`
+	ExpectedMembership                       uint64          `json:",omitempty"`
+	AlreadyRetired                           []client.ID     `json:",omitempty"`
 	Operation                                client.ID
 	Nodes                                    []client.ID
 	Administrator                            client.ID
@@ -22,7 +24,27 @@ type controlExclusion struct {
 }
 
 func exclusionMembership(base client.Membership, exclusion *controlExclusion) (client.Membership, error) {
-	if exclusion == nil || exclusion.ExpectedMembership > base.Epoch || !exclusion.AcceptDataLoss || !exclusion.ExternalFencingConfirmed || exclusion.Operation == (client.ID{}) || exclusion.Administrator == (client.ID{}) || !validUsername(exclusion.Username) || len(exclusion.Nodes) == 0 || base.Epoch == 0 || base.Epoch == ^uint64(0) {
+	if exclusion == nil || exclusion.ExpectedMembership > base.Epoch || (!exclusion.AcceptDataLoss && !exclusion.RecoverOnly && exclusion.Restore == nil) || !exclusion.ExternalFencingConfirmed || exclusion.Operation == (client.ID{}) || exclusion.Administrator == (client.ID{}) || !validUsername(exclusion.Username) || (len(exclusion.Nodes) == 0 && exclusion.Restore == nil) || base.Epoch == 0 || base.Epoch == ^uint64(0) {
+		return client.Membership{}, client.ErrProtocol
+	}
+	if exclusion.Restore != nil {
+		restore := exclusion.Restore
+		if exclusion.AcceptDataLoss || exclusion.RecoverOnly || len(exclusion.Nodes) != 0 || len(exclusion.AlreadyRetired) != 0 || exclusion.ExpectedMembership != base.Epoch || !hasControlNode(membershipIDs(base), restore.Target) || len(restore.Origins) == 0 || len(restore.Origins) > 10000 || len(restore.Volumes) > 10000 || len(restore.Volumes) == 0 {
+			return client.Membership{}, client.ErrProtocol
+		}
+		for i, id := range restore.Volumes {
+			if id == (client.ID{}) || i > 0 && restore.Volumes[i-1].String() >= id.String() {
+				return client.Membership{}, client.ErrProtocol
+			}
+		}
+		for i, id := range restore.Origins {
+			if id == ([32]byte{}) || i > 0 && bytes.Compare(restore.Origins[i-1][:], id[:]) >= 0 {
+				return client.Membership{}, client.ErrProtocol
+			}
+		}
+		return base, nil
+	}
+	if exclusion.RecoverOnly && exclusion.AcceptDataLoss {
 		return client.Membership{}, client.ErrProtocol
 	}
 	old := membershipIDs(base)
@@ -57,7 +79,7 @@ func exclusionMembership(base client.Membership, exclusion *controlExclusion) (c
 
 func validExclusionClaim(c controlClaim) bool {
 	next, err := exclusionMembership(c.Base.Membership, c.Exclusion)
-	if err != nil || len(c.Required) != len(next.Members) || c.Round.Initiator != next.Members[0].ID {
+	if err != nil || len(c.Required) != len(next.Members) || (c.Exclusion.Restore == nil && c.Round.Initiator != next.Members[0].ID || c.Exclusion.Restore != nil && c.Round.Initiator != c.Exclusion.Restore.Target) {
 		return false
 	}
 	for i, member := range next.Members {
@@ -88,12 +110,27 @@ func encodeControlExclusion(e *client.Encoder, x *controlExclusion) {
 	if x.ExpectedMembership != 0 {
 		e.U64(x.ExpectedMembership)
 	}
-	if len(x.AlreadyRetired) > 0 {
+	if len(x.AlreadyRetired) > 0 || x.RecoverOnly || x.Restore != nil {
 		e.V(uint64(len(x.AlreadyRetired)))
 		for _, node := range x.AlreadyRetired {
 			e.ID(node)
 		}
 	}
+	if x.RecoverOnly {
+		e.U8(1)
+	} else if x.Restore != nil {
+		e.U8(2)
+		e.ID(x.Restore.Target)
+		e.V(uint64(len(x.Restore.Origins)))
+		for _, id := range x.Restore.Origins {
+			e.B = append(e.B, id[:]...)
+		}
+		e.V(uint64(len(x.Restore.Volumes)))
+		for _, id := range x.Restore.Volumes {
+			e.ID(id)
+		}
+	}
+
 }
 
 func exclusionObservedEpoch(claim controlClaim) uint64 {
@@ -106,11 +143,13 @@ func exclusionObservedEpoch(claim controlClaim) uint64 {
 func decodeControlExclusion(d *client.Decoder) *controlExclusion {
 	x := &controlExclusion{Operation: d.ID(), Administrator: d.ID(), Username: d.Text(), AcceptDataLoss: d.Bool(), ExternalFencingConfirmed: d.Bool()}
 	n := d.Count(10000)
-	if n == 0 || n > len(d.B)/16 {
+	if n > len(d.B)/16 {
 		d.Err = client.ErrProtocol
 		return x
 	}
-	x.Nodes = make([]client.ID, n)
+	if n > 0 {
+		x.Nodes = make([]client.ID, n)
+	}
 	for i := range x.Nodes {
 		x.Nodes[i] = d.ID()
 	}

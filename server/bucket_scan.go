@@ -114,9 +114,13 @@ func (b *Bucket) scan(ctx context.Context, description BucketDescription, after 
 	return b.scanPlacement(ctx, description, after, limit, b.server.placement.Load(), nil)
 }
 
-func (b *Bucket) scanPlacement(ctx context.Context, description BucketDescription, after *volume.ObjectID, limit int, placement *placementImage, exclude func(client.RangeEntry) bool) ([]volume.ObjectRecord, volume.ObjectID, bool, error) {
+func (b *Bucket) scanPlacement(ctx context.Context, description BucketDescription, after *volume.ObjectID, limit int, placement *placementImage, exclude func(client.RangeEntry) bool, views ...*systemView) ([]volume.ObjectRecord, volume.ObjectID, bool, error) {
 	merged := map[volume.ObjectID]volume.ObjectRecord{}
 	visited := map[volume.ObjectID]bool{}
+	view := b.server.currentSystem.Load()
+	if len(views) > 0 {
+		view = views[0]
+	}
 	stores := b.volumesFor(description)
 	if description.DesiredPolicy != nil {
 		desired := description
@@ -129,6 +133,23 @@ func (b *Bucket) scanPlacement(ctx context.Context, description BucketDescriptio
 			if !seen[store] {
 				stores = append(stores, store)
 				seen[store] = true
+			}
+		}
+	}
+	if len(views) > 0 && view != nil {
+		seen := map[volume.ID]bool{}
+		for _, store := range stores {
+			seen[store.Identity().VolumeID] = true
+		}
+		for _, origin := range view.manifest.VolumeRecoveries {
+			if origin.Complete && origin.Target == b.server.control.ledger.node && origin.Before.Bucket == client.ID(b.ID()) {
+				for _, id := range origin.Volumes {
+					staged := b.server.recoveryVolumes[volume.ID(id)]
+					if staged != nil && !seen[volume.ID(id)] {
+						stores = append(stores, staged.store)
+						seen[volume.ID(id)] = true
+					}
+				}
 			}
 		}
 	}
@@ -151,7 +172,7 @@ func (b *Bucket) scanPlacement(ctx context.Context, description BucketDescriptio
 				entry, known := placement.lookup(client.ID(b.ID()), client.ObjectID(r.Key.Object))
 				owned := false
 				for _, loc := range entry.Locations {
-					if loc.Role == 0 && loc.Node == b.server.control.ledger.node && (loc.Volume == (client.ID{}) || loc.Volume == client.ID(v.Identity().VolumeID)) {
+					if loc.Role == 0 && loc.Node == b.server.control.ledger.node && entry.State != 4 && b.server.volumeAllowedForEntry(client.ID(b.ID()), entry, v.Identity().VolumeID, view) {
 						owned = true
 					}
 				}

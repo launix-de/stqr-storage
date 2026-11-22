@@ -638,6 +638,21 @@ Persistente Volume-Klassen sind `hdd` und `ssd`; daneben verwaltet der Daemon fl
 
 `volume.ListBlockdevices()` liefert typisierte exportierte Structs für alle verwendbaren Gerätepfade (Disks, Partitionen, LVM/Device-Mapper) und ungeclaimte reguläre Dateien in `VOLUMES_DIR`. JSON-Marshalling erfolgt später in der Admin-Schicht; die Library liefert bereits JSON-Tags für `path`, `size_bytes`, `type`, `class`, `class_detected` und optionale `aliases`. Gemountete, als Swap/Loop genutzte oder bereits geclaimte Ziele werden ausgeschlossen. Der Konstruktor prüft den konkreten Pfad erneut; Linux-Blockdevices erhalten zusätzlich einen exklusiven Kernel-Claim. Größen in der Library sind immer Bytes, die Texteingabe bleibt reine UI-Aufgabe.
 
+### 8.2.3 Gerettete Volumes nach dauerhaftem Node-Ausfall
+
+Die Ersatznode behält ihre eigene neue Node-ID. Mehrere laufende Prozesse mit derselben Node-ID sind nicht zulässig. Der Admin bestätigt vor der Übernahme die dauerhafte Stilllegung beziehungsweise Netztrennung der alten Node (externes Fencing). Ein unbekannter Verbindungszustand allein berechtigt niemals zur Übernahme.
+
+1. `NODE_RECOVERY_BEGIN` entfernt die gefencete Node aus der Membership und bewahrt deren bisherige persistente Range-Zuständigkeiten als Recovery-Ursprünge im replizierten Systemzustand. Diese Ranges werden `HOLD` (State 4): Reads und Writes antworten 503, auch LIST liefert keine unvollständige Inventur. Der Vorgang akzeptiert **keinen Datenverlust**. Andere Ranges bleiben nutzbar; eine Ersatznode kann anschließend regulär beitreten. RAM-Inhalte werden durch ausgebaute Platten nicht wiederhergestellt.
+2. `VOLUME_RECOVERY_STAGE` öffnet ausschließlich einen bereits formatierten, exklusiv verfügbaren Datenträger desselben Clusters. Es wird weder angelegt noch formatiert noch eine neue Node-ID eingetragen. Die Vormerkung steht nur in der lokalen Node-Konfiguration (`recovery_volumes`); ihr Inhalt ist für Clients unsichtbar. `VOLUME_RECOVERY_RELEASE` gibt eine solche Vormerkung ohne Übernahme frei.
+3. Auf jedem Datenvolume liegt ein lokaler, checksummierter Verwaltungsdatensatz: Cluster-/Node-/Volume-ID, Bucket-/Range-Zuständigkeit, Owner-Epoch, Aktiv-/FENCE-Status und vollständige Volume-Gruppe für ungebundene Ranges. Der Header enthält dafür Wurzel und Länge. Änderungen der Volume-Gruppe müssen vor dem nächsten Mutations-ACK auf **allen** beteiligten Volumes persistieren. Ein Source-FENCE entwertet diese Nachweise vor seinem lokalen FENCE-/READY-Beleg. Fehlende, widersprüchliche oder noch gefencete Nachweise ergeben 409; die Implementierung rät keinen Stand einer unterbrochenen Migration.
+4. `VOLUME_RECOVERY_COMMIT` prüft die vollständigen Gruppen der ausgewählten Volumes gegen die bewahrte Herkunft, aktuelle Placement-Groups, Speicherklassen und Quotas. Eine fehlende Platte wird niemals als leer angenommen. Alle aktuellen Mitglieder bestätigen den identischen Kontrollentscheid; die Zielnode liefert ihren READY-Nachweis zuerst. Fehlende Teilnehmer führen weiterhin zum Warten. Ein noch unvorbereiteter Übernahmeaufbau kann abgebrochen werden; ein verbindlicher COMMIT wird beim Wiederanlauf vollendet.
+5. Die Übernahme ändert die Owner-Epoch und führt die Map über eine persistente Kontrollentscheidung zusammen, ohne eine neue Placement-Generation oder Payload-Kopie abzuwarten. Erst nach COMMIT werden Header-Node-ID und Volume-Nachweise in **einer** lokalen Redo-Transaktion aktualisiert und die lokale Konfiguration gespeichert. Versionsstände, Tombstones und Request-ID-Belege bleiben erhalten. APPLIED folgt erst nach verfügbarer Aktivierung. Nicht übernommene Bereiche bleiben HOLD; frühere LOST-Bereiche bleiben auch nach Rettung LOST, damit unbekannte Abwesenheit weiterhin 410 ergibt.
+6. Gerettete Volumes bleiben für fremde, ungebundene Ranges und neue Migrationsziele gesperrt. Nur ihre übernommenen Bereiche verwenden sie; alte fremde Objektkopien dürfen keine neueren Daten überlagern. Bei einem späteren Drain werden diese Bereiche regulär migriert; erst wenn keine aktive Zuständigkeit und kein offener Recovery-Ursprung die Platte benötigt, dürfen verbliebene alte Kopien entfernt werden.
+
+Das Dashboard bietet **Node ersetzen** mit Fencing-Bestätigung sowie **Gerettete Volumes** je erreichbarer Node zum Vormerken, Freigeben und gemeinsamen Übernehmen. Die Bedienung verwendet dieselben binären Admin-Nachrichten, auch über `NODE_ADMIN` zu anderen Nodes. `--connect` bleibt ein Bootstrap-Helfer; alte Node-Konfiguration, Admin-Volume und private Kontrolljournale sind für die normale Rettung eines vollständig nachgewiesenen Datenvolume-Satzes nicht erforderlich. Ein Cluster ohne erhaltenen Systemzustand ist dadurch nicht automatisch rekonstruierbar.
+
+Volume-Format **3** ergänzt die bestehende Formatfamilie `STQRVOL2` um Verwaltungswurzel/-länge bei Header-Offset 160/168 (je `u64`). Verwaltungsseiten sind 4 KiB groß, tragen Magic `STQRMET1`, Volume-ID, Folgezeiger, Nutzlänge und CRC32C; sie zählen zu physischen Metadaten, niemals zu Client-Objekten oder logischer Bucket-Nutzung. Format-2-Volumes bleiben lesbar und werden bei der nächsten Transaktion auf Format 3 geschrieben. Ohne zuvor erzeugte Herkunftsnachweise ist eine journalunabhängige Rettung nicht möglich. Alte Format-2-Binaries müssen Format 3 ablehnen; kein Downgrade nach dem Upgrade.
+
 ### 8.3 Memory Mapping – differenziert
 
 **Anforderung:** effizienter, mmap-fähiger Volume-Zugriff, live zu- und abschaltbar. **Umsetzungsempfehlung:**
@@ -1271,7 +1286,8 @@ Nur authentifizierte NODE-Rolle, gebunden an Membership-Epoch. In der Tabelle be
 | 0x1067 | FORCE_RANGE_RECOVERY / Q | `schema:u16=1,claim:Blob(GlobalClaim),action:u8,payload`; `0:offset:u64` => JSON `{Next,Done,Reports}` (max. 24 Teilnehmerstände); `1:plan:Blob(RangeHandoffPlan)` bricht unbestätigtes Angebot ab; `2:plan:Blob` beendet einen durch Ausschluss unvollendbaren committed Teilnehmerclaim; `3:plan:Blob` vervollständigt einen bestehenden Source-COMMIT am überlebenden Ziel; `4:plan:Blob` sichert einen versiegelten Zielstand zur Übernahme durch den FORCE-Systemgraph; Aktionen 1..4 => leer |
 | 0x1068 | FORCE_CONTROL_STATE / Q | `schema:u16=1` => JSON `{Schema,Node,Current,Slot,Committed}`; COMMIT samt Proposal, ALL-READY und eigenem durable COMMIT-Proof; nur gebundene Kontrollteilnehmer |
 | 0x1069 | FORCE_CONSTRUCTION / Q | `claim:Blob(GlobalClaim)` => leer nach dauerhafter Konstruktionsbarriere; nur Initiator des exakt reservierten FORCE-Slots |
-| 0x1070 | FORCE_ADOPT_COMMIT / Q | `schema:u16=1,user:ID,username:Text,request:Blob(FORCE_DISCONNECT-Body),proposal:Blob(GlobalProposal),ready:Blob(Certificate),witness:Proof` => `applied:Proof`; übernimmt ausschließlich eine bereits verbindliche, lokal vorbereitete Elternentscheidung |
+| 0x1070 | FORCE_ADOPT_COMMIT / Q | `schema:u16,user:ID,username:Text,request:Blob(FORCE_DISCONNECT-Body),proposal:Blob(GlobalProposal),ready:Blob(Certificate),witness:Proof` => `applied:Proof`; übernimmt ausschließlich eine bereits verbindliche, lokal vorbereitete Elternentscheidung |
+| 0x1071 | VOLUME_RECOVERY_READY / Q | `claim:Blob(ControlClaim),image:Digest` => `ready:Proof`; ausschließlich vom im Claim gebundenen Teilnehmer an das Übernahmeziel, nur für die identische lokal persistierte READY-Entscheidung |
 
 
 
@@ -1337,6 +1353,20 @@ andere Buckets bleiben zugänglich. Quota-Verkleinerungen summieren unter dieser
 ALL-Barriere frische autoritative Nutzung aller Teilnehmer; eine lokal leere
 Admin-Node darf daher keine zu kleine globale Quota bestätigen. Claim-Schema 1
 bleibt die Darstellung ohne Bucket-Fence.
+
+Recovery verwendet ebenfalls Kontrollkind `4`, mit Claim-Schema `6`: Auf die
+bestehenden Ausschlussfelder folgen `expected_membership:u64`,
+`already_retired:Vec(ID)` und `mode:u8`. Mode 1 bereitet eine gefencete Node-Rettung
+vor (`accept_data_loss=false`); Mode 2 übernimmt Volumes und ergänzt
+`target:ID,origins:Vec(Digest),volumes:Vec(ID)` (jeweils kanonisch sortiert).
+Mode 2 hat eine leere Ausschlussliste und erhält die Membership-Epoch; Mode 1
+entfernt die benannten Nodes und erhöht sie. Alle Überlebenden beziehungsweise
+aktuellen Mitglieder sind erforderlich. Die Systemmanifest-Erweiterung
+`VolumeRecoveries` bindet je Ursprung die ursprüngliche Map-Patch, den HOLD-/
+Übernahmebereich und die vollständige übernommene Volume-Gruppe. FORCE_ADOPT_COMMIT
+Schema 2 ergänzt unmittelbar nach `schema:u16` ein `recover_only:Bool`; Schema 1
+bleibt unverändert. Bereits verbindliche Volume-Übernahmen zählen ebenfalls als
+wiederaufzunehmende Elternentscheidungen.
 
 Der ausdrückliche FORCE-Pfad verwendet Kind `4` und Claim-Schema `3`.
 Nach `required` folgen `frozen_buckets:Vec(ID)` (auch leer), dann
@@ -1551,6 +1581,10 @@ ADMIN oder ausdrücklich ADMIN_READ für reine Leseoperationen. `C` bedeutet glo
 | 0x2011 | NODE_SHUTDOWN / Q/F / L | `node:ID,mode:u8` => `ack:AdminAck` |
 | 0x2012 | CLUSTER_SHUTDOWN / Q/F / C | `mode:u8=2` => `ack:AdminAck` |
 | 0x2013 | FORCE_DISCONNECT / Q/F / C,G | `nodes:Vec(ID),accept_data_loss:Bool,external_fencing_confirmed:Bool,expected_membership:u64` => `ack:AdminAck` |
+| 0x2014 | NODE_RECOVERY_BEGIN / Q / C,G | `nodes:Vec(ID),accept_data_loss:Bool=false,external_fencing_confirmed:Bool=true,expected_membership:u64` => `ack:AdminAck`; erhält Datenbereiche als HOLD (§8.2.3) |
+| 0x2015 | VOLUME_RECOVERY_STAGE / Q / L | `name:Text,path:Text` => `Text(JSON{volume_id,state})`, Status 201; vorhandenen Datenträger vormerken, niemals formatieren |
+| 0x2016 | VOLUME_RECOVERY_COMMIT / Q / C,G | `expected_membership:u64,volumes:Vec(ID)` => `ack:AdminAck`; Volume-IDs nichtleer, eindeutig und aufsteigend, höchstens 10000; vollständige passende Herkunftsgruppen übernehmen |
+| 0x2017 | VOLUME_RECOVERY_RELEASE / Q / L | `volume:ID` => `Text(JSON{released:Bool})`; nur vorgemerkte, noch nicht aktivierte Volumes freigeben |
 | 0x2014 | NODE_SET_TAGS / Q/F / C,G | `node:ID,tags:Vec(Tag)` => `ack:AdminAck` |
 | 0x2015 | PEER_CONNECT / Q/F / L | `url:Text` => `ack:AdminAck` |
 | 0x2016 | REBUILD_TRIGGER / Q/F / G | `reasons:u64` => `ack:AdminAck` |

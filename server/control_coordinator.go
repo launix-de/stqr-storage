@@ -110,7 +110,7 @@ func (c *controlCoordinator) cancelBuilding(ctx context.Context) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	r := c.requestSnapshot()
-	if r != nil && (r.ResultReady || r.Claim.Exclusion != nil && r.ConstructionStarted) {
+	if r != nil && (r.ResultReady || r.Claim.Exclusion != nil && r.ConstructionStarted && (r.Claim.Exclusion.Restore == nil || r.Proposal != nil)) {
 		return errControlConflict
 	}
 	c.building = false
@@ -124,7 +124,7 @@ func (c *controlCoordinator) resumeLocked(ctx context.Context) ([]byte, error) {
 		return nil, nil
 	}
 	if !r.ResultReady {
-		if r.Claim.Exclusion != nil && r.ConstructionStarted {
+		if r.Claim.Exclusion != nil && r.ConstructionStarted && (r.Claim.Exclusion.Restore == nil || r.Proposal != nil) {
 			return nil, errControlConflict // only the cluster builder can resume it
 		}
 		aborted, err := collectControlProofs(ctx, r.Claim.Required, func(ctx context.Context, node client.ID) (client.Proof, error) {

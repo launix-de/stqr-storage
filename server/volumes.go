@@ -79,6 +79,7 @@ type Operation struct {
 }
 
 func copyConfig(c Config) Config {
+	c.RecoveryVolumes = append([]VolumeConfig(nil), c.RecoveryVolumes...)
 	c.Volumes = append([]VolumeConfig(nil), c.Volumes...)
 	c.Peers = append([]PeerConfig(nil), c.Peers...)
 	c.AllowSubnets = append([]string{}, c.AllowSubnets...)
@@ -172,6 +173,7 @@ var validName = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
 
 func (s *Server) AddVolume(id string, r AddVolumeRequest) (op Operation, err error) {
 	s.opMu.Lock()
+	s.dirtyVolumeAuthority()
 	defer s.opMu.Unlock()
 	if s.forceFrozen() {
 		return op, fail(503, "administration is frozen for exclusion")
@@ -333,6 +335,7 @@ func (s *Server) AddVolume(id string, r AddVolumeRequest) (op Operation, err err
 }
 func (s *Server) RemoveVolume(id, vid string) (Operation, error) {
 	s.opMu.Lock()
+	s.dirtyVolumeAuthority()
 	defer s.opMu.Unlock()
 	if s.forceFrozen() {
 		return Operation{}, fail(503, "administration is frozen for exclusion")
@@ -415,6 +418,15 @@ func (s *Server) configView() map[string]any {
 		}
 		view["member_nodes"], view["excluded_nodes"] = members, excluded
 		view["membership_epoch"] = strconv.FormatUint(image.manifest.Membership.Epoch, 10)
+		recoveries := []map[string]any{}
+		for _, origin := range image.manifest.VolumeRecoveries {
+			volumes := []string{}
+			for _, id := range origin.Volumes {
+				volumes = append(volumes, id.String())
+			}
+			recoveries = append(recoveries, map[string]any{"bucket": origin.Before.Bucket.String(), "source": origin.Before.Entries[0].Locations[0].Node.String(), "complete": origin.Complete, "target": origin.Target.String(), "volumes": volumes})
+		}
+		view["volume_recoveries"] = recoveries
 		if len(members) > 1 {
 			view["mode"] = "cluster"
 		} else {
@@ -425,6 +437,7 @@ func (s *Server) configView() map[string]any {
 }
 func (s *Server) updateConfig(patch map[string]json.RawMessage) error {
 	s.opMu.Lock()
+	s.dirtyVolumeAuthority()
 	defer s.opMu.Unlock()
 	if s.forceFrozen() {
 		return fail(503, "administration is frozen for exclusion")
@@ -489,6 +502,7 @@ func (s *Server) updateConfig(patch map[string]json.RawMessage) error {
 // resize an LV, reread partition tables or format an already attached device.
 func (s *Server) RescanVolume(id, vid string) (op Operation, err error) {
 	s.opMu.Lock()
+	s.dirtyVolumeAuthority()
 	defer s.opMu.Unlock()
 	if s.forceFrozen() {
 		return op, fail(503, "administration is frozen for exclusion")

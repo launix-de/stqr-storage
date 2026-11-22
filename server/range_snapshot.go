@@ -453,6 +453,9 @@ func (r *rangeManager) sourceVolumes(p rangePlan) []*volume.Volume {
 	var out []*volume.Volume
 	pin := volume.ID(p.Before.Entries[0].Locations[0].Volume)
 	for _, v := range all {
+		if !r.server.volumeAllowedForEntry(p.Before.Bucket, p.Before.Entries[0], v.Identity().VolumeID, r.server.currentSystem.Load()) {
+			continue
+		}
 		if p.Source == p.Target && v.Identity().VolumeID == p.Volume {
 			continue
 		}

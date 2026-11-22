@@ -52,6 +52,10 @@ const (
 	NodeShutdown            uint16 = 0x2011
 	ClusterShutdown         uint16 = 0x2012
 	ForceDisconnect         uint16 = 0x2013
+	NodeRecoveryBegin       uint16 = 0x2014
+	VolumeRecoveryStage     uint16 = 0x2015
+	VolumeRecoveryCommit    uint16 = 0x2016
+	VolumeRecoveryRelease   uint16 = 0x2017
 	AdminOperationStatus    uint16 = 0x2019
 	// Local configuration and candidate discovery extend the administration range.
 	NodeConfigGet     uint16 = 0x201a

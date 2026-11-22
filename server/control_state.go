@@ -553,7 +553,7 @@ func (l *controlLedger) abort(round client.RoundID) error {
 		}
 		return errControlConflict
 	}
-	if l.slot == nil || l.slot.Claim.Round != round || l.slot.Committed.RecordSequence != 0 || l.slot.ConstructionStarted {
+	if l.slot == nil || l.slot.Claim.Round != round || l.slot.Committed.RecordSequence != 0 || l.slot.ConstructionStarted && (l.slot.Claim.Exclusion == nil || l.slot.Claim.Exclusion.Restore == nil || l.slot.Proposal != nil) {
 		return errControlConflict
 	}
 	_, err := l.persist(controlAbort, l.slot.Claim)
@@ -575,10 +575,10 @@ func (l *controlLedger) abortClaim(claim controlClaim) (client.Proof, error) {
 	if l.closed[claim.Round] || !l.checkClaimShape(claim) {
 		return client.Proof{}, errControlConflict
 	}
-	if l.slot != nil && l.slot.Claim.Round == claim.Round && (!equalControlClaim(l.slot.Claim, claim) || l.slot.Committed.RecordSequence != 0 || l.slot.ConstructionStarted) {
+	if l.slot != nil && l.slot.Claim.Round == claim.Round && (!equalControlClaim(l.slot.Claim, claim) || l.slot.Committed.RecordSequence != 0 || (l.slot.ConstructionStarted && (claim.Exclusion == nil || claim.Exclusion.Restore == nil || l.slot.Proposal != nil))) {
 		return client.Proof{}, errControlConflict
 	}
-	if l.slot != nil && l.slot.Suspended != nil && l.slot.Suspended.Claim.Round == claim.Round && (!equalControlClaim(l.slot.Suspended.Claim, claim) || l.slot.Suspended.Committed.RecordSequence != 0 || l.slot.Suspended.ConstructionStarted) {
+	if l.slot != nil && l.slot.Suspended != nil && l.slot.Suspended.Claim.Round == claim.Round && (!equalControlClaim(l.slot.Suspended.Claim, claim) || l.slot.Suspended.Committed.RecordSequence != 0 || (l.slot.Suspended.ConstructionStarted && (claim.Exclusion == nil || claim.Exclusion.Restore == nil || l.slot.Suspended.Proposal != nil))) {
 		return client.Proof{}, errControlConflict
 	}
 	return l.persist(controlAbort, claim)
@@ -719,7 +719,7 @@ func (l *controlLedger) replay(record controlRecord) error {
 			return bad()
 		}
 		if l.slot != nil && l.slot.Claim.Round == claim.Round {
-			if !equalControlClaim(l.slot.Claim, claim) || l.slot.Committed.RecordSequence != 0 || l.slot.ConstructionStarted {
+			if !equalControlClaim(l.slot.Claim, claim) || l.slot.Committed.RecordSequence != 0 || l.slot.ConstructionStarted && (claim.Exclusion == nil || claim.Exclusion.Restore == nil || l.slot.Proposal != nil) {
 				return bad()
 			}
 			l.slot = l.slot.Suspended

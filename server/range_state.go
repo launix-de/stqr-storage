@@ -304,6 +304,9 @@ func (r *rangeManager) busyLocked() bool {
 
 func (r *rangeManager) reserve(p rangePlan, sourceBoot ...client.ID) error {
 	wire, err := p.marshal()
+	if len(p.Before.Entries) > 0 && p.Before.Entries[0].State == 4 {
+		return fail(503, "range awaits rescued storage")
+	}
 	if err != nil {
 		return err
 	}
@@ -362,7 +365,7 @@ func (r *rangeManager) reserve(p rangePlan, sourceBoot ...client.ID) error {
 	if p.Target == r.node {
 		r.server.mu.RLock()
 		managed := r.server.volumes[p.Volume.String()]
-		active := managed != nil && managed.config.State == "active" && (!r.server.cfg.Node.Draining || p.Source == p.Target)
+		active := managed != nil && managed.config.State == "active" && !managed.config.RecoveryOnly && (!r.server.cfg.Node.Draining || p.Source == p.Target)
 		r.server.mu.RUnlock()
 		if !active {
 			return volume.ErrFull
@@ -441,6 +444,8 @@ func (r *rangeManager) destination(p rangePlan) (*volume.Volume, error) {
 	return managed.store, nil
 }
 func (r *rangeManager) fence(id [32]byte) error {
+	r.server.opMu.Lock()
+	defer r.server.opMu.Unlock()
 	r.mu.Lock()
 	t := r.txns[id]
 	r.mu.Unlock()
@@ -462,6 +467,9 @@ func (r *rangeManager) fence(id [32]byte) error {
 	}
 	if t.plan.Source != r.node {
 		return errControlConflict
+	}
+	if err := r.server.invalidateVolumeAuthorityLocked(t.plan); err != nil {
+		return err
 	}
 	_, err := r.persist(rangeFenced, rangeEvent{ID: id})
 	return err
@@ -512,11 +520,31 @@ func (r *rangeManager) readyWithForce(id, digest [32]byte, source bool, force *c
 func (r *rangeManager) commit(c rangeCommit) (client.Proof, error) {
 	return r.commitWithForce(c, nil)
 }
-func (r *rangeManager) commitWithForce(c rangeCommit, force *controlClaim) (client.Proof, error) {
+func (r *rangeManager) commitWithForce(c rangeCommit, force *controlClaim) (proof client.Proof, err error) {
 	r.server.opMu.Lock()
 	defer r.server.opMu.Unlock()
 	r.mu.Lock()
-	defer r.mu.Unlock()
+	defer func() {
+		txn := r.txns[c.ID]
+		var store *volume.Volume
+		var before, budget uint64
+		if txn != nil && txn.plan.Target == r.node {
+			store, _ = r.destination(txn.plan)
+			budget = txn.remaining
+			if store != nil {
+				before = store.Stats().InFlightReservedPhysical
+			}
+		}
+		r.mu.Unlock()
+		if err == nil {
+			if store != nil {
+				err = r.server.ensureVolumeAuthorityLocked(map[volume.ID]uint64{store.Identity().VolumeID: budget})
+				r.consumed(txn, store, before)
+			} else {
+				err = r.server.ensureVolumeAuthorityLocked()
+			}
+		}
+	}()
 	if err := r.server.scopedTransition(force); err != nil {
 		return client.Proof{}, err
 	}
@@ -533,7 +561,7 @@ func (r *rangeManager) commitWithForce(c rangeCommit, force *controlClaim) (clie
 	if t.plan.Target == r.node && t.plan.ram() && t.targetBoot != r.server.boot {
 		return client.Proof{}, fail(503, "RAM READY belongs to a previous process")
 	}
-	proof, err := r.persist(rangeCommitted, rangeEvent{ID: c.ID, Commit: &c})
+	proof, err = r.persist(rangeCommitted, rangeEvent{ID: c.ID, Commit: &c})
 	if err == nil {
 		err = r.rebuildLocked()
 	}
@@ -675,5 +703,6 @@ func (r *rangeManager) rebuildLocked() error {
 		return err
 	}
 	r.server.placement.Store(image)
+	r.server.dirtyVolumeAuthority()
 	return nil
 }

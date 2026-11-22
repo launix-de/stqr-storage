@@ -18,6 +18,7 @@ type NodeAdmin struct {
 func NodeLocalAdminOpcode(op uint16) bool {
 	switch op {
 	case NodeDrain, NodeShutdown, VolumeAdd, VolumeRemove, VolumeRescan, VolumeGrow, VolumeGrowInfo,
+		VolumeRecoveryStage, VolumeRecoveryCommit, VolumeRecoveryRelease,
 		VolumeCandidates, VolumeCapacityGet, NodeConfigGet, NodeConfigSet,
 		AdminOperationStatus:
 		return true

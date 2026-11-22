@@ -43,6 +43,32 @@ func (s *Server) checkObjectOwner(bucket volume.ID, id volume.ObjectID) error {
 	node := s.control.ledger.node
 	for _, loc := range patch.Entries[0].Locations {
 		if loc.Role == 0 && loc.Node == node {
+			if patch.Entries[0].State == 4 {
+				return fail(503, "range is waiting for recovered volumes")
+			}
+			if loc.Volume != (client.ID{}) {
+				s.mu.RLock()
+				available := s.volumes[loc.Volume.String()] != nil
+				s.mu.RUnlock()
+				if !available {
+					return fail(503, "authoritative volume is unavailable")
+				}
+			}
+			if loc.Volume == (client.ID{}) {
+				view := s.currentSystem.Load()
+				for _, origin := range view.manifest.VolumeRecoveries {
+					if origin.Complete && origin.Before.Bucket == client.ID(bucket) && sameRangeAuthority(origin.After, patch.Entries[0]) {
+						for _, id := range origin.Volumes {
+							s.mu.RLock()
+							available := s.volumes[id.String()] != nil
+							s.mu.RUnlock()
+							if !available {
+								return fail(503, "recovered volume cohort is incomplete")
+							}
+						}
+					}
+				}
+			}
 			if patch.Entries[0].Runtime != (client.ID{}) && !s.scopes.ramAvailable(bucket, id, patch.Entries[0]) {
 				return fail(503, "RAM runtime recovery is not yet committed")
 			}

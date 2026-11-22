@@ -76,6 +76,15 @@ func (s *Server) dispatchAs(m client.Message, ws *wsSession, p principal) ([]byt
 				return client.ResponseBody(403, nil, "peer is excluded from committed membership"), 403
 			}
 		}
+		if m.Opcode == peerRecoveryReady {
+			actor, _ := parseID(p.User.ID)
+			result, err := s.recoveryReady(m.Body, client.ID(actor))
+			if err != nil {
+				status := statusOf(err)
+				return client.ResponseBody(status, nil, err.Error()), status
+			}
+			return client.ResponseBody(200, result, ""), 200
+		}
 		if m.Opcode == peerForceAdoptCommit {
 			actor, _ := parseID(p.User.ID)
 			result, err := s.receiveForceAdoptCommit(m.Body, client.ID(actor))
@@ -285,7 +294,15 @@ func (s *Server) dispatchAs(m client.Message, ws *wsSession, p principal) ([]byt
 			return client.ResponseBody(503, nil, "cluster shutdown is pending"), 503
 		}
 	}
-	if m.Opcode == client.ForceDisconnect {
+	if m.Opcode == client.VolumeRecoveryStage || m.Opcode == client.VolumeRecoveryCommit || m.Opcode == client.VolumeRecoveryRelease {
+		result, status, err := s.executeVolumeRecovery(m, p)
+		if err != nil {
+			status = statusOf(err)
+			return client.ResponseBody(status, nil, err.Error()), status
+		}
+		return client.ResponseBody(status, result, ""), status
+	}
+	if m.Opcode == client.ForceDisconnect || m.Opcode == client.NodeRecoveryBegin {
 		result, status, err := s.forceDisconnect(m, p)
 		if err != nil {
 			status = statusOf(err)
@@ -449,7 +466,7 @@ func (s *Server) execute(m client.Message, ws *wsSession) ([]byte, int, error) {
 			s.control.ledger.mu.Unlock()
 		}
 		if s.scopes != nil {
-			caps |= client.CapabilityRangeHandoff | client.CapabilityExclusion | client.CapabilityControlRecovery
+			caps |= client.CapabilityRangeHandoff | client.CapabilityExclusion | client.CapabilityControlRecovery | client.CapabilityVolumeRecovery
 		}
 		if s.retiring() {
 			caps |= client.CapabilityRetiringNode

@@ -13,6 +13,7 @@ const CapabilityRangeHandoff uint64 = 16
 const CapabilityRetiringNode uint64 = 32
 const CapabilityExclusion uint64 = 64
 const CapabilityControlRecovery uint64 = 128
+const CapabilityVolumeRecovery uint64 = 256
 const NodeHelloMessage uint16 = 0x1000
 
 type NodeHello struct {

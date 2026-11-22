@@ -38,6 +38,9 @@ func marshalControlClaim(c controlClaim) ([]byte, error) {
 		if len(c.Exclusion.AlreadyRetired) > 0 {
 			schema = 5
 		}
+		if c.Exclusion.RecoverOnly || c.Exclusion.Restore != nil {
+			schema = 6
+		}
 	}
 	e.U16(schema)
 	e.Blob(membership)
@@ -105,7 +108,7 @@ func decodeControlClaim(body []byte) (controlClaim, error) {
 			}
 		}
 	}
-	if schema >= 3 && schema <= 5 {
+	if schema >= 3 && schema <= 6 {
 		c.Exclusion = decodeControlExclusion(&d)
 		if schema >= 4 {
 			c.Exclusion.ExpectedMembership = d.U64()
@@ -113,21 +116,50 @@ func decodeControlClaim(body []byte) (controlClaim, error) {
 				return controlClaim{}, client.ErrProtocol
 			}
 		}
-		if schema == 5 {
+		if schema >= 5 {
 			n := d.Count(10000)
-			if n == 0 || n > len(c.Exclusion.Nodes) || n > len(d.B)/16 {
+			if schema == 5 && n == 0 || n > len(c.Exclusion.Nodes) || n > len(d.B)/16 {
 				return controlClaim{}, client.ErrProtocol
 			}
-			c.Exclusion.AlreadyRetired = make([]client.ID, n)
+			if n > 0 {
+				c.Exclusion.AlreadyRetired = make([]client.ID, n)
+			}
 			for i := range c.Exclusion.AlreadyRetired {
 				c.Exclusion.AlreadyRetired[i] = d.ID()
+			}
+		}
+		if schema == 6 {
+			mode := d.U8()
+			if mode == 1 {
+				c.Exclusion.RecoverOnly = true
+			} else if mode == 2 {
+				restore := &volumeTakeover{Target: d.ID()}
+				n := d.Count(10000)
+				if n == 0 || n > len(d.B)/32 {
+					return controlClaim{}, client.ErrProtocol
+				}
+				restore.Origins = make([][32]byte, n)
+				for i := range restore.Origins {
+					copy(restore.Origins[i][:], d.Take(32))
+				}
+				n = d.Count(10000)
+				if n == 0 || n > len(d.B)/16 {
+					return controlClaim{}, client.ErrProtocol
+				}
+				restore.Volumes = make([]client.ID, n)
+				for i := range restore.Volumes {
+					restore.Volumes[i] = d.ID()
+				}
+				c.Exclusion.Restore = restore
+			} else {
+				return controlClaim{}, client.ErrProtocol
 			}
 		}
 		if !validExclusionClaim(c) {
 			return controlClaim{}, client.ErrProtocol
 		}
 	}
-	if (schema < controlWireSchema || schema > 5) || err != nil || d.Done() != nil || len(body) > client.MaxMessage-20 || membership.ControlSequence != 0 || membership.MapRevision != 0 || membership.Generation != 1 || c.Base.Membership.Epoch == 0 || c.Round.Membership != c.Base.Membership.Epoch || c.Round.Generation != c.Base.Generation || c.Round.Initiator == (client.ID{}) || c.Round.Attempt == 0 {
+	if (schema < controlWireSchema || schema > 6) || err != nil || d.Done() != nil || len(body) > client.MaxMessage-20 || membership.ControlSequence != 0 || membership.MapRevision != 0 || membership.Generation != 1 || c.Base.Membership.Epoch == 0 || c.Round.Membership != c.Base.Membership.Epoch || c.Round.Generation != c.Base.Generation || c.Round.Initiator == (client.ID{}) || c.Round.Attempt == 0 {
 		return controlClaim{}, client.ErrProtocol
 	}
 	return c, nil

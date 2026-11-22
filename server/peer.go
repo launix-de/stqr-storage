@@ -311,7 +311,7 @@ func (p *peerConnection) readLoop() {
 			pending.result <- decodePeerReply(m, pending.opcode)
 		case client.Request, client.FireAndForget:
 			queue := p.incoming
-			if m.Opcode == peerForceAdmin {
+			if isControlPeerRequest(m) {
 				queue = p.controlIncoming
 			}
 			select {

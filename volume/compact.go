@@ -180,6 +180,9 @@ func (v *Volume) Scrub() error {
 	return v.scrubLocked()
 }
 func (v *Volume) scrubLocked() error {
+	if _, _, err := v.localMetadataLocked(); err != nil {
+		return err
+	}
 	buf := make([]byte, BlockSize)
 	return v.walkIndex(func(x indexEntry) error {
 		if x.Key[0] == 1 {
@@ -226,6 +229,15 @@ func (v *Volume) Export(dst io.Writer) error {
 	enc := json.NewEncoder(dst)
 	if e := enc.Encode(snapshotFrame{Kind: "STQR-SNAPSHOT-2"}); e != nil {
 		return e
+	}
+	metadata, _, err := v.localMetadataLocked()
+	if err != nil {
+		return err
+	}
+	if len(metadata) > 0 {
+		if err := enc.Encode(snapshotFrame{Kind: "local-metadata", Data: metadata}); err != nil {
+			return err
+		}
 	}
 	e := v.walkIndex(func(x indexEntry) error {
 		if x.Key[0] != 0 {
@@ -321,6 +333,12 @@ func (v *Volume) Import(src io.Reader, codec *Compression) error {
 			return e
 		}
 		switch f.Kind {
+		case "local-metadata":
+			if temp.sb.LocalMetadataRoot != 0 || len(f.Data) == 0 {
+				e = ErrCorrupt
+			} else {
+				e = h.SetLocalMetadata(f.Data)
+			}
 		case "object":
 			key, info := f.Key, f.Info
 			if codec != nil {

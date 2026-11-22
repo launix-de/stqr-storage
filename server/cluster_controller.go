@@ -301,7 +301,20 @@ func (c *clusterController) finishReservedChange(ctx context.Context, claim cont
 	building := true
 	defer func() {
 		if building {
-			if exclusion != nil {
+			if exclusion != nil && exclusion.Restore != nil {
+				request := c.coordinator.requestSnapshot()
+				if request != nil && request.Proposal == nil {
+					if c.coordinator.cancelBuilding(ctx) == nil {
+						c.server.opMu.Lock()
+						if op, err := c.server.operation(exclusion.Operation.String()); err == nil {
+							_, _ = c.server.finishOperation(op, fail(409, "takeover cancelled before READY; check volume, placement and quota prerequisites"))
+						}
+						c.server.opMu.Unlock()
+					}
+				} else {
+					c.coordinator.suspendBuilding()
+				}
+			} else if exclusion != nil {
 				c.coordinator.suspendBuilding()
 			} else {
 				_ = c.coordinator.cancelBuilding(ctx)
@@ -369,8 +382,16 @@ func (c *clusterController) finishReservedChange(ctx context.Context, claim cont
 		}
 	}
 	patches := c.patches(membership, descriptions)
+	origins, err := c.server.recoveryOriginsForChange(patches, exclusion)
+	if err != nil {
+		return nil, 0, err
+	}
 	if exclusion != nil {
 		if err := c.applyRecoveredRanges(patches, recovered); err != nil {
+			return nil, 0, err
+		}
+		origins, err = c.server.recoveryOriginsForChange(patches, exclusion)
+		if err != nil {
 			return nil, 0, err
 		}
 		if err := c.markExcludedRangesLost(patches, descriptions, exclusion, membership); err != nil {
@@ -379,6 +400,9 @@ func (c *clusterController) finishReservedChange(ctx context.Context, claim cont
 	}
 	bundle, err := source.captureSystemImage(membership, base.Sequence+1, base.Generation, base.MapRevision, roots, patches)
 	if err != nil {
+		return nil, 0, err
+	}
+	if err := c.server.setRecoveryBundle(bundle, patches, origins, exclusion); err != nil {
 		return nil, 0, err
 	}
 	var planned volume.ObjectID

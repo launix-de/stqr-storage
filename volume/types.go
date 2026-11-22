@@ -15,7 +15,7 @@ const (
 	PageSize        = 4096
 	BlockSize       = 1 << 20
 	MinVolumeSize   = 256 << 10
-	FormatVersion   = 2
+	FormatVersion   = 3
 	pageHeaderSize  = 64
 	pagePayload     = PageSize - pageHeaderSize
 	superblockBytes = 2 * PageSize

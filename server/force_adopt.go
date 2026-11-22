@@ -34,12 +34,17 @@ func validForceCommitWitness(slot *controlSlot) bool {
 
 func (s *Server) receiveForceAdoptCommit(body []byte, actor client.ID) ([]byte, error) {
 	d := client.Decoder{B: body}
-	schema, user, name := d.U16(), d.ID(), d.Text()
-	request, requestErr := decodeForceDisconnect(d.Blob())
+	schema := d.U16()
+	recovery := false
+	if schema == 2 {
+		recovery = d.Bool()
+	}
+	user, name := d.ID(), d.Text()
+	request, requestErr := decodeForceDisconnectMode(d.Blob(), recovery)
 	proposal, proposalErr := decodeControlProposal(d.Blob())
 	certificate, certificateErr := client.DecodeCertificate(d.Blob())
 	witness, witnessErr := client.DecodeProof(d.Take(56))
-	if schema != 1 || requestErr != nil || proposalErr != nil || certificateErr != nil || witnessErr != nil || d.Done() != nil || s.control == nil {
+	if (schema != 1 && schema != 2) || requestErr != nil || proposalErr != nil || certificateErr != nil || witnessErr != nil || d.Done() != nil || s.control == nil {
 		return nil, client.ErrProtocol
 	}
 	decision, err := proposal.decision()
@@ -49,7 +54,7 @@ func (s *Server) receiveForceAdoptCommit(body []byte, actor client.ID) ([]byte, 
 		epochMatches = s.acceptsObservedMembership(request.Membership)
 	}
 	actorMember := hasControlNode(membershipIDs(proposal.Claim.Base.Membership), actor) || membershipChange && hasControlNode(membershipIDs(*proposal.NextMembership), actor)
-	if err != nil || (proposal.Kind != controlAdministration && proposal.Kind != controlShutdown && !membershipChange) || !epochMatches || !actorMember || hasControlNode(request.Nodes, actor) || hasControlNode(request.Nodes, witness.Node) || !hasControlNode(proposal.Claim.Required, witness.Node) || !certificate.Covers(proposal.Claim.Required) {
+	if err != nil || (proposal.Kind != controlAdministration && proposal.Kind != controlShutdown && !membershipChange && !committedVolumeTakeover(proposal)) || !epochMatches || !actorMember || hasControlNode(request.Nodes, actor) || hasControlNode(request.Nodes, witness.Node) || !hasControlNode(proposal.Claim.Required, witness.Node) || !certificate.Covers(proposal.Claim.Required) {
 		return nil, errControlConflict
 	}
 	var ready client.Proof
@@ -219,7 +224,7 @@ func (c *clusterController) adoptKnownForceParent(ctx context.Context, request f
 	}
 	proposal := highest.Proposal
 	compatibleMembership := equalControlMembership(proposal.Claim.Base.Membership, base.Membership) || committedControlMembership(*proposal) && equalControlMembership(*proposal.NextMembership, base.Membership)
-	if (proposal.Kind != controlAdministration && proposal.Kind != controlShutdown && !committedControlMembership(*proposal)) || !compatibleMembership {
+	if (proposal.Kind != controlAdministration && proposal.Kind != controlShutdown && !committedControlMembership(*proposal) && !committedVolumeTakeover(*proposal)) || !compatibleMembership {
 		return fail(409, "committed membership recovery must finish before this exclusion")
 	}
 	proposalWire, err := marshalControlProposal(*proposal)
@@ -247,7 +252,12 @@ func (c *clusterController) adoptKnownForceParent(ctx context.Context, request f
 	original.Bool(request.ExternalFencingConfirmed)
 	original.U64(request.Membership)
 	message := client.Encoder{}
-	message.U16(1)
+	if request.RecoverOnly {
+		message.U16(2)
+		message.Bool(true)
+	} else {
+		message.U16(1)
+	}
 	message.ID(client.ID(admin))
 	message.Text(actor.User.Name)
 	message.Blob(original.B)

@@ -137,8 +137,7 @@ func (b *Bucket) selectVolume(d BucketDescription, key volume.Key, request volum
 		}
 		if b.server.controller != nil {
 			if patch, ok := b.server.routingPatch(key.Bucket, key.Object); ok {
-				pin := volume.ID(patch.Entries[0].Locations[0].Volume)
-				if pin != (volume.ID{}) && v.Identity().VolumeID != pin {
+				if !b.server.volumeAllowedForEntry(client.ID(b.ID()), patch.Entries[0], v.Identity().VolumeID, b.server.currentSystem.Load()) {
 					continue
 				}
 			}
@@ -417,6 +416,9 @@ func (b *Bucket) mutate(ctx context.Context, p principal, id volume.ObjectID, op
 			return volume.Result{}, e
 		}
 		d = saved.Describe()
+	}
+	if err := s.ensureVolumeAuthorityLocked(); err != nil {
+		return volume.Result{}, err
 	}
 	// Inspect retry presence before applying current admission. The volume still
 	// validates the complete original fingerprint; status alone is not a success.

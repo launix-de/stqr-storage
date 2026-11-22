@@ -75,7 +75,7 @@ func (s *Server) quotaCheckpoint(body []byte, actor client.ID) ([]byte, error) {
 		if err != nil {
 			return nil, err
 		}
-		if plannedView.manifest.Sequence != claim.Base.Sequence+1 || plannedView.manifest.Membership.Epoch != claim.Base.Membership.Epoch+1 {
+		if plannedView.manifest.Sequence != claim.Base.Sequence+1 || plannedView.manifest.Membership.Epoch != claim.Base.Membership.Epoch+1 && !(claim.Exclusion != nil && claim.Exclusion.Restore != nil && plannedView.manifest.Membership.Epoch == claim.Base.Membership.Epoch) {
 			return nil, errControlConflict
 		}
 	}
@@ -105,7 +105,7 @@ func (s *Server) quotaCheckpoint(body []byte, actor client.ID) ([]byte, error) {
 				}
 			} else if b, e := s.Bucket(volume.ID(bucket)); e == nil {
 				if plannedView != nil {
-					entry.Used, err = b.plannedLogicalUsage(plannedView.placement)
+					entry.Used, err = b.plannedLogicalUsage(plannedView)
 				} else {
 					entry.Used, err = b.logicalUsage()
 				}
@@ -308,9 +308,13 @@ func (c *clusterController) ensureQuotaAllocations(ctx context.Context) {
 // from that old map would omit its bytes. Count the exact staged candidate and
 // ignore newly LOST ranges whose stale records PREPARE will remove. This does
 // not populate the normal cache or publish speculative placement authority.
-func (b *Bucket) plannedLogicalUsage(placement *placementImage) (uint64, error) {
+func (b *Bucket) plannedLogicalUsage(view *systemView) (uint64, error) {
+	placement := view.placement
 	current := b.server.placement.Load()
 	exclude := func(entry client.RangeEntry) bool {
+		if entry.State == 4 {
+			return true
+		}
 		if entry.State != 5 {
 			return false
 		}
@@ -320,7 +324,7 @@ func (b *Bucket) plannedLogicalUsage(placement *placementImage) (uint64, error) 
 	var total uint64
 	var after *volume.ObjectID
 	for {
-		records, next, more, err := b.scanPlacement(b.server.ctx, b.Describe(), after, 128, placement, exclude)
+		records, next, more, err := b.scanPlacement(b.server.ctx, b.Describe(), after, 128, placement, exclude, view)
 		if err != nil {
 			return 0, err
 		}

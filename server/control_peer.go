@@ -250,6 +250,9 @@ func (p peerControlParticipants) call(ctx context.Context, node client.ID, opcod
 		return nil, err
 	}
 	if node == p.runtime.ledger.node {
+		if opcode == peerRecoveryReady {
+			return p.runtime.server.recoveryReady(body, node)
+		}
 		if opcode == peerForceAdoptCommit {
 			return p.runtime.server.receiveForceAdoptCommit(body, node)
 		}

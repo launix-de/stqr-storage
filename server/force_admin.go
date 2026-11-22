@@ -13,15 +13,19 @@ import (
 const peerForceAdmin uint16 = 0x1065
 
 type forceDisconnectRequest struct {
+	RecoverOnly                              bool `json:",omitempty"`
 	Nodes                                    []client.ID
 	AcceptDataLoss, ExternalFencingConfirmed bool
 	Membership                               uint64
 }
 
 func decodeForceDisconnect(body []byte) (forceDisconnectRequest, error) {
+	return decodeForceDisconnectMode(body, false)
+}
+func decodeForceDisconnectMode(body []byte, recovery bool) (forceDisconnectRequest, error) {
 	d := client.Decoder{B: body}
 	count := d.Count(10000)
-	r := forceDisconnectRequest{}
+	r := forceDisconnectRequest{RecoverOnly: recovery}
 	if count == 0 || count > len(d.B)/16 {
 		return r, client.ErrProtocol
 	}
@@ -33,7 +37,7 @@ func decodeForceDisconnect(body []byte) (forceDisconnectRequest, error) {
 		}
 	}
 	r.AcceptDataLoss, r.ExternalFencingConfirmed, r.Membership = d.Bool(), d.Bool(), d.U64()
-	if d.Done() != nil || !r.AcceptDataLoss || !r.ExternalFencingConfirmed || r.Membership == 0 {
+	if d.Done() != nil || r.AcceptDataLoss == recovery || !r.ExternalFencingConfirmed || r.Membership == 0 {
 		return r, fail(400, "explicit data-loss acceptance and external fencing confirmation are required")
 	}
 	return r, nil
@@ -97,7 +101,7 @@ func (s *Server) forceDisconnect(m client.Message, actor principal) ([]byte, int
 	if m.Kind != client.Request || m.ID == (client.ID{}) || s.controller == nil {
 		return nil, 0, fail(400, "force disconnect requires a cluster request")
 	}
-	request, err := decodeForceDisconnect(m.Body)
+	request, err := decodeForceDisconnectMode(m.Body, m.Opcode == client.NodeRecoveryBegin)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -111,7 +115,7 @@ func (s *Server) forceDisconnect(m client.Message, actor principal) ([]byte, int
 	var prior Operation
 	priorErr := s.readBlob("admin-op/"+m.ID.String(), &prior)
 	if priorErr == nil {
-		op, _, err := s.beginOperation(m.ID.String(), "force-disconnect", request)
+		op, _, err := s.beginOperation(m.ID.String(), request.operationKind(), request)
 		if err == nil && s.completedExclusion(m.ID) != nil {
 			op, err = s.finishOperation(op, nil)
 		}
@@ -132,7 +136,7 @@ func (s *Server) forceDisconnect(m client.Message, actor principal) ([]byte, int
 	}
 	if done := s.completedExclusionProposal(m.ID); done != nil {
 		x := done.Claim.Exclusion
-		if request.Membership != exclusionObservedEpoch(done.Claim) || !reflect.DeepEqual(x.Nodes, request.Nodes) || !request.AcceptDataLoss || !request.ExternalFencingConfirmed {
+		if request.Membership != exclusionObservedEpoch(done.Claim) || !reflect.DeepEqual(x.Nodes, request.Nodes) || x.RecoverOnly != request.RecoverOnly || request.AcceptDataLoss == request.RecoverOnly || !request.ExternalFencingConfirmed {
 			s.opMu.Unlock()
 			return nil, 0, fail(400, "operation ID reused with different exclusion input")
 		}
@@ -161,7 +165,7 @@ func (s *Server) forceDisconnect(m client.Message, actor principal) ([]byte, int
 		s.opMu.Unlock()
 		return nil, 0, ErrBucketForbidden
 	}
-	x := &controlExclusion{ExpectedMembership: request.Membership, Operation: m.ID, Nodes: request.Nodes, Administrator: client.ID(adminID), Username: actor.User.Name, AcceptDataLoss: true, ExternalFencingConfirmed: true}
+	x := &controlExclusion{ExpectedMembership: request.Membership, Operation: m.ID, Nodes: request.Nodes, Administrator: client.ID(adminID), Username: actor.User.Name, AcceptDataLoss: request.AcceptDataLoss, ExternalFencingConfirmed: true, RecoverOnly: request.RecoverOnly}
 	x.AlreadyRetired = s.knownRetiredVictims(request.Membership, request.Nodes)
 	next, err := exclusionMembership(view.manifest.Membership, x)
 	if err != nil {
@@ -236,7 +240,7 @@ func (s *Server) forceDisconnect(m client.Message, actor principal) ([]byte, int
 		}
 		s.peerStatsMu.RLock()
 		o := s.peerStats[member.ID]
-		available := o != nil && o.online && o.connection.Capabilities&client.CapabilityControlRecovery != 0
+		available := o != nil && o.online && o.connection.Capabilities&client.CapabilityControlRecovery != 0 && (!request.RecoverOnly || o.connection.Capabilities&client.CapabilityVolumeRecovery != 0)
 		s.peerStatsMu.RUnlock()
 		if !available {
 			return nil, 0, fail(503, "a required survivor is unavailable or needs an exclusion-capable upgrade")
@@ -251,7 +255,7 @@ func (s *Server) forceDisconnect(m client.Message, actor principal) ([]byte, int
 		s.opMu.Unlock()
 		return nil, 0, fail(409, "control state changed before exclusion")
 	}
-	op, _, err := s.beginOperation(m.ID.String(), "force-disconnect", request)
+	op, _, err := s.beginOperation(m.ID.String(), request.operationKind(), request)
 	s.opMu.Unlock()
 	if err != nil {
 		return nil, 0, err
@@ -289,7 +293,12 @@ func (s *Server) delegateForceDisconnect(m client.Message, actor principal, node
 		return nil, 0, ErrBucketForbidden
 	}
 	e := client.Encoder{}
-	e.U16(1)
+	if m.Opcode == client.NodeRecoveryBegin {
+		e.U16(2)
+		e.U16(m.Opcode)
+	} else {
+		e.U16(1)
+	}
 	e.ID(client.ID(user))
 	e.Text(actor.User.Name)
 	e.ID(m.ID)
@@ -309,9 +318,14 @@ func (s *Server) delegateForceDisconnect(m client.Message, actor principal, node
 
 func (s *Server) receiveForceAdmin(ctx context.Context, body []byte, node client.ID) ([]byte, error) {
 	d := client.Decoder{B: body}
-	schema, user, name, operation := d.U16(), d.ID(), d.Text(), d.ID()
+	schema := d.U16()
+	opcode := client.ForceDisconnect
+	if schema == 2 {
+		opcode = d.U16()
+	}
+	user, name, operation := d.ID(), d.Text(), d.ID()
 	inner := d.Blob()
-	if schema != 1 || d.Done() != nil {
+	if (schema != 1 && schema != 2) || opcode != client.ForceDisconnect && opcode != client.NodeRecoveryBegin || d.Done() != nil {
 		return nil, client.ErrProtocol
 	}
 	view := s.currentSystem.Load()
@@ -325,7 +339,7 @@ func (s *Server) receiveForceAdmin(ctx context.Context, body []byte, node client
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	result, status, err := s.forceDisconnect(client.Message{Kind: client.Request, Opcode: client.ForceDisconnect, ID: operation, Body: inner}, principal{User: a})
+	result, status, err := s.forceDisconnect(client.Message{Kind: client.Request, Opcode: opcode, ID: operation, Body: inner}, principal{User: a})
 	if err != nil {
 		return nil, err
 	}
@@ -356,7 +370,7 @@ func (c *clusterController) finishExclusionReceipts() {
 	for _, id := range ids {
 		s.opMu.Lock()
 		op, err := s.operation(id.String())
-		if err == nil && op.Kind == "force-disconnect" {
+		if err == nil && (op.Kind == "force-disconnect" || op.Kind == "node-recovery" || op.Kind == "volume-recovery") {
 			if op.State != "fulfilled" {
 				_, err = s.finishOperation(op, nil)
 			}
@@ -400,4 +414,11 @@ func (s *Server) closeExcludedTransports(membership client.Membership) {
 	for _, ws := range sockets {
 		ws.close()
 	}
+}
+
+func (r forceDisconnectRequest) operationKind() string {
+	if r.RecoverOnly {
+		return "node-recovery"
+	}
+	return "force-disconnect"
 }
