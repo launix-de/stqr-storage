@@ -59,6 +59,13 @@ func (s *Server) writeBlob(name string, value any) error {
 	if e != nil {
 		return e
 	}
+	return s.metadataWrite(func(h *volume.Handle) error {
+		_, e := h.Put(systemKey(name), b, volume.Options{})
+		return e
+	})
+}
+
+func (s *Server) metadataWrite(write func(*volume.Handle) error) error {
 	s.systemMu.Lock()
 	defer s.systemMu.Unlock()
 	store, e := s.metadataStore()
@@ -70,7 +77,7 @@ func (s *Server) writeBlob(name string, value any) error {
 		if e != nil {
 			return e
 		}
-		_, e = h.Put(systemKey(name), b, volume.Options{})
+		e = write(h)
 		h.Close()
 		if !errors.Is(e, volume.ErrFull) || errors.Is(e, volume.ErrRecovery) {
 			return e

@@ -409,6 +409,9 @@ cluster as ready for user testing until all of the following work together:
   its volume configuration locally; the aggregated list is administrative data.
 - Persistent rebuild rounds, unique coordinator binding, CURRENT/NEXT planning,
   copy/catch-up/fencing/cutover/cleanup, recovery, and queued `needrebuild` runs.
+  Rebuild binding is per affected current range groups: disjoint scopes may run
+  concurrently, including on overlapping node sets. Global membership/admin
+  decisions retain their separate ALL barrier and decision chain.
 - Required: one bucket/client stores more data than fits on one node, using
   learned range routing. Data replication is optional for this milestone.
 - SHORT/update shutdown preserves placement/data; unaffected nodes keep serving.
@@ -428,3 +431,49 @@ Peer identity/telemetry transport alone is not membership admission or a working
 rebuild. Model scheduler results are not real cluster availability measurements.
 The user's existing local volumes and accounts must survive upgrades; use
 separate fixtures for destructive/failure tests.
+
+## Durable global participant path (not default daemon admission yet)
+
+`control_journal.go` stores hash-chained atomic records in a private node-local
+volume. Existing unformatted, foreign, truncated or modified state is rejected;
+it is never reformatted or silently replaced. The requester is persisted before
+the first remote reservation, separately from the local participant slot.
+READY, COMMIT, APPLIED, abort and release proofs survive file reopen. An
+unprepared requester cancels every bound participant; a prepared requester
+finishes the original decision after reconnect. Completed proofs remain
+available for delayed retries, including after a coordinator leaves membership.
+
+`system_image.go` copies immutable, content-addressed system objects and validates
+the complete accounts/PG/bucket/map graph before READY. The local head is
+published only after ALL-COMMIT. Passwords remain bcrypt verifiers; local volume
+configuration and discovery caches are not installed as another node's config.
+
+`control_coordinator.go` and `control_peer.go` run the global participant barriers
+through native authenticated Q messages 0x1040–0x1045. A runtime installer must
+succeed before APPLIED is recorded. The ordinary daemon does not activate these
+handlers yet: bootstrap/recovery, runtime installation, global admin mutations
+and automatic candidate admission must be connected together first. Unactivated
+control RPCs return 503; this work does not advertise data authority.
+
+Validation separates journal/coordinator recovery from actual transport:
+
+- `TestControlCoordinatorRecoversLostAcknowledgements` reopens real journals
+  after lost PREPARE/COMMIT/APPLIED/RELEASE replies, using modeled publication.
+- `TestControlCoordinatorCrashBeforeOwnReservation` covers the first remote
+  grant followed by restart, cancellation and delayed RESERVE rejection.
+- `TestPeerControlSystemCommit` uses real authenticated WebSockets and real
+  system-head publication, with explicit test runtime installers. Missing
+  referenced children prevent READY; completing the transfer lets the same
+  request finish. This is not automatic daemon admission or user-object I/O.
+- `TestControlRuntimeRestoresPublishedAndAppliedImages` reopens the journal
+  after head publication before APPLIED, finishes the same durable decision,
+  and reinstalls an already applied image into fresh runtime memory. Missing
+  heads/children and a head contradicting the journal are rejected.
+
+The client `PartialMap` merges overlapping portions by OwnerEpoch and then
+compatible policy advancement. Disjoint updates do not compete through a global
+map revision. Tests cover reordered independent updates, partial snapshots and
+old full snapshots without rollback of newer ownership. Server-side scoped
+transition proofs and the scope scheduler remain separate pending work.
+`FuzzPartialMapMerge` compares the segment cache against independent per-hash
+learning with overlapping patches and reordered ownership/revision updates.

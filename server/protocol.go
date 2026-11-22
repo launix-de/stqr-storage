@@ -70,6 +70,18 @@ func (s *Server) dispatchAs(m client.Message, ws *wsSession, p principal) ([]byt
 		if p.connection == nil || !p.connection.peerVerified.Load() {
 			return client.ResponseBody(403, nil, "NODE_HELLO identity binding required"), 403
 		}
+		if controlPeerOpcode(m.Opcode) {
+			actor, err := parseID(p.User.ID)
+			if err != nil {
+				return client.ResponseBody(403, nil, "invalid peer identity"), 403
+			}
+			result, err := s.executePeerControl(m, client.ID(actor))
+			if err != nil {
+				status := statusOf(err)
+				return client.ResponseBody(status, nil, err.Error()), status
+			}
+			return client.ResponseBody(200, result, ""), 200
+		}
 		if m.Opcode == client.PeerAdminRequest {
 			result, err := s.peerAdmin(m, ws, p)
 			if err != nil {

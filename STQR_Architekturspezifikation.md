@@ -191,6 +191,10 @@ Ein SHORT/CLUSTER-Shutdown kann bei ausstehenden Commits oder fehlenden Mitglied
 
 ### 4.1 Persistenter Kontrollstand
 
+**Scope-Regel:** Globale Membership-/Admin-Entscheidungen besitzen weiterhin eine gemeinsame Sequenz-/Hashkette und ihre ALL-Barriere. Rebuilds sind dagegen **an betroffene Range-Groups gebunden**. Disjunkte Scopes dürfen parallel auch verschiedene Koordinatoren haben; überlappende Scopes müssen sich ausschließen. Jeder Rebuild-Beleg bindet Scope-ID, RoundID, die vollständigen bisherigen Range-Grenzen/Owner-Epochs und die feste Teilnehmermenge. Seine Sequenz/Vorgängerkette gilt innerhalb dieses Scopes und darf nicht mit der globalen Admin-Sequenz verwechselt werden. Ein fehlender globaler Initiator oder Koordinationszeuge blockiert keinen sonst unabhängigen Online-Scope.
+
+Die Vereinigung bestätigter disjunkter Patches ergibt die gemeinsame Placement-Map. Generation/Map-Revision sind dabei keine globale Totalordnung gleichzeitig laufender disjunkter Rebuilds; Schreibautorität folgt den bestätigten Übergaben und Owner-Epochs der jeweiligen Range. Ein Merge darf eine neuere Übergabe nie durch einen alten Gesamt-Snapshot überschreiben. Split/Merge beansprucht sämtliche betroffenen bisherigen Range-Groups einschließlich ihrer Grenzen, nicht bloß schon vorausgesetzte neue Teilbereiche. Die reservierten Rebuild-Wirelayouts erhalten bei Umsetzung einen explizit gebundenen Scope; die vorhandene globale Membership-/Admin-Decision bleibt davon getrennt.
+
 ```go
 type RoundID struct { MembershipEpoch, Generation uint64; Initiator [16]byte; Attempt uint64 }
 type ControlState struct {
@@ -208,6 +212,8 @@ Der Zustand liegt in einem replaybaren Kontrolljournal im Node-Datenverzeichnis;
 
 Zum persistenten Rundenzustand gehören außerdem die gebundene Teilnehmermenge, eingefrorene Placement-Bereiche und die noch offenen Rebuild-Gründe samt Offline-Abhängigkeiten (§4.3). Das obige Strukturbeispiel und die vorläufigen Wire-Layouts sind dafür noch zu erweitern; `NeedRebuild` allein kann diese Informationen nicht ausdrücken.
 
+Der eigene **Auftrag als Koordinator** wird getrennt vom eigenen Teilnehmer-Slot persistiert, und zwar vor der ersten entfernten Reservierung. Er bindet RoundID, Ausgangsstand, feste Teilnehmermenge und Änderungsart. Nach lokaler READY-Zusage werden der vorbereitete System-Manifest-Verweis und die öffentliche Ergebnisantwort gespeichert, niemals der rohe Passwort-Request. Ein Absturz vor diesem gespeicherten Vorbereitungsabschluss führt zur wiederholbaren Absage auf **allen** gebundenen Teilnehmern, auch solchen ohne bereits erteilte Reservierung; deren persistierte Absage verhindert das Wiederaufleben durch verspätete Nachrichten. Ein bereits committed Teilnehmer darf niemals abgesagt werden. Ab gespeicherter Vorbereitung wird derselbe Auftrag nach Wiederkehr zu Ende geführt. Nach ALL-APPLIED werden die entfernten Slots und zuletzt der eigene Slot freigegeben; der Koordinator vergisst den Auftrag erst nach allen dauerhaften Freigabebelegen. Abgeschlossene Teilnehmer behalten wiederholbar abrufbare Belege, auch wenn der Koordinator mit dieser Entscheidung aus der Membership ausscheidet. Eine spätere Journalbereinigung benötigt bestätigte Aufbewahrungs-Watermarks.
+
 ### 4.2 Auslöser und Push-Wahl: funktionaler Vertrag, Race-Algorithmus später
 
 1. In IDLE passiert ohne Rebuild-Grund keine Migration. Hat ein Peer einen Grund und kennt keinen laufenden Rebuild, bietet er sich direkt per REBUILD_OFFER an und beginnt mit der Vorbereitung.
@@ -221,6 +227,8 @@ Zum persistenten Rundenzustand gehören außerdem die gebundene Teilnehmermenge,
 Broadcast ist Fan-out über Peer-Verbindungen, kein Netzwerk-Broadcast. Die unten reservierten Wahl-/Konfliktnachrichten sind vorläufige Katalogeinträge; ihre Feldfolgen können nach der Messphase geändert oder entfernt werden. ALL-Plan-/Cutover-Barrieren beziehen sich auf die gebundene Online-Teilnehmermenge aus §4.3; deren sichere Bindung gehört zum noch zu entwerfenden Wahlprotokoll.
 
 ### 4.3 Plan, Migration und Folgegründe
+
+Der folgende Ablauf gilt **pro Scope**. „Maximal CURRENT/NEXT“ bedeutet einen aktuellen und einen vorbereiteten Stand je betroffenem Scope; mehrere disjunkte Scopes dürfen gleichzeitig einen solchen Übergang haben. Eine Node darf Teilnehmer mehrerer disjunkter Scopes sein. Sie hält dafür getrennte persistente Rundenzustände und Rebuild-Gründe statt eines einzigen clusterweiten Koordinator-Slots. Membership-/Admin-Commits und globale Policy-Freigaben bleiben nach §4.5 geordnet. Änderungen an einer PG müssen über freigegebene Zielpolicy-/PG-Versionen den jeweiligen Ranges eindeutig zugeordnet bleiben, bis auch zurückgestellte Bereiche umgestellt sind.
 
 ```text
 IDLE -> OFFER/COLLECT -> SEALED -> PLAN -> PREPARE_ALL
@@ -249,7 +257,7 @@ IDLE -> OFFER/COLLECT -> SEALED -> PLAN -> PREPARE_ALL
 
 - Join/Leave: Die bisherige Membership bestätigt den Übergang vollständig, beim Join bestätigt auch das neue Mitglied seinen initialen Zustand. Erst dann gilt Epoch e+1. Ein geplanter Leave endet erst nach Evakuierung.
 - FORCE_DISCONNECT: Alle **verbleibenden** Mitglieder bestätigen eine neue Epoch einschließlich Ausschlussliste, Fencing-/Verlustfreigabe und letztem rekonstruierbarem Kontrollstand. Es gibt keinen Beleg des ausgeschlossenen Mitglieds; dies ist eine administrative Ausnahme unter akzeptiertem Datenverlust, kein normaler Quorum-Failover.
-- Bucket-/User-/Quota-/Credential-Änderungen werden als geordnete `CONTROL_CHANGE` im selben Journal committed. Pro Kontrollsequenz genau ein Digest und ALL-READY/APPLIED. Während eines Rebuilds sequenziert dessen gebundener Koordinator diese Änderungen. Außerhalb eines Rebuilds benötigt eine administrative Kontrollrunde dieselbe eindeutige Koordinatorzuordnung; ihre Race-Behandlung wird gemeinsam mit §4.2 nach den Stresstests entworfen. Nach Abschluss gibt der Koordinator den Slot mit FINALIZE frei, ohne Plan/Migration zu starten, sofern kein Rebuild-Grund vorliegt. Es gibt keine dauerhaft bevorzugte Admin-Master-Node. Lokales Volume-Add und lokale Statistikmessung benötigen diesen globalen Commitweg nicht.
+- Bucket-/User-/Quota-/Credential-Änderungen werden als geordnete `CONTROL_CHANGE` im selben Journal committed. Pro Kontrollsequenz genau ein Digest und ALL-READY/APPLIED. Eine globale administrative Kontrollrunde benötigt unabhängig von parallel laufenden Range-Scopes eine eindeutige Koordinatorzuordnung und die Zustimmung aller erforderlichen Mitglieder. Sie stimmt Policy-/Membership-Freigaben und Map-Checkpoints mit laufenden Scopes ab; deren Bulk-Copy allein erfordert keine globale Daten-I/O-Sperre. Die Race-Behandlung wird gemeinsam mit §4.2 nach den Stresstests entworfen. Nach Abschluss gibt der Koordinator den Slot mit FINALIZE frei, ohne Plan/Migration zu starten, sofern kein Rebuild-Grund vorliegt. Es gibt keine dauerhaft bevorzugte Admin-Master-Node. Lokales Volume-Add und lokale Statistikmessung benötigen diesen globalen Commitweg nicht.
 - Berechtigungsentzug gilt nach Veröffentlichung der gemeinsamen Kontrollentscheidung; laufende bereits linearisiert autorisierte Operationen dürfen enden. Neue Operationen müssen den neuen Stand prüfen. Ausschlüsse brauchen das zusätzliche externe Fencing aus §3.5.
 
 ---
@@ -420,7 +428,7 @@ Bei **1 PB** logischer Daten und **10 GB** je Range entstehen näherungsweise **
 - v1 benötigt keinen Map-Agent. Ein Client startet mit leerer Map oder ausschließlich als **UNKNOWN** markierten Dummy-Bereichen und kennt mindestens eine Kontaktadresse. Für einen unbekannten Hash darf er optimistisch eine zufällige bekannte Node ansprechen.
 - Bei falscher Zuständigkeit pusht diese Node einen authentifizierten **Map-Ausschnitt** (`MAP_PATCH`) und liefert 301 samt demselben Ausschnitt im Folgeheader. Die doppelte Übermittlung ist idempotent; eine zusätzliche Map-GET-Runde ist nicht nötig. Der Patch umfasst vollständige Range-Gruppen inklusive expliziter Segmentgrenzen, Policy, Locations, Membership-/Placement-Version und Ownership-Epoch.
 - Der Client ersetzt nur den abgedeckten Bereich seiner segmentierten Map. Unbekannte Bereiche bleiben unbekannt; die letzte gelernte Range darf **nicht** versehentlich bis max256 gelten. `end_exclusive` ist im Patch optional mit einem separaten `to_end`-Bit für das Hashraumende kodiert. Für Split/Merge enthält der Patch die vollständige Ersatzpartition des angegebenen Intervalls.
-- Veraltete Patches ersetzen keine neueren überlappenden Einträge; maßgeblich ist die monotone globale `map_revision`, zusätzlich werden Membership und Ownership geprüft. Bei Lücken/Versionskonflikt wird der betroffene Bereich UNKNOWN und beim nächsten Zugriff neu gelernt. Nicht betroffene Segmente bleiben bestehen.
+- Innerhalb derselben Membership wird jeder überlappende Teilbereich separat zusammengeführt: Die höhere bestätigte `owner_epoch` gewinnt, unabhängig von der Map-Revision eines anderen Scopes. Bei unverändertem Owner, Runtime und Range-Grenzen kann eine höhere `policy_version` die Policy aktualisieren. Gleich alte widersprüchliche Angaben machen nur ihren Schnittbereich UNKNOWN; andere Teile desselben Patches werden weiterhin übernommen. `map_revision` ist ein Aktualitätshinweis bei sonst identischem Eintrag, keine globale Totalordnung disjunkter Rebuilds. Ein alter Gesamt-Snapshot darf weder eine neuere Übergabe zurückrollen noch neue Informationen für andere Bereiche blockieren. Die Client-Map lernt Routen; die serverseitige Autorität benötigt weiterhin validierte Übergabebelege. Eine neuere committed Membership verwirft alte Client-Segmente; Patches älterer Memberships werden ignoriert.
 - Server können relevante Patches aktiv an verbundene Clients pushen. Ein explizites `MAP_GET` ist nur eine optionale Vorausladeoptimierung. Patches enthalten keine fremden Bucket-Rechte oder Secrets.
 
 ### 6.5 Splitting
@@ -1219,6 +1227,29 @@ Nur authentifizierte NODE-Rolle, gebunden an Membership-Epoch. In der Tabelle be
 | 0x1036 | PEER_ADMIN_REQUEST / Q | `actor:ID,username:Text,operation:ID,opcode:u16,body:Blob` => vollständiger innerer RESPONSE-Body (`status:V,follow_headers:Blob,result`); nur nach NODE_HELLO, Ziel prüft den aktuellen Admin-Account selbst |
 | 0x1037 | PEER_VERIFY_ADMIN / Q | `actor:ID,username:Text` => `actor:ID,username:Text`; Gegenrichtung derselben gebundenen Peer-Verbindung, Abgleich mit aktuellem autoritativem Accountstand, keine Rollenbehauptung und kein Membership-/Commit-Beleg |
 | 0x1038 | PEER_DIRECTORY / F, Q für Diagnose | `cluster:ID,sender:ID,nodes:Vec(NodeAddress)`; nur geprüfte Peer-Identität, Absender-ID muss dem gebundenen Peer entsprechen; persistiert/vereinigt Kontaktinformationen und verteilt Änderungen weiter, keine Membership- oder Placement-Autorität |
+| 0x1040 | GLOBAL_RESERVE / Q | `claim:GlobalClaim` => leer; dauerhafte Reservierung des globalen Membership-/Admin-Slots |
+| 0x1041 | GLOBAL_PREPARE / Q | `proposal:GlobalProposal` => `proof:Proof`; vollständiger, gehashter und geflushter Systemobjektgraph ist Voraussetzung für READY |
+| 0x1042 | GLOBAL_COMMIT / Q | `schema:u16=1,decision:Decision,ready:Blob(Certificate)` => `proof:Proof`; exakt ein READY jedes gebundenen Teilnehmers |
+| 0x1043 | GLOBAL_APPLY / Q | `schema:u16=1,decision:Decision` => `proof:Proof`; erst nach dauerhaftem COMMIT, Veröffentlichung des System-Heads und Installation der Laufzeitsicht |
+| 0x1044 | GLOBAL_RELEASE / Q | `schema:u16=1,decision:Decision,applied:Blob(Certificate)` => `proof:Proof`; genau ALL-APPLIED, wiederholbar auch nach Freigabe |
+| 0x1045 | GLOBAL_ABORT / Q | `claim:GlobalClaim` => `proof:Proof`; persistierte Absage einer nicht committed Runde, auch ohne vorherige Reservierung |
+
+Diese Q-Nachrichten bilden den explizit bestätigten Teilnehmerpfad für **globale** Membership-/Admin-Entscheidungen. Sie ersetzen keinen Range-Scope und legen dessen späteren Race-/Wahlalgorithmus nicht fest. Sie sind nur nach NODE_HELLO zulässig; der gebundene Absender muss der Initiator der referenzierten Runde sein. Ein noch nicht aktivierter dauerhafter Controller antwortet 503. Unvollständiger oder widersprüchlicher Zustand erzeugt keine Erfolgsantwort. P-Nachrichten des Katalogs bleiben die gesonderten Push-Varianten; Q und P werden nicht stillschweigend als identische Feldfolgen interpretiert.
+
+```text
+GlobalBaseMembership = membership:Membership,control_sequence:u64=0,
+                       generation:u64=1,map_revision:u64=0
+GlobalClaim = schema:u16=1,membership:Blob(GlobalBaseMembership),
+              sequence:u64,head:Digest,generation:u64,map_revision:u64,
+              system_image:Digest,round:RoundID,required:Vec(ID)
+GlobalProposal = schema:u16=1,claim:Blob(GlobalClaim),kind:u16,
+                 system_image:Digest,has_next_membership:Bool,
+                 [next_membership:Blob(GlobalBaseMembership)]
+```
+
+`kind=1` ändert Membership, `kind=2` globale Administration. `required` ist streng nach Node-ID sortiert, duplikatfrei, höchstens 10.000 Einträge. Bei Membership-Änderung ist die Vereinigung aus bisherigen und neuen Mitgliedern erforderlich; bei Administration die unveränderte vollständige Membership. `next_membership` ist genau bei `kind=1` vorhanden. Die eingebettete Membership verwendet den vorhandenen NODE_HELLO-Antwortcodec mit den oben festen drei Zusatzwerten; die tatsächlichen Ausgangszähler stehen separat im Claim. Ein System-Image ist ein normales SHA-256-adressiertes Manifestobjekt des EVERYWHERE-System-Buckets mit Referenzen auf Account-/PG-/Bucketobjekte und Map-Checkpoints. Die Veröffentlichung seines Heads erfolgt atomar erst nach ALL-COMMIT; reine Übertragung seiner Kinder ändert noch keine Authentifizierung oder Placement-Autorität. Die Aktivierung im Daemon benötigt zusätzlich Bootstrap, Wiederaufnahme und Installation dieser Sicht.
+
+Für diesen globalen Teilnehmerpfad wird `Decision.digest` als SHA-256 über `Text("STQR control decision v1"), membership:u64, sequence:u64, previous:Digest, kind:u16, payload:Blob` berechnet. `payload` ist die kanonische Folge `Blob(GlobalBaseMembership), RoundID, generation:u64, map_revision:u64, system_image:Digest, required:Vec(ID), proposed_system_image:Digest, has_next_membership:Bool, [Blob(GlobalBaseMembership)]`. Damit sind Ausgangs-Membership, Initiator/Versuch, Ausgangs-Checkpoint, Teilnehmermenge, Objektgraph und Ziel-Membership unabhängig von der zustellenden Verbindung gebunden. Leere Go-Slices und nil-Slices sind auf dem Wire dieselbe leere Vec und dürfen nach Reconnect keine unterschiedlichen Zusagen ergeben.
 
 ```text
 ControlWire = membership:u64,generation:u64,round:RoundID,coordinator:ID,

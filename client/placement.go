@@ -290,38 +290,104 @@ type PartialMap struct {
 }
 
 func beforeEnd(value, end ObjectID, toEnd bool) bool { return toEnd || compareObject(value, end) < 0 }
-func segmentsOverlap(a, b mapSegment) bool {
-	return beforeEnd(a.begin, b.end, b.toEnd) && beforeEnd(b.begin, a.end, a.toEnd)
-}
-func cutSegment(s, cut mapSegment) []mapSegment {
-	if !segmentsOverlap(s, cut) {
-		return []mapSegment{s}
-	}
-	var out []mapSegment
-	if compareObject(s.begin, cut.begin) < 0 {
-		left := s
-		left.end = cut.begin
-		left.toEnd = false
-		out = append(out, left)
-	}
-	if !cut.toEnd && beforeEnd(cut.end, s.end, s.toEnd) {
-		right := s
-		right.begin = cut.end
-		out = append(out, right)
+
+func learnedSegments(p MapPatch) []mapSegment {
+	out := make([]mapSegment, 0, len(p.Entries))
+	for _, entry := range p.Entries {
+		end, toEnd, _ := RangeEnd(entry.Start, entry.PrefixBits)
+		piece := p
+		piece.Entries = []RangeEntry{entry}
+		out = append(out, mapSegment{entry.Start, end, toEnd, piece})
 	}
 	return out
 }
-func conflictingSegments(a, b mapSegment) bool {
-	for _, x := range a.patch.Entries {
-		xe, xt, _ := RangeEnd(x.Start, x.PrefixBits)
-		for _, y := range b.patch.Entries {
-			ye, yt, _ := RangeEnd(y.Start, y.PrefixBits)
-			if beforeEnd(x.Start, ye, yt) && beforeEnd(y.Start, xe, xt) && !reflect.DeepEqual(x, y) {
-				return true
+
+// Every learned segment contains one entry; its bounds may be clipped by a
+// newer partial patch. Sweep both ordered lists once. Revisions are hints for
+// the same range, never a global ordering of disjoint rebuilds. The server must
+// validate committed lineage; this cache learns routes, not write authority.
+func mergeLearnedSegments(old, incoming []mapSegment) ([]mapSegment, bool, bool) {
+	next := make([]mapSegment, 0, len(old)+len(incoming))
+	i, j := 0, 0
+	accepted, conflict := false, false
+	for i < len(old) && j < len(incoming) {
+		a, b := old[i], incoming[j]
+		if !a.toEnd && compareObject(a.end, b.begin) <= 0 {
+			next = append(next, a)
+			i++
+			continue
+		}
+		if !b.toEnd && compareObject(b.end, a.begin) <= 0 {
+			next = append(next, b)
+			accepted = true
+			j++
+			continue
+		}
+		if compareObject(a.begin, b.begin) < 0 {
+			left := a
+			left.end, left.toEnd = b.begin, false
+			next = append(next, left)
+			a.begin = b.begin
+		} else if compareObject(b.begin, a.begin) < 0 {
+			left := b
+			left.end, left.toEnd = a.begin, false
+			next = append(next, left)
+			accepted = true
+			b.begin = a.begin
+		}
+		end, toEnd := a.end, a.toEnd
+		if !b.toEnd && (toEnd || compareObject(b.end, end) < 0) {
+			end, toEnd = b.end, false
+		}
+		x, y := a.patch.Entries[0], b.patch.Entries[0]
+		winner := a
+		chooseIncoming, ambiguous := false, false
+		switch {
+		case y.OwnerEpoch != x.OwnerEpoch:
+			chooseIncoming = y.OwnerEpoch > x.OwnerEpoch
+		case y.PolicyVersion != x.PolicyVersion:
+			// Policy updates do not permit a conflicting owner/runtime under an
+			// unchanged OwnerEpoch. A changed boundary is an ownership transition.
+			x.PolicyVersion = y.PolicyVersion
+			if !reflect.DeepEqual(x, y) {
+				ambiguous = true
+			} else {
+				chooseIncoming = y.PolicyVersion > a.patch.Entries[0].PolicyVersion
 			}
+		case !reflect.DeepEqual(x, y):
+			ambiguous = true
+		default:
+			chooseIncoming = b.patch.Revision >= a.patch.Revision
+		}
+		if chooseIncoming {
+			winner = b
+			accepted = true
+		}
+		winner.end, winner.toEnd = end, toEnd
+		if ambiguous {
+			conflict = true
+		} else {
+			next = append(next, winner)
+		}
+		if a.toEnd == toEnd && (toEnd || a.end == end) {
+			i++
+		} else {
+			old[i] = a
+			old[i].begin = end
+		}
+		if b.toEnd == toEnd && (toEnd || b.end == end) {
+			j++
+		} else {
+			incoming[j] = b
+			incoming[j].begin = end
 		}
 	}
-	return false
+	next = append(next, old[i:]...)
+	if j < len(incoming) {
+		accepted = true
+		next = append(next, incoming[j:]...)
+	}
+	return next, accepted, conflict
 }
 func (m *PartialMap) Apply(p MapPatch) (bool, error) {
 	if err := p.Validate(); err != nil {
@@ -336,7 +402,7 @@ func (m *PartialMap) Apply(p MapPatch) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	incoming := mapSegment{p.Begin, p.End, p.ToEnd, p}
+	incoming := learnedSegments(p)
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if p.Membership < m.membership {
@@ -349,32 +415,12 @@ func (m *PartialMap) Apply(p MapPatch) (bool, error) {
 	if m.segments == nil {
 		m.segments = map[ID][]mapSegment{}
 	}
-	old := m.segments[p.Bucket]
-	conflict := false
-	for _, s := range old {
-		if !segmentsOverlap(s, incoming) {
-			continue
-		}
-		if s.patch.Revision > p.Revision {
-			return false, nil
-		}
-		if s.patch.Revision == p.Revision && conflictingSegments(s, incoming) {
-			conflict = true
-		}
-	}
-	var next []mapSegment
-	for _, s := range old {
-		next = append(next, cutSegment(s, incoming)...)
-	}
-	if !conflict {
-		next = append(next, incoming)
-	}
-	sort.Slice(next, func(i, j int) bool { return compareObject(next[i].begin, next[j].begin) < 0 })
+	next, accepted, conflict := mergeLearnedSegments(m.segments[p.Bucket], incoming)
 	m.segments[p.Bucket] = next
 	if conflict {
 		return false, ErrProtocol
 	}
-	return true, nil
+	return accepted, nil
 }
 func (m *PartialMap) Lookup(bucket ID, object ObjectID) (RangeEntry, uint64, uint64, []string, bool) {
 	m.mu.RLock()

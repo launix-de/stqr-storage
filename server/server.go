@@ -60,6 +60,7 @@ type Server struct {
 	peerManagers           map[string]bool
 	directory              atomic.Pointer[peerDirectoryImage]
 	placementGroups        atomic.Pointer[placementGroupImage]
+	control                *controlRuntime // initialized before accepting control RPCs
 }
 
 func Open(opts Options) (s *Server, err error) {
