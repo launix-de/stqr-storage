@@ -25,6 +25,10 @@ func s3NativeError(err error) error {
 		return client.ErrNotFound
 	case errors.Is(err, volume.ErrPrecondition):
 		return client.ErrPrecondition
+	case errors.Is(err, volume.ErrFull):
+		return client.ErrFull
+	case err != nil && objectStatus(err) == 507:
+		return client.ErrFull
 	case errors.Is(err, volume.ErrRange):
 		return client.ErrRange
 	}
@@ -64,7 +68,7 @@ func (s s3Store) GetRangeToVersion(ctx context.Context, id client.ObjectID, off,
 		return client.ObjectInfo{}, e
 	}
 	defer snapshot.Close()
-	i, _, e := s.b.copyToVersion(ctx, s.p, volume.ObjectID(id), off, n, &objectBudgetWriter{dst: snapshot, remaining: maxObjectStagingBytes}, &version)
+	i, _, e := s.b.copyToVersion(ctx, s.p, volume.ObjectID(id), off, n, snapshot, &version)
 	if e != nil {
 		return s3Info(i), s3NativeError(e)
 	}

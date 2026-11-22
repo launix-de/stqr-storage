@@ -23,3 +23,18 @@ check(file_get_contents((string)$presigned->getUri())==='123:100_100');
 foreach(['123:','123:100_100','folder/a','folder/b'] as $key)$s3->deleteObject(['Bucket'=>$bucket,'Key'=>$key]);
 check(count($s3->listObjects(['Bucket'=>$bucket])['Contents']??[])===0);
 echo "STQR_S3_PHP_PASS\n";
+// Multipart with composite checksums, retry, and server-side part copy.
+$first=str_repeat('m',5*1024*1024);$last='final';
+$upload=$s3->createMultipartUpload(['Bucket'=>$bucket,'Key'=>'multipart','ContentType'=>'text/plain','ChecksumAlgorithm'=>'CRC32','ChecksumType'=>'COMPOSITE']);$uploadId=$upload['UploadId'];
+$parts=[];foreach([1=>$first,2=>$last] as $n=>$payload){$part=$s3->uploadPart(['Bucket'=>$bucket,'Key'=>'multipart','UploadId'=>$uploadId,'PartNumber'=>$n,'Body'=>$payload,'ChecksumAlgorithm'=>'CRC32']);$parts[]=['PartNumber'=>$n,'ETag'=>$part['ETag'],'ChecksumCRC32'=>$part['ChecksumCRC32']];}
+check(count($s3->listParts(['Bucket'=>$bucket,'Key'=>'multipart','UploadId'=>$uploadId])['Parts'])===2);
+$completed=$s3->completeMultipartUpload(['Bucket'=>$bucket,'Key'=>'multipart','UploadId'=>$uploadId,'MultipartUpload'=>['Parts'=>$parts]]);check(str_ends_with($completed['ETag'],'-2"'));
+check((string)$s3->getObject(['Bucket'=>$bucket,'Key'=>'multipart'])['Body']===$first.$last);
+$upload=$s3->createMultipartUpload(['Bucket'=>$bucket,'Key'=>'part-copy']);$copyId=$upload['UploadId'];
+$part=$s3->uploadPartCopy(['Bucket'=>$bucket,'Key'=>'part-copy','UploadId'=>$copyId,'PartNumber'=>1,'CopySource'=>$bucket.'/multipart','CopySourceRange'=>'bytes=10-19']);
+$s3->completeMultipartUpload(['Bucket'=>$bucket,'Key'=>'part-copy','UploadId'=>$copyId,'MultipartUpload'=>['Parts'=>[['PartNumber'=>1,'ETag'=>$part['CopyPartResult']['ETag']]]]]);
+check((string)$s3->getObject(['Bucket'=>$bucket,'Key'=>'part-copy'])['Body']===str_repeat('m',10));
+$s3->copyObject(['Bucket'=>$bucket,'Key'=>'ordinary-copy','CopySource'=>$bucket.'/part-copy','MetadataDirective'=>'REPLACE','Metadata'=>['changed'=>'yes']]);
+check($s3->headObject(['Bucket'=>$bucket,'Key'=>'ordinary-copy'])['Metadata']['changed']==='yes');
+$s3->deleteObjects(['Bucket'=>$bucket,'Delete'=>['Objects'=>[['Key'=>'multipart'],['Key'=>'part-copy'],['Key'=>'ordinary-copy']],'Quiet'=>true]]);
+echo "STQR_S3_PHP_MULTIPART_PASS\n";
