@@ -295,7 +295,9 @@ func (t *transaction) finalize() error {
 				return e
 			}
 		}
-		for r < len(t.retired) {
+		// Coalescing can allocate and retire metadata pages. Claim any newly
+		// allocated pages before processing the next retired extent.
+		if r < len(t.retired) {
 			x := t.retired[r]
 			r++
 			if e := t.freeSpan(x.off, x.n); e != nil {

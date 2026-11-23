@@ -14,6 +14,12 @@ func TestFreeTreeFragmentedSmallObjectMutations(t *testing.T) {
 			if _, err := testPut(v, testKey(uint64(i)), payload, Options{}); err != nil {
 				t.Fatalf("round %d, object %d: %v", round, i, err)
 			}
+			mustGet(t, v, testKey(uint64(i)), payload)
+		}
+		for i := 0; i < 600; i++ {
+			if err := testDelete(v, testKey(uint64(i)), Options{}); err != nil {
+				t.Fatalf("delete round %d, object %d: %v", round, i, err)
+			}
 		}
 	}
 }
