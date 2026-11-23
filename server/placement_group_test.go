@@ -49,6 +49,16 @@ func TestPlacementGroupFilterModesAndDesiredMask(t *testing.T) {
 
 func installTestPlacementGroup(t *testing.T, s *Server, g PlacementGroup) {
 	t.Helper()
+	if g.Effective.Storage == nil {
+		p := storagePolicy(DefaultBucketPolicy())
+		g.Effective.Storage = &p
+	}
+	if g.Desired != nil && g.Desired.Storage == nil {
+		p := *g.Effective.Storage
+		desired := *g.Desired
+		desired.Storage = &p
+		g.Desired = &desired
+	}
 	object := s.placementGroups.Load().object
 	object.Groups = append(append([]PlacementGroup{}, object.Groups...), g)
 	image, err := compilePlacementGroups(object)

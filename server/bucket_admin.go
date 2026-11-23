@@ -24,7 +24,7 @@ type bucketListEntry struct {
 }
 
 func bucketAdminOpcode(op uint16) bool {
-	return op >= 0x2003 && op <= 0x200a || op == client.BucketList || op == client.BucketQuotaCapacity
+	return op == client.BucketListPage || op == client.BucketGroupCapacity || op == client.BucketCreateInGroup || op >= 0x2003 && op <= 0x200a || op == client.BucketList || op == client.BucketQuotaCapacity
 }
 func encodeBucketAck(operation string, id volume.ID, running bool) []byte {
 	e := client.Encoder{}
@@ -110,7 +110,7 @@ func (s *Server) bucketReceipt(p principal, m client.Message) (BucketReceipt, *B
 func (s *Server) executeBuckets(m client.Message, p principal) ([]byte, int, error) {
 	// Telemetry queries may wait for a required remote owner; they must never
 	// hold the node's mutation lock while doing so.
-	if m.Opcode != client.BucketList && m.Opcode != client.BucketQuotaCapacity {
+	if m.Opcode != client.BucketList && m.Opcode != client.BucketListPage && m.Opcode != client.BucketQuotaCapacity && m.Opcode != client.BucketGroupCapacity {
 		s.opMu.Lock()
 		defer s.opMu.Unlock()
 	}
@@ -120,8 +120,11 @@ func (s *Server) executeBuckets(m client.Message, p principal) ([]byte, int, err
 	if closed {
 		return nil, 0, fail(503, "server is stopping")
 	}
-	if m.Opcode == client.BucketQuotaCapacity {
+	if m.Opcode == client.BucketQuotaCapacity || m.Opcode == client.BucketGroupCapacity {
 		return s.executeBucketQuotaCapacity(m, p)
+	}
+	if m.Opcode == client.BucketListPage {
+		return s.executeBucketListPage(m.Body, p)
 	}
 	if m.Opcode == client.BucketList {
 		if err := s.requireAdmin(p); err != nil {
@@ -203,8 +206,32 @@ func (s *Server) executeBuckets(m client.Message, p principal) ([]byte, int, err
 	var grantedUser string
 	var description BucketDescription
 	var b *Bucket
-	if m.Opcode == client.BucketCreate {
-		id, name, state, policy := decodeBucketPolicy(&d)
+	if m.Opcode == client.BucketCreate || m.Opcode == client.BucketCreateInGroup {
+		var id volume.ID
+		var name string
+		state := BucketActive
+		var policy BucketPolicy
+		if m.Opcode == client.BucketCreateInGroup {
+			if d.U16() != 1 {
+				return nil, 0, client.ErrProtocol
+			}
+			id, name = volume.ID(d.ID()), d.Text()
+			group := d.ID().String()
+			policy = DefaultBucketPolicy()
+			policy.Limits = decodePGLimits(&d)
+			var e error
+			policy, e = s.policyForGroup(policy, group, true)
+			if e != nil {
+				return nil, 0, e
+			}
+		} else {
+			id, name, state, policy = decodeBucketPolicy(&d)
+			var e error
+			policy, e = s.legacyStorageGroup(policy)
+			if e != nil {
+				return nil, 0, e
+			}
+		}
 		target = id
 		if d.Done() != nil || state != BucketActive {
 			return nil, 0, ErrBucketInvalid
@@ -230,6 +257,13 @@ func (s *Server) executeBuckets(m client.Message, p principal) ([]byte, int, err
 				// references. Preserve the committed mask on ordinary policy changes.
 				policy.PlacementGroup = description.Policy.PlacementGroup
 				policy.PlacementMaskVersion = description.Policy.PlacementMaskVersion
+				if storagePolicy(policy) != storagePolicy(description.Policy) {
+					var e error
+					policy, e = s.legacyStorageGroup(policy)
+					if e != nil {
+						return nil, 0, e
+					}
+				}
 				if description.DesiredPolicy != nil {
 					return nil, 0, ErrBucketConflict
 				}
@@ -353,7 +387,7 @@ func (s *Server) executeBuckets(m client.Message, p principal) ([]byte, int, err
 	}
 	if !description.Policy.Limits.Unlimited {
 		usage := uint64(0)
-		if m.Opcode != client.BucketCreate {
+		if m.Opcode != client.BucketCreate && m.Opcode != client.BucketCreateInGroup {
 			usage, err = b.logicalUsage()
 			if err != nil {
 				return nil, 0, err
@@ -363,14 +397,14 @@ func (s *Server) executeBuckets(m client.Message, p principal) ([]byte, int, err
 			return nil, 0, volume.ErrFull
 		}
 	}
-	if m.Opcode == client.BucketCreate {
+	if m.Opcode == client.BucketCreate || m.Opcode == client.BucketCreateInGroup {
 		// An empty bucket may be described before hardware is attached. Its writes
 		// will report 507 until an eligible local volume exists; no admin-file fallback.
 		receipt.Status = 201
 	}
 	description.Receipts = append(description.Receipts, receipt)
 	revision := description.Revision
-	if m.Opcode == client.BucketCreate {
+	if m.Opcode == client.BucketCreate || m.Opcode == client.BucketCreateInGroup {
 		revision = 0
 	}
 	saved, err := s.buckets.Save(description, revision)

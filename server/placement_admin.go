@@ -17,6 +17,12 @@ const (
 	bucketSetPlacementGroup = client.BucketSetPlacementGroup
 )
 
+type placementGroupListEntry struct {
+	PlacementGroup
+	BucketCount    uint64 `json:"bucket_count"`
+	PendingBuckets uint64 `json:"pending_buckets"`
+}
+
 type placementGroupReceipt struct {
 	BucketReceipt
 	Target string `json:"target"`
@@ -48,7 +54,8 @@ func (s *Server) executePlacementAdmin(m client.Message, p principal) ([]byte, i
 		return nil, 0, err
 	}
 	d := client.Decoder{B: m.Body}
-	if d.U16() != 1 {
+	schema := d.U16()
+	if schema != 1 && schema != 2 {
 		return nil, 0, client.ErrProtocol
 	}
 	object := s.placementGroups.Load().object
@@ -57,7 +64,23 @@ func (s *Server) executePlacementAdmin(m client.Message, p principal) ([]byte, i
 		if d.Done() != nil || limit == 0 || limit > 1000 {
 			return nil, 0, client.ErrProtocol
 		}
-		page := []PlacementGroup{}
+		counts, pending := map[string]uint64{}, map[string]uint64{}
+		for _, b := range s.bucketSnapshots() {
+			if b.DeletionComplete {
+				continue
+			}
+			ids := map[string]bool{b.Policy.PlacementGroup: true}
+			if b.DesiredPolicy != nil {
+				ids[b.DesiredPolicy.PlacementGroup] = true
+			}
+			for id := range ids {
+				counts[id]++
+				if b.DesiredPolicy != nil {
+					pending[id]++
+				}
+			}
+		}
+		page := []placementGroupListEntry{}
 		next := ""
 		budget := client.MaxMessage - 1024
 		for _, g := range object.Groups {
@@ -68,7 +91,8 @@ func (s *Server) executePlacementAdmin(m client.Message, p principal) ([]byte, i
 				next = page[len(page)-1].ID
 				break
 			}
-			raw, err := json.Marshal(g)
+			entry := placementGroupListEntry{g, counts[g.ID], pending[g.ID]}
+			raw, err := json.Marshal(entry)
 			if err != nil {
 				return nil, 0, err
 			}
@@ -80,11 +104,11 @@ func (s *Server) executePlacementAdmin(m client.Message, p principal) ([]byte, i
 				break
 			}
 			budget -= len(raw) + 1
-			page = append(page, g)
+			page = append(page, entry)
 		}
 		return jsonText(struct {
-			Groups []PlacementGroup `json:"groups"`
-			Next   string           `json:"next"`
+			Groups []placementGroupListEntry `json:"groups"`
+			Next   string                    `json:"next"`
 		}{page, next}), 200, nil
 	}
 	if m.Kind != client.Request || m.ID == (client.ID{}) {
@@ -108,9 +132,14 @@ func (s *Server) executePlacementAdmin(m client.Message, p principal) ([]byte, i
 	}
 	if m.Opcode == bucketSetPlacementGroup {
 		bucket, expected := volume.ID(d.ID()), d.U64()
-		group := ""
+		group := defaultPlacementGroup.String()
 		if d.Bool() {
 			group = d.ID().String()
+		}
+		var limits *BucketLimits
+		if schema == 2 {
+			l := decodePGLimits(&d)
+			limits = &l
 		}
 		if d.Done() != nil || bucket == systemBucket {
 			return nil, 0, ErrBucketInvalid
@@ -128,10 +157,13 @@ func (s *Server) executePlacementAdmin(m client.Message, p principal) ([]byte, i
 			found := false
 			for _, g := range object.Groups {
 				if g.ID == group {
-					if g.Desired != nil {
+					if g.Desired != nil && schema == 1 {
 						return nil, 0, ErrBucketConflict
 					}
 					maskVersion = g.Effective.Version
+					if schema == 2 && g.Desired != nil {
+						maskVersion = g.Desired.Version
+					}
 					found = true
 					break
 				}
@@ -146,13 +178,52 @@ func (s *Server) executePlacementAdmin(m client.Message, p principal) ([]byte, i
 				maskVersion = 0
 			}
 		}
-		if description.Policy.PlacementGroup != group || description.Policy.PlacementMaskVersion != maskVersion {
+		if schema == 1 && group == defaultPlacementGroup.String() {
+			mask, _ := s.placementGroups.Load().mask(group, maskVersion)
+			if mask.Storage != nil && *mask.Storage != storagePolicy(description.Policy) {
+				base := description.Policy
+				base.PlacementGroup = ""
+				base.PlacementMaskVersion = 0
+				compatible, err := s.legacyStorageGroup(base)
+				if err != nil {
+					return nil, 0, err
+				}
+				group, maskVersion = compatible.PlacementGroup, compatible.PlacementMaskVersion
+			}
+		}
+		if description.Policy.PlacementGroup != group || description.Policy.PlacementMaskVersion != maskVersion || limits != nil && *limits != description.Policy.Limits {
 			if description.Policy.Version == ^uint64(0) {
 				return nil, 0, volume.ErrRange
 			}
 			policy := description.Policy
 			policy.Version++
 			policy.PlacementGroup, policy.PlacementMaskVersion = group, maskVersion
+			if schema == 2 {
+				var err error
+				policy, err = s.policyForGroup(policy, group, true)
+				if err != nil {
+					return nil, 0, err
+				}
+			}
+			if limits != nil {
+				policy.Limits = *limits
+			}
+			if err := validateBucketPolicy(policy); err != nil {
+				return nil, 0, err
+			}
+			if err := bucketLocalPolicy(policy); err != nil {
+				return nil, 0, err
+			}
+			if schema == 1 { // Bind an unused legacy mask to its first bucket's contract.
+				if err := s.bindLegacyGroupStorage(group, storagePolicy(policy)); err != nil {
+					return nil, 0, err
+				}
+				object = s.placementGroups.Load().object
+				mask, _ := s.placementGroups.Load().mask(group, maskVersion)
+				if mask.Storage != nil && *mask.Storage != storagePolicy(policy) {
+					return nil, 0, fail(409, "use schema 2 to select the group's storage policy")
+				}
+			}
 			description.DesiredPolicy = &policy
 			receipt.Running, receipt.Status = true, 202
 		}
@@ -160,6 +231,7 @@ func (s *Server) executePlacementAdmin(m client.Message, p principal) ([]byte, i
 		if _, err := s.buckets.Save(description, description.Revision); err != nil {
 			return nil, 0, err
 		}
+		s.startBucketCleanup(bucket)
 		return encodeBucketAck(receipt.ID, bucket, receipt.Running), receipt.Status, nil
 	}
 	id, expected := volume.ID(d.ID()), d.U64()
@@ -183,6 +255,20 @@ func (s *Server) executePlacementAdmin(m client.Message, p principal) ([]byte, i
 			return nil, 0, ErrBucketNotFound
 		}
 		g := object.Groups[index]
+		s.mu.RLock()
+		held := false
+		for _, v := range s.cfg.Volumes {
+			for _, group := range v.PlacementGroupsPending {
+				held = held || group == g.ID
+			}
+		}
+		s.mu.RUnlock()
+		if held {
+			return nil, 0, fail(409, "placement group is referenced by a pending volume")
+		}
+		if id == defaultPlacementGroup {
+			return nil, 0, ErrBucketForbidden
+		}
 		if g.Revision != expected || g.Desired != nil {
 			return nil, 0, ErrBucketConflict
 		}
@@ -195,14 +281,38 @@ func (s *Server) executePlacementAdmin(m client.Message, p principal) ([]byte, i
 	} else if m.Opcode == placementGroupSet {
 		name := d.Text()
 		var nodes []PlacementNode
-		if err := decodeControlRecord(d.Blob(), &nodes); err != nil || d.Done() != nil {
+		var settings PlacementMask
+		raw := d.Blob()
+		var decodeErr error
+		if schema == 2 {
+			decodeErr = decodeControlRecord(raw, &settings)
+			nodes = settings.Nodes
+			if settings.Storage == nil {
+				return nil, 0, ErrBucketInvalid
+			}
+			if err := settings.Storage.validate(); err != nil {
+				return nil, 0, err
+			}
+			if err := bucketLocalPolicy(settings.Storage.project(DefaultBucketPolicy())); err != nil {
+				return nil, 0, err
+			}
+		} else {
+			decodeErr = decodeControlRecord(raw, &nodes)
+		}
+		if decodeErr != nil || d.Done() != nil {
 			return nil, 0, client.ErrProtocol
 		}
 		if index < 0 {
 			if expected != 0 {
 				return nil, 0, ErrBucketConflict
 			}
-			object.Groups = append(object.Groups, PlacementGroup{ID: id.String(), Name: name, Revision: 1, Effective: PlacementMask{Version: 1, Nodes: nodes}})
+			settings.Version = 1
+			settings.Nodes = nodes
+			if schema == 1 {
+				p := storagePolicy(DefaultBucketPolicy())
+				settings.Storage = &p
+			}
+			object.Groups = append(object.Groups, PlacementGroup{ID: id.String(), Name: name, Revision: 1, Effective: settings})
 			receipt.Status = 201
 		} else {
 			g := object.Groups[index]
@@ -212,14 +322,35 @@ func (s *Server) executePlacementAdmin(m client.Message, p principal) ([]byte, i
 			if g.Revision == ^uint64(0) || g.Effective.Version == ^uint64(0) {
 				return nil, 0, volume.ErrRange
 			}
-			mask, err := normalizePlacementMask(PlacementMask{Version: g.Effective.Version + 1, Nodes: nodes})
+			if schema == 1 {
+				settings = g.Effective
+			}
+			settings.Version = g.Effective.Version + 1
+			settings.Nodes = nodes
+			mask, err := normalizePlacementMask(settings)
 			if err != nil {
 				return nil, 0, err
 			}
 			g.Revision++
 			g.Name = name
-			if !reflect.DeepEqual(mask.Nodes, g.Effective.Nodes) {
+			if !reflect.DeepEqual(mask.Nodes, g.Effective.Nodes) || mask.NodeSelection != g.Effective.NodeSelection || !reflect.DeepEqual(mask.Storage, g.Effective.Storage) || !reflect.DeepEqual(mask.FailureDomains, g.Effective.FailureDomains) {
 				g.Desired = &mask
+				for _, description := range s.bucketSnapshots() {
+					if description.DeletionComplete || description.Policy.PlacementGroup != g.ID {
+						continue
+					}
+					if description.DesiredPolicy != nil || description.State == BucketDeleting || description.Policy.Version == ^uint64(0) {
+						return nil, 0, ErrBucketConflict
+					}
+					if err := s.checkPGTransition(description, mask); err != nil {
+						return nil, 0, err
+					}
+				}
+				object.Groups[index] = g
+				if err := s.savePlacementGroups(object); err != nil {
+					return nil, 0, err
+				}
+				var changes []BucketDescription
 				for _, description := range s.bucketSnapshots() {
 					if description.DeletionComplete || description.Policy.PlacementGroup != g.ID {
 						continue
@@ -234,11 +365,15 @@ func (s *Server) executePlacementAdmin(m client.Message, p principal) ([]byte, i
 					policy := description.Policy
 					policy.Version++
 					policy.PlacementMaskVersion = mask.Version
-					description.DesiredPolicy = &policy
-					if _, err := s.buckets.Save(description, description.Revision); err != nil {
-						return nil, 0, err
+					if mask.Storage != nil {
+						policy = mask.Storage.project(policy)
 					}
+					description.DesiredPolicy = &policy
+					changes = append(changes, description)
 					receipt.Running, receipt.Status = true, 202
+				}
+				if err := s.buckets.saveBatch(changes); err != nil {
+					return nil, 0, err
 				}
 				if !receipt.Running {
 					g.Effective, g.Desired = mask, nil
@@ -252,6 +387,11 @@ func (s *Server) executePlacementAdmin(m client.Message, p principal) ([]byte, i
 	object.Receipts = append(object.Receipts, placementGroupReceipt{BucketReceipt: receipt, Target: id.String()})
 	if err := s.savePlacementGroups(object); err != nil {
 		return nil, 0, err
+	}
+	for _, description := range s.bucketSnapshots() {
+		if description.DesiredPolicy != nil {
+			s.startBucketCleanup(mustBucketID(description.ID))
+		}
 	}
 	return encodeBucketAck(receipt.ID, id, receipt.Running), receipt.Status, nil
 }

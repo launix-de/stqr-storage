@@ -68,10 +68,10 @@ func (b *Bucket) clusterLogicalUsage(ctx context.Context, p principal) (uint64, 
 	return total, nil
 }
 
-func (s *Server) administrativeQuotaCapacity(id volume.ID, strategy uint8, p principal) (bucketQuotaCapacity, error) {
+func (s *Server) administrativeQuotaCapacity(id volume.ID, strategy uint8, p principal, selection ...BucketPolicy) (bucketQuotaCapacity, error) {
 	view := s.currentSystem.Load()
 	if s.controller == nil || view == nil || len(view.manifest.Membership.Members) <= 1 {
-		return s.bucketQuotaCapacity(id, strategy)
+		return s.bucketQuotaCapacity(id, strategy, selection...)
 	}
 	if strategy > 2 {
 		return bucketQuotaCapacity{}, fail(400, "invalid storage strategy")
@@ -92,6 +92,9 @@ func (s *Server) administrativeQuotaCapacity(id volume.ID, strategy uint8, p pri
 		if err != nil {
 			return bucketQuotaCapacity{}, err
 		}
+	}
+	if len(selection) > 0 {
+		group, maskVersion = selection[0].PlacementGroup, selection[0].PlacementMaskVersion
 	}
 	local := s.CollectStats(client.StatsFilter{})
 	images := map[client.ID]client.StatsSnapshot{local.Node: local}
@@ -118,6 +121,8 @@ func (s *Server) administrativeQuotaCapacity(id volume.ID, strategy uint8, p pri
 				if groups.allows(systemPlacementGroup.String(), member.ID.String(), v.ID.String()) {
 					continue
 				}
+			} else if mask, ok := groups.mask(group, maskVersion); ok && mask.NodeSelection == "all" && groups.allows(systemPlacementGroup.String(), member.ID.String(), v.ID.String()) {
+				continue
 			} else if !groups.allowsVersion(group, maskVersion, member.ID.String(), v.ID.String()) {
 				continue
 			}

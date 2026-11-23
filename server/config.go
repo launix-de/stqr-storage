@@ -49,16 +49,17 @@ type PeerConfig struct {
 	URL    string `yaml:"url" json:"url"`
 }
 type VolumeConfig struct {
-	OriginNode   string `yaml:"origin_node,omitempty" json:"origin_node,omitempty"`
-	RecoveryOnly bool   `yaml:"recovery_only,omitempty" json:"recovery_only,omitempty"`
-	ID           string `yaml:"id" json:"id"`
-	Name         string `yaml:"name" json:"name"`
-	Path         string `yaml:"path" json:"path"`
-	Class        string `yaml:"class" json:"class"`
-	SizeBytes    int64  `yaml:"size_bytes" json:"size_bytes"`
-	State        string `yaml:"state" json:"state"`
-	System       bool   `yaml:"system,omitempty" json:"system"`
-	OperationID  string `yaml:"operation_id,omitempty" json:"operation_id,omitempty"`
+	PlacementGroupsPending []string `yaml:"placement_groups_pending,omitempty" json:"placement_groups_pending,omitempty"`
+	OriginNode             string   `yaml:"origin_node,omitempty" json:"origin_node,omitempty"`
+	RecoveryOnly           bool     `yaml:"recovery_only,omitempty" json:"recovery_only,omitempty"`
+	ID                     string   `yaml:"id" json:"id"`
+	Name                   string   `yaml:"name" json:"name"`
+	Path                   string   `yaml:"path" json:"path"`
+	Class                  string   `yaml:"class" json:"class"`
+	SizeBytes              int64    `yaml:"size_bytes" json:"size_bytes"`
+	State                  string   `yaml:"state" json:"state"`
+	System                 bool     `yaml:"system,omitempty" json:"system"`
+	OperationID            string   `yaml:"operation_id,omitempty" json:"operation_id,omitempty"`
 }
 type Config struct {
 	RecoveryVolumes        []VolumeConfig `yaml:"recovery_volumes,omitempty" json:"recovery_volumes,omitempty"`

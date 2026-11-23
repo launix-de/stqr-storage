@@ -17,7 +17,7 @@ type NodeAdmin struct {
 // object commands and recursive proxy calls cannot bypass their own protocols.
 func NodeLocalAdminOpcode(op uint16) bool {
 	switch op {
-	case NodeDrain, NodeShutdown, VolumeAdd, VolumeRemove, VolumeRescan, VolumeGrow, VolumeGrowInfo,
+	case VolumeAddWithGroups, VolumePlacementRelease, NodeDrain, NodeShutdown, VolumeAdd, VolumeRemove, VolumeRescan, VolumeGrow, VolumeGrowInfo,
 		VolumeRecoveryStage, VolumeRecoveryCommit, VolumeRecoveryRelease,
 		VolumeCandidates, VolumeCapacityGet, NodeConfigGet, NodeConfigSet,
 		AdminOperationStatus:

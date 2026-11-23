@@ -80,7 +80,7 @@ func quotaCapacity(nodes []quotaNodeCapacity, strategy uint8, used uint64, guara
 // do not omit an unavailable peer or fabricate capacity on its behalf. Current
 // guaranteed quotas remain unsupported by admission; this preview also protects
 // reservations present in catalog metadata and volume-level reserve counters.
-func (s *Server) bucketQuotaCapacity(id volume.ID, strategy uint8) (bucketQuotaCapacity, error) {
+func (s *Server) bucketQuotaCapacity(id volume.ID, strategy uint8, selection ...BucketPolicy) (bucketQuotaCapacity, error) {
 	if strategy > 2 {
 		return bucketQuotaCapacity{}, fail(400, "invalid storage strategy")
 	}
@@ -99,6 +99,9 @@ func (s *Server) bucketQuotaCapacity(id volume.ID, strategy uint8) (bucketQuotaC
 		if err != nil {
 			return bucketQuotaCapacity{}, err
 		}
+	}
+	if len(selection) > 0 {
+		group, maskVersion = selection[0].PlacementGroup, selection[0].PlacementMaskVersion
 	}
 	var node quotaNodeCapacity
 	for _, store := range s.placementVolumesAt(group, maskVersion) {
@@ -157,6 +160,13 @@ func (s *Server) executeBucketQuotaCapacity(m client.Message, p principal) ([]by
 		return nil, 0, err
 	}
 	d := client.Decoder{B: m.Body}
+	group := ""
+	if m.Opcode == client.BucketGroupCapacity {
+		if d.U16() != 1 {
+			return nil, 0, client.ErrProtocol
+		}
+		group = d.ID().String()
+	}
 	id := volume.ID(d.ID())
 	strategy := d.U8()
 	profile := d.U8()
@@ -170,7 +180,16 @@ func (s *Server) executeBucketQuotaCapacity(m client.Message, p principal) ([]by
 		}
 		ppm, _ = volume.EstimatePutOverheadPPM(objectSizeProfiles[profile].Size)
 	}
-	c, err := s.administrativeQuotaCapacity(id, strategy, p)
+	var selection []BucketPolicy
+	if group != "" {
+		policy, err := s.policyForGroup(DefaultBucketPolicy(), group, true)
+		if err != nil {
+			return nil, 0, err
+		}
+		strategy = uint8(bucketClass(policy))
+		selection = append(selection, policy)
+	}
+	c, err := s.administrativeQuotaCapacity(id, strategy, p, selection...)
 	if err != nil {
 		return nil, 0, err
 	}

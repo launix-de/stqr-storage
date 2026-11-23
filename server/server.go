@@ -260,6 +260,9 @@ func Open(opts Options) (s *Server, err error) {
 	if e = s.initBuckets(); e != nil {
 		return s, e
 	}
+	if e = s.upgradePGStorage(); e != nil {
+		return s, e
+	}
 	if e = s.initPeerDirectory(); e != nil {
 		return s, e
 	}

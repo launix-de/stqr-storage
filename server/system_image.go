@@ -139,7 +139,7 @@ func (s *Server) captureSystemImage(membership client.Membership, sequence, gene
 			}
 			nodes = append(nodes, PlacementNode{NodeID: member.ID.String(), Mode: VolumesWhitelist, Volumes: []string{root.String()}})
 		}
-		mask, err := normalizePlacementMask(PlacementMask{Version: g.Effective.Version, Nodes: nodes})
+		mask, err := normalizePlacementMask(PlacementMask{Version: g.Effective.Version, Nodes: nodes, Storage: g.Effective.Storage, FailureDomains: g.Effective.FailureDomains})
 		if err != nil {
 			return nil, err
 		}
@@ -321,6 +321,12 @@ func decodeSystemView(root volume.ObjectID, load func(volume.ObjectID) ([]byte, 
 			return nil, err
 		}
 		for _, policy := range []*BucketPolicy{&d.Policy, d.DesiredPolicy} {
+			if groups.Schema >= 2 && !d.DeletionComplete && policy != nil {
+				mask, ok := view.groupImage.mask(policy.PlacementGroup, policy.PlacementMaskVersion)
+				if !ok || mask.Storage == nil || *mask.Storage != storagePolicy(*policy) {
+					return nil, volume.ErrCorrupt
+				}
+			}
 			if !d.DeletionComplete && policy != nil && policy.PlacementGroup != "" && policy.PlacementMaskVersion != 0 && view.groupImage.versions[policy.PlacementGroup][policy.PlacementMaskVersion] == nil {
 				return nil, volume.ErrCorrupt
 			}

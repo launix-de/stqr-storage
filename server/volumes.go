@@ -60,11 +60,12 @@ func statusOf(e error) int {
 }
 
 type AddVolumeRequest struct {
-	Name      string `json:"name"`
-	Source    uint8  `json:"source"`
-	Path      string `json:"path"`
-	Class     string `json:"class"`
-	SizeBytes int64  `json:"size_bytes"`
+	PlacementGroups []string `json:"placement_groups,omitempty"`
+	Name            string   `json:"name"`
+	Source          uint8    `json:"source"`
+	Path            string   `json:"path"`
+	Class           string   `json:"class"`
+	SizeBytes       int64    `json:"size_bytes"`
 }
 type Operation struct {
 	ID        string `json:"operation_id"`
@@ -183,6 +184,9 @@ func (s *Server) AddVolume(id string, r AddVolumeRequest) (op Operation, err err
 	s.mu.RUnlock()
 	if closed {
 		return op, fail(503, "server is stopping")
+	}
+	if err := s.validateVolumeGroupSelection(r.PlacementGroups); err != nil {
+		return op, err
 	}
 	op, exists, e := s.beginOperation(id, "add", r)
 	if e != nil || exists {
@@ -304,7 +308,7 @@ func (s *Server) AddVolume(id string, r AddVolumeRequest) (op Operation, err err
 		return op, fail(409, "volume is already attached")
 	}
 	actual := v.Identity().Class.String()
-	vc := VolumeConfig{ID: vid, Name: r.Name, Path: path, Class: actual, SizeBytes: int64(v.Size()), State: "pending", OperationID: id}
+	vc := VolumeConfig{PlacementGroupsPending: append([]string(nil), r.PlacementGroups...), ID: vid, Name: r.Name, Path: path, Class: actual, SizeBytes: int64(v.Size()), State: "pending", OperationID: id}
 	if e = v.SetState(volume.Pending); e != nil {
 		return op, e
 	}

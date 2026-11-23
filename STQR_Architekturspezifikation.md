@@ -1351,6 +1351,35 @@ binden. Bestehende Frames dürfen weder still umgedeutet noch erweitert werden.
 | 0x2032 | PLACEMENT_GROUP_DELETE / Q | `schema:u16=1,group:ID,expected_revision:u64` => Admin-ACK; referenzierte/gerade umgestellte Gruppen liefern 409 |
 | 0x2033 | BUCKET_SET_PLACEMENT_GROUP / Q | `schema:u16=1,bucket:ID,expected_policy_version:u64,group:Opt(ID)` => Admin-ACK; Änderung läuft über Desired-Policy |
 
+**Implementierter zentraler PG-Pfad:** Der PG-Katalog verwendet `schema=2`. Jede
+Effective-/Desired-Version enthält `version`, `node_selection`, `nodes`, optionale
+`failure_domains` und `storage` mit Klasse, Kompression, Platzierungsmodus,
+Redundanz/ACK und Read-Cache-Einstellungen. Die bisherigen flachen Policy-Bytes
+bleiben als abgeleitete Projektion unverändert; serverseitige Bucket-/Range-Bezüge
+binden sie an die wirksame PG-Version. System-Images prüfen die Übereinstimmung.
+Alte flache Admin-Anfragen wählen eine zentrale Kompatibilitäts-PG für ihren
+Storage-Vertrag; sie ändern keine gemeinsame PG und erzeugen keine Overrides.
+
+| Opcode | Aktueller zusätzlicher Pfad | Body / Antwort |
+|---|---|---|
+| 0x2031 | PLACEMENT_GROUP_SET / Q, Schema 2 | `schema:u16=2,group:ID,expected_revision:u64,name:Text,settings:Blob(JSON PlacementMask)` => Admin-ACK; die Versionsnummer der neuen PG-Version vergibt der Server |
+| 0x2033 | BUCKET_SET_PLACEMENT_GROUP / Q, Schema 2 | `schema:u16=2,bucket:ID,expected_policy_version:u64,group:Opt(ID),limits:BucketLimitsWire` => Admin-ACK; fehlende PG bedeutet Standard-PG |
+| 0x2034 | BUCKET_CREATE_IN_GROUP / Q | `schema:u16=1,bucket:ID,name:Text,group:ID,limits:BucketLimitsWire` => Admin-ACK |
+| 0x2035 | BUCKET_GROUP_CAPACITY / Q | `schema:u16=1,group:ID,bucket:ID,strategy:u8,profile:u8,overhead:u32` => bisherige Kontingentvorschau unter der Ziel-PG-Maske; Klasse aus der PG, Null-Bucket-ID für Neuanlage |
+| 0x2036 | VOLUME_ADD_WITH_GROUPS / Q, node-lokal | bisheriger VOLUME_ADD-Body, danach `schema:u16=1,groups:Vec(ID)` => Admin-ACK; persistente Placement-Sperre bis zur Aufnahme in die gewählten Listen |
+| 0x2037 | VOLUME_PLACEMENT_RELEASE / Q, node-lokal | `volume:ID` => Admin-ACK nach Prüfung der Listenergänzungen; unvollständige Blacklist-Änderungen liefern 409 |
+| 0x2038 | USER_LIST_PAGE / Q | `schema:u16=1,after_name:Text,limit:u32,query:Text,ids:Vec(ID)` => `Text(JSON{users,next,total,all_total})`; nur ID, Name, numerische Rolle und Disabled-Zustand, keine Verifier |
+| 0x2039 | BUCKET_LIST_PAGE / Q | gleicher Request wie USER_LIST_PAGE => `Text(JSON{buckets,next,total,all_total,active,locked})`; keine internen Retry-Belege |
+
+`BucketLimitsWire = accounting:u8,guaranteed:u64,unlimited:Bool,absolute:u64,metadata_reserve_ppm:u32`.
+PG-Listen- und Löschoperationen behalten Schema 1; PG-Listeneinträge ergänzen die abgeleiteten Zähler `bucket_count` und `pending_buckets`. Beim Volume-Hinzufügen werden
+angehakte Listen im vorhandenen globalen PG-Commitweg ergänzt. Die lokale Sperre
+überlebt Neustarts; Volumes werden als PENDING gemeldet und erst nach sicherer
+Freigabe reguläre Placement-Ziele. Eine committed Desired-Whitelist darf das neue
+Volume bereits für Migration verwenden, während ihre alte Version es weiter
+ausschließt; eine Blacklist muss das Volume bereits effektiv ausschließen.
+Die Administration zeigt für unterbrochene Vorgänge „PG-Listen fortsetzen“.
+
 Bestehende Ranges behalten ihre effektive PG-Version, bis ihre Daten sicher
 übergeben bzw. gemäß Zielpolicy umgestellt wurden. Freigegebene Zielversionen
 werden pro Range wirksam; erst nach allen betroffenen Bucket-Übergängen gilt die
@@ -1690,6 +1719,8 @@ AuditEntry = sequence:u64,unix_ns:u64,actor:ID,opcode:u16,operation:ID,
 VOLUME_ADD-Source `0 FILE,1 BLOCKDEVICE`; UI-Textgrößen werden vor dem Aufruf zu size_bytes konvertiert.
 
 Das Dashboard bietet die Menüpunkte **Volumes, Buckets, User, Einstellungen**. Volumes, Buckets und User zeigen jeweils einen Badge mit ihrer Anzahl; Bucket-/User-Zähler werden bereits bei Anmeldung geladen und nach lokalen Änderungen aktualisiert. Die Benutzerliste zeigt Rolle/Zustand und pro Zeile Passwortänderung und Löschen. Das eigene Konto ist vom Löschen ausgeschlossen, sowohl im Dashboard als auch bei direktem USER_DELETE. Der letzte Listeneintrag öffnet „User anlegen“ mit Benutzername und Passwort; neue Konten erhalten standardmäßig Rolle USER, optional über den Haken „Administrator“ Rolle ADMIN. In der Rollen-Spalte ist die Rolle unmittelbar per Dropdown änderbar; die Änderung verwendet USER_UPDATE (0x200c). Der angemeldete User darf sich weder selbst löschen noch die eigene Rolle ändern oder das eigene Konto deaktivieren. Das eigene Rollen-Dropdown ist sichtbar, aber deaktiviert; dieselbe Regel gilt serverseitig, unabhängig von der Zahl weiterer Administratoren. Rollenänderungen entziehen bestehende Sessions und Verbindungscapabilities des betroffenen Users; die eigene Rolle ist nicht änderbar. Eine Dashboard-Anmeldung mit korrektem Passwort, aber Rolle USER, zeigt den fehlenden Administratorzugriff ausdrücklich an. Der optionale Haken „Gleichnamigen Bucket anlegen“ öffnet nach erfolgreichem USER_CREATE das mit Name und Benutzer-ID vorbelegte Bucket-Formular. Die Bestätigung erzeugt den Bucket und gibt dem ausgewählten User Lesen/Schreiben/Anhängen/Löschen frei. Schlägt die Freigabe nach erfolgreicher Anlage fehl, bleibt dieser Teilzustand sichtbar; ein erneuter Versuch wiederholt nur die fehlende Freigabe mit derselben Request-ID. Abbrechen löscht einen bereits angelegten Bucket nicht. Die UI-Beschriftung des Hakens enthält nur „Gleichnamigen Bucket anlegen“.
+
+**Große Bucket-/User-Listen:** Das Dashboard nutzt API-Pagination mit exklusivem Namenscursor und im UI ausschließlich **Endless Scroll**. Initial werden 50 Einträge geladen; weitere Seiten werden beim Annähern an das Listenende angehängt, ohne bestehende Zeilen neu aufzubauen. Es gibt keine Seitennummern oder Vor-/Zurück-Seitenknöpfe. Verdeckte Ansichten laden keine Folgeseiten vorab. Suche erfolgt serverseitig und findet auch noch nicht geladene Einträge. Die APIs 0x2038/0x2039 begrenzen Seiten auf 1–1000 Einträge und optionale ID-Filter auf 1000 eindeutige IDs; ein leerer Folgecursor beendet die Liste. `total` zählt Treffer, `all_total` alle nicht gelöschten Einträge und speist die globalen Zähler. User-Passwortverifier und Bucket-Retry-Belege werden nicht ausgeliefert. Bestehende Listen-Opcodes behalten ihr bisheriges Layout. PG-Übersichten beziehen Bucket-Zähler direkt aus der PG-API; Benutzer-Auswahlfelder nutzen begrenzte Suchseiten und gezielte ID-Abfragen. Laufende Belegungsaktualisierung betrifft nur sichtbare Bucket-Zeilen. Anlegen bleibt über einen Knopf im jeweiligen Seitenkopf erreichbar. Fehler beim Nachladen erhalten vorhandene Zeilen und bieten einen erneuten Versuch mit demselben Cursor.
 
 Die Bucket-Ansicht zeigt PG, daraus abgeleitete Speicherklasse/Kompression, absolutes Kontingent, Freigaben und Zustand. Im Zielmodell aus §5.2/§5.8 werden Storage-Einstellungen ausschließlich im zentralen PG-Editor geändert; die folgende Beschreibung vorhandener direkter Bucket-Policy-Operationen dokumentiert den bisherigen Implementierungsstand und ist entsprechend umzustellen. Sie bietet Anlegen, Policy-/Kontingentänderung, Umbenennen, Sperren/Entsperren, Löschen sowie Freigaben je User mit einzelnen READ/WRITE/APPEND/DELETE-Rechten. Der System-Bucket ist schreibgeschützt in der Administration. Reine Kontingentänderungen verwenden BUCKET_SET_QUOTA ohne Datenmigration; laufende Umstellungen/Löschungen werden bis zum Abschluss aktualisiert. Der aktuelle Single-Node-Stand bietet eine Kopie bzw. EVERYWHERE auf der einzigen Node, HDD/SSD/RAM und raw/gzip/lz4/xz. Weitere Node-Replikate, garantierte Reservierungen und begrenzte physische Kontingente werden erst bei verfügbarer Server-Unterstützung angeboten. JavaScript erhält bei Listen und Policyänderungen alle u64-Werte exakt; Kontingente dürfen auch null oder kleiner als die Volume-Mindestgröße sein.
 

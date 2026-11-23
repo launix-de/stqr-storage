@@ -419,7 +419,7 @@ func (r *rangeManager) destination(p rangePlan) (*volume.Volume, error) {
 		config = managed.config
 	}
 	s.mu.RUnlock()
-	if managed == nil || config.System || config.State != "active" && config.State != "draining" {
+	if managed == nil || len(config.PlacementGroupsPending) > 0 || config.System || config.State != "active" && config.State != "draining" {
 		return nil, volume.ErrFull
 	}
 	b, err := s.Bucket(volume.ID(p.Before.Bucket))

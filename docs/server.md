@@ -818,3 +818,77 @@ coordinator after target cancellation and before recovery READY.
 fence, moves only its data volume over SSH and checks content, versions and
 APPEND retry identity before and after restarting the surviving daemon. The
 temporary test nodes never modify the existing deployed PM2 process.
+
+## Central placement-group storage policies
+
+Buckets select a placement group (PG); the PG owns storage class, compression,
+replication/ACK settings, optional failure-domain constraints, read-cache settings
+and the node/volume mask. Bucket limits, grants and names remain independent.
+`BucketPolicy` storage fields and the existing object-client Policy frames are
+materialized projections of an immutable PG version, not separate overrides.
+The system-image validator verifies these projections before activation.
+
+The dashboard's **Placement Groups** page edits the shared policy and its node
+list. Each node offers **Alle / Blacklist / Whitelist**; the volume add/remove
+list appears only for the latter two modes. Bucket dialogs select a PG and show
+its storage settings as read-only values. A change fans out to every referring
+bucket and remains desired until each bucket/range completes its existing
+migration path. Offline work stays pending; the old effective PG version remains
+available. New buckets can select the committed desired version during a change.
+The system PG stays reserved for membership-managed metadata placement.
+
+PG SET schema 2 sends a `PlacementMask` JSON object containing `node_selection`,
+`nodes`, `failure_domains` and a `storage` object. Schema 1 remains a mask-only
+compatibility operation. The new bucket-create opcode takes a PG ID and binary
+limits, without independently editable storage fields. Legacy flat create/set
+requests select a centrally stored compatibility PG for their storage contract.
+Startup upgrades old catalogs to schema 2, preserves existing masks, effective and
+desired contracts, and shares equal legacy contracts. It persists PGs before
+publishing bucket references and can resume an interrupted upgrade.
+
+When adding a volume, checkboxes optionally add its ID to existing node-specific
+PG blacklists/whitelists. The volume is mounted with a persistent placement hold
+and reported as PENDING until the list commits permit release. Whitelist additions
+can receive migrations after their desired version commits; blacklist exclusions
+must already be effective before release. Failed/interrupted additions retain the
+volume and show **PG-Listen fortsetzen**; retries do not create another volume.
+These operations can also target another node through the existing node wrapper.
+
+Current implementation limits still apply: multiple synchronous data replicas,
+EC, active read caches, guaranteed reservations and nonempty disk/RAM conversion
+are not implemented. Moving these settings into a PG does not enable them;
+unsupported replica/conversion requests fail explicitly.
+
+Validation covers shared policy changes with individual quotas and payloads,
+legacy migration/restart, persistent offline intents, two-node convergence,
+volume holds across restart, binary dashboard commands and exact uint64 values.
+The optional browser test `TestDashboardCentralPGBrowser` creates a PG and two
+buckets, checks volume-filter visibility and applies a shared compression change.
+
+## Dashboard cursor pages and endless scrolling
+
+The user and bucket screens fetch 50 entries initially and append another cursor
+page near the end of the visible list. Hidden screens do not drain remaining
+pages. Existing rows are retained when appending; there are no page-number or
+next/previous controls. Search is performed by the API, including entries which
+have not yet been loaded. Sidebar totals represent all records, rather than the
+number of rendered rows. Add buttons remain in the page heading.
+
+`USER_LIST_PAGE` (0x2038) and `BUCKET_LIST_PAGE` (0x2039) use
+`schema:u16=1,after_name:Text,limit:u32,query:Text,ids:Vec(ID)`.
+The limit is 1..1000; `ids` contains at most 1000 distinct nonzero IDs and an empty
+vector means no ID restriction. The response is a Text JSON object with
+`users`/`buckets`, `next`, matching `total` and unfiltered `all_total`. Bucket pages
+also report matching `active` and `locked` counts. An empty next cursor ends the
+list. Pages sort by unique name and use an exclusive name cursor; this is a live
+administrative listing, not a snapshot across concurrent renames.
+
+User entries contain only ID, name, numeric role and disabled state. Bucket
+receipts and account verifiers are excluded. Both endpoints require current
+administrator authorization and do not acquire a global mutation round.
+Legacy list opcodes retain their existing byte layouts for older clients.
+
+The PG list supplies derived `bucket_count` and `pending_buckets`, avoiding a
+complete bucket download for its overview. User selectors search bounded API
+pages and resolve existing grants by explicit IDs. Periodic bucket usage refresh
+is restricted to visible rows instead of reloading every visited page.

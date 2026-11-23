@@ -150,7 +150,7 @@ func cloneBucketDescription(d BucketDescription) BucketDescription {
 }
 func DefaultBucketPolicy() BucketPolicy {
 	overhead, _ := volume.EstimatePutOverheadPPM(1 << 20)
-	return BucketPolicy{Version: 1, StorageStrategy: "hdd", Compression: "raw", PlacementMode: "count", Redundancy: BucketRedundancy{Mode: "single", Replicas: 1, ACK: "all"}, Limits: BucketLimits{Accounting: "logical", MetadataReservePPM: overhead, Unlimited: true}}
+	return BucketPolicy{Version: 1, PlacementGroup: defaultPlacementGroup.String(), PlacementMaskVersion: 1, StorageStrategy: "hdd", Compression: "raw", PlacementMode: "count", Redundancy: BucketRedundancy{Mode: "single", Replicas: 1, ACK: "all"}, Limits: BucketLimits{Accounting: "logical", MetadataReservePPM: overhead, Unlimited: true}}
 }
 func NewBucket(id volume.ID, name string) (*Bucket, error) {
 	d := BucketDescription{Schema: 1, ID: id.String(), Name: name, State: BucketActive, Revision: 1, Policy: DefaultBucketPolicy()}
@@ -158,6 +158,7 @@ func NewBucket(id volume.ID, name string) (*Bucket, error) {
 		d.Policy.PlacementMode = "everywhere"
 		d.Policy.Redundancy = BucketRedundancy{Mode: "replication", ACK: "all"}
 		d.Policy.PlacementGroup = systemPlacementGroup.String()
+		d.Policy.PlacementMaskVersion = 0
 	}
 	d, err := normalizeBucketDescription(d)
 	if err != nil {
@@ -385,8 +386,9 @@ func (i BucketInfo) MarshalBinary() ([]byte, error) {
 // Metadata objects currently use the volume's bounded convenience reads and
 // must fit MaxBufferedRead. Payload object sizes are unrelated to this budget.
 type BucketCatalog struct {
-	admin  *volume.Volume
-	onSave func(BucketDescription)
+	admin     *volume.Volume
+	onSave    func(BucketDescription)
+	upgrading bool // startup-only enrichment of unchanged legacy storage contracts
 }
 
 func BucketCatalogKey() volume.Key {
@@ -562,7 +564,7 @@ func (c *BucketCatalog) Save(d BucketDescription, expectedRevision uint64) (*Buc
 				if current.Revision != expectedRevision {
 					return nil, ErrBucketConflict
 				}
-				if d.Policy.Version < current.Policy.Version || (d.Policy != current.Policy && d.Policy.Version == current.Policy.Version) {
+				if !c.upgrading && (d.Policy.Version < current.Policy.Version || (d.Policy != current.Policy && d.Policy.Version == current.Policy.Version)) {
 					return nil, ErrBucketInvalid
 				}
 			} else if current.Name == d.Name && !current.DeletionComplete && !d.DeletionComplete {

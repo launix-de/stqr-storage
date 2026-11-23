@@ -290,7 +290,7 @@ func (s *Server) dispatchAs(m client.Message, ws *wsSession, p principal) ([]byt
 	}
 	if s.clusterPaused() || s.forceFrozen() {
 		switch m.Opcode {
-		case client.VolumeAdd, client.VolumeRemove, client.VolumeRescan, client.VolumeGrow, client.NodeConfigSet, client.NodeDrain:
+		case client.VolumeAddWithGroups, client.VolumePlacementRelease, client.VolumeAdd, client.VolumeRemove, client.VolumeRescan, client.VolumeGrow, client.NodeConfigSet, client.NodeDrain:
 			return client.ResponseBody(503, nil, "cluster shutdown is pending"), 503
 		}
 	}
@@ -538,24 +538,43 @@ func (s *Server) execute(m client.Message, ws *wsSession) ([]byte, int, error) {
 			ws.unsubscribe(sub)
 		}
 		return nil, 200, nil
-	case client.VolumeAdd:
+	case client.VolumeAdd, client.VolumeAddWithGroups:
 		name := d.Text()
 		source := d.U8()
 		path := d.Text()
 		class := d.U8()
 		size := d.U64()
+		var groups []string
+		if m.Opcode == client.VolumeAddWithGroups {
+			if d.U16() != 1 {
+				return nil, 0, client.ErrProtocol
+			}
+			for i, n := 0, d.Count(10000); i < n; i++ {
+				groups = append(groups, d.ID().String())
+			}
+		}
 		if e := guard(); e != nil {
 			return nil, 0, e
 		}
 		if size > math.MaxInt64 || class > 2 {
 			return nil, 0, fail(400, "invalid volume size/class")
 		}
-		op, e := s.AddVolume(m.ID.String(), AddVolumeRequest{Name: name, Source: source, Path: path, Class: []string{"hdd", "ssd", "ram"}[class], SizeBytes: int64(size)})
+		op, e := s.AddVolume(m.ID.String(), AddVolumeRequest{PlacementGroups: groups, Name: name, Source: source, Path: path, Class: []string{"hdd", "ssd", "ram"}[class], SizeBytes: int64(size)})
 		if e != nil {
 			return nil, 0, e
 		}
 		if op.State == "failed" {
 			return nil, 0, fail(op.Status, op.Detail)
+		}
+		return encodeAck(op), op.Status, nil
+	case client.VolumePlacementRelease:
+		id := d.ID()
+		if err := guard(); err != nil {
+			return nil, 0, err
+		}
+		op, err := s.releaseVolumePlacement(m.ID.String(), id.String())
+		if err != nil {
+			return nil, 0, err
 		}
 		return encodeAck(op), op.Status, nil
 	case client.VolumeRescan:

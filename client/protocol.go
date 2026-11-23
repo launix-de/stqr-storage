@@ -31,6 +31,12 @@ const (
 	BucketMaintenance       uint16 = 0x0115
 	BucketScan              uint16 = 0x0116
 	BucketObjectList        uint16 = 0x0117
+	UserListPage            uint16 = 0x2038
+	BucketListPage          uint16 = 0x2039
+	VolumeAddWithGroups     uint16 = 0x2036
+	VolumePlacementRelease  uint16 = 0x2037
+	BucketGroupCapacity     uint16 = 0x2035
+	BucketCreateInGroup     uint16 = 0x2034
 	BucketCreate            uint16 = 0x2003
 	BucketSetPolicy         uint16 = 0x2004
 	BucketSetQuota          uint16 = 0x2005

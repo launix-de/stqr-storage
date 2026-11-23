@@ -30,8 +30,11 @@ type PlacementNode struct {
 }
 
 type PlacementMask struct {
-	Version uint64          `json:"version"`
-	Nodes   []PlacementNode `json:"nodes"`
+	Version        uint64          `json:"version"`
+	NodeSelection  string          `json:"node_selection,omitempty"` // empty/list: explicit nodes; all: unrestricted data volumes
+	Storage        *StoragePolicy  `json:"storage,omitempty"`
+	FailureDomains []string        `json:"failure_domains,omitempty"`
+	Nodes          []PlacementNode `json:"nodes"`
 }
 
 // Desired is persisted planning input. Only a committed generation may replace
@@ -58,14 +61,30 @@ type placementNodeFilter struct {
 // Published images are immutable. Object placement does one map lookup per node
 // and volume; it never scans or copies a potentially large administrative mask.
 type placementGroupImage struct {
-	object   placementGroupsObject
-	filters  map[string]map[string]placementNodeFilter
-	versions map[string]map[uint64]map[string]placementNodeFilter
+	object    placementGroupsObject
+	filters   map[string]map[string]placementNodeFilter
+	versions  map[string]map[uint64]map[string]placementNodeFilter
+	masks     map[string]map[uint64]PlacementMask
+	effective map[string]uint64
 }
 
 func normalizePlacementMask(mask PlacementMask) (PlacementMask, error) {
-	if mask.Version == 0 || len(mask.Nodes) > 10000 {
+	if mask.Version == 0 || len(mask.Nodes) > 10000 || mask.NodeSelection != "" && mask.NodeSelection != "list" && mask.NodeSelection != "all" || mask.NodeSelection == "all" && len(mask.Nodes) != 0 {
 		return mask, ErrBucketInvalid
+	}
+	mask.FailureDomains = append([]string(nil), mask.FailureDomains...)
+	sort.Strings(mask.FailureDomains)
+	for i, domain := range mask.FailureDomains {
+		if domain != "node" && domain != "host" && domain != "rack" && domain != "zone" || i > 0 && mask.FailureDomains[i-1] == domain {
+			return mask, ErrBucketInvalid
+		}
+	}
+	if mask.Storage != nil {
+		policy := *mask.Storage
+		if err := policy.validate(); err != nil {
+			return mask, err
+		}
+		mask.Storage = &policy
 	}
 	mask.Nodes = append([]PlacementNode{}, mask.Nodes...)
 	for i := range mask.Nodes {
@@ -106,7 +125,7 @@ func normalizePlacementMask(mask PlacementMask) (PlacementMask, error) {
 }
 
 func compilePlacementGroups(object placementGroupsObject) (*placementGroupImage, error) {
-	if object.Schema != 1 || len(object.Groups) > 10000 {
+	if object.Schema != 1 && object.Schema != 2 || len(object.Groups) > 10000 {
 		return nil, ErrBucketInvalid
 	}
 	object.Groups = append([]PlacementGroup{}, object.Groups...)
@@ -129,6 +148,8 @@ func compilePlacementGroups(object placementGroupsObject) (*placementGroupImage,
 	}
 	image := &placementGroupImage{filters: make(map[string]map[string]placementNodeFilter)}
 	image.versions = make(map[string]map[uint64]map[string]placementNodeFilter)
+	image.masks = make(map[string]map[uint64]PlacementMask)
+	image.effective = make(map[string]uint64)
 	for i := range object.Groups {
 		g := &object.Groups[i]
 		id, err := bucketID(g.ID)
@@ -136,6 +157,9 @@ func compilePlacementGroups(object placementGroupsObject) (*placementGroupImage,
 			return nil, ErrBucketInvalid
 		}
 		g.ID = id.String()
+		if g.ID == systemPlacementGroup.String() && (g.Effective.NodeSelection == "all" || g.Desired != nil && g.Desired.NodeSelection == "all") {
+			return nil, ErrBucketInvalid
+		}
 		if g.Effective, err = normalizePlacementMask(g.Effective); err != nil {
 			return nil, err
 		}
@@ -145,6 +169,11 @@ func compilePlacementGroups(object placementGroupsObject) (*placementGroupImage,
 				return nil, ErrBucketInvalid
 			}
 			g.Desired = &desired
+		}
+		image.masks[g.ID] = map[uint64]PlacementMask{g.Effective.Version: g.Effective}
+		image.effective[g.ID] = g.Effective.Version
+		if g.Desired != nil {
+			image.masks[g.ID][g.Desired.Version] = *g.Desired
 		}
 		nodes := make(map[string]placementNodeFilter)
 		for _, n := range g.Effective.Nodes {
@@ -189,6 +218,9 @@ func (p *placementGroupImage) allowsVersion(group string, version uint64, node, 
 	if group != systemPlacementGroup.String() && p.allowsVersion(systemPlacementGroup.String(), 0, node, vol) {
 		return false
 	}
+	if mask, ok := p.mask(group, version); ok && mask.NodeSelection == "all" {
+		return group != systemPlacementGroup.String() && !p.allowsVersion(systemPlacementGroup.String(), 0, node, vol)
+	}
 	nodes := p.filters[group]
 	if version != 0 {
 		nodes = p.versions[group][version]
@@ -218,10 +250,15 @@ func (s *Server) placementVolumesAt(group string, version uint64) []*volume.Volu
 	image := s.placementGroups.Load()
 	result := []*volume.Volume{}
 	for id, v := range s.volumes {
+		if len(v.config.PlacementGroupsPending) > 0 {
+			continue
+		}
 		if group == "" {
 			if v.config.System {
 				continue // unrestricted data-volume pool
 			}
+		} else if mask, ok := image.mask(group, version); ok && mask.NodeSelection == "all" && v.config.System {
+			continue
 		} else if !image.allowsVersion(group, version, s.cfg.Node.ID, id) {
 			continue
 		}

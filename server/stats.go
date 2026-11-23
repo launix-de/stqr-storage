@@ -94,6 +94,9 @@ func (s *Server) CollectStats(filter client.StatsFilter) client.StatsSnapshot {
 		id := client.ID(v.Identity.VolumeID)
 		io := client.IOStats{PhysicalReadBytes: v.IO.ReadBytes, PhysicalWriteBytes: v.IO.WriteBytes, Errors: v.IO.Errors, Flushes: v.IO.SyncOps, FlushNS: v.IO.SyncNanoseconds}
 		state := uint8(m.store.State())
+		if len(m.config.PlacementGroupsPending) > 0 {
+			state = 0
+		}
 		if s.controller != nil && m.config.State == "draining" {
 			state = 2
 		}

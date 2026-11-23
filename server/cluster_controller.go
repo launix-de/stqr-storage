@@ -282,6 +282,7 @@ func (c *clusterController) changeWithExclusion(ctx context.Context, next *clien
 		kind = controlForceDisconnect
 	}
 	sort.Slice(required, func(i, j int) bool { return bytes.Compare(required[i][:], required[j][:]) < 0 })
+	sort.Slice(frozen, func(i, j int) bool { return bytes.Compare(frozen[i][:], frozen[j][:]) < 0 })
 	claim, err := c.coordinator.beginWithExclusion(ctx, kind, required, exclusion, frozen...)
 	if err != nil {
 		if exclusion != nil && claim.Exclusion != nil {
@@ -506,10 +507,27 @@ func (s *Server) executeGlobalAdmin(m client.Message, actor principal) ([]byte, 
 		copy(bucket[:], m.Body[:16])
 		frozen = []client.ID{bucket}
 	}
+	if m.Opcode == bucketSetPlacementGroup {
+		d := client.Decoder{B: m.Body}
+		schema := d.U16()
+		id := d.ID()
+		if d.Err != nil || schema != 1 && schema != 2 {
+			return nil, 0, client.ErrProtocol
+		}
+		frozen = append(frozen, id)
+	}
 	return c.change(s.ctx, nil, func() (*adminDraft, error) {
 		draft, err := s.prepareAdminDraft(m, actor)
 		if err != nil {
 			return nil, err
+		}
+		if m.Opcode == placementGroupSet {
+			for _, d := range draft.server.bucketSnapshots() {
+				if d.DesiredPolicy != nil && (d.Policy.StorageStrategy == "ram") != (d.DesiredPolicy.StorageStrategy == "ram") {
+					draft.close()
+					return nil, fail(501, "cluster RAM/disk policy conversion requires runtime handoff")
+				}
+			}
 		}
 		for _, id := range frozen {
 			usage, err := c.frozenUsage(s.ctx, id)
