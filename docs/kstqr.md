@@ -116,8 +116,10 @@ can be helped after interruption without recursive kernel-stack traversal.
 Data and index objects are immutable. A version-checked inode CAS publishes each
 new content image. Partial writes preserve unmodified segment references; sparse
 extensions store zero spans. Open-unlinked files remain usable until close.
-All successful `write`/`pwrite` chunks are acknowledged by the server before
-returning. Shared writable mappings use the kernel page cache: `msync(MS_SYNC)`
+Successful `write`/`pwrite` chunks are atomically accepted by the server before
+returning; on capable nodes their persistence can be deferred until a barrier.
+`fsync`, `fdatasync`, `msync(MS_SYNC)`, synchronous writes and waiting `syncfs`
+confirm the observed bucket prefix across the mount's connections. Shared writable mappings use the kernel page cache: `msync(MS_SYNC)`
 and `fsync` flush dirty pages through the same durable object CAS path. Background
 writeback and unmount also flush these pages; `munmap` alone is not a durability
 barrier. Failed writeback reports an error and retains dirty pages for retry.
@@ -136,7 +138,9 @@ operation. Mapped writeback collects contiguous dirty folios into batches of
 at most 1 MiB. Gaps and the requested writeback range split batches; partial EOF
 pages are clipped. Pages remain under writeback until their batch is acknowledged.
 A failed batch redirties all of its pages and reports the error, preserving them
-for a later retry. There is no change to the synchronous server ACK contract. `MAP_SHARED` supports reads and writes;
+for a later retry. Writeback completion alone is an accepted ACK on capable nodes; filesystem sync
+also confirms the server checkpoint. Nodes lacking the capability retain the
+previous durable-per-mutation path. `MAP_SHARED` supports reads and writes;
 `MAP_PRIVATE` uses normal copy-on-write pages without modifying stored content.
 Mappings and ordinary I/O share the page cache within a mount. Truncation flushes
 dirty data before resizing; access to pages beyond the new EOF raises `SIGBUS`.
@@ -271,3 +275,8 @@ validates and cleans the published object graph.
 the read benchmark: ordinary durable writes, dense/sparse mmap+msync and repeated
 4 KiB commits. It also records per-case CAS counts and phase timings. See
 [the writeback measurements](../benchmarks/2026-11-23-writeback/README.md).
+
+The [explicit durability contract](durability.md) describes accepted writes,
+checkpoint bounds, cross-volume ordering and unconfirmed marks after server loss.
+After a rollback, inode versions/sizes can decrease to the recovered checkpoint;
+reads refresh that state, while fsync of the lost incarnation reports ESTALE.

@@ -15,7 +15,7 @@ info, err := conn.Put(ctx, objectID, payload, client.PutOptions{
 
 `Client` exposes only object operations inside that bucket: Get/GetRange,
 Put/PutRange, Append, Trunc, Delete, Stat, CAS, the necessary streaming variants
-and Close. Object IDs are native `[32]byte` addresses. No per-call bucket argument,
+Sync and Close. Object IDs are native `[32]byte` addresses. No per-call bucket argument,
 Bucket(name), global multi-bucket handle, key-address alias API, administration
 or cluster metrics are offered. Another bucket requires another connection.
 The shared wire codec/statistics types remain in this package to avoid server /
@@ -304,3 +304,13 @@ files/FIFOs/Unix sockets, and `GetXattr`, `SetXattr`, `ListXattr`, `RemoveXattr`
 The FUSE adapter implements the corresponding Linux operations. These changes
 use STFS v5 and require upgrading every client accessing a bucket; see the
 [shared format and semantics guide](filesystem-posix.md) before deploying them.
+
+## Explicit durability
+
+Native mutations retain durable ACKs by default. Set `MutationOptions.Accepted`
+to opt into visible, potentially volatile writes, then call `Client.Sync(ctx)` at
+an explicit durability boundary. Receipts include the issuing server incarnation;
+unconfirmed receipts cannot silently survive a reboot. The FUSE CLI negotiates
+this mode and uses actual barriers for filesystem sync operations; ordinary close
+is no longer a forced fsync. See [the durability contract](durability.md) for
+causal references, bounds, fallback behavior and recovery semantics.

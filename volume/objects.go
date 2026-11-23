@@ -291,6 +291,15 @@ func oldPieces(v *Volume, o *object, limit, cutStart, cutEnd uint64) []payloadPi
 	return pieces
 }
 func (v *Volume) mutateWithRetryLocked(op uint8, k Key, offset, length uint64, src io.Reader, expected []byte, opts Options) (Result, error) {
+	if opts.Accepted {
+		return v.acceptedMutation(op, k, offset, length, src, expected, opts)
+	}
+	if err := v.flushDeferred(); err != nil {
+		return Result{}, err
+	}
+	return v.mutateCore(op, k, offset, length, src, expected, opts)
+}
+func (v *Volume) mutateCore(op uint8, k Key, offset, length uint64, src io.Reader, expected []byte, opts Options) (Result, error) {
 	if e := v.check(true); e != nil {
 		return Result{}, e
 	}

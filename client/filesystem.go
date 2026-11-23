@@ -434,11 +434,16 @@ func (f *Filesystem) Rename(ctx context.Context, parent ObjectID, name string, n
 	return f.RenameWithFlags(ctx, parent, name, newParent, newName, 0)
 }
 
-// Sync performs no additional flush: no dirty data is buffered by this frontend.
-// All prior completed mutations already received the store's durable CAS ACK.
+// Sync checkpoints all observed writes, including dependent immutable objects.
+// Stores without deferred durability already give durable mutation ACKs.
 func (f *Filesystem) Sync(ctx context.Context, id ObjectID) error {
-	_, err := f.Stat(ctx, id)
-	return err
+	if _, err := f.Stat(ctx, id); err != nil {
+		return err
+	}
+	if s, ok := f.store.(interface{ Sync(context.Context) error }); ok {
+		return s.Sync(ctx)
+	}
+	return nil
 }
 
 func (f *Filesystem) CheckWrite(ctx context.Context, id ObjectID) error {

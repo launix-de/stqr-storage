@@ -61,6 +61,16 @@ int main(void) {
     CHECK(!stqr_put(c,id,"hello",5,&o,&info)); CHECK(info.length == 5);
     CHECK(!stqr_get(c,id,&data,&n,&info)); CHECK(n == 5 && !memcmp(data,"hello",5)); stqr_free(data);
     {
+        stqr_commit_mark mark, wrong, durable;
+        o = fresh(); o.accepted = 1;
+        CHECK(!stqr_put(c,id,"hello",5,&o,&info));
+        CHECK(!stqr_pending_mark(c,&mark) && mark.sequence);
+        wrong = mark; wrong.boot.bytes[0] ^= 1;
+        CHECK(stqr_sync_through(c,&wrong,&durable) == -ESTALE);
+        CHECK(!stqr_pending_mark(c,&wrong) && wrong.sequence == mark.sequence);
+        CHECK(!stqr_sync(c)); CHECK(!stqr_pending_mark(c,&mark) && !mark.sequence);
+    }
+    {
         stqr_client *watch = NULL; stqr_id sid; stqr_u64 cursor;
         struct observer events = {0};
         CHECK(!stqr_dial(&watch,url,getenv("STQR_TEST_USER"),getenv("STQR_TEST_PASSWORD"),bucket,3000));

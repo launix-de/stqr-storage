@@ -62,10 +62,9 @@ static umode_t node_mode(const struct ks_node *n)
 static void update_inode(struct inode *i, const struct ks_node *n, u64 version)
 {
 	mutex_lock(&KS_I(i)->metadata_lock);
-	if (KS_I(i)->version > version) {
-		mutex_unlock(&KS_I(i)->metadata_lock);
-		return;
-	}
+	/* Unconfirmed accepted versions can roll back after an incarnation loss.
+	 * Cache/transport loss invalidates pages; accept authoritative lower versions
+	 * too instead of pinning the inode forever to a vanished volatile size. */
 	if (KS_I(i)->version && KS_I(i)->version != version)
 		WRITE_ONCE(KS_I(i)->invalidate, true);
 	KS_I(i)->version = version;
@@ -607,6 +606,11 @@ static ssize_t ks_write_iter(struct kiocb *iocb, struct iov_iter *from)
 	}
 out:
 	sq_free(buffer);
+	if (total && (iocb->ki_flags & (IOCB_DSYNC | IOCB_SYNC))) {
+		int synced = ks_checkpoint(f);
+		if (synced)
+			return synced;
+	}
 	return total ? total : err;
 }
 static int ks_read_folio(struct file *file, struct folio *folio)
@@ -850,7 +854,8 @@ static int ks_mmap(struct file *file, struct vm_area_struct *vma)
 static int ks_fsync(struct file *file, loff_t start, loff_t end, int datasync)
 {
 	(void)datasync;
-	return file_write_and_wait_range(file, start, end);
+	int err = file_write_and_wait_range(file, start, end);
+	return err ? err : ks_checkpoint(file_inode(file)->i_sb->s_fs_info);
 }
 static const struct address_space_operations ks_aops = {.read_folio = ks_read_folio,
 							.readahead = ks_readahead,
@@ -1061,6 +1066,11 @@ static void ks_put_super(struct super_block *sb)
 	struct ks_fs *f = sb->s_fs_info;
 	if (!f)
 		return;
+	if (!f->readonly) {
+		int err = ks_checkpoint(f);
+		if (err)
+			pr_err("kstqr: final durability checkpoint failed: %d\n", err);
+	}
 	WRITE_ONCE(f->stopping, true);
 	ks_cache_stop(f);
 	cancel_work_sync(&f->invalidation_work);
@@ -1110,11 +1120,16 @@ static int ks_statfs(struct dentry *d, struct kstatfs *s)
 	/* No invented physical capacity: bucket capacity RPC is not implemented. */
 	return 0;
 }
+static int ks_sync_fs(struct super_block *sb, int wait)
+{
+	return wait ? ks_checkpoint(sb->s_fs_info) : 0;
+}
 static const struct super_operations ks_super_ops = {
     .alloc_inode = ks_alloc_inode,
     .free_inode = ks_free_inode,
     .evict_inode = ks_evict,
     .put_super = ks_put_super,
+    .sync_fs = ks_sync_fs,
     .show_options = ks_show_options,
     .show_stats = ks_show_stats,
     .statfs = ks_statfs,
@@ -1139,6 +1154,7 @@ static int ks_fill_super(struct super_block *sb, struct fs_context *fc)
 		return -ENOMEM;
 	for (unsigned slot = 0; slot < KS_RPC_SLOTS; slot++)
 		mutex_init(&f->rpc[slot].lock);
+	mutex_init(&f->sync_lock);
 	spin_lock_init(&f->inode_lock);
 	INIT_LIST_HEAD(&f->inodes);
 	INIT_WORK(&f->invalidation_work, ks_invalidation_worker);

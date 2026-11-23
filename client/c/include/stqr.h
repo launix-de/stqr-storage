@@ -27,6 +27,7 @@ typedef struct {
     stqr_id request_id;
     stqr_u64 version, length;
     int has_version, has_length, absent;
+    int accepted; /* opt-in visible ACK; stqr_sync confirms persistence */
 } stqr_options;
 typedef struct {
     stqr_u64 version, length;
@@ -72,6 +73,16 @@ int stqr_cas(stqr_client *, stqr_object_id, unsigned scope, stqr_u64 offset,
              const void *expected, size_t expected_len,
              const void *replacement, size_t replacement_len,
              const stqr_options *, stqr_info *);
+#define STQR_CAP_DURABILITY 1024U
+typedef struct { stqr_id boot; stqr_u64 sequence; } stqr_commit_mark;
+/* Mark observation includes reads and subscription updates, preserving causal
+ * dependencies. Close is not a durability barrier. Marks survive reconnect;
+ * loss of an unconfirmed server incarnation makes sync return -ESTALE. */
+int stqr_pending_mark(stqr_client *, stqr_commit_mark *);
+int stqr_sync_through(stqr_client *, const stqr_commit_mark *, stqr_commit_mark *);
+int stqr_sync(stqr_client *);
+/* Propagate a real successful SYNC response across connections to this bucket. */
+void stqr_note_durable(stqr_client *, const stqr_commit_mark *);
 /* Subscriptions use the same wire protocol as the Go SDK. Calls, polling and
  * callbacks are serialized by the caller. Callback data is borrowed until return;
  * callbacks must not call this connection. NULL update means connection loss.

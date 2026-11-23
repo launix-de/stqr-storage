@@ -7,6 +7,7 @@ import (
 	"math"
 
 	"github.com/launix-de/stqr-storage/client"
+	"github.com/launix-de/stqr-storage/volume"
 )
 
 func encodeAck(op Operation) []byte {
@@ -48,7 +49,7 @@ func (s *Server) dispatchAs(m client.Message, ws *wsSession, p principal) ([]byt
 		if p.connection.invalid.Load() {
 			return client.ResponseBody(403, nil, "connection authorization revoked"), 403
 		}
-		if p.connection.bucket != nil && m.Opcode != client.Hello && m.Opcode != client.Ping && !(m.Opcode >= 0x0100 && m.Opcode <= client.BucketObjectList) {
+		if p.connection.bucket != nil && m.Opcode != client.Hello && m.Opcode != client.Ping && !(m.Opcode >= 0x0100 && m.Opcode <= client.BucketObjectList || m.Opcode == client.ObjectAccepted || m.Opcode == client.BucketSync) {
 			return client.ResponseBody(403, nil, "bucket connection has no administrative privileges"), 403
 		}
 	}
@@ -285,7 +286,7 @@ func (s *Server) dispatchAs(m client.Message, ws *wsSession, p principal) ([]byt
 		return client.ResponseBody(403, nil, "cluster peer operation required"), 403
 	}
 
-	if !p.isAdmin() && m.Opcode != client.Hello && m.Opcode != client.Ping && !(m.Opcode >= 0x0100 && m.Opcode <= client.BucketObjectList) {
+	if !p.isAdmin() && m.Opcode != client.Hello && m.Opcode != client.Ping && !(m.Opcode >= 0x0100 && m.Opcode <= client.BucketObjectList || m.Opcode == client.ObjectAccepted || m.Opcode == client.BucketSync) {
 		return client.ResponseBody(403, nil, "administrator required"), 403
 	}
 	if s.clusterPaused() || s.forceFrozen() {
@@ -389,6 +390,21 @@ func (s *Server) dispatchAs(m client.Message, ws *wsSession, p principal) ([]byt
 		}
 		return client.ResponseBody(status, result, ""), status
 	}
+	if (m.Opcode == client.ObjectAccepted || m.Opcode == client.BucketSync) && (ws == nil || !ws.durabilityCap.Load()) {
+		return client.ResponseBody(501, nil, "durability capability was not negotiated"), 501
+	}
+	if m.Opcode == client.BucketSync {
+		ctx := s.ctx
+		if ws != nil {
+			ctx = ws.objectContext(m.ID)
+		}
+		result, status, err := s.executeSync(ctx, m, ws, p)
+		if err != nil {
+			status = objectStatus(err)
+			return client.ResponseBody(status, nil, err.Error()), status
+		}
+		return client.ResponseBody(status, result, ""), status
+	}
 	if m.Opcode == client.ObjectSubscribe || m.Opcode == client.ObjectUnsubscribe || m.Opcode == client.SubscriptionAck {
 		result, status, err := s.executeObjectSubscription(m, ws, p)
 		if err != nil {
@@ -399,9 +415,16 @@ func (s *Server) dispatchAs(m client.Message, ws *wsSession, p principal) ([]byt
 			status = objectStatus(err)
 			return client.ResponseBody(status, nil, err.Error()), status
 		}
+		if m.Opcode == client.ObjectSubscribe {
+			var bucket volume.ID
+			if len(m.Body) >= 16 {
+				copy(bucket[:], m.Body[:16])
+			}
+			return s.durabilityResponse(status, result, bucket), status
+		}
 		return client.ResponseBody(status, result, ""), status
 	}
-	if m.Opcode >= 0x0100 && m.Opcode <= 0x0108 || m.Opcode == client.BucketMaintenance || m.Opcode == client.BucketScan || m.Opcode == client.BucketObjectList {
+	if m.Opcode >= 0x0100 && m.Opcode <= 0x0108 || m.Opcode == client.ObjectAccepted || m.Opcode == client.BucketMaintenance || m.Opcode == client.BucketScan || m.Opcode == client.BucketObjectList {
 		result, status, err := s.executeObjects(m, ws, p)
 		if errors.Is(err, errObjectStaged) {
 			return nil, 0
@@ -414,7 +437,11 @@ func (s *Server) dispatchAs(m client.Message, ws *wsSession, p principal) ([]byt
 			}
 			return client.ResponseBody(status, nil, err.Error()), status
 		}
-		return client.ResponseBody(status, result, ""), status
+		var bucket volume.ID
+		if len(m.Body) >= 16 {
+			copy(bucket[:], m.Body[:16])
+		}
+		return s.durabilityResponse(status, result, bucket), status
 	}
 	if userOpcode(m.Opcode) {
 		result, status, e := s.executeUsers(m, p)
@@ -456,7 +483,10 @@ func (s *Server) execute(m client.Message, ws *wsSession) ([]byte, int, error) {
 	switch m.Opcode {
 	case client.Hello:
 		min, max := d.U16(), d.U16()
-		d.U64()
+		requestedCapabilities := d.U64()
+		if ws != nil {
+			ws.durabilityCap.Store(requestedCapabilities&client.CapabilityDurability != 0)
+		}
 		d.Text()
 		if e := guard(); e != nil {
 			return nil, 0, e
@@ -469,7 +499,7 @@ func (s *Server) execute(m client.Message, ws *wsSession) ([]byte, int, error) {
 		s.mu.RUnlock()
 		e := client.Encoder{}
 		e.U16(1)
-		caps, membership, revision := client.CapabilityPeerTransport|client.CapabilityNodeAdmin|client.CapabilityObjectSubscriptions, uint64(1), c.Generation
+		caps, membership, revision := client.CapabilityPeerTransport|client.CapabilityNodeAdmin|client.CapabilityObjectSubscriptions|client.CapabilityDurability, uint64(1), c.Generation
 		if s.control != nil {
 			caps |= client.CapabilityClusterControl
 			s.control.ledger.mu.Lock()

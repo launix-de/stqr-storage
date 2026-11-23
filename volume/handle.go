@@ -215,6 +215,11 @@ func (h *Handle) CAS(k Key, offset uint64, expected, replacement []byte, opts Op
 
 func (h *Handle) do(write bool, f func(*Volume) error) error {
 	_, e := withHandle(h, write, func(v *Volume) (struct{}, error) {
+		if write {
+			if err := v.flushDeferred(); err != nil {
+				return struct{}{}, err
+			}
+		}
 		return struct{}{}, f(v)
 	})
 	return e
@@ -367,4 +372,9 @@ func (h *Handle) ScanObjects(after *Key, limit int) ([]ObjectRecord, error) {
 		}
 		return out, e
 	})
+}
+
+// Generation identifies the full local checkpoint covering the handle's snapshot.
+func (h *Handle) Generation() (uint64, error) {
+	return withHandle(h, false, func(v *Volume) (uint64, error) { return v.sb.Generation, nil })
 }

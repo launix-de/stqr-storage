@@ -13,6 +13,8 @@ struct stqr_client {
     stqr_u64 capabilities;
     stqr_update_handler update;
     void *update_arg;
+    stqr_commit_mark pending_mark, synced_mark;
+    int durability_lost;
 };
 struct buf { stqr_u8 *p; size_t n, cap, pos; int err; };
 static int zero(const void *v, size_t n) {
@@ -343,7 +345,25 @@ static int stream_push(struct download *s, unsigned op, struct buf *d) {
     }
     return -EPROTO;
 }
+static int decode_mark(struct buf *b, stqr_commit_mark *m) {
+    const stqr_u8 *p = take(b, 16);
+    memset(m, 0, sizeof(*m)); if (p) memcpy(m->boot.bytes, p, 16);
+    m->sequence = readnum(b, 8);
+    if (done(b) || zero(m->boot.bytes, 16) || !m->sequence) return -EPROTO;
+    return 0;
+}
+static int observe_mark(stqr_client *c, struct buf *b) {
+    stqr_commit_mark m; int err = decode_mark(b, &m);
+    if (err) return err;
+    if (c->pending_mark.sequence && memcmp(c->pending_mark.boot.bytes, m.boot.bytes, 16)) {
+        c->durability_lost = 1; return 0;
+    }
+    if (!memcmp(c->synced_mark.boot.bytes, m.boot.bytes, 16) && m.sequence <= c->synced_mark.sequence) return 0;
+    if (!c->pending_mark.sequence || m.sequence > c->pending_mark.sequence) c->pending_mark = m;
+    return 0;
+}
 static int dispatch_update(stqr_client *c, unsigned opcode, struct buf *m) {
+    if (opcode == 0x11a) return observe_mark(c, m);
     stqr_update u = {0};
     const stqr_u8 *p, *digest; stqr_u8 hash[32];
     unsigned mode; stqr_u64 total; int err;
@@ -386,7 +406,7 @@ static int reply(stqr_client *c, unsigned op, stqr_id id, struct buf *result, st
         kind = (unsigned)readnum(&m, 1); opcode = (unsigned)readnum(&m, 2); p = take(&m, 16);
         if (m.err) { drop(&m); return -EPROTO; }
         if (kind == 3) {
-            if (opcode == 0x112 || opcode == 0x113) {
+            if (opcode == 0x112 || opcode == 0x113 || opcode == 0x11a) {
                 err = dispatch_update(c, opcode, &m); drop(&m);
                 if (err) return err;
                 continue;
@@ -409,7 +429,13 @@ static int reply(stqr_client *c, unsigned op, stqr_id id, struct buf *result, st
           for (i = 0; i < count && !headers.err; i++) {
               tags[i] = readvar(&headers);
               for (j = 0; j < i; j++) if (tags[j] == tags[i]) headers.err = -EPROTO;
-              readblob(&headers, &n);
+              { const stqr_u8 *value = readblob(&headers, &n);
+                if (tags[i] == 48 && !headers.err) {
+                    struct buf mark = {.p = (stqr_u8 *)value, .n = n};
+                    int observed = observe_mark(c, &mark);
+                    if (observed) headers.err = observed;
+                }
+              }
           }
         }
         if (m.err || done(&headers) || c->status < 100 || c->status > 599) { drop(&m); return -EPROTO; }
@@ -422,13 +448,20 @@ static void broken(stqr_client *c) {
     if (c->update) c->update(c->update_arg, NULL);
 }
 static int request(stqr_client *c, unsigned op, struct buf *body, stqr_id id, int mutation, struct buf *result, struct download *s) {
-    int err;
+    int err; struct buf wrapped = {0}; unsigned wire_op = op; struct buf *wire_body = body;
     if (!c || !c->socket) return -ENOTCONN;
+    if (mutation && c->durability_lost) return -ESTALE;
     c->status = 0;
     if (body->err) return body->err;
     if (zero(id.bytes, 16)) { if (mutation) return -EINVAL; if ((err = stqr_request_id(&id))) return err; }
-    err = message_send(c, 1, op, id, body);
-    if (!err) err = reply(c, op, id, result, s);
+    if (mutation > 1 && (c->capabilities & STQR_CAP_DURABILITY)) {
+        if (body->n < 80) return -EINVAL;
+        put(&wrapped, body->p, 80); number(&wrapped, op, 2); put(&wrapped, body->p+80, body->n-80);
+        wire_op = 0x118; wire_body = &wrapped;
+    }
+    err = message_send(c, 1, wire_op, id, wire_body);
+    if (!err) err = reply(c, wire_op, id, result, s);
+    drop(&wrapped);
     if (err && !c->status) { broken(c); return mutation ? -EINPROGRESS : err; }
     if (err == -EPROTO || err == -EBADMSG) broken(c);
     return err;
@@ -441,7 +474,7 @@ int stqr_reconnect(stqr_client *c) {
     if (!err) err = handshake(c);
     if (err) { broken(c); return err; }
     c->status = 0;
-    number(&body, 1, 2); number(&body, 1, 2); number(&body, 0, 8); blob(&body, "stqr-c", 6);
+    number(&body, 1, 2); number(&body, 1, 2); number(&body, STQR_CAP_DURABILITY, 8); blob(&body, "stqr-c", 6);
     err = request(c, 1, &body, id, 0, &result, NULL);
     if (!err) {
         if (readnum(&result, 2) != 1) result.err = -EPROTO;
@@ -535,7 +568,7 @@ static int write_payload(stqr_client *c, unsigned op, stqr_object_id id, stqr_u6
     if ((err = sq_hash(256, data, n, hash))) goto out;
     number(&b, n > SQ_CHUNK, 1); number(&b, n, 8); put(&b, hash, 32); blob(&b, n > SQ_CHUNK ? NULL : data, n > SQ_CHUNK ? 0 : n);
     if (b.err) { err = b.err; goto out; }
-    if (n <= SQ_CHUNK) { err = request(c, op, &b, opt->request_id, 1, &r, NULL); }
+    if (n <= SQ_CHUNK) { err = request(c, op, &b, opt->request_id, 1+!!opt->accepted, &r, NULL); }
     else {
         if (!c->socket) { err = -ENOTCONN; goto out; }
         c->status = 0;
@@ -577,7 +610,7 @@ static int metadata_write(stqr_client *c, unsigned op, stqr_object_id id, stqr_u
     if (!c || (op == 0x105 && !info)) return -EINVAL;
     reference(c, &b, id); if (op == 0x105) number(&b, len, 8);
     err = options(&b, o);
-    if (!err) err = request(c, op, &b, o->request_id, 1, &r, NULL);
+    if (!err) err = request(c, op, &b, o->request_id, 1+!!o->accepted, &r, NULL);
     if (!err) {
         if (op == 0x105) info_decode(&r, info);
         err = done(&r); if (!err && info) err = accept_info(c, info);
@@ -592,7 +625,7 @@ int stqr_cas(stqr_client *c, stqr_object_id id, unsigned scope, stqr_u64 off, co
     reference(c, &b, id); number(&b, scope, 1); number(&b, off, 8); err = options(&b, o);
     if (!err) {
         blob(&b, expected, en); blob(&b, replacement, rn);
-        err = request(c, 0x108, &b, o->request_id, 1, &r, NULL);
+        err = request(c, 0x108, &b, o->request_id, 1+!!o->accepted, &r, NULL);
     }
     if (!err) { info_decode(&r, info); err = done(&r); if (!err) err = accept_info(c, info); }
     drop(&b); drop(&r); return err;
@@ -613,7 +646,7 @@ int stqr_poll(stqr_client *c, unsigned ms) {
         if (readnum(&m, 1) != 1) m.err = -EPROTO;
         kind = (unsigned)readnum(&m, 1); opcode = (unsigned)readnum(&m, 2);
         take(&m, 16);
-        if (m.err || kind != 3 || (opcode != 0x112 && opcode != 0x113)) err = -EPROTO;
+        if (m.err || kind != 3 || (opcode != 0x112 && opcode != 0x113 && opcode != 0x11a)) err = -EPROTO;
         else err = dispatch_update(c, opcode, &m);
     }
     drop(&m);
@@ -665,4 +698,37 @@ int stqr_unsubscribe(stqr_client *c, stqr_id sid) {
     put(&b, sid.bytes, 16); err = request(c, 0x111, &b, rid, 0, &r, NULL);
     if (!err) err = done(&r);
     drop(&b); drop(&r); return err;
+}
+
+int stqr_pending_mark(stqr_client *c, stqr_commit_mark *out) {
+    if (!c || !out) return -EINVAL;
+    if (c->durability_lost) return -ESTALE;
+    *out = c->pending_mark; return 0;
+}
+int stqr_sync_through(stqr_client *c, const stqr_commit_mark *mark, stqr_commit_mark *durable) {
+    struct buf b = {0}, r = {0}; stqr_id rid = {{0}}; int err;
+    if (!c || !mark || !durable || !mark->sequence || zero(mark->boot.bytes,16)) return -EINVAL;
+    if (c->durability_lost) return -ESTALE;
+    put(&b,c->bucket.bytes,16); put(&b,mark->boot.bytes,16); number(&b,mark->sequence,8);
+    err = request(c,0x119,&b,rid,0,&r,NULL);
+    if (!err) err = decode_mark(&r,durable);
+    if (!err && (memcmp(durable->boot.bytes,mark->boot.bytes,16) || durable->sequence < mark->sequence)) err = -EPROTO;
+    if (!err) {
+        c->synced_mark = *durable;
+        if (!memcmp(c->pending_mark.boot.bytes,durable->boot.bytes,16) && c->pending_mark.sequence <= durable->sequence)
+            memset(&c->pending_mark,0,sizeof(c->pending_mark));
+    }
+    drop(&b); drop(&r); return err;
+}
+int stqr_sync(stqr_client *c) {
+    stqr_commit_mark mark, durable; int err = stqr_pending_mark(c,&mark);
+    if (err || !mark.sequence) return err;
+    return stqr_sync_through(c,&mark,&durable);
+}
+void stqr_note_durable(stqr_client *c, const stqr_commit_mark *mark) {
+    if (!c || !mark || c->durability_lost) return;
+    if (!memcmp(c->pending_mark.boot.bytes,mark->boot.bytes,16) && c->pending_mark.sequence <= mark->sequence)
+        memset(&c->pending_mark,0,sizeof(c->pending_mark));
+    if (!memcmp(c->synced_mark.boot.bytes,mark->boot.bytes,16) && c->synced_mark.sequence > mark->sequence) return;
+    c->synced_mark = *mark;
 }

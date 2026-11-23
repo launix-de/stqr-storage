@@ -6,6 +6,7 @@ package server
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -15,6 +16,8 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -83,6 +86,7 @@ func TestKSTQRVirtualMachine(t *testing.T) {
 	run("cc", "-static", "-std=c11", "-Wall", "-Wextra", "-Werror", "-O2", "-o", filepath.Join(initrdRoot, "coherence"), filepath.Join(root, "tests/coherence.c"))
 	run("cc", "-static", "-std=c11", "-Wall", "-Wextra", "-Werror", "-O2", "-o", filepath.Join(initrdRoot, "throughput"), filepath.Join(root, "tests/throughput.c"))
 	run("cc", "-static", "-std=c11", "-Wall", "-Wextra", "-Werror", "-O2", "-o", filepath.Join(initrdRoot, "writeback"), filepath.Join(root, "tests/writeback.c"))
+	run("cc", "-static", "-std=c11", "-Wall", "-Wextra", "-Werror", "-O2", "-o", filepath.Join(initrdRoot, "crash-reconnect"), filepath.Join(root, "tests/crash_reconnect.c"))
 	run("cc", "-static", "-std=c11", "-Wall", "-Wextra", "-Werror", "-O2", "-o", filepath.Join(initrdRoot, "mmap-test"), filepath.Join(root, "tests/mmap.c"), "-lsqlite3", "-lm", "-ldl", "-lpthread")
 	s := testServer(t)
 	addTestVolume(t, s, "kernel-vm", "hdd", 192<<20)
@@ -100,8 +104,86 @@ func TestKSTQRVirtualMachine(t *testing.T) {
 	}
 	admin := s.cfg.Auth.BootstrapAdmin
 	handler := s.Handler()
+	var current atomic.Pointer[Server]
+	current.Store(s)
+	checkpointImages := map[string][]byte{}
+	var checkpointMu sync.Mutex
 	var subscriptionFS *client.Filesystem
 	host := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/__kstqr_test/checkpoint-image" {
+			checkpointMu.Lock()
+			defer checkpointMu.Unlock()
+			s.mu.RLock()
+			stores := []*volume.Volume{}
+			for _, v := range s.volumes {
+				stores = append(stores, v.store)
+			}
+			s.mu.RUnlock()
+			for _, v := range stores {
+				path := v.Name()
+				h, err := v.Open(false)
+				if err != nil {
+					http.Error(w, err.Error(), 500)
+					return
+				}
+				data, err := os.ReadFile(path)
+				h.Close()
+				if err != nil {
+					http.Error(w, err.Error(), 500)
+					return
+				}
+				checkpointImages[path] = data
+			}
+			w.WriteHeader(200)
+			return
+		}
+		if r.URL.Path == "/__kstqr_test/restart-checkpoint-image" {
+			checkpointMu.Lock()
+			defer checkpointMu.Unlock()
+			if len(checkpointImages) == 0 {
+				http.Error(w, "checkpoint image missing", 500)
+				return
+			}
+			if err := s.Close(); err != nil {
+				http.Error(w, err.Error(), 500)
+				return
+			}
+			// Restore the earlier durable image to model loss of the unconfirmed
+			// tail. Volume crash-at-every-step tests separately validate real WAL
+			// recovery. Only this test's closed, disposable data files are touched.
+			for path, data := range checkpointImages {
+				if err := os.WriteFile(path, data, 0600); err != nil {
+					http.Error(w, err.Error(), 500)
+					return
+				}
+			}
+			restarted, err := openTransportTestNode(Options{ConfigPath: s.configPath})
+			if err != nil {
+				http.Error(w, err.Error(), 500)
+				return
+			}
+			t.Cleanup(func() { restarted.Close() })
+			current.Store(restarted)
+			w.WriteHeader(200)
+			return
+		}
+		if r.URL.Path == "/__kstqr_test/io-stats" {
+			s.mu.RLock()
+			stores := []*volume.Volume{}
+			for _, v := range s.volumes {
+				stores = append(stores, v.store)
+			}
+			s.mu.RUnlock()
+			total := volume.IOStats{}
+			for _, v := range stores {
+				io := v.IOStats()
+				total.SyncOps += io.SyncOps
+				total.WriteBytes += io.WriteBytes
+			}
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(total)
+			return
+		}
 		if r.URL.Path == "/__kstqr_test/lock" || r.URL.Path == "/__kstqr_test/unlock" {
 			body := client.Encoder{}
 			body.ID(client.ID(b.ID()))
@@ -168,7 +250,7 @@ func TestKSTQRVirtualMachine(t *testing.T) {
 			}
 			return
 		}
-		handler.ServeHTTP(w, r)
+		current.Load().Handler().ServeHTTP(w, r)
 	}))
 	defer host.Close()
 	conn, err := client.Dial(ctx, host.URL, admin.Username, admin.Password, client.ID(b.ID()))
@@ -346,6 +428,7 @@ umount /fresh
 test "$(cat /fresh/go.txt)" = 'Hello from Go'
 umount /fresh
 cat /proc/self/mountstats
+/crash-reconnect @@URL@@
 ls -l /mnt
 if grep 'password=' /proc/mounts; then exit 1; fi
 umount /readonly
@@ -375,7 +458,7 @@ rmmod kstqr
 `
 		if writeBenchmark {
 			script = `/mount.kstqr --uri ` + endpoint + ` --bucket ` + client.ID(b.ID()).String() + ` --credentials /credentials /mnt
-/writeback benchmark
+/writeback benchmark ` + endpoint + `
 cat /proc/self/mountstats
 umount /mnt
 rmmod kstqr

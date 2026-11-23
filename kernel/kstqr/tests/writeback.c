@@ -13,7 +13,8 @@
 #include "subscription_wait.h"
 #define CHECK(x) do { if (!(x)) { fprintf(stderr,"writeback line %d: %s (%s)\n",__LINE__,#x,strerror(errno)); exit(1); } } while(0)
 static double now(void) { struct timespec ts; CHECK(!clock_gettime(CLOCK_MONOTONIC,&ts)); return ts.tv_sec+ts.tv_nsec/1e9; }
-struct counters { unsigned long long cas, batches, folios, snapshot, prepare, publish, retries; };
+static const char *endpoint;
+struct counters { unsigned long long cas, batches, folios, snapshot, prepare, publish, retries, backend_syncs, backend_bytes; };
 static unsigned long long field(const char *text,const char *key) { const char *p=strstr(text,key); return p?strtoull(p+strlen(key),NULL,10):0; }
 static struct counters counters(void) {
     char *line=NULL; size_t cap=0; struct counters c={0}; int found=0;
@@ -26,11 +27,21 @@ static struct counters counters(void) {
             c.snapshot=field(line,"write_snapshot_ns="); c.prepare=field(line,"write_prepare_ns="); c.publish=field(line,"write_publish_ns="); c.retries=field(line,"write_retries="); break;
         }
     }
-    free(line); CHECK(!fclose(f)); return c;
+    free(line); CHECK(!fclose(f));
+    if(endpoint) {
+        char address[512],json[4096]; int status;
+        snprintf(address,sizeof(address),"%s/__kstqr_test/io-stats",endpoint);
+        pid_t child=fork();CHECK(child>=0);
+        if(!child){execl("/bin/busybox","wget","-q","-O","/tmp/stqr-bench-io.json",address,NULL);_exit(127);}
+        CHECK(waitpid(child,&status,0)==child&&WIFEXITED(status)&&!WEXITSTATUS(status));
+        f=fopen("/tmp/stqr-bench-io.json","r");CHECK(f);size_t n=fread(json,1,sizeof(json)-1,f);json[n]=0;CHECK(!fclose(f));
+        c.backend_syncs=field(json,"\"sync_ops\":");c.backend_bytes=field(json,"\"write_bytes\":");
+    }
+    return c;
 }
 static void report(const char *test,int rep,double start,double units,const char *unit,struct counters a) {
     double elapsed=now()-start; struct counters b=counters();
-    printf("KSTQR_WRITE_BENCH {\"test\":\"%s\",\"rep\":%d,\"seconds\":%.9f,\"rate\":%.3f,\"unit\":\"%s\",\"cas\":%llu,\"batches\":%llu,\"folios\":%llu,\"snapshot_ns\":%llu,\"prepare_ns\":%llu,\"publish_ns\":%llu,\"retries\":%llu}\n",test,rep,elapsed,units/elapsed,unit,b.cas-a.cas,b.batches-a.batches,b.folios-a.folios,b.snapshot-a.snapshot,b.prepare-a.prepare,b.publish-a.publish,b.retries-a.retries);
+    printf("KSTQR_WRITE_BENCH {\"test\":\"%s\",\"rep\":%d,\"seconds\":%.9f,\"rate\":%.3f,\"unit\":\"%s\",\"cas\":%llu,\"batches\":%llu,\"folios\":%llu,\"snapshot_ns\":%llu,\"prepare_ns\":%llu,\"publish_ns\":%llu,\"retries\":%llu,\"backend_syncs\":%llu,\"backend_bytes\":%llu}\n",test,rep,elapsed,units/elapsed,unit,b.cas-a.cas,b.batches-a.batches,b.folios-a.folios,b.snapshot-a.snapshot,b.prepare-a.prepare,b.publish-a.publish,b.retries-a.retries,b.backend_syncs-a.backend_syncs,b.backend_bytes-a.backend_bytes);
 }
 static int newfile(const char *name,int rep,size_t size) {
     char path[128]; snprintf(path,sizeof(path),"/mnt/wb-%s-%d",name,rep);
@@ -84,6 +95,7 @@ static void correctness(void) {
 }
 int main(int argc,char **argv) {
     setvbuf(stdout,NULL,_IOLBF,0);
+    if(argc>2)endpoint=argv[2];
     if(argc>1 && !strcmp(argv[1],"benchmark"))benchmark(); else correctness();
     return 0;
 }

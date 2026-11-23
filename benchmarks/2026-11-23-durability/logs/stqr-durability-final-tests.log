@@ -1,0 +1,61 @@
+=== RUN   TestCClient
+=== RUN   TestCClient/objects
+=== RUN   TestCClient/disconnect
+=== RUN   TestCClient/digest
+=== RUN   TestCClient/malformed
+=== RUN   TestCClient/wrong-id
+=== RUN   TestCClient/varint
+=== RUN   TestCClient/text
+=== RUN   TestCClient/subscription-digest
+--- PASS: TestCClient (4.43s)
+    --- PASS: TestCClient/objects (3.58s)
+    --- PASS: TestCClient/disconnect (0.02s)
+    --- PASS: TestCClient/digest (0.02s)
+    --- PASS: TestCClient/malformed (0.02s)
+    --- PASS: TestCClient/wrong-id (0.02s)
+    --- PASS: TestCClient/varint (0.02s)
+    --- PASS: TestCClient/text (0.02s)
+    --- PASS: TestCClient/subscription-digest (0.02s)
+=== RUN   TestAcceptedProtocolBarrier
+--- PASS: TestAcceptedProtocolBarrier (1.89s)
+=== RUN   TestAcceptedSubscriptionReceipt
+--- PASS: TestAcceptedSubscriptionReceipt (1.91s)
+=== RUN   TestAcceptedInvalidIncarnation
+--- PASS: TestAcceptedInvalidIncarnation (0.47s)
+=== RUN   TestAcceptedVolumeSwitchOrdering
+--- PASS: TestAcceptedVolumeSwitchOrdering (0.52s)
+=== RUN   TestAcceptedCrossOwnerSubscriptionDependency
+--- PASS: TestAcceptedCrossOwnerSubscriptionDependency (3.93s)
+=== RUN   TestKSTQRVirtualMachine
+    kstqr_linux_test.go:530: Standalone kernel mount, Go interoperability, filesystem operations and clean unload passed
+--- PASS: TestKSTQRVirtualMachine (39.86s)
+=== RUN   TestObjectSubscriptionMutationsAndLifetime
+--- PASS: TestObjectSubscriptionMutationsAndLifetime (2.09s)
+=== RUN   TestObjectSubscriptionStreamAndRangedUpdates
+--- PASS: TestObjectSubscriptionStreamAndRangedUpdates (2.04s)
+=== RUN   TestObjectSubscriptionGCCleanup
+--- PASS: TestObjectSubscriptionGCCleanup (1.89s)
+=== RUN   TestSubscriptionStoreBoundedAndInvalidated
+--- PASS: TestSubscriptionStoreBoundedAndInvalidated (1.90s)
+=== RUN   TestDaemonSubscriptionResyncsBeforeRangeHandoff
+--- PASS: TestDaemonSubscriptionResyncsBeforeRangeHandoff (3.01s)
+=== RUN   TestObjectSubscriptionDisconnectAndRevocation
+=== RUN   TestObjectSubscriptionDisconnectAndRevocation/disconnect
+=== RUN   TestObjectSubscriptionDisconnectAndRevocation/revoke
+--- PASS: TestObjectSubscriptionDisconnectAndRevocation (3.82s)
+    --- PASS: TestObjectSubscriptionDisconnectAndRevocation/disconnect (1.93s)
+    --- PASS: TestObjectSubscriptionDisconnectAndRevocation/revoke (1.88s)
+=== RUN   TestObjectSubscriptionSnapshotRegistrationBarrier
+--- PASS: TestObjectSubscriptionSnapshotRegistrationBarrier (1.91s)
+=== RUN   TestObjectSubscriptionJournalOverflowRequestsResync
+--- PASS: TestObjectSubscriptionJournalOverflowRequestsResync (0.00s)
+=== RUN   TestSubscriptionStoreDisconnectCleanupDoesNotReenterTransportOnce
+--- PASS: TestSubscriptionStoreDisconnectCleanupDoesNotReenterTransportOnce (1.87s)
+=== RUN   TestObjectSubscriptionCanceledCloseStillReleases
+--- PASS: TestObjectSubscriptionCanceledCloseStillReleases (1.90s)
+=== RUN   TestSubscriptionStoreCoalescesParallelColdReaders
+--- PASS: TestSubscriptionStoreCoalescesParallelColdReaders (1.96s)
+=== RUN   TestSubscriptionStorePausedOwnerDoesNotBlockIndependentRange
+--- PASS: TestSubscriptionStorePausedOwnerDoesNotBlockIndependentRange (3.01s)
+PASS
+ok  	github.com/launix-de/stqr-storage/server	79.488s

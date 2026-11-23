@@ -27,6 +27,8 @@ type managedVolume struct {
 // Server currently owns one node. opMu serializes local administrative commits;
 // it is not a distributed lock or a substitute for placement authority.
 type Server struct {
+	durability durabilityState
+
 	objectSubscriptions    objectSubscriptionRegistry
 	recoveryVolumes        map[volume.ID]*stagedRecoveryVolume
 	authority              *volumeAuthorityState
@@ -304,6 +306,7 @@ func Open(opts Options) (s *Server, err error) {
 			return nil, err
 		}
 	}
+	s.startAcceptedCheckpoints()
 	s.startS3Maintenance()
 	s.workers.Add(1)
 	go s.statsLoop()

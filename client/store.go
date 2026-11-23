@@ -259,7 +259,7 @@ func (c *Client) Trunc(ctx context.Context, id ObjectID, length uint64, opt Trun
 	if err := encodePrecondition(&e, opt); err != nil {
 		return ObjectInfo{}, err
 	}
-	r, err := c.do(ctx, objectTrunc, e.B, opt.RequestID, true, nil)
+	r, err := c.do(withAccepted(ctx, opt.Accepted), objectTrunc, e.B, opt.RequestID, true, nil)
 	if err != nil {
 		return ObjectInfo{}, err
 	}
@@ -283,7 +283,7 @@ func (c *Client) Delete(ctx context.Context, id ObjectID, opt DeleteOptions) err
 	if err := encodePrecondition(&e, opt); err != nil {
 		return err
 	}
-	r, err := c.do(ctx, objectDelete, e.B, opt.RequestID, true, nil)
+	r, err := c.do(withAccepted(ctx, opt.Accepted), objectDelete, e.B, opt.RequestID, true, nil)
 	defer r.close()
 	if err == nil && len(r.result) != 0 {
 		return ErrProtocol
@@ -306,7 +306,7 @@ func (c *Client) CAS(ctx context.Context, id ObjectID, off uint64, expected, rep
 	}
 	e.Blob(expected)
 	e.Blob(replacement)
-	r, err := c.do(ctx, objectCAS, e.B, opt.RequestID, true, nil)
+	r, err := c.do(withAccepted(ctx, opt.Accepted), objectCAS, e.B, opt.RequestID, true, nil)
 	if err != nil {
 		return ObjectInfo{}, err
 	}

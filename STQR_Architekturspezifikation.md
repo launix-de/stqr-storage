@@ -930,6 +930,38 @@ Für die Neuanlage kann `Precondition.absent=true` mit Offset 0 und ohne expecte
 
 ---
 
+### 10.8 Explizite Durability-Barrieren (Capability 1024)
+
+Native Mutationen behalten standardmäßig ihren bisherigen Durable-ACK. Ein Client
+kann nach HELLO-Aushandlung mit `OBJECT_ACCEPTED` ausdrücklich einen schwächeren
+ACK anfordern: die vollständige Mutation samt CAS-/Versions-/Retry-Zustand ist
+sichtbar, aber möglicherweise noch nicht dauerhaft. `CommitMark = boot:ID,
+sequence:u64` bezeichnet einen Bucket-Präfix auf genau einer Node-Inkarnation.
+`BUCKET_SYNC` bestätigt diesen Präfix erst nach dem Checkpoint aller betroffenen
+Volumes gemäß Storage-Strategie. RAM bleibt ausdrücklich flüchtig. Neue Writes
+nach dem erfassten Präfix dürfen weiterlaufen; es gibt keine globale Lesesperre.
+
+Receipts werden auch bei Reads und vor Subscription-Updates übertragen. Vor einer
+referenzveröffentlichenden Mutation auf einem anderen Owner synchronisiert das SDK
+die beobachteten Vorgänger. Lokal wird beim Wechsel des Zielvolumes zuerst der
+vorherige Bucket-Präfix gespeichert. So darf ein dauerhafter Inode nicht auf
+verlorene Daten-/Indexobjekte zeigen. Das ist keine Multi-Object-Transaktion.
+
+Die erste Implementierung benutzt einen begrenzten Seiten-Overlay und vorhandene
+Redo-Checkpoints; ausschließlich im dauerhaften Freispeicherbild freie Seiten
+dürfen vorab direkt geschrieben werden. Crash-Recovery stellt den alten oder den
+vollständigen neuen Volume-Checkpoint her. Platz-/Budgetgrenzen dürfen auf den
+stärkeren ACK zurückfallen. Durability-Modus gehört nicht zum Retry-Fingerprint;
+ein identischer Retry darf einen zuvor akzeptierten Erfolg dauerhaft bestätigen.
+Marken fremder/neuer Boot-Inkarnationen werden mit 410 abgelehnt; die erste Version
+führt keine rebootübergreifende Receipt-Historie. SDKs dürfen unbestätigte Marken
+nicht stillschweigend verwerfen.
+
+FUSE/Kernel verwenden Barrieren für `fsync`, `fdatasync`, `msync(MS_SYNC)`,
+`O_SYNC`/`O_DSYNC` und Dateisystem-Sync. Normales Close ist keine Pflichtbarriere.
+S3 und vorhandene native Clients behalten den Durable-ACK. Die Details und
+Implementierungsgrenzen stehen in [docs/durability.md](docs/durability.md).
+
 ## 11. Replikation, Erasure Coding und Read-Replicas
 
 ### 11.1 Replikation für HDD, SSD und RAM
@@ -1001,7 +1033,7 @@ STABLE -> PREPARED -> COPYING -> CATCHING_UP -> CUTOVER -> CLEANUP -> STABLE
 - Routet ein Client aufgrund falscher oder veralteter Informationen an den alten oder einen unzuständigen Node, antwortet dieser mit **301/302** und einem variablen Folgeheader mit Bucket/Range, aktueller bekannter Map-Version, Ownership-Epoch sowie zuständiger Node-ID und Kontaktadresse(n). `301` bezeichnet die committed Neuzuordnung; `302` eine vorübergehende Weiterleitung zu einem aktuell zulässigen Ziel. Ein bloß vorbereitetes NEXT-Ziel ist noch kein gültiger autoritativer Owner.
 - Routing-Hinweise werden nur an berechtigte Clients ausgegeben. Kann ein Node die aktuelle Zuständigkeit nicht verlässlich ermitteln, antwortet er mit `503`/`STALE_MAP` und bekannten Map-Kontaktstellen, statt einen ungeprüften Owner zu behaupten. Ist die alte Node bereits offline, lädt das SDK nach Verbindungsfehlern die Map über andere bekannte Clusterkontakte neu.
 - Bei nicht erreichbarem Primary kann das SDK eine im aktuellen Replica-Set enthaltene erreichbare Kopie für GET/GET_RANGE/STAT wählen. Eine gültige Replica liest auch ohne vorherigen Failure-Timeout; ein Transportfehler gibt ihr aber niemals Schreibrechte. Der Client übernimmt den Routing-Hinweis bzw. aktualisiert die Map und wiederholt Mutationen mit **derselben Request-ID**. Redirects erzeugen keinen mutierenden Effekt. Redirect-Schleifen werden begrenzt und lösen einen Map-Refresh aus.
-- **Ein Erfolgs-ACK garantiert die Einhaltung des zum Commit wirksamen Placements und der zugehörigen Policy**, einschließlich gültiger Schreibautorität, erforderlicher Kopien, tatsächlicher Speicherstrategie und Commitstand. HDD/SSD sind durable; RAM ist ausdrücklich an die Lebensdauer seiner Prozesse/Replikate gebunden und CACHE später verlustbehaftet. Eine veraltete Client-Map schwächt diese Zusage nicht. Bei einem Retry bestätigt eine gespeicherte Erfolgsantwort den ursprünglichen Commit; spätere Placement-Übergänge müssen dessen Daten entsprechend dem vereinbarten Disk-/RAM-Lebensdauervertrag erhalten.
+- **Ein Durable-Erfolgs-ACK (Standard; ein expliziter ACCEPTED-ACK nach §10.8 bestätigt zunächst nur die atomare Übernahme) garantiert die Einhaltung des zum Commit wirksamen Placements und der zugehörigen Policy**, einschließlich gültiger Schreibautorität, erforderlicher Kopien, tatsächlicher Speicherstrategie und Commitstand. HDD/SSD sind durable; RAM ist ausdrücklich an die Lebensdauer seiner Prozesse/Replikate gebunden und CACHE später verlustbehaftet. Eine veraltete Client-Map schwächt diese Zusage nicht. Bei einem Retry bestätigt eine gespeicherte Erfolgsantwort den ursprünglichen Commit; spätere Placement-Übergänge müssen dessen Daten entsprechend dem vereinbarten Disk-/RAM-Lebensdauervertrag erhalten.
 - Ein drainender Node darf noch vorhandene Daten ausliefern, solange er für diesen Read weiterhin autorisiert ist und deren Aktualität nachweisen kann: vor Cutover als Owner, danach nur als weiterhin gültige Lesekopie bzw. mit Owner-validierter Version. Bloße Existenz alter Bytes reicht nach Update/Delete/TRUNC nicht. Andernfalls antwortet er mit Redirect.
 - Alte Primaries werden gefenced und dürfen nach Cutover keine neuen Schreib-ACKs für die alte Autorität ausstellen. Für Read-Caches gilt die separate Validierungssemantik. Nach vollständigem Drain erfolgt `GOAWAY` auf allen Client-Verbindungen (§3.3).
 
@@ -1074,7 +1106,7 @@ Eine **binäre WebSocket-Message ist exakt eine STQR-Message**; kein zusätzlich
 - F bedeutet „kein Warten auf Remote-Antwort“, nicht unbeschränkte Speicherbelegung. Senden erfolgt über eine begrenzte Queue; volle Queue gibt lokal `WOULD_BLOCK` zurück. Kritische Kontrollpushes werden journalisiert und nach Reconnect wiederholt. Telemetrie darf zusammengefasst werden.
 - P hat keine direkte Antwort. Semantische READY-/APPLIED-/ACK-Pushes sind eigene Nachrichten mit RoundID/Sequenz als Kausalbezug; sie sind nötig, obwohl kein synchroner Request/Response-Call verwendet wird.
 
-**Status und Folgeheader:** 200 vollständige Daten/Erfolg, 201 angelegt, 202 Adminoperation angenommen, 206 Bereich, 301 committed anderer Owner inkl. MapPatch, 302 temporäres gültiges Ziel, 400 ungültig, 401 Auth, 403 ACL, 404 fehlendes Objekt, 409 Kontrollkonflikt, 410 verlorene Range, 412 CAS/Precondition, 416 Bereich, 499 abgebrochener Stream, 501 spätere/nicht unterstützte Funktion, 503 derzeit nicht ausführbar, 507 physischer Platz/Quota fehlt. Numerische Werte als V, weil sie nicht in u8 passen. Tags: `1=ObjectInfo`, `2=MapPatch`, `3=Text Fehler`, `4=u64 RetryAfterMS` (Hinweis, kein Failure-Timeout), `5=ID OperationID`, `6=Vec(NodeAddress)`, `7=RangeResult`, `8=ID SubscriptionID`. Unbekannte optionale TLVs werden übersprungen. Erfolgsantworten können Map-Patches als Optimierung tragen. Bei HDD/SSD ist runtime_id Null, bei RAM aus §8.1.1 abgeleitet. Policy.storage_strategy kann CACHE nur mit späterer Capability enthalten. RAM unterstützt SINGLE und REPLICATION wie HDD/SSD; ERASURE bleibt für alle Strategien ein späteres Feature.
+**Status und Folgeheader:** 200 vollständige Daten/Erfolg, 201 angelegt, 202 Adminoperation angenommen, 206 Bereich, 301 committed anderer Owner inkl. MapPatch, 302 temporäres gültiges Ziel, 400 ungültig, 401 Auth, 403 ACL, 404 fehlendes Objekt, 409 Kontrollkonflikt, 410 verlorene Range, 412 CAS/Precondition, 416 Bereich, 499 abgebrochener Stream, 501 spätere/nicht unterstützte Funktion, 503 derzeit nicht ausführbar, 507 physischer Platz/Quota fehlt. Numerische Werte als V, weil sie nicht in u8 passen. Tags: `1=ObjectInfo`, `2=MapPatch`, `3=Text Fehler`, `4=u64 RetryAfterMS` (Hinweis, kein Failure-Timeout), `5=ID OperationID`, `6=Vec(NodeAddress)`, `7=RangeResult`, `8=ID SubscriptionID`, `48=CommitMark` (Capability 1024, noch nicht bestätigter Bucket-Präfix). Unbekannte optionale TLVs werden übersprungen. Erfolgsantworten können Map-Patches als Optimierung tragen. Bei HDD/SSD ist runtime_id Null, bei RAM aus §8.1.1 abgeleitet. Policy.storage_strategy kann CACHE nur mit späterer Capability enthalten. RAM unterstützt SINGLE und REPLICATION wie HDD/SSD; ERASURE bleibt für alle Strategien ein späteres Feature.
 
 ### 13.3 Gemeinsame binäre Strukturen
 
@@ -1204,6 +1236,9 @@ Normale Clients bekommen ausschließlich Objektzugriff und die dafür nötigen R
 | 0x0115 | BUCKET_MAINTENANCE / Q, Single-Node | `object:ObjectRef` (OID=0, nur Bucket relevant) => leer; exklusive Wartung an die Bucket-WebSocket-Sitzung binden |
 | 0x0116 | BUCKET_SCAN / Q, Single-Node | `object:ObjectRef` (OID=0), `after:Opt(OID),limit:u32` (1..1000) => `count:u32,(id:OID,info:ObjectInfo)*,next:Opt(OID)`; nur in eigener Wartungssitzung |
 | 0x0117 | BUCKET_OBJECT_LIST / Q | `object:ObjectRef` (OID=0), `after:Opt(OID),limit:u32` (1..1000) => `count:u32,(id:OID,info:ObjectInfo)*,next:Opt(OID)`; normale READ-Inventur ohne Wartungssperre, aktuelle Sicht in OID-Reihenfolge, keine Namen-/Prefix-Sortierung |
+| 0x0118 | OBJECT_ACCEPTED / Q, Capability 1024 | `object:ObjectRef,opcode:u16,remaining_native_body` => ursprüngliches Mutationsresultat; Tag 48 trägt den CommitMark; nur vollständige INLINE-Mutationen |
+| 0x0119 | BUCKET_SYNC / Q, Capability 1024 | `bucket:ID,mark:CommitMark` => bestätigter `CommitMark`; alter Boot => 410 |
+| 0x011a | DURABILITY_NOTICE / P, Capability 1024 | `mark:CommitMark`; vor einem Subscription-Update mit akzeptiertem Zustand |
 
 CAS-Scope `0 RANGE,1 OBJECT`; OP_STATUS-State `0 UNKNOWN,1 PENDING,2 COMMITTED,3 FAILED,4 EXPIRED`. UNKNOWN/EXPIRED ist keine Zusicherung „nie ausgeführt“. ObjectUpdate-Change `0 REPLACE,1 RANGE_WRITE,2 APPEND,3 TRUNC,4 DELETE,5 RESYNC_REQUIRED`. SUBSCRIBE/UNSUBSCRIBE/ACK benötigen HELLO-Capability `512`; ohne Unterstützung gilt Q => 501 und F wird nicht gesendet. Die erste Implementierung publiziert vollständige Replacement-Snapshots, DELETE oder explizites RESYNC_REQUIRED; unvollständige oder unbekannte Teilupdate-Sätze invalidieren den Client-Snapshot.
 
@@ -2205,7 +2240,7 @@ STQR reduziert einige spezifische Zielkonflikte anderer Systeme, **beseitigt abe
 - **ALL-Barrieren und Warten:** Ein einzelner persistenter Node ist nicht host-ausfallsicher. Bereits vor einer Rebuild-Runde fehlende Nodes blockieren unabhängiges Online-Rebalancing nicht; ihr Placement bleibt eingefroren. Fehlende erforderliche Replikate blockieren betroffene Writes, fehlende Mitglieder globale Membership-/Admin-Entscheidungen und nach Bindung ausfallende Rundenteilnehmer den laufenden Rebuild. Warten bis Reconnect oder administrativem Forceful Disconnect bleibt in diesen Fällen eine bewusste Verfügbarkeitsgrenze.
 - **Hot Objects:** Splitting isoliert ein heißes Objekt, verteilt aber dessen Writes nicht. Read-Cache-Skalierung funktioniert nur mit einer korrekten Versions-/Invalidierungsstrategie.
 - **S3/POSIX/Block:** `LIST` braucht eine Namenssicht (derzeit Inventur der S3-Envelopes); FUSE braucht Dateisystemmetadaten und Semantik; NBD braucht Flush/Discard/partielle Writes. Diese Gateways sind nicht bloß ein Protokoll-Wrapper.
-- **Crash-Durability:** `ACK` darf nur nach persistenter Daten- und Recovery-Information erfolgen; SSD-/HDD-Controller müssen Flush/FUA korrekt unterstützen. Group Commit kann Flush-Aufwand zusammenfassen, aber nicht umgehen.
+- **Crash-Durability:** Der Standard-/Durable-ACK und ein erfolgreicher SYNC dürfen nur nach persistenter Daten- und Recovery-Information erfolgen; der explizite ACCEPTED-ACK (§10.8) ist eine schwächere Zusage; SSD-/HDD-Controller müssen Flush/FUA korrekt unterstützen. Group Commit kann Flush-Aufwand zusammenfassen, aber nicht umgehen.
 
 ### 23.3 Vergleich – ohne unbewiesene Überlegenheit
 

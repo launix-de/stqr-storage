@@ -56,6 +56,7 @@ static int cas_object(struct ks_fs *f, stqr_object_id id, const void *p, size_t 
 	int err;
 	if (f->readonly)
 		return -EROFS;
+	o.accepted = 1;
 	o.has_version = !absent;
 	o.version = version;
 	o.absent = absent;
@@ -1624,4 +1625,57 @@ int ks_setxattr(struct ks_fs *f, stqr_object_id id, const char *name, const void
 			return err;
 	}
 	return -EAGAIN;
+}
+
+static int merge_mark(stqr_commit_mark *latest, const stqr_commit_mark *m)
+{
+	if (!m->sequence)
+		return 0;
+	if (latest->sequence && memcmp(latest->boot.bytes, m->boot.bytes, 16))
+		return -ESTALE;
+	if (m->sequence > latest->sequence)
+		*latest = *m;
+	return 0;
+}
+int ks_checkpoint(struct ks_fs *f)
+{
+	stqr_commit_mark latest = {0}, m = {0}, durable = {0};
+	int err = 0;
+	mutex_lock(&f->sync_lock);
+	for (unsigned n = 0; n < KS_RPC_SLOTS && !err; n++) {
+		mutex_lock(&f->rpc[n].lock);
+		err = f->rpc[n].client ? stqr_pending_mark(f->rpc[n].client, &m) : 0;
+		mutex_unlock(&f->rpc[n].lock);
+		if (!err)
+			err = merge_mark(&latest, &m);
+	}
+	if (!err)
+		err = ks_cache_mark(f, &m);
+	if (!err)
+		err = merge_mark(&latest, &m);
+	if (err || !latest.sequence)
+		goto out;
+	if (!memcmp(f->durable.boot.bytes, latest.boot.bytes, 16) &&
+	    latest.sequence <= f->durable.sequence)
+		goto out;
+	mutex_lock(&f->rpc[0].lock);
+	err = stqr_sync_through(f->rpc[0].client, &latest, &durable);
+	if (err == -ENOTCONN || err == -ECONNRESET || err == -EPIPE || err == -ETIMEDOUT) {
+		err = stqr_reconnect(f->rpc[0].client);
+		if (!err)
+			err = stqr_sync_through(f->rpc[0].client, &latest, &durable);
+	}
+	mutex_unlock(&f->rpc[0].lock);
+	if (!err) {
+		f->durable = durable;
+		for (unsigned n = 0; n < KS_RPC_SLOTS; n++) {
+			mutex_lock(&f->rpc[n].lock);
+			stqr_note_durable(f->rpc[n].client, &durable);
+			mutex_unlock(&f->rpc[n].lock);
+		}
+		ks_cache_note_durable(f, &durable);
+	}
+out:
+	mutex_unlock(&f->sync_lock);
+	return err;
 }

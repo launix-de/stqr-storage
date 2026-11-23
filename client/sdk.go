@@ -23,6 +23,10 @@ import (
 // cluster statistics. IDs are native 256-bit object addresses, never rehashed.
 // It is safe to call methods concurrently; Close is idempotent.
 type Client struct {
+	durabilityError error
+
+	durability map[ID]pendingDurability
+
 	subMu                        sync.Mutex
 	subscriptions                map[ID]weak.Pointer[Subscription]
 	subscriptionSources          map[ID]*objectTransport
@@ -119,13 +123,15 @@ func (c *Client) connectEndpoint(ctx context.Context, endpoint string) (*objectT
 	hello := Encoder{}
 	hello.U16(1)
 	hello.U16(1)
-	hello.U64(0)
+	hello.U64(CapabilityDurability)
 	hello.Text("stqr-go")
 	r, e := t.roundTrip(ctx, Message{Kind: Request, Opcode: Hello, ID: NewRequestID(), Body: hello.B}, false, nil)
 	if e == nil {
 		d := Decoder{B: r.result}
 		version := d.U16()
 		capabilities := d.U64()
+		t.capabilities = capabilities
+		t.endpoint = endpoint
 		t.node = d.ID()
 		cluster := d.ID()
 		membership := d.U64()
@@ -315,8 +321,21 @@ func (c *Client) do(ctx context.Context, opcode uint16, body []byte, id RequestI
 				copy(subscription[:], m.Body[80:96])
 				c.bindSubscriptionTransport(subscription, t)
 			}
-			r, er := t.roundTrip(ctx, m, mutation, upload)
+			outgoing := m
+			if mutation && upload == nil && ctx.Value(acceptedContextKey{}) == true && t.capabilities&CapabilityDurability != 0 {
+				if err := c.syncExcept(ctx, t); err != nil {
+					return wireReply{}, err
+				}
+				outgoing = acceptedMessage(m)
+			}
+			r, er := t.roundTrip(ctx, outgoing, mutation, upload)
 			if er == nil {
+				if b := r.headers[DurabilityHeader]; len(b) > 0 {
+					if err := c.observeDurability(t, b); err != nil {
+						r.close()
+						return wireReply{}, err
+					}
+				}
 				return r, nil
 			}
 			e = er

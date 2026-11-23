@@ -520,8 +520,17 @@ func (o *OverlayFilesystem) ReadAt(ctx context.Context, id ObjectID, dst []byte,
 	return o.upper.readBlob(ctx, n.blob, dst, uint64(offset))
 }
 func (o *OverlayFilesystem) Sync(ctx context.Context, id ObjectID) error {
-	_, err := o.Stat(ctx, id)
-	return err
+	if _, err := o.Stat(ctx, id); err != nil {
+		return err
+	}
+	for _, f := range []*Filesystem{o.lower, o.upper} {
+		if s, ok := f.store.(interface{ Sync(context.Context) error }); ok {
+			if err := s.Sync(ctx); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 func (o *OverlayFilesystem) copyUp(ctx context.Context, id ObjectID) error {
@@ -555,6 +564,11 @@ func (o *OverlayFilesystem) copyUp(ctx context.Context, id ObjectID) error {
 		}
 		if n.kind != fsFile {
 			return syscall.EISDIR
+		}
+		if syncer, ok := o.lower.store.(interface{ Sync(context.Context) error }); ok {
+			if err := syncer.Sync(ctx); err != nil {
+				return err
+			}
 		}
 		n.blob = fsBlob{length: n.blob.length, source: id, sourceVersion: base.Version}
 		n.writePath = p

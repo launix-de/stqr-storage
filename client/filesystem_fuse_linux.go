@@ -92,6 +92,7 @@ func NewFUSERoot(view FilesystemView) *FSNode {
 }
 
 type fsOpenFile struct {
+	sync     bool
 	writable bool
 	append   bool
 	identity *fsInodeIdentity
@@ -99,7 +100,7 @@ type fsOpenFile struct {
 
 // Mount serves this filesystem through go-fuse. No daemon/CLI is started.
 // The dry memory backend loses all data when its process ends. Other backends
-// must honor FilesystemStore's synchronous commit contract.
+// must honor FilesystemStore's commit contract and expose Sync when ACKs defer durability.
 func (f *Filesystem) Mount(mountpoint string, debug bool) (*fuse.Server, error) {
 	return MountFilesystem(f, mountpoint, FSMountOptions{Debug: debug, ReadOnly: f.readOnly})
 }
@@ -256,7 +257,7 @@ func (n *FSNode) Create(ctx context.Context, name string, flags, mode uint32, ou
 		return nil, nil, 0, fsErrno(err)
 	}
 	child := n.child(ctx, info, out)
-	return child, &fsOpenFile{writable: true, append: flags&syscall.O_APPEND != 0, identity: child.Operations().(*FSNode).identity}, fuse.FOPEN_DIRECT_IO, 0
+	return child, &fsOpenFile{sync: flags&(syscall.O_SYNC|syscall.O_DSYNC) != 0, writable: true, append: flags&syscall.O_APPEND != 0, identity: child.Operations().(*FSNode).identity}, fuse.FOPEN_DIRECT_IO, 0
 }
 func (n *FSNode) Open(ctx context.Context, flags uint32) (fusefs.FileHandle, uint32, syscall.Errno) {
 	info, err := n.filesystem.Stat(ctx, n.id)
@@ -288,7 +289,7 @@ func (n *FSNode) Open(ctx context.Context, flags uint32) (fusefs.FileHandle, uin
 			}
 		}
 	}
-	return &fsOpenFile{writable: flags&(syscall.O_WRONLY|syscall.O_RDWR) != 0, append: flags&syscall.O_APPEND != 0, identity: n.identity}, openFlags, 0
+	return &fsOpenFile{sync: flags&(syscall.O_SYNC|syscall.O_DSYNC) != 0, writable: flags&(syscall.O_WRONLY|syscall.O_RDWR) != 0, append: flags&syscall.O_APPEND != 0, identity: n.identity}, openFlags, 0
 }
 func (n *FSNode) Read(ctx context.Context, fh fusefs.FileHandle, dst []byte, offset int64) (fuse.ReadResult, syscall.Errno) {
 	count, err := n.filesystem.ReadAt(ctx, n.id, dst, offset)
@@ -308,16 +309,20 @@ func (n *FSNode) Write(ctx context.Context, fh fusefs.FileHandle, data []byte, o
 	} else {
 		count, err = n.filesystem.WriteAt(ctx, n.id, data, offset)
 	}
+	if err == nil {
+		if h, ok := fh.(*fsOpenFile); ok && h.sync {
+			err = n.filesystem.Sync(ctx, n.id)
+		}
+	}
 	return uint32(count), fsErrno(err)
 }
 func (n *FSNode) Fsync(ctx context.Context, fh fusefs.FileHandle, flags uint32) syscall.Errno {
 	return fsErrno(n.filesystem.Sync(ctx, n.id))
 }
+
+// FUSE FLUSH also runs on ordinary close; it is not a durability barrier.
 func (n *FSNode) Flush(ctx context.Context, fh fusefs.FileHandle) syscall.Errno {
-	if h, ok := fh.(*fsOpenFile); ok && !h.writable {
-		return fsErrno(ctx.Err())
-	}
-	return fsErrno(n.filesystem.Sync(ctx, n.id))
+	return fsErrno(ctx.Err())
 }
 func (n *FSNode) Unlink(ctx context.Context, name string) syscall.Errno {
 	return fsErrno(n.filesystem.Unlink(ctx, n.id, name))

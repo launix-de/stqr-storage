@@ -37,6 +37,8 @@ struct ks_entry {
 };
 struct ks_fs {
 	struct ks_rpc rpc[KS_RPC_SLOTS];
+	struct mutex sync_lock;
+	stqr_commit_mark durable;
 	struct ks_cache *cache;
 	size_t cache_budget;
 	struct super_block *sb;
@@ -68,6 +70,9 @@ static inline struct ks_inode *KS_I(struct inode *i)
 {
 	return container_of(i, struct ks_inode, inode);
 }
+int ks_checkpoint(struct ks_fs *);
+int ks_cache_mark(struct ks_fs *, stqr_commit_mark *);
+void ks_cache_note_durable(struct ks_fs *, const stqr_commit_mark *);
 struct ks_rpc *ks_rpc_lock(struct ks_fs *, stqr_object_id);
 int ks_cache_start(struct ks_fs *, const char *, const char *, unsigned);
 void ks_cache_stop(struct ks_fs *);

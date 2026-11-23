@@ -115,3 +115,14 @@ strategy is unchanged; the C/kernel implementations use explicit ownership.
 
 The framing path sends a header and its masked payload together in one socket
 send, reducing small-RPC latency without changing framing, hashes or ACK semantics.
+
+## Explicit durability
+
+Default mutations keep durable ACKs. Set `stqr_options.accepted=1` to request a
+weaker visible ACK where `STQR_CAP_DURABILITY` is supported. `stqr_sync()` confirms
+all observed pending writes on the connection. `stqr_pending_mark()` and
+`stqr_sync_through()` support a shared barrier across a mount's connections;
+`stqr_note_durable()` propagates only a real successful response for that same
+bucket. Receipt observation also covers reads and subscription notices. Marks
+survive reconnect; an unconfirmed lost incarnation yields `-ESTALE`. Close alone
+is not a sync. See [the complete contract](../../docs/durability.md).

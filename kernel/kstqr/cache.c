@@ -332,3 +332,25 @@ void ks_cache_stop(struct ks_fs *f)
 	f->cache = NULL;
 	kfree(c);
 }
+
+int ks_cache_mark(struct ks_fs *f, stqr_commit_mark *m)
+{
+	struct ks_cache *c = f->cache;
+	int err;
+	memset(m, 0, sizeof(*m));
+	if (!c)
+		return 0;
+	mutex_lock(&c->wire);
+	err = stqr_pending_mark(c->client, m);
+	mutex_unlock(&c->wire);
+	return err;
+}
+void ks_cache_note_durable(struct ks_fs *f, const stqr_commit_mark *m)
+{
+	struct ks_cache *c = f->cache;
+	if (!c)
+		return;
+	mutex_lock(&c->wire);
+	stqr_note_durable(c->client, m);
+	mutex_unlock(&c->wire);
+}

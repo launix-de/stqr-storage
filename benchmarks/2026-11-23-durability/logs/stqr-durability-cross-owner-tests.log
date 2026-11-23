@@ -1,0 +1,4 @@
+=== RUN   TestAcceptedCrossOwnerSubscriptionDependency
+--- PASS: TestAcceptedCrossOwnerSubscriptionDependency (3.99s)
+PASS
+ok  	github.com/launix-de/stqr-storage/server	5.005s

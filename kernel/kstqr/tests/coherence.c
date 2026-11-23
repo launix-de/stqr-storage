@@ -10,6 +10,7 @@
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
+#include "subscription_wait.h"
 #define REQUIRE(x) do { if (!(x)) { fprintf(stderr,"coherence line %d: %s: %s\n",__LINE__,#x,strerror(errno)); exit(1); } } while(0)
 static void control(const char *url, const char *action)
 {
@@ -49,7 +50,7 @@ int main(int argc, char **argv)
     fd = open("/mnt/subscription.txt",O_CREAT|O_TRUNC|O_RDWR,0644); REQUIRE(fd >= 0);
     REQUIRE(write(fd,content,sizeof(content)) == sizeof(content)); REQUIRE(!close(fd));
     REQUIRE(stat("/readonly/subscription-created",&st) < 0 && errno == ENOENT);
-    ro = open("/readonly/subscription.txt",O_RDONLY); REQUIRE(ro >= 0);
+    ro = test_open_eventually("/readonly/subscription.txt",O_RDONLY); REQUIRE(ro >= 0);
     char *mapping = mmap(NULL,4096,PROT_READ,MAP_SHARED,ro,0); REQUIRE(mapping != MAP_FAILED);
     REQUIRE(!memcmp(mapping,"before",6));
     /* Warm metadata and page cache. No stat/read is issued while awaiting the
