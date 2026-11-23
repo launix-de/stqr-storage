@@ -1,0 +1,20 @@
+{"Time":"2026-11-23T08:19:49.169831587+01:00","Action":"start","Package":"github.com/launix-de/stqr-storage/server"}
+{"Time":"2026-11-23T08:19:49.181355787+01:00","Action":"run","Package":"github.com/launix-de/stqr-storage/server","Test":"TestSubscriptionStoreDisconnectCleanupDoesNotReenterTransportOnce"}
+{"Time":"2026-11-23T08:19:49.181391996+01:00","Action":"output","Package":"github.com/launix-de/stqr-storage/server","Test":"TestSubscriptionStoreDisconnectCleanupDoesNotReenterTransportOnce","Output":"=== RUN   TestSubscriptionStoreDisconnectCleanupDoesNotReenterTransportOnce\n"}
+{"Time":"2026-11-23T08:19:51.13849743+01:00","Action":"output","Package":"github.com/launix-de/stqr-storage/server","Test":"TestSubscriptionStoreDisconnectCleanupDoesNotReenterTransportOnce","Output":"--- PASS: TestSubscriptionStoreDisconnectCleanupDoesNotReenterTransportOnce (1.96s)\n"}
+{"Time":"2026-11-23T08:19:51.138530063+01:00","Action":"pass","Package":"github.com/launix-de/stqr-storage/server","Test":"TestSubscriptionStoreDisconnectCleanupDoesNotReenterTransportOnce","Elapsed":1.96}
+{"Time":"2026-11-23T08:19:51.138540793+01:00","Action":"run","Package":"github.com/launix-de/stqr-storage/server","Test":"TestObjectSubscriptionCanceledCloseStillReleases"}
+{"Time":"2026-11-23T08:19:51.138543749+01:00","Action":"output","Package":"github.com/launix-de/stqr-storage/server","Test":"TestObjectSubscriptionCanceledCloseStillReleases","Output":"=== RUN   TestObjectSubscriptionCanceledCloseStillReleases\n"}
+{"Time":"2026-11-23T08:19:53.092037393+01:00","Action":"output","Package":"github.com/launix-de/stqr-storage/server","Test":"TestObjectSubscriptionCanceledCloseStillReleases","Output":"--- PASS: TestObjectSubscriptionCanceledCloseStillReleases (1.95s)\n"}
+{"Time":"2026-11-23T08:19:53.092060617+01:00","Action":"pass","Package":"github.com/launix-de/stqr-storage/server","Test":"TestObjectSubscriptionCanceledCloseStillReleases","Elapsed":1.95}
+{"Time":"2026-11-23T08:19:53.092238316+01:00","Action":"run","Package":"github.com/launix-de/stqr-storage/server","Test":"TestSubscribedFilesystemKernelInvalidation"}
+{"Time":"2026-11-23T08:19:53.092242363+01:00","Action":"output","Package":"github.com/launix-de/stqr-storage/server","Test":"TestSubscribedFilesystemKernelInvalidation","Output":"=== RUN   TestSubscribedFilesystemKernelInvalidation\n"}
+{"Time":"2026-11-23T08:19:55.032044862+01:00","Action":"output","Package":"github.com/launix-de/stqr-storage/server","Test":"TestSubscribedFilesystemKernelInvalidation","Output":"--- PASS: TestSubscribedFilesystemKernelInvalidation (1.94s)\n"}
+{"Time":"2026-11-23T08:19:55.032072896+01:00","Action":"pass","Package":"github.com/launix-de/stqr-storage/server","Test":"TestSubscribedFilesystemKernelInvalidation","Elapsed":1.94}
+{"Time":"2026-11-23T08:19:55.032082604+01:00","Action":"run","Package":"github.com/launix-de/stqr-storage/server","Test":"TestSubscribedOverlayKernelCopyUpInvalidation"}
+{"Time":"2026-11-23T08:19:55.032087173+01:00","Action":"output","Package":"github.com/launix-de/stqr-storage/server","Test":"TestSubscribedOverlayKernelCopyUpInvalidation","Output":"=== RUN   TestSubscribedOverlayKernelCopyUpInvalidation\n"}
+{"Time":"2026-11-23T08:19:58.459157566+01:00","Action":"output","Package":"github.com/launix-de/stqr-storage/server","Test":"TestSubscribedOverlayKernelCopyUpInvalidation","Output":"--- PASS: TestSubscribedOverlayKernelCopyUpInvalidation (3.43s)\n"}
+{"Time":"2026-11-23T08:19:58.459181572+01:00","Action":"pass","Package":"github.com/launix-de/stqr-storage/server","Test":"TestSubscribedOverlayKernelCopyUpInvalidation","Elapsed":3.43}
+{"Time":"2026-11-23T08:19:58.459315707+01:00","Action":"output","Package":"github.com/launix-de/stqr-storage/server","Output":"PASS\n"}
+{"Time":"2026-11-23T08:19:59.46360099+01:00","Action":"output","Package":"github.com/launix-de/stqr-storage/server","Output":"ok  \tgithub.com/launix-de/stqr-storage/server\t10.294s\n"}
+{"Time":"2026-11-23T08:19:59.463630216+01:00","Action":"pass","Package":"github.com/launix-de/stqr-storage/server","Elapsed":10.294}

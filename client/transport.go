@@ -12,8 +12,12 @@ import (
 
 const objectSendQueue = 32
 const maxPendingObjectRequests = 12
+const maxFilesystemPendingRequests = 8
+
+type filesystemWaitKey struct{}
 
 type wireReply struct {
+	source   *objectTransport
 	status   int
 	headers  map[uint64][]byte
 	result   []byte
@@ -45,20 +49,22 @@ type outboundObject struct {
 }
 type uploadFunc func(context.Context, *objectTransport, *pendingObject, ID) error
 type objectTransport struct {
-	conn    *websocket.Conn
-	mu      sync.Mutex
-	pending map[ID]*pendingObject
-	send    chan outboundObject
-	done    chan struct{}
-	once    sync.Once
-	workers sync.WaitGroup
-	cause   error
-	node    ID // identity from this authenticated transport's HELLO
-	goAway  func(Message) error
+	capacityChanged    chan struct{}
+	subscriptionClient *Client
+	conn               *websocket.Conn
+	mu                 sync.Mutex
+	pending            map[ID]*pendingObject
+	send               chan outboundObject
+	done               chan struct{}
+	once               sync.Once
+	workers            sync.WaitGroup
+	cause              error
+	node               ID // identity from this authenticated transport's HELLO
+	goAway             func(Message) error
 }
 
-func newObjectTransport(conn *websocket.Conn, goAway ...func(Message) error) *objectTransport {
-	t := &objectTransport{conn: conn, pending: map[ID]*pendingObject{}, send: make(chan outboundObject, objectSendQueue), done: make(chan struct{})}
+func newObjectTransport(conn *websocket.Conn, owner *Client, goAway ...func(Message) error) *objectTransport {
+	t := &objectTransport{subscriptionClient: owner, conn: conn, pending: map[ID]*pendingObject{}, send: make(chan outboundObject, objectSendQueue), done: make(chan struct{})}
 	if len(goAway) != 0 {
 		t.goAway = goAway[0]
 	}
@@ -74,12 +80,18 @@ func (t *objectTransport) fail(e error) {
 		t.cause = e
 		close(t.done)
 		for id, p := range t.pending {
-			delete(t.pending, id)
+			t.dropPendingLocked(id)
 			p.reply <- wireReply{err: e}
 		}
 		t.mu.Unlock()
 		t.conn.Close()
 	})
+	// Invalidators can evict a subscription and attempt its FF cleanup. Keep
+	// callbacks outside Once: cleanup on this closed transport may call fail
+	// again, and sync.Once is not reentrant.
+	if t.subscriptionClient != nil {
+		t.subscriptionClient.failSubscriptions(t)
+	}
 }
 func (t *objectTransport) enqueue(ctx context.Context, out outboundObject, wait bool) error {
 	if wait {
@@ -118,9 +130,33 @@ func (t *objectTransport) roundTrip(ctx context.Context, m Message, mutation boo
 	}
 	p := &pendingObject{opcode: m.Opcode, reply: make(chan wireReply, 1), upload: upload != nil}
 	t.mu.Lock()
-	if len(t.pending) >= maxPendingObjectRequests {
+	wait, _ := ctx.Value(filesystemWaitKey{}).(bool)
+	limit := maxPendingObjectRequests
+	if wait {
+		limit = maxFilesystemPendingRequests
+	}
+	for len(t.pending) >= limit {
+		if !wait {
+			t.mu.Unlock()
+			return wireReply{}, ErrWouldBlock
+		}
+		if t.capacityChanged == nil {
+			t.capacityChanged = make(chan struct{})
+		}
+		changed := t.capacityChanged
 		t.mu.Unlock()
-		return wireReply{}, ErrWouldBlock
+		select {
+		case <-changed:
+		case <-ctx.Done():
+			return wireReply{}, ctx.Err()
+		case <-t.done:
+			return wireReply{}, t.failure()
+		}
+		t.mu.Lock()
+	}
+	if err := ctx.Err(); err != nil {
+		t.mu.Unlock()
+		return wireReply{}, err
 	}
 	select {
 	case <-t.done:
@@ -137,7 +173,7 @@ func (t *objectTransport) roundTrip(ctx context.Context, m Message, mutation boo
 	cleanup := func() {
 		t.mu.Lock()
 		if t.pending[m.ID] == p {
-			delete(t.pending, m.ID)
+			t.dropPendingLocked(m.ID)
 		}
 		t.mu.Unlock()
 		p.streamMu.Lock()
@@ -179,7 +215,7 @@ func (t *objectTransport) roundTrip(ctx context.Context, m Message, mutation boo
 	case <-ctx.Done():
 		t.mu.Lock()
 		sent := p.sent
-		delete(t.pending, m.ID)
+		t.dropPendingLocked(m.ID)
 		t.mu.Unlock()
 		cancel := Encoder{}
 		cancel.ID(m.ID)
@@ -252,6 +288,15 @@ func (t *objectTransport) readLoop() {
 				t.fail(ErrClosed)
 				return
 			}
+			if m.Opcode == ObjectUpdateMessage || m.Opcode == SubscriptionMoved {
+				if t.subscriptionClient != nil {
+					if e = t.subscriptionClient.receiveSubscription(t, m); e != nil {
+						t.fail(e)
+						return
+					}
+				}
+				continue
+			}
 			if m.Opcode >= 5 && m.Opcode <= 6 || m.Opcode == 13 {
 				if e = t.streamMessage(m); e != nil {
 					t.fail(e)
@@ -267,7 +312,7 @@ func (t *objectTransport) readLoop() {
 		t.mu.Lock()
 		p := t.pending[m.ID]
 		if p != nil {
-			delete(t.pending, m.ID)
+			t.dropPendingLocked(m.ID)
 		}
 		t.mu.Unlock()
 		if p == nil {
@@ -279,6 +324,7 @@ func (t *objectTransport) readLoop() {
 			return
 		}
 		r, e := decodeWireReply(m)
+		r.source = t
 		if e == nil && r.status >= 300 {
 			e = &StatusError{Status: r.status, Message: responseDetail(r.headers), RequestID: m.ID, Headers: r.headers}
 		}
@@ -340,3 +386,15 @@ type uploadError struct{ Cause error }
 
 func (e *uploadError) Error() string { return e.Cause.Error() }
 func (e *uploadError) Unwrap() error { return e.Cause }
+
+// Called with mu held. Allocate a broadcast channel only when a filesystem
+// caller actually waits, avoiding an allocation on every ordinary RPC.
+func (t *objectTransport) dropPendingLocked(id ID) {
+	if _, ok := t.pending[id]; ok {
+		delete(t.pending, id)
+		if t.capacityChanged != nil {
+			close(t.capacityChanged)
+			t.capacityChanged = nil
+		}
+	}
+}

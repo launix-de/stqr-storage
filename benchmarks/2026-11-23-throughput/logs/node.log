@@ -1,0 +1,2 @@
+STQR listening on http://127.0.0.1:17421 · config /home/carli/.cache/stqr-throughput-20261123/stqr.yaml
+Bootstrap credentials are in the auth.bootstrap_admin section of the config file.

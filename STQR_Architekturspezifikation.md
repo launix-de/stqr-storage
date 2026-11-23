@@ -340,7 +340,7 @@ placement_group:
 ### 5.4 Sicherheits- und Quota-Regeln
 
 - Server prüft **jede** Request-Autorisierung unabhängig vom Client-SDK.
-- Permission-Bits: `read` (GET/GET_RANGE/STAT, später SUBSCRIBE/UNSUBSCRIBE), `write` (PUT/PUT_RANGE/TRUNC/CAS), `append`, `delete`, optional `manage` nur Admin. APPEND darf mit Append-Recht ein fehlendes Objekt anlegen, ohne allgemeines Überschreibrecht zu vergeben.
+- Permission-Bits: `read` (GET/GET_RANGE/STAT, SUBSCRIBE/UNSUBSCRIBE), `write` (PUT/PUT_RANGE/TRUNC/CAS), `append`, `delete`, optional `manage` nur Admin. APPEND darf mit Append-Recht ein fehlendes Objekt anlegen, ohne allgemeines Überschreibrecht zu vergeben.
 - Admin-Befehle erfordern Admin-Rolle; Node-Befehle Cluster-Rolle.
 - Volumes rechnen **immer physisch**, einschließlich Index, Journal, Alignment, Arenen, Checkpoints und GC-/Migrationsreserven. Bucket-Quotas können logisch oder physisch geführt werden; §5.5 definiert Admission und Reservierung.
 - Credentials und `CLUSTER_TOKEN` sind nie Bestandteil der frei veröffentlichten Placement-Map.
@@ -857,7 +857,7 @@ type ObjectStore interface {
 
 Die Verbindung ist bereits im Konstruktor an genau eine Bucket-ID gebunden; einzelne Operationen erhalten keine Bucket-ID und bieten keine Bucket-/Node-/Adminverwaltung. Objekt-IDs werden direkt verwendet, ohne erneutes Hashen. `GET_RANGE`, `PUT_RANGE` und `TRUNC` gehören zur nativen Basis-API. Die dargestellten Byte-Slice-Methoden sind Komfortfunktionen für in den Arbeitsspeicher passende Transfers; vollständige und ranged Reads/Writes benötigen außerdem Streaming-Varianten mit `io.Reader`/`io.Writer`. Objektgröße und Transfergröße dürfen keine vollständige Pufferung des Objekts erzwingen. Endliche Integer-/Adressräume und explizite Frame-/Ressourcenlimits bleiben technische Grenzen, aber es gibt **kein internes festes Objektgrößenlimit**.
 
-CAS gehört bereits zur Basis-API (§10.6). SUBSCRIBE/UNSUBSCRIBE sind für eine spätere Protokollversion reserviert (§10.7). Listing und sonstige Frontend-Metadatenindizes entstehen ausschließlich aus normalen Objekten in den jeweiligen Client-Libs. Die noch offenen API-Randfälle sind in §20.2 aufgeführt.
+CAS gehört bereits zur Basis-API (§10.6). SUBSCRIBE/UNSUBSCRIBE sind über die optionale HELLO-Capability `512` verfügbar (§10.7). Listing und sonstige Frontend-Metadatenindizes entstehen ausschließlich aus normalen Objekten in den jeweiligen Client-Libs. Die noch offenen API-Randfälle sind in §20.2 aufgeführt.
 
 ### 10.2 APPEND-Semantik – **zwingende Anforderung**
 
@@ -918,14 +918,17 @@ APPEND(bucket,key,payload, request_id, [expected_version])
 
 Für die Neuanlage kann `Precondition.absent=true` mit Offset 0 und ohne expected_version verwendet werden; dann MUSS das Objekt fehlen und `expected` ist leer. Für den atomaren Ersatz eines ganzen Metadatenobjekts, einschließlich Längenänderung, gibt es `scope=OBJECT`: Für ein vorhandenes Objekt ist expected_version verpflichtend, neue Bytes ersetzen das gesamte Objekt. Für Neuanlage gilt stattdessen absent=true; absent und expected_version dürfen nicht zugleich gesetzt sein. Erfolgreiche Änderungen werden durable/dedupliziert wie PUT. CAS gehört zu v1 und ermöglicht optimistische Directory-/Manifest-Änderungen auf mehreren gleichzeitig gemounteten FUSE-Clients.
 
-### 10.7 SUBSCRIBE und UNSUBSCRIBE (spätere Version)
+### 10.7 SUBSCRIBE und UNSUBSCRIBE (optionale Capability)
 
 - `SUBSCRIBE` ist ein Request mit Bucket/Objekt-ID, optionalem Bytebereich und Resume-Cursor. Zunächst liefert er wie GET/GET_RANGE einen konsistenten Snapshot samt Objektversion und Subscription-ID. Nachfolgende `OBJECT_UPDATE`-Pushes liefern unaufgefordert vollständige oder ranged Änderungen, APPEND-Bereiche, TRUNC-Längen und DELETE-Ereignisse, bis UNSUBSCRIBE erfolgt. Rechteprüfung entspricht GET; Änderungen an Berechtigungen beenden betroffene Subscriptions.
 - Snapshotaufnahme und Aufnahme ins Update-Journal erfolgen an derselben Objektsequenzbarriere; Änderungen zwischen GET und Listener-Registrierung dürfen nicht verloren gehen. Jede Aktualisierung trägt `previous_version`, `new_version` und einen monotonen Subscription-Cursor. Ereignisse können nach Reconnect wiederholt eintreffen; Clients deduplizieren. Bei einer Lücke liefern sie keinen vermeintlich aktuellen Zustand, sondern fordern Snapshot/Resume an. Bei vielen Änderungen in einer Version werden alle Teilupdates als zusammengehöriger Satz publiziert.
 - `UNSUBSCRIBE(subscription_id)` ist idempotent. Als Request bestätigt es die Beendigungsbarriere; bereits davor in die Verbindung geschriebene Updates können noch eintreffen und werden anhand der ID verworfen. FF-Unsubscribe liefert keine Abschlussbestätigung.
 - Bei Migration übergibt der Source **nach den Objektdaten** auch Subscription-Deskriptoren, Berechtigungsbezug, letzte bestätigte Cursor und noch benötigte Update-Journalbereiche an das Ziel. Cutover-READY setzt deren Übernahme voraus. Ein TCP-/WebSocket-Socket wird nicht auf den anderen Host verschoben: der Source kann Updates zum bestehenden Client proxyen oder `SUBSCRIPTION_MOVED` mit neuem Owner/Resume-Cursor pushen. Das Ziel hält Replay-Daten bis zur bestätigten Wiederaufnahme bzw. expliziten Beendigung.
 - Allein aktive Subscriptions dürfen beim Drain nicht still verloren gehen. Der Source bleibt bis zu gesichertem Handoff/Resume bzw. einem expliziten Resync-Vertrag als Relay vorhanden. Ein Short-Shutdown pausiert Subscriptions; nach Reconnect wird anhand des Cursors fortgesetzt. Journal-Retention/Backpressure sind in §20 noch zu verfeinern.
-- Diese Commands und ihre Opcodes sind bereits reserviert; v1 ohne das Feature antwortet auf Requests mit 501. Das Plan-/Migrationsformat führt den Subscription-Handoff-Zähler bereits mit.
+- Diese Commands werden über HELLO-Capability `512` aktiviert; Nodes ohne das Feature antworten auf Requests mit 501. Das Plan-/Migrationsformat führt den Subscription-Handoff-Zähler bereits mit.
+- Implementierter Resync-Vertrag: Replay darf durch einen vollständigen autoritativen Snapshot ersetzt werden. Nach Reconnect/SHORT wird bei mitgegebenem Resume-Cursor ein strikt größerer Snapshot-Cursor geliefert. Ein Range-Fence beendet die betroffenen Source-Subscriptions ausdrücklich mit `RESYNC_REQUIRED`, bevor finale Handoff-READYs erzeugt werden; neue Subscriptions sind im gefencten Bereich gesperrt. Damit bleiben keine aktiven Deskriptoren ohne Übergabe am alten Owner zurück. Andere Ranges bleiben unabhängig abonniert.
+- Ressourcenprofil der ersten Implementierung: maximal 2.048 Subscriptions pro Sitzung, 16.384 pro Node; unbestätigte Updates maximal 16 Ereignisse/1 MiB je Subscription und 64 MiB je Node. Push-Replacements sind bis 1 MiB INLINE; größere Änderungen liefern `RESYNC_REQUIRED`. Volle Socket-Queues schließen die Verbindung statt Änderungen still zu verlieren. Der Go-Client puffert Snapshot-Transfers bis 16 MiB und bestätigt vollständig geprüfte Cursor kumulativ. Es wird derzeit kein persistentes Delta-Replay über einen Node-Neustart zugesagt.
+- Subscription-Snapshots gelten bis zur beobachteten Änderung/Invalidierung ihrer Verbindung; asynchrone Zustellung macht sie nicht zu linearisierbaren Reads über mehrere Clients. FUSE cacht Metadaten nur mit einer lebenden Subscription, invalidiert Kernel-Inodes bei Änderungen/Resync und nutzt weiterhin keine blinden Metadaten-TTLs. SDK-Registries halten nur schwache Referenzen; explizites Close und Cache-Eviction beenden deterministisch, Go-GC/AddCleanup räumt verwaiste Handles auf.
 
 ---
 
@@ -1195,16 +1198,16 @@ Normale Clients bekommen ausschließlich Objektzugriff und die dafür nötigen R
 | 0x010a | SYNC_BARRIER / Q | `object:ObjectRef,through_version:u64` => `durable_version:u64` |
 | 0x010b | MAP_GET / Q | `bucket:ID,hash:OID` => `patch:MapPatch` |
 | 0x010c | BUCKET_INFO / Q | `name:Text` => `policy:Policy,permissions:u32` |
-| 0x0110 | SUBSCRIBE / Q, später | `object:ObjectRef,subscription:ID,ranged:Bool,offset:u64,length:u64,resume:Opt(u64)` => `subscription:ID,cursor:u64,info:ObjectInfo,data:Transfer` |
-| 0x0111 | UNSUBSCRIBE / Q/F, später | `subscription:ID` |
-| 0x0112 | OBJECT_UPDATE / P vom Server, später | `subscription:ID,cursor:u64,previous_version:u64,new_version:u64,part:u32,parts:u32,change:u8,offset:u64,new_length:u64,data:Transfer` |
-| 0x0113 | SUBSCRIPTION_MOVED / P vom Server, später | `subscription:ID,cursor:u64,patch:MapPatch` |
-| 0x0114 | SUBSCRIPTION_ACK / F, später | `subscription:ID,through_cursor:u64` |
+| 0x0110 | SUBSCRIBE / Q, Capability 512 | `object:ObjectRef,subscription:ID,ranged:Bool,offset:u64,length:u64,resume:Opt(u64)` => `subscription:ID,cursor:u64,info:ObjectInfo,data:Transfer` |
+| 0x0111 | UNSUBSCRIBE / Q/F, Capability 512 | `subscription:ID` |
+| 0x0112 | OBJECT_UPDATE / P vom Server, Capability 512 | `subscription:ID,cursor:u64,previous_version:u64,new_version:u64,part:u32,parts:u32,change:u8,offset:u64,new_length:u64,data:Transfer` |
+| 0x0113 | SUBSCRIPTION_MOVED / P vom Server, Capability 512 | `subscription:ID,cursor:u64,patch:MapPatch` |
+| 0x0114 | SUBSCRIPTION_ACK / F, Capability 512 | `subscription:ID,through_cursor:u64` |
 | 0x0115 | BUCKET_MAINTENANCE / Q, Single-Node | `object:ObjectRef` (OID=0, nur Bucket relevant) => leer; exklusive Wartung an die Bucket-WebSocket-Sitzung binden |
 | 0x0116 | BUCKET_SCAN / Q, Single-Node | `object:ObjectRef` (OID=0), `after:Opt(OID),limit:u32` (1..1000) => `count:u32,(id:OID,info:ObjectInfo)*,next:Opt(OID)`; nur in eigener Wartungssitzung |
 | 0x0117 | BUCKET_OBJECT_LIST / Q | `object:ObjectRef` (OID=0), `after:Opt(OID),limit:u32` (1..1000) => `count:u32,(id:OID,info:ObjectInfo)*,next:Opt(OID)`; normale READ-Inventur ohne Wartungssperre, aktuelle Sicht in OID-Reihenfolge, keine Namen-/Prefix-Sortierung |
 
-CAS-Scope `0 RANGE,1 OBJECT`; OP_STATUS-State `0 UNKNOWN,1 PENDING,2 COMMITTED,3 FAILED,4 EXPIRED`. UNKNOWN/EXPIRED ist keine Zusicherung „nie ausgeführt“. ObjectUpdate-Change `0 REPLACE,1 RANGE_WRITE,2 APPEND,3 TRUNC,4 DELETE,5 RESYNC_REQUIRED`. SUBSCRIBE/UNSUBSCRIBE/ACK sind in v1 reserviert: Q => 501; F-Varianten werden mangels ausgehandeltem Feature nicht gesendet.
+CAS-Scope `0 RANGE,1 OBJECT`; OP_STATUS-State `0 UNKNOWN,1 PENDING,2 COMMITTED,3 FAILED,4 EXPIRED`. UNKNOWN/EXPIRED ist keine Zusicherung „nie ausgeführt“. ObjectUpdate-Change `0 REPLACE,1 RANGE_WRITE,2 APPEND,3 TRUNC,4 DELETE,5 RESYNC_REQUIRED`. SUBSCRIBE/UNSUBSCRIBE/ACK benötigen HELLO-Capability `512`; ohne Unterstützung gilt Q => 501 und F wird nicht gesendet. Die erste Implementierung publiziert vollständige Replacement-Snapshots, DELETE oder explizites RESYNC_REQUIRED; unvollständige oder unbekannte Teilupdate-Sätze invalidieren den Client-Snapshot.
 
 **Streaming-Regel:** PUT/PUT_RANGE/APPEND mit mode=STREAM eröffnen unter ihrer ID einen begrenzten Staging-Transfer. CHUNKs tragen explizite Offsets; END validiert Gesamtlänge/Digest. Erst dann darf eine Mutation sichtbar werden und Q seinen terminalen Erfolg bekommen. Bei Abbruch werden uncommittete Extents freigegeben. Für GET/SUBSCRIBE-Snapshots kann der Server CHUNK/END-Pushes unter der Request-ID senden und im terminalen result Transfer(mode=STREAM) referenzieren; Clientpufferung ist begrenzt/spoolbar. Nicht vorbereitete CHUNKs werden abgewiesen; der Server kündigt Downstream-Streams vor dem ersten Chunk durch TRANSFER_BEGIN an. Das ist keine zweite RESPONSE und kein Commit-ACK. Bei späteren OBJECT_UPDATE-Streams ist operation die ID des zugehörigen Pushes; dessen Cursor-/Versionsmetadaten werden vor den Chunks gesendet. Kleinere Requests anderer IDs dürfen dazwischenliegen. Flow Control erfolgt über Queue-/Staging-Budgets und WebSocket/TCP-Backpressure.
 

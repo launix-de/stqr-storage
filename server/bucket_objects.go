@@ -530,6 +530,14 @@ func (b *Bucket) mutate(ctx context.Context, p principal, id volume.ObjectID, op
 	default:
 		err = volume.ErrUnsupported
 	}
+	if err == nil && !repeated && s.objectSubscriptions.watched(key) {
+		published, readErr := h.RecordInfo(key)
+		if readErr == nil {
+			s.objectSubscriptions.publish(key, old.Version, published, h)
+		} else {
+			s.objectSubscriptions.resyncWhere(func(k volume.Key) bool { return k == key })
+		}
+	}
 	// Release the write handle before consulting capacity/index statistics.
 	// An unchanged logical request ID safely retries after ownership cutover.
 	h.Close()

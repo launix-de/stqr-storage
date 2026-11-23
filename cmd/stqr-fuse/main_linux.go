@@ -29,6 +29,7 @@ type options struct {
 	create, debug                                   bool
 	fsck                                            bool
 	connectTimeout                                  time.Duration
+	metadataCacheBytes                              uint64
 }
 
 func parseOptions(args []string, out io.Writer) (options, error) {
@@ -49,6 +50,7 @@ func parseOptions(args []string, out io.Writer) (options, error) {
 	flags.BoolVar(&opt.create, "init", false, "initialize a missing filesystem root; preserve an existing root")
 	flags.BoolVar(&opt.debug, "debug", false, "enable FUSE protocol logging")
 	flags.BoolVar(&opt.fsck, "fsck", false, "validate the filesystem, delete unreachable bucket objects, then exit; all mounts must be closed")
+	flags.Uint64Var(&opt.metadataCacheBytes, "metadata-cache-bytes", 32<<20, "subscription-backed metadata cache budget per bucket in bytes; 0 disables caching")
 	flags.DurationVar(&opt.connectTimeout, "connect-timeout", 30*time.Second, "connection and filesystem initialization timeout")
 	flags.Usage = func() {
 		fmt.Fprintln(out, "Usage: stqr-fuse -uri URI -username USER -password PASSWORD [-readonly-bucket ID] [-bucket ID] [-init] MOUNTPOINT\n       stqr-fuse -uri URI -username USER -password PASSWORD -bucket ID [-readonly-bucket ID] --fsck [MOUNTPOINT]\nOnly -readonly-bucket: readonly; only -bucket: read/write; both: native overlay.")
@@ -177,14 +179,27 @@ func run(ctx context.Context, opt options, out io.Writer) error {
 		fmt.Fprintf(out, "stqr-fuse: fsck OK; scanned %d objects, reachable %d, deleted %d (%d payload bytes); removed %d whiteouts, pruned %d directory records\n", result.Scanned, result.Reachable, result.Deleted, result.DeletedBytes, result.WhiteoutsRemoved, result.DirectoriesPruned)
 		return nil
 	}
+	var upperStore, lowerStore client.FilesystemStore = conn, lower
+	if opt.metadataCacheBytes > 0 {
+		if conn != nil {
+			cache := client.NewSubscriptionStore(conn, opt.metadataCacheBytes)
+			defer cache.Close()
+			upperStore = cache
+		}
+		if lower != nil {
+			cache := client.NewSubscriptionStore(lower, opt.metadataCacheBytes)
+			defer cache.Close()
+			lowerStore = cache
+		}
+	}
 	var filesystem client.FilesystemView
 	if conn != nil && lower != nil {
-		filesystem, err = client.OpenOverlayFilesystem(startup, lower, conn, client.OverlayOptions{Create: opt.create, LowerBucketID: opt.readonlyBucket, Whitelist: opt.whitelist})
+		filesystem, err = client.OpenOverlayFilesystem(startup, lowerStore, upperStore, client.OverlayOptions{Create: opt.create, LowerBucketID: opt.readonlyBucket, Whitelist: opt.whitelist})
 	} else {
-		store := conn
+		store := upperStore
 		readonly := false
 		if lower != nil {
-			store = lower
+			store = lowerStore
 			readonly = true
 		}
 		filesystem, err = client.OpenFilesystem(startup, store, client.FSOptions{Create: opt.create, ReadOnly: readonly, UID: uint32(os.Getuid()), GID: uint32(os.Getgid())})

@@ -25,6 +25,7 @@ var _ FilesystemStore = (*Client)(nil)
 // per-inode intents. Data/index objects are immutable. Unlinked inodes, old
 // segments and completed intents are retained until offline fsck collection.
 type Filesystem struct {
+	directoryCache       *filesystemDirectoryCache
 	store                FilesystemStore
 	directoryMemoryLimit uint64
 	readOnly             bool
@@ -53,7 +54,7 @@ func OpenFilesystem(ctx context.Context, store FilesystemStore, opt FSOptions) (
 	if opt.Create && opt.ReadOnly {
 		return nil, syscall.EROFS
 	}
-	f := &Filesystem{store: store, directoryMemoryLimit: limit, readOnly: opt.ReadOnly}
+	f := &Filesystem{directoryCache: newFilesystemDirectoryCache(), store: store, directoryMemoryLimit: limit, readOnly: opt.ReadOnly}
 	if raw, _, err := store.Get(ctx, FilesystemRootID()); err == nil && len(raw) >= 4 && string(raw[:4]) == "STOR" {
 		return nil, ErrOverlayNeedsLower
 	}
@@ -124,6 +125,10 @@ func (f *Filesystem) mutate(ctx context.Context, id ObjectID, fn func(*fsNode) e
 	return FSInfo{}, syscall.EAGAIN
 }
 func (f *Filesystem) directory(ctx context.Context, n fsNode) ([]FSEntry, error) {
+	entries, err := f.directoryView(ctx, n)
+	return append([]FSEntry(nil), entries...), err
+}
+func (f *Filesystem) directoryView(ctx context.Context, n fsNode) ([]FSEntry, error) {
 	if n.kind != fsDirectory {
 		return nil, syscall.ENOTDIR
 	}
@@ -135,13 +140,23 @@ func (f *Filesystem) directory(ctx context.Context, n fsNode) ([]FSEntry, error)
 	if n.blob.length > f.directoryMemoryLimit || n.blob.length > uint64(int(^uint(0)>>1)) {
 		return nil, syscall.ENOMEM
 	}
+	key, cacheable := directoryKey(n.blob)
+	if cacheable {
+		if entries, ok := f.directoryCache.get(key); ok {
+			return entries, nil
+		}
+	}
 	data := make([]byte, int(n.blob.length))
 	if len(data) > 0 {
 		if _, err := f.readBlob(ctx, n.blob, data, 0); err != nil {
 			return nil, err
 		}
 	}
-	return decodeFSDirectory(data)
+	entries, err := decodeFSDirectory(data)
+	if err == nil && cacheable {
+		f.directoryCache.put(key, entries)
+	}
+	return entries, err
 }
 func (f *Filesystem) ReadDir(ctx context.Context, id ObjectID) ([]FSEntry, error) {
 	n, _, err := f.load(ctx, id)
@@ -161,7 +176,11 @@ func (f *Filesystem) Lookup(ctx context.Context, parent ObjectID, name string) (
 	if !validFSName(name) {
 		return FSInfo{}, syscall.EINVAL
 	}
-	entries, err := f.ReadDir(ctx, parent)
+	node, _, err := f.load(ctx, parent)
+	if err != nil {
+		return FSInfo{}, err
+	}
+	entries, err := f.directoryView(ctx, node)
 	if err != nil {
 		return FSInfo{}, err
 	}

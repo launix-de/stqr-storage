@@ -1,0 +1,1375 @@
+{
+  "server_cases": {
+    "TestAdminDraftUserMutationDoesNotPublish": {
+      "result": "pass",
+      "log": "stqr-throughput-server-0.jsonl",
+      "seconds": 1.58
+    },
+    "TestBucketQuotaCapacityExcludesAdminAndUsesProfile": {
+      "result": "pass",
+      "log": "stqr-throughput-server-0.jsonl",
+      "seconds": 0.51
+    },
+    "TestBucketFsckNetworkExclusiveSweep": {
+      "result": "pass",
+      "log": "stqr-throughput-server-0.jsonl",
+      "seconds": 5.2
+    },
+    "TestBucketFilesystemKernelNamespace": {
+      "result": "pass",
+      "log": "stqr-throughput-server-0.jsonl",
+      "seconds": 1.68
+    },
+    "TestBucketConfigurationAndAsynchronousDeletion": {
+      "result": "pass",
+      "log": "stqr-throughput-server-0.jsonl",
+      "seconds": 4.54
+    },
+    "TestBucketDiskPolicyMovePreservesVersionsAndRetries": {
+      "result": "pass",
+      "log": "stqr-throughput-server-0.jsonl",
+      "seconds": 2.08
+    },
+    "TestBucketStreamingDigestFailureDoesNotCommit": {
+      "result": "pass",
+      "log": "stqr-throughput-server-0.jsonl",
+      "seconds": 1.59
+    },
+    "TestBucketInfoWireAndPermissions": {
+      "result": "pass",
+      "log": "stqr-throughput-server-0.jsonl",
+      "seconds": 0
+    },
+    "TestBucketCatalogRejectsCorruptionWithoutBootstrap/duplicate-hash": {
+      "result": "pass",
+      "log": "stqr-throughput-server-0.jsonl",
+      "seconds": 0
+    },
+    "TestBucketCatalogRejectsCorruptionWithoutBootstrap/unsorted": {
+      "result": "pass",
+      "log": "stqr-throughput-server-0.jsonl",
+      "seconds": 0
+    },
+    "TestBucketCatalogRejectsCorruptionWithoutBootstrap/missing-config": {
+      "result": "pass",
+      "log": "stqr-throughput-server-0.jsonl",
+      "seconds": 0
+    },
+    "TestBucketCatalogRejectsCorruptionWithoutBootstrap/wrong-digest": {
+      "result": "pass",
+      "log": "stqr-throughput-server-0.jsonl",
+      "seconds": 0
+    },
+    "TestBucketCatalogRejectsCorruptionWithoutBootstrap/missing-root": {
+      "result": "pass",
+      "log": "stqr-throughput-server-0.jsonl",
+      "seconds": 0
+    },
+    "TestBucketCatalogRejectsCorruptionWithoutBootstrap/partial-hash": {
+      "result": "pass",
+      "log": "stqr-throughput-server-0.jsonl",
+      "seconds": 0
+    },
+    "TestBucketCatalogRejectsCorruptionWithoutBootstrap": {
+      "result": "pass",
+      "log": "stqr-throughput-server-0.jsonl",
+      "seconds": 0.02
+    },
+    "TestBucketUsageCountsCommitsWithoutRepeatedIndexScans": {
+      "result": "pass",
+      "log": "stqr-throughput-server-0.jsonl",
+      "seconds": 1.11
+    },
+    "TestBucketInfoWebSocketRevocation": {
+      "result": "pass",
+      "log": "stqr-throughput-server-0.jsonl",
+      "seconds": 0.53
+    },
+    "TestBucketInfoUsesRAMAndStartupRejectsCorruption": {
+      "result": "pass",
+      "log": "stqr-throughput-server-0.jsonl",
+      "seconds": 1.02
+    },
+    "TestClusterAdminSocketCanMutateUntilItsRoleIsRevoked": {
+      "result": "pass",
+      "log": "stqr-throughput-server-0.jsonl",
+      "seconds": 3.19
+    },
+    "TestDashboardMembershipProjection": {
+      "result": "pass",
+      "log": "stqr-throughput-server-0.jsonl",
+      "seconds": 0.04
+    },
+    "TestCollectStatsReadsControlActivityWithoutLedgerLock": {
+      "result": "pass",
+      "log": "stqr-throughput-server-0.jsonl",
+      "seconds": 0.53
+    },
+    "TestDaemonFiniteQuotaAcrossOwnersAndRestart": {
+      "result": "pass",
+      "log": "stqr-throughput-server-0.jsonl",
+      "seconds": 4.79
+    },
+    "TestFrontendCredentialsStayPrivateAndBucketBound": {
+      "result": "pass",
+      "log": "stqr-throughput-server-0.jsonl",
+      "seconds": 2.63
+    },
+    "TestFrontendIssuerOfflineRemainsRetryable": {
+      "result": "pass",
+      "log": "stqr-throughput-server-0.jsonl",
+      "seconds": 2.08
+    },
+    "TestDaemonClusterShutdownMissedStopWaitsForReconnect": {
+      "result": "pass",
+      "log": "stqr-throughput-server-0.jsonl",
+      "seconds": 3.71
+    },
+    "TestDaemonUpgradeFromDiscoveryOnlyCluster": {
+      "result": "pass",
+      "log": "stqr-throughput-server-0.jsonl",
+      "seconds": 3.68
+    },
+    "TestConnectionCannotSwitchBucketOrBecomeAdministrative": {
+      "result": "pass",
+      "log": "stqr-throughput-server-0.jsonl",
+      "seconds": 2.03
+    },
+    "TestControlCoordinatorRecoversLostAcknowledgements/prepare01000000000000000000000000000000": {
+      "result": "pass",
+      "log": "stqr-throughput-server-0.jsonl",
+      "seconds": 0.03
+    },
+    "TestControlCoordinatorRecoversLostAcknowledgements/prepare02000000000000000000000000000000": {
+      "result": "pass",
+      "log": "stqr-throughput-server-0.jsonl",
+      "seconds": 0.03
+    },
+    "TestControlCoordinatorRecoversLostAcknowledgements/commit01000000000000000000000000000000": {
+      "result": "pass",
+      "log": "stqr-throughput-server-0.jsonl",
+      "seconds": 0.04
+    },
+    "TestControlCoordinatorRecoversLostAcknowledgements/commit02000000000000000000000000000000": {
+      "result": "pass",
+      "log": "stqr-throughput-server-0.jsonl",
+      "seconds": 0.03
+    },
+    "TestControlCoordinatorRecoversLostAcknowledgements/apply01000000000000000000000000000000": {
+      "result": "pass",
+      "log": "stqr-throughput-server-0.jsonl",
+      "seconds": 0.03
+    },
+    "TestControlCoordinatorRecoversLostAcknowledgements/apply02000000000000000000000000000000": {
+      "result": "pass",
+      "log": "stqr-throughput-server-0.jsonl",
+      "seconds": 0.03
+    },
+    "TestControlCoordinatorRecoversLostAcknowledgements/release01000000000000000000000000000000": {
+      "result": "pass",
+      "log": "stqr-throughput-server-0.jsonl",
+      "seconds": 0.03
+    },
+    "TestControlCoordinatorRecoversLostAcknowledgements/release02000000000000000000000000000000": {
+      "result": "pass",
+      "log": "stqr-throughput-server-0.jsonl",
+      "seconds": 0.03
+    },
+    "TestControlCoordinatorRecoversLostAcknowledgements": {
+      "result": "pass",
+      "log": "stqr-throughput-server-0.jsonl",
+      "seconds": 0.27
+    },
+    "TestControlCompletedProofsSurviveLaterRounds": {
+      "result": "pass",
+      "log": "stqr-throughput-server-0.jsonl",
+      "seconds": 0.04
+    },
+    "TestExclusionRequiresEverySurvivorAndPersistsExactDecision": {
+      "result": "pass",
+      "log": "stqr-throughput-server-0.jsonl",
+      "seconds": 0.05
+    },
+    "TestExclusionConstructionMarkerPreventsAbandoningSealedRecovery": {
+      "result": "pass",
+      "log": "stqr-throughput-server-0.jsonl",
+      "seconds": 0.02
+    },
+    "TestExclusionWireBindsOriginalMembership": {
+      "result": "pass",
+      "log": "stqr-throughput-server-0.jsonl",
+      "seconds": 0
+    },
+    "TestControlJournalRejectsCorruptionAndValidPrefixRollback/payload": {
+      "result": "pass",
+      "log": "stqr-throughput-server-0.jsonl",
+      "seconds": 0.01
+    },
+    "TestControlJournalRejectsCorruptionAndValidPrefixRollback/truncated-header": {
+      "result": "pass",
+      "log": "stqr-throughput-server-0.jsonl",
+      "seconds": 0.01
+    },
+    "TestControlJournalRejectsCorruptionAndValidPrefixRollback/valid-prefix": {
+      "result": "pass",
+      "log": "stqr-throughput-server-0.jsonl",
+      "seconds": 0.01
+    },
+    "TestControlJournalRejectsCorruptionAndValidPrefixRollback": {
+      "result": "pass",
+      "log": "stqr-throughput-server-0.jsonl",
+      "seconds": 0.03
+    },
+    "TestControlRuntimeRestoresPublishedAndAppliedImages/none": {
+      "result": "pass",
+      "log": "stqr-throughput-server-0.jsonl",
+      "seconds": 0.57
+    },
+    "TestControlRuntimeRestoresPublishedAndAppliedImages/head-missing": {
+      "result": "pass",
+      "log": "stqr-throughput-server-0.jsonl",
+      "seconds": 0.54
+    },
+    "TestControlRuntimeRestoresPublishedAndAppliedImages/head-decision-changed": {
+      "result": "pass",
+      "log": "stqr-throughput-server-0.jsonl",
+      "seconds": 0.58
+    },
+    "TestControlRuntimeRestoresPublishedAndAppliedImages/child-missing": {
+      "result": "pass",
+      "log": "stqr-throughput-server-0.jsonl",
+      "seconds": 0.53
+    },
+    "TestControlRuntimeRestoresPublishedAndAppliedImages": {
+      "result": "pass",
+      "log": "stqr-throughput-server-0.jsonl",
+      "seconds": 2.22
+    },
+    "TestControlWireStrictRoundTrips/claim": {
+      "result": "pass",
+      "log": "stqr-throughput-server-0.jsonl",
+      "seconds": 0
+    },
+    "TestControlWireStrictRoundTrips/proposal": {
+      "result": "pass",
+      "log": "stqr-throughput-server-0.jsonl",
+      "seconds": 0
+    },
+    "TestControlWireStrictRoundTrips/certificate": {
+      "result": "pass",
+      "log": "stqr-throughput-server-0.jsonl",
+      "seconds": 0
+    },
+    "TestControlWireStrictRoundTrips/apply": {
+      "result": "pass",
+      "log": "stqr-throughput-server-0.jsonl",
+      "seconds": 0
+    },
+    "TestControlWireStrictRoundTrips": {
+      "result": "pass",
+      "log": "stqr-throughput-server-0.jsonl",
+      "seconds": 0
+    },
+    "TestDashboardRecoveryCodec": {
+      "result": "pass",
+      "log": "stqr-throughput-server-0.jsonl",
+      "seconds": 0.06
+    },
+    "TestDaemonExplicitExclusionMarksLostAndPurgesStaleCopies": {
+      "result": "pass",
+      "log": "stqr-throughput-server-0.jsonl",
+      "seconds": 5.74
+    },
+    "TestDaemonExclusionCancelsUncommittedHandoffs/target-lost-during-bulk": {
+      "result": "pass",
+      "log": "stqr-throughput-server-0.jsonl",
+      "seconds": 3.69
+    },
+    "TestDaemonExclusionCancelsUncommittedHandoffs/target-lost-after-ready": {
+      "result": "pass",
+      "log": "stqr-throughput-server-0.jsonl",
+      "seconds": 3.74
+    },
+    "TestDaemonExclusionCancelsUncommittedHandoffs/source-lost-before-seal": {
+      "result": "pass",
+      "log": "stqr-throughput-server-0.jsonl",
+      "seconds": 3.69
+    },
+    "TestDaemonExclusionCancelsUncommittedHandoffs/source-lost-after-ready": {
+      "result": "pass",
+      "log": "stqr-throughput-server-0.jsonl",
+      "seconds": 3.68
+    },
+    "TestDaemonExclusionCancelsUncommittedHandoffs/target-lost-after-source-commit": {
+      "result": "pass",
+      "log": "stqr-throughput-server-0.jsonl",
+      "seconds": 3.72
+    },
+    "TestDaemonExclusionCancelsUncommittedHandoffs/source-lost-after-target-commit": {
+      "result": "pass",
+      "log": "stqr-throughput-server-0.jsonl",
+      "seconds": 3.68
+    },
+    "TestDaemonExclusionCancelsUncommittedHandoffs": {
+      "result": "pass",
+      "log": "stqr-throughput-server-0.jsonl",
+      "seconds": 22.2
+    },
+    "TestDaemonForceHonorsAdminRevocationInCommittedParent": {
+      "result": "pass",
+      "log": "stqr-throughput-server-0.jsonl",
+      "seconds": 4.73
+    },
+    "TestDaemonForcePreservesEarlierForceCommit/coordinator-lost": {
+      "result": "pass",
+      "log": "stqr-throughput-server-0.jsonl",
+      "seconds": 7.34
+    },
+    "TestDaemonForcePreservesEarlierForceCommit/coordinator-survives": {
+      "result": "pass",
+      "log": "stqr-throughput-server-0.jsonl",
+      "seconds": 7.33
+    },
+    "TestDaemonForcePreservesEarlierForceCommit": {
+      "result": "pass",
+      "log": "stqr-throughput-server-0.jsonl",
+      "seconds": 14.67
+    },
+    "TestGrowthMaximumOverflowAndPageAlignment": {
+      "result": "pass",
+      "log": "stqr-throughput-server-0.jsonl",
+      "seconds": 0
+    },
+    "TestObjectSubscriptionMutationsAndLifetime": {
+      "result": "pass",
+      "log": "stqr-throughput-server-0.jsonl",
+      "seconds": 2.02
+    },
+    "TestSubscriptionStoreBoundedAndInvalidated": {
+      "result": "pass",
+      "log": "stqr-throughput-server-0.jsonl",
+      "seconds": 2.02
+    },
+    "TestObjectSubscriptionSnapshotRegistrationBarrier": {
+      "result": "pass",
+      "log": "stqr-throughput-server-0.jsonl",
+      "seconds": 2.06
+    },
+    "TestPeerDirectoryUnionIsCanonicalAndRejectsIdentityCollision": {
+      "result": "pass",
+      "log": "stqr-throughput-server-0.jsonl",
+      "seconds": 0
+    },
+    "TestPeerNativeIdentityPingAndStats": {
+      "result": "pass",
+      "log": "stqr-throughput-server-0.jsonl",
+      "seconds": 0.99
+    },
+    "TestPeerNativeDisconnectReconnectAndMultiplex": {
+      "result": "pass",
+      "log": "stqr-throughput-server-0.jsonl",
+      "seconds": 1.02
+    },
+    "TestPlacementGroupFilterModesAndDesiredMask/default": {
+      "result": "pass",
+      "log": "stqr-throughput-server-0.jsonl",
+      "seconds": 0
+    },
+    "TestPlacementGroupFilterModesAndDesiredMask/all": {
+      "result": "pass",
+      "log": "stqr-throughput-server-0.jsonl",
+      "seconds": 0
+    },
+    "TestPlacementGroupFilterModesAndDesiredMask/blacklist-empty": {
+      "result": "pass",
+      "log": "stqr-throughput-server-0.jsonl",
+      "seconds": 0
+    },
+    "TestPlacementGroupFilterModesAndDesiredMask/blacklist": {
+      "result": "pass",
+      "log": "stqr-throughput-server-0.jsonl",
+      "seconds": 0
+    },
+    "TestPlacementGroupFilterModesAndDesiredMask/whitelist-empty": {
+      "result": "pass",
+      "log": "stqr-throughput-server-0.jsonl",
+      "seconds": 0
+    },
+    "TestPlacementGroupFilterModesAndDesiredMask/whitelist": {
+      "result": "pass",
+      "log": "stqr-throughput-server-0.jsonl",
+      "seconds": 0
+    },
+    "TestPlacementGroupFilterModesAndDesiredMask": {
+      "result": "pass",
+      "log": "stqr-throughput-server-0.jsonl",
+      "seconds": 0
+    },
+    "TestEstablishedMetadataPGDoesNotFallBackOrReinitialize": {
+      "result": "pass",
+      "log": "stqr-throughput-server-0.jsonl",
+      "seconds": 0.53
+    },
+    "TestQuotaTransferRejectsReplayMutationAndWrongAuthority": {
+      "result": "pass",
+      "log": "stqr-throughput-server-0.jsonl",
+      "seconds": 0.01
+    },
+    "TestDaemonRAMNodeDrainPreservesLiveRuntime": {
+      "result": "pass",
+      "log": "stqr-throughput-server-0.jsonl",
+      "seconds": 6.25
+    },
+    "TestDaemonBucketDeletionReclaimsEveryNode": {
+      "result": "pass",
+      "log": "stqr-throughput-server-0.jsonl",
+      "seconds": 3.64
+    },
+    "TestRangePlanAttemptAndLegacyWireIdentity": {
+      "result": "pass",
+      "log": "stqr-throughput-server-0.jsonl",
+      "seconds": 0
+    },
+    "TestRebuildProbeDetectsCompetingPotentialBindings": {
+      "result": "pass",
+      "log": "stqr-throughput-server-0.jsonl",
+      "seconds": 0
+    },
+    "TestS3MultipartValidationAndPartReplacement": {
+      "result": "pass",
+      "log": "stqr-throughput-server-0.jsonl",
+      "seconds": 4.78
+    },
+    "TestS3CRC64NVMEVector": {
+      "result": "pass",
+      "log": "stqr-throughput-server-0.jsonl",
+      "seconds": 0
+    },
+    "TestS3StreamingModesAndTampering": {
+      "result": "pass",
+      "log": "stqr-throughput-server-0.jsonl",
+      "seconds": 1.54
+    },
+    "TestS3InvalidCompositeChecksumCanBeRetriedOrAborted": {
+      "result": "pass",
+      "log": "stqr-throughput-server-0.jsonl",
+      "seconds": 1.51
+    },
+    "TestS3MultipartRejectsUnsupportedCompletionPrecondition": {
+      "result": "pass",
+      "log": "stqr-throughput-server-0.jsonl",
+      "seconds": 1.49
+    },
+    "TestS3AuthenticationGrantsAndKeyPersistence": {
+      "result": "pass",
+      "log": "stqr-throughput-server-0.jsonl",
+      "seconds": 3.01
+    },
+    "TestS3ChecksumsStagingAndSignatureTampering": {
+      "result": "pass",
+      "log": "stqr-throughput-server-0.jsonl",
+      "seconds": 1.48
+    },
+    "TestS3ReclaimsPhysicalSpaceOnOverwriteDeleteAndFailure": {
+      "result": "pass",
+      "log": "stqr-throughput-server-0.jsonl",
+      "seconds": 3.94
+    },
+    "TestS3StagingFileReleasedOnProcessKill": {
+      "result": "pass",
+      "log": "stqr-throughput-server-0.jsonl",
+      "seconds": 0.01
+    },
+    "TestVolumeAddIdempotencyAndRescan": {
+      "result": "pass",
+      "log": "stqr-throughput-server-0.jsonl",
+      "seconds": 0.48
+    },
+    "TestWebSocketOriginalMessagesQueuesAndStats": {
+      "result": "pass",
+      "log": "stqr-throughput-server-0.jsonl",
+      "seconds": 0.97
+    },
+    "TestIncompleteLocalOperationsRecoverWithoutLosingVolumes": {
+      "result": "pass",
+      "log": "stqr-throughput-server-0.jsonl",
+      "seconds": 0.51
+    },
+    "TestStreamingPutFinishesWithMapRedirectAfterHandoff": {
+      "result": "pass",
+      "log": "stqr-throughput-server-0.jsonl",
+      "seconds": 3.79
+    },
+    "TestSystemImageCopyNeedsCompleteGraphAndAllCommit": {
+      "result": "pass",
+      "log": "stqr-throughput-server-0.jsonl",
+      "seconds": 1.03
+    },
+    "TestRoleUpdateRejectsSelfChangesAndPersistsOthers": {
+      "result": "pass",
+      "log": "stqr-throughput-server-0.jsonl",
+      "seconds": 1.01
+    },
+    "TestConcurrentUserCreationDoesNotLoseAccounts": {
+      "result": "pass",
+      "log": "stqr-throughput-server-0.jsonl",
+      "seconds": 2.03
+    },
+    "TestRecoveryRejectsUnresolvedSourceFence": {
+      "result": "pass",
+      "log": "stqr-throughput-server-0.jsonl",
+      "seconds": 3.08
+    },
+    "TestRecoveredStaleCopiesCannotOverrideOtherRanges": {
+      "result": "pass",
+      "log": "stqr-throughput-server-0.jsonl",
+      "seconds": 5.66
+    },
+    "TestAdminDraftBucketDeletionCannotTouchData": {
+      "result": "pass",
+      "log": "stqr-throughput-server-1.jsonl",
+      "seconds": 1.05
+    },
+    "TestUnusedGuaranteeSubtractsUsedBytes": {
+      "result": "pass",
+      "log": "stqr-throughput-server-1.jsonl",
+      "seconds": 0
+    },
+    "TestBucketScanMergesTombstonesAndPages": {
+      "result": "pass",
+      "log": "stqr-throughput-server-1.jsonl",
+      "seconds": 1.02
+    },
+    "TestBucketAdminAndClientObjectsEndToEnd": {
+      "result": "pass",
+      "log": "stqr-throughput-server-1.jsonl",
+      "seconds": 3.62
+    },
+    "TestBucketLogicalQuotaAndAppendOnlyUser": {
+      "result": "pass",
+      "log": "stqr-throughput-server-1.jsonl",
+      "seconds": 2.58
+    },
+    "TestBucketDeletionIntentResumesOnRestart": {
+      "result": "pass",
+      "log": "stqr-throughput-server-1.jsonl",
+      "seconds": 1.05
+    },
+    "TestBucketNativeOverlayPHPCluster": {
+      "result": "pass",
+      "log": "stqr-throughput-server-1.jsonl",
+      "seconds": 15.52
+    },
+    "TestBucketCatalogConcurrentHandles": {
+      "result": "pass",
+      "log": "stqr-throughput-server-1.jsonl",
+      "seconds": 0.05
+    },
+    "TestBucketDescriptionValidationAndCanonicalJSON": {
+      "result": "pass",
+      "log": "stqr-throughput-server-1.jsonl",
+      "seconds": 0
+    },
+    "TestBucketUsageConcurrentMeasurementsAndAppends": {
+      "result": "pass",
+      "log": "stqr-throughput-server-1.jsonl",
+      "seconds": 1.07
+    },
+    "TestBucketCatalogServerMigrationAndRestart": {
+      "result": "pass",
+      "log": "stqr-throughput-server-1.jsonl",
+      "seconds": 0.53
+    },
+    "TestVolumeCapacityUsesDFAndAvailableRAM": {
+      "result": "pass",
+      "log": "stqr-throughput-server-1.jsonl",
+      "seconds": 0.52
+    },
+    "TestClusterQuotaDisplayUsesAllMembersWithoutBlockingLocalWrites": {
+      "result": "pass",
+      "log": "stqr-throughput-server-1.jsonl",
+      "seconds": 4.38
+    },
+    "TestDashboardForceDisconnect": {
+      "result": "pass",
+      "log": "stqr-throughput-server-1.jsonl",
+      "seconds": 0.03
+    },
+    "TestDashboardForceDisconnectBrowser": {
+      "result": "skip",
+      "log": "stqr-throughput-server-1.jsonl",
+      "seconds": 0
+    },
+    "TestDaemonQuotaMovesLiveBytesAndChangesLimits": {
+      "result": "pass",
+      "log": "stqr-throughput-server-1.jsonl",
+      "seconds": 5.26
+    },
+    "TestNodeDrainLetsActiveFrontendFinishBeforeMembershipLeave": {
+      "result": "pass",
+      "log": "stqr-throughput-server-1.jsonl",
+      "seconds": 4.32
+    },
+    "TestDaemonClusterShutdownAndReverseRestart": {
+      "result": "pass",
+      "log": "stqr-throughput-server-1.jsonl",
+      "seconds": 3.79
+    },
+    "TestSSHClusterAcceptance": {
+      "result": "skip",
+      "log": "stqr-throughput-server-1.jsonl",
+      "seconds": 0
+    },
+    "TestConnectionChecksBucketGrantAtUpgrade": {
+      "result": "pass",
+      "log": "stqr-throughput-server-1.jsonl",
+      "seconds": 1.08
+    },
+    "TestConnectionCachesAdminAndPeerRoles": {
+      "result": "pass",
+      "log": "stqr-throughput-server-1.jsonl",
+      "seconds": 1.02
+    },
+    "TestControlCoordinatorCrashBeforeOwnReservation": {
+      "result": "pass",
+      "log": "stqr-throughput-server-1.jsonl",
+      "seconds": 0.03
+    },
+    "TestControlAbortBindsClaimAcrossRestart": {
+      "result": "pass",
+      "log": "stqr-throughput-server-1.jsonl",
+      "seconds": 0.01
+    },
+    "TestExclusionWireBindsFlagsActorAndCanonicalSurvivors": {
+      "result": "pass",
+      "log": "stqr-throughput-server-1.jsonl",
+      "seconds": 0.04
+    },
+    "TestExclusionSuspendsUncommittedGlobalRoundUntilAbortOrCommit/abort": {
+      "result": "pass",
+      "log": "stqr-throughput-server-1.jsonl",
+      "seconds": 0.04
+    },
+    "TestExclusionSuspendsUncommittedGlobalRoundUntilAbortOrCommit/commit": {
+      "result": "pass",
+      "log": "stqr-throughput-server-1.jsonl",
+      "seconds": 0.05
+    },
+    "TestExclusionSuspendsUncommittedGlobalRoundUntilAbortOrCommit": {
+      "result": "pass",
+      "log": "stqr-throughput-server-1.jsonl",
+      "seconds": 0.09
+    },
+    "TestExclusionNeverAbortsSuspendedCommittedParent": {
+      "result": "pass",
+      "log": "stqr-throughput-server-1.jsonl",
+      "seconds": 0.04
+    },
+    "TestControlJournalIdentityAndMissingStateNeverReformat": {
+      "result": "pass",
+      "log": "stqr-throughput-server-1.jsonl",
+      "seconds": 0.01
+    },
+    "TestControlMembershipParticipantBarriersSurviveEveryPhase": {
+      "result": "pass",
+      "log": "stqr-throughput-server-1.jsonl",
+      "seconds": 0.05
+    },
+    "TestControlWireBucketFenceIsCanonicalAndBindsDecision": {
+      "result": "pass",
+      "log": "stqr-throughput-server-1.jsonl",
+      "seconds": 0
+    },
+    "TestDashboardVolumeRecoveryBrowser": {
+      "result": "skip",
+      "log": "stqr-throughput-server-1.jsonl",
+      "seconds": 0
+    },
+    "TestDaemonExclusionDelegatesAndSurvivesOriginalInitiatorLoss": {
+      "result": "pass",
+      "log": "stqr-throughput-server-1.jsonl",
+      "seconds": 6.5
+    },
+    "TestDaemonForceReplacesUncommittedGlobalRound": {
+      "result": "pass",
+      "log": "stqr-throughput-server-1.jsonl",
+      "seconds": 4.27
+    },
+    "TestDaemonForceCompletesCommittedJoinAndDelegatesToNewMember": {
+      "result": "pass",
+      "log": "stqr-throughput-server-1.jsonl",
+      "seconds": 4.7
+    },
+    "TestDaemonForceRetryAfterApplyResumesOriginalIntent": {
+      "result": "pass",
+      "log": "stqr-throughput-server-1.jsonl",
+      "seconds": 3.67
+    },
+    "TestLostRangeDistinguishesRepairFromPartialCreate": {
+      "result": "pass",
+      "log": "stqr-throughput-server-1.jsonl",
+      "seconds": 1.6
+    },
+    "TestObjectSubscriptionStreamAndRangedUpdates": {
+      "result": "pass",
+      "log": "stqr-throughput-server-1.jsonl",
+      "seconds": 2.26
+    },
+    "TestDaemonSubscriptionResyncsBeforeRangeHandoff": {
+      "result": "pass",
+      "log": "stqr-throughput-server-1.jsonl",
+      "seconds": 3.22
+    },
+    "TestObjectSubscriptionJournalOverflowRequestsResync": {
+      "result": "pass",
+      "log": "stqr-throughput-server-1.jsonl",
+      "seconds": 0
+    },
+    "TestAutomaticPeerDiscoveryPendingAdministrationAndRestart": {
+      "result": "pass",
+      "log": "stqr-throughput-server-1.jsonl",
+      "seconds": 1.18
+    },
+    "TestPeerNativeRejectsIdentityAndClusterMismatch": {
+      "result": "pass",
+      "log": "stqr-throughput-server-1.jsonl",
+      "seconds": 2.05
+    },
+    "TestPeerExternalTransport": {
+      "result": "skip",
+      "log": "stqr-throughput-server-1.jsonl",
+      "seconds": 0
+    },
+    "TestPlacementGroupConstrainsWritesAndSurvivesRestart": {
+      "result": "pass",
+      "log": "stqr-throughput-server-1.jsonl",
+      "seconds": 0.53
+    },
+    "TestPlacementUsesDetachedContiguousImage": {
+      "result": "pass",
+      "log": "stqr-throughput-server-1.jsonl",
+      "seconds": 0
+    },
+    "TestDaemonAutomaticExtension": {
+      "result": "pass",
+      "log": "stqr-throughput-server-1.jsonl",
+      "seconds": 10
+    },
+    "TestDaemonExtensionWithConcentratedObjectHashes": {
+      "result": "pass",
+      "log": "stqr-throughput-server-1.jsonl",
+      "seconds": 4.16
+    },
+    "TestDaemonCodecPolicyConvertsEveryOwner": {
+      "result": "pass",
+      "log": "stqr-throughput-server-1.jsonl",
+      "seconds": 4.24
+    },
+    "TestDaemonRAMHandoffCrashRecovery/unsealed-source": {
+      "result": "pass",
+      "log": "stqr-throughput-server-1.jsonl",
+      "seconds": 2.74
+    },
+    "TestDaemonRAMHandoffCrashRecovery/sealed-source": {
+      "result": "pass",
+      "log": "stqr-throughput-server-1.jsonl",
+      "seconds": 3.78
+    },
+    "TestDaemonRAMHandoffCrashRecovery/sealed-target": {
+      "result": "pass",
+      "log": "stqr-throughput-server-1.jsonl",
+      "seconds": 3.4
+    },
+    "TestDaemonRAMHandoffCrashRecovery/source-commit-target": {
+      "result": "pass",
+      "log": "stqr-throughput-server-1.jsonl",
+      "seconds": 3.43
+    },
+    "TestDaemonRAMHandoffCrashRecovery/source-commit-both": {
+      "result": "pass",
+      "log": "stqr-throughput-server-1.jsonl",
+      "seconds": 2.85
+    },
+    "TestDaemonRAMHandoffCrashRecovery/target-commit-target": {
+      "result": "pass",
+      "log": "stqr-throughput-server-1.jsonl",
+      "seconds": 2.82
+    },
+    "TestDaemonRAMHandoffCrashRecovery": {
+      "result": "pass",
+      "log": "stqr-throughput-server-1.jsonl",
+      "seconds": 19.02
+    },
+    "TestRebuildProbeReproducible": {
+      "result": "pass",
+      "log": "stqr-throughput-server-1.jsonl",
+      "seconds": 0
+    },
+    "TestS3MultipartRecoveryCannotOverwriteLaterWrite": {
+      "result": "pass",
+      "log": "stqr-throughput-server-1.jsonl",
+      "seconds": 1.54
+    },
+    "TestS3RealCLI": {
+      "result": "skip",
+      "log": "stqr-throughput-server-1.jsonl",
+      "seconds": 0
+    },
+    "TestS3MultipartRestartRecoversPendingCompletion": {
+      "result": "pass",
+      "log": "stqr-throughput-server-1.jsonl",
+      "seconds": 1.59
+    },
+    "TestS3FailedCompletionCanBeAbortedWhenStorageIsFull": {
+      "result": "pass",
+      "log": "stqr-throughput-server-1.jsonl",
+      "seconds": 1.54
+    },
+    "TestS3HTTPPublicationRangesAndBinaryDelete": {
+      "result": "pass",
+      "log": "stqr-throughput-server-1.jsonl",
+      "seconds": 1.5
+    },
+    "TestS3PHPClient": {
+      "result": "skip",
+      "log": "stqr-throughput-server-1.jsonl",
+      "seconds": 0
+    },
+    "TestS3KeyAdminReceiptsAndPrivateListings": {
+      "result": "pass",
+      "log": "stqr-throughput-server-1.jsonl",
+      "seconds": 1.57
+    },
+    "TestS3DownloadSnapshotSurvivesReclamation": {
+      "result": "pass",
+      "log": "stqr-throughput-server-1.jsonl",
+      "seconds": 1.5
+    },
+    "TestBootstrapConfigAccountsAndAutoGrowth": {
+      "result": "pass",
+      "log": "stqr-throughput-server-1.jsonl",
+      "seconds": 1.03
+    },
+    "TestDrainWaitsAndPreservesSparseTombstonesAndDedupe": {
+      "result": "pass",
+      "log": "stqr-throughput-server-1.jsonl",
+      "seconds": 3.5
+    },
+    "TestConfiguredVolumeDamageNeverReformats": {
+      "result": "pass",
+      "log": "stqr-throughput-server-1.jsonl",
+      "seconds": 0.49
+    },
+    "TestBoundObjectSDKAndAdministrativeRoleBoundary": {
+      "result": "pass",
+      "log": "stqr-throughput-server-1.jsonl",
+      "seconds": 0.51
+    },
+    "TestSubscribedFilesystemKernelInvalidation": {
+      "result": "pass",
+      "log": "stqr-throughput-server-extra.jsonl",
+      "seconds": 1.94
+    },
+    "TestTelemetryCoalescesPerSourceAndPreservesFairness": {
+      "result": "pass",
+      "log": "stqr-throughput-server-1.jsonl",
+      "seconds": 0
+    },
+    "TestUserCommandsPersistAndDeduplicateWithoutSecrets": {
+      "result": "pass",
+      "log": "stqr-throughput-server-1.jsonl",
+      "seconds": 2.48
+    },
+    "TestRecoveryOnNewNodeThroughDashboardPeer": {
+      "result": "pass",
+      "log": "stqr-throughput-server-1.jsonl",
+      "seconds": 6.58
+    },
+    "TestRecoveryBeginPreservesUnavailableRanges": {
+      "result": "pass",
+      "log": "stqr-throughput-server-1.jsonl",
+      "seconds": 5.84
+    },
+    "TestRecoveryResumesCommittedTakeoverAfterRestart": {
+      "result": "pass",
+      "log": "stqr-throughput-server-1.jsonl",
+      "seconds": 5.08
+    },
+    "TestQuotaCapacityCombinesNodesAndProtectsGuarantees": {
+      "result": "pass",
+      "log": "stqr-throughput-server-2.jsonl",
+      "seconds": 0
+    },
+    "TestBucketMutationFenceSurvivesRestartAndAbort": {
+      "result": "pass",
+      "log": "stqr-throughput-server-2.jsonl",
+      "seconds": 0.02
+    },
+    "TestBucketFsckRecoversInterruptedRmdir": {
+      "result": "pass",
+      "log": "stqr-throughput-server-2.jsonl",
+      "seconds": 2.07
+    },
+    "TestBucketClientStreamingAndFilesystem": {
+      "result": "pass",
+      "log": "stqr-throughput-server-2.jsonl",
+      "seconds": 3.62
+    },
+    "TestBucketPlacementDrainAndRestartPreserveRetries": {
+      "result": "pass",
+      "log": "stqr-throughput-server-2.jsonl",
+      "seconds": 2.07
+    },
+    "TestBucketRAMResetRejectsLearnedClientRuntime": {
+      "result": "pass",
+      "log": "stqr-throughput-server-2.jsonl",
+      "seconds": 2.61
+    },
+    "TestBucketCatalogExplicitBootstrapAndReopen": {
+      "result": "pass",
+      "log": "stqr-throughput-server-2.jsonl",
+      "seconds": 0.01
+    },
+    "TestBucketCatalogUnpublishedDescriptionAndAutoGrowth": {
+      "result": "pass",
+      "log": "stqr-throughput-server-2.jsonl",
+      "seconds": 0.06
+    },
+    "TestBucketPolicyVersionCannotChangeInPlace": {
+      "result": "pass",
+      "log": "stqr-throughput-server-2.jsonl",
+      "seconds": 0.01
+    },
+    "TestBucketInfoHTTPAuthenticationAndPolicy/admin-system": {
+      "result": "pass",
+      "log": "stqr-throughput-server-2.jsonl",
+      "seconds": 0.5
+    },
+    "TestBucketInfoHTTPAuthenticationAndPolicy/admin-application": {
+      "result": "pass",
+      "log": "stqr-throughput-server-2.jsonl",
+      "seconds": 0.51
+    },
+    "TestBucketInfoHTTPAuthenticationAndPolicy/granted-user": {
+      "result": "pass",
+      "log": "stqr-throughput-server-2.jsonl",
+      "seconds": 0.01
+    },
+    "TestBucketInfoHTTPAuthenticationAndPolicy/private-denied": {
+      "result": "pass",
+      "log": "stqr-throughput-server-2.jsonl",
+      "seconds": 0.01
+    },
+    "TestBucketInfoHTTPAuthenticationAndPolicy/system-denied": {
+      "result": "pass",
+      "log": "stqr-throughput-server-2.jsonl",
+      "seconds": 0.01
+    },
+    "TestBucketInfoHTTPAuthenticationAndPolicy/missing": {
+      "result": "pass",
+      "log": "stqr-throughput-server-2.jsonl",
+      "seconds": 0.01
+    },
+    "TestBucketInfoHTTPAuthenticationAndPolicy": {
+      "result": "pass",
+      "log": "stqr-throughput-server-2.jsonl",
+      "seconds": 4.08
+    },
+    "TestBucketCatalogServerUpgradeFromAccountsOnly": {
+      "result": "pass",
+      "log": "stqr-throughput-server-2.jsonl",
+      "seconds": 0.52
+    },
+    "TestNewFileAndRAMCapacityValidation": {
+      "result": "pass",
+      "log": "stqr-throughput-server-2.jsonl",
+      "seconds": 0.52
+    },
+    "TestDaemonControlBootstrapAndAutomaticJoin": {
+      "result": "pass",
+      "log": "stqr-throughput-server-2.jsonl",
+      "seconds": 10.68
+    },
+    "TestConfigViewKeepsOfflineCommittedMembers": {
+      "result": "pass",
+      "log": "stqr-throughput-server-2.jsonl",
+      "seconds": 1.61
+    },
+    "TestDaemonInventoryMergesTombstonesAndWaitsOnlyForOwners": {
+      "result": "pass",
+      "log": "stqr-throughput-server-2.jsonl",
+      "seconds": 3.84
+    },
+    "TestDaemonS3ExtendsAndReadsThroughEitherNode": {
+      "result": "pass",
+      "log": "stqr-throughput-server-2.jsonl",
+      "seconds": 6.26
+    },
+    "TestDaemonS3MultipartCopyAndExpiryAfterMigration": {
+      "result": "pass",
+      "log": "stqr-throughput-server-2.jsonl",
+      "seconds": 3.74
+    },
+    "TestDaemonClusterShutdownWaitsForEveryReadyAfterCrash": {
+      "result": "pass",
+      "log": "stqr-throughput-server-2.jsonl",
+      "seconds": 3.69
+    },
+    "TestSSHPM2ClusterAcceptance": {
+      "result": "skip",
+      "log": "stqr-throughput-server-2.jsonl",
+      "seconds": 0
+    },
+    "TestConnectionDataPathHasNoAccountOrGrantLookups": {
+      "result": "pass",
+      "log": "stqr-throughput-server-2.jsonl",
+      "seconds": 1.01
+    },
+    "TestConnectionPasswordChangeInvalidatesCachedAccess": {
+      "result": "pass",
+      "log": "stqr-throughput-server-2.jsonl",
+      "seconds": 2.59
+    },
+    "TestControlCoordinatorCrashBeforePublicResultAborts": {
+      "result": "pass",
+      "log": "stqr-throughput-server-2.jsonl",
+      "seconds": 0.02
+    },
+    "TestControlRecoveryDoesNotCancelLiveBuilder": {
+      "result": "pass",
+      "log": "stqr-throughput-server-2.jsonl",
+      "seconds": 0.01
+    },
+    "TestExclusionReservationConflictReleasesOnlyItsOwnPromises": {
+      "result": "pass",
+      "log": "stqr-throughput-server-2.jsonl",
+      "seconds": 0.03
+    },
+    "TestExclusionRetiresReleasedRequesterAfterLostFinalAck": {
+      "result": "pass",
+      "log": "stqr-throughput-server-2.jsonl",
+      "seconds": 0.05
+    },
+    "TestControlJournalDurableChainGrowthAndReopen": {
+      "result": "pass",
+      "log": "stqr-throughput-server-2.jsonl",
+      "seconds": 0.05
+    },
+    "TestPeerControlSystemCommit": {
+      "result": "pass",
+      "log": "stqr-throughput-server-2.jsonl",
+      "seconds": 1.06
+    },
+    "TestControlAbortAndConflictingPrepare": {
+      "result": "pass",
+      "log": "stqr-throughput-server-2.jsonl",
+      "seconds": 0.01
+    },
+    "TestDashboardPeerVolumesBrowser": {
+      "result": "skip",
+      "log": "stqr-throughput-server-2.jsonl",
+      "seconds": 0
+    },
+    "TestForceControlInspectionDistinguishesReadyCommitAndReleased": {
+      "result": "pass",
+      "log": "stqr-throughput-server-2.jsonl",
+      "seconds": 0.03
+    },
+    "TestDaemonExclusionRecoversRetainedRAMSource": {
+      "result": "pass",
+      "log": "stqr-throughput-server-2.jsonl",
+      "seconds": 7.1
+    },
+    "TestDaemonForcePreservesCommittedAdminParent": {
+      "result": "pass",
+      "log": "stqr-throughput-server-2.jsonl",
+      "seconds": 3.69
+    },
+    "TestDaemonForceCompletesCommittedDepartureWithoutLosingData": {
+      "result": "pass",
+      "log": "stqr-throughput-server-2.jsonl",
+      "seconds": 4.82
+    },
+    "TestManualGrowthAndBounds": {
+      "result": "pass",
+      "log": "stqr-throughput-server-2.jsonl",
+      "seconds": 0.54
+    },
+    "TestNodeAdminTargetsVolumesAndPreservesReceipts": {
+      "result": "pass",
+      "log": "stqr-throughput-server-2.jsonl",
+      "seconds": 1.54
+    },
+    "TestObjectSubscriptionGCCleanup": {
+      "result": "pass",
+      "log": "stqr-throughput-server-2.jsonl",
+      "seconds": 2.05
+    },
+    "TestObjectSubscriptionDisconnectAndRevocation/disconnect": {
+      "result": "pass",
+      "log": "stqr-throughput-server-2.jsonl",
+      "seconds": 2.03
+    },
+    "TestObjectSubscriptionDisconnectAndRevocation/revoke": {
+      "result": "pass",
+      "log": "stqr-throughput-server-2.jsonl",
+      "seconds": 2.06
+    },
+    "TestObjectSubscriptionDisconnectAndRevocation": {
+      "result": "pass",
+      "log": "stqr-throughput-server-2.jsonl",
+      "seconds": 4.09
+    },
+    "TestPeerDirectoryReconnectsWithoutOriginalInitiator": {
+      "result": "pass",
+      "log": "stqr-throughput-server-2.jsonl",
+      "seconds": 0.63
+    },
+    "TestPeerStatsPushDashboardAndReconnect": {
+      "result": "pass",
+      "log": "stqr-throughput-server-2.jsonl",
+      "seconds": 4.04
+    },
+    "TestPeerNativeRequiresBindingBeforeStats": {
+      "result": "pass",
+      "log": "stqr-throughput-server-2.jsonl",
+      "seconds": 0.5
+    },
+    "TestDaemonPlacementMaskTransitionsKeepOldAndNewReadable/hdd": {
+      "result": "pass",
+      "log": "stqr-throughput-server-2.jsonl",
+      "seconds": 8.15
+    },
+    "TestDaemonPlacementMaskTransitionsKeepOldAndNewReadable/ram": {
+      "result": "pass",
+      "log": "stqr-throughput-server-2.jsonl",
+      "seconds": 8.34
+    },
+    "TestDaemonPlacementMaskTransitionsKeepOldAndNewReadable": {
+      "result": "pass",
+      "log": "stqr-throughput-server-2.jsonl",
+      "seconds": 16.49
+    },
+    "TestSystemMetadataUsesGeneralPlacementGroup": {
+      "result": "pass",
+      "log": "stqr-throughput-server-2.jsonl",
+      "seconds": 0.51
+    },
+    "TestQuotaTransferCrashWindowsConserveCredits/debit": {
+      "result": "pass",
+      "log": "stqr-throughput-server-2.jsonl",
+      "seconds": 0.02
+    },
+    "TestQuotaTransferCrashWindowsConserveCredits/receive": {
+      "result": "pass",
+      "log": "stqr-throughput-server-2.jsonl",
+      "seconds": 0.02
+    },
+    "TestQuotaTransferCrashWindowsConserveCredits/settle": {
+      "result": "pass",
+      "log": "stqr-throughput-server-2.jsonl",
+      "seconds": 0.02
+    },
+    "TestQuotaTransferCrashWindowsConserveCredits": {
+      "result": "pass",
+      "log": "stqr-throughput-server-2.jsonl",
+      "seconds": 0.06
+    },
+    "TestDaemonRAMRuntimeResetFencesOldRetries": {
+      "result": "pass",
+      "log": "stqr-throughput-server-2.jsonl",
+      "seconds": 3.38
+    },
+    "TestDaemonNativeShortShutdownCommand": {
+      "result": "pass",
+      "log": "stqr-throughput-server-2.jsonl",
+      "seconds": 2.61
+    },
+    "TestDaemonStorageClassPolicyMovesToEligibleOwner": {
+      "result": "pass",
+      "log": "stqr-throughput-server-2.jsonl",
+      "seconds": 5.83
+    },
+    "TestRebuildOfferStressBaseline/single_candidate": {
+      "result": "pass",
+      "log": "stqr-throughput-server-2.jsonl",
+      "seconds": 0.05
+    },
+    "TestRebuildOfferStressBaseline/three_nodes": {
+      "result": "pass",
+      "log": "stqr-throughput-server-2.jsonl",
+      "seconds": 0.06
+    },
+    "TestRebuildOfferStressBaseline/simultaneous": {
+      "result": "pass",
+      "log": "stqr-throughput-server-2.jsonl",
+      "seconds": 0.12
+    },
+    "TestRebuildOfferStressBaseline/crossing_offers": {
+      "result": "pass",
+      "log": "stqr-throughput-server-2.jsonl",
+      "seconds": 0.12
+    },
+    "TestRebuildOfferStressBaseline/duplicates": {
+      "result": "pass",
+      "log": "stqr-throughput-server-2.jsonl",
+      "seconds": 0.3
+    },
+    "TestRebuildOfferStressBaseline/thirty_two_nodes": {
+      "result": "pass",
+      "log": "stqr-throughput-server-2.jsonl",
+      "seconds": 1.63
+    },
+    "TestRebuildOfferStressBaseline/pause_and_resume": {
+      "result": "pass",
+      "log": "stqr-throughput-server-2.jsonl",
+      "seconds": 0.27
+    },
+    "TestRebuildOfferStressBaseline": {
+      "result": "pass",
+      "log": "stqr-throughput-server-2.jsonl",
+      "seconds": 2.54
+    },
+    "TestS3MultipartCompleteAbortAndReclamation": {
+      "result": "pass",
+      "log": "stqr-throughput-server-2.jsonl",
+      "seconds": 2.04
+    },
+    "TestS3CopyBulkDeleteAndBucketDiscovery": {
+      "result": "pass",
+      "log": "stqr-throughput-server-2.jsonl",
+      "seconds": 1.56
+    },
+    "TestS3OfficialStreamingTrailerVector": {
+      "result": "pass",
+      "log": "stqr-throughput-server-2.jsonl",
+      "seconds": 0
+    },
+    "TestS3MultipartRecoveryRespectsRevokedGrants": {
+      "result": "pass",
+      "log": "stqr-throughput-server-2.jsonl",
+      "seconds": 2
+    },
+    "TestS3MaintenanceIgnoresUnrelatedNativeData": {
+      "result": "pass",
+      "log": "stqr-throughput-server-2.jsonl",
+      "seconds": 1.51
+    },
+    "TestS3ListingAndConcurrentPublication": {
+      "result": "pass",
+      "log": "stqr-throughput-server-2.jsonl",
+      "seconds": 1.54
+    },
+    "TestS3NativeSDKAndFailedPublication": {
+      "result": "pass",
+      "log": "stqr-throughput-server-2.jsonl",
+      "seconds": 1.95
+    },
+    "TestS3DashboardKeysBrowser": {
+      "result": "skip",
+      "log": "stqr-throughput-server-2.jsonl",
+      "seconds": 0
+    },
+    "TestS3NativeSnapshotVersionMismatchEmitsNoBytes": {
+      "result": "pass",
+      "log": "stqr-throughput-server-2.jsonl",
+      "seconds": 1.97
+    },
+    "TestFlagsAndJoinNeverForkExistingCluster": {
+      "result": "pass",
+      "log": "stqr-throughput-server-2.jsonl",
+      "seconds": 0
+    },
+    "TestConfigValidationAndNetworkGate": {
+      "result": "pass",
+      "log": "stqr-throughput-server-2.jsonl",
+      "seconds": 0.5
+    },
+    "TestBrowserSessionsCSRFAndOriginalHTTPMessage": {
+      "result": "pass",
+      "log": "stqr-throughput-server-2.jsonl",
+      "seconds": 1
+    },
+    "TestNodeIOCountersKeepDetachedVolumeHistory": {
+      "result": "pass",
+      "log": "stqr-throughput-server-2.jsonl",
+      "seconds": 0.5
+    },
+    "TestSubscribedOverlayKernelCopyUpInvalidation": {
+      "result": "pass",
+      "log": "stqr-throughput-server-extra.jsonl",
+      "seconds": 3.43
+    },
+    "TestRolePromotionEnablesLoginAndDemotionRevokesIt": {
+      "result": "pass",
+      "log": "stqr-throughput-server-remainder.jsonl",
+      "seconds": 2.46
+    },
+    "TestUserAuthorizationAndValidation": {
+      "result": "pass",
+      "log": "stqr-throughput-server-remainder.jsonl",
+      "seconds": 0.96
+    },
+    "TestRecoveryQuotaRejectionDoesNotFreezeCluster": {
+      "result": "pass",
+      "log": "stqr-throughput-server-remainder.jsonl",
+      "seconds": 6.2
+    },
+    "TestRecoveryRequiresCompleteCohort": {
+      "result": "pass",
+      "log": "stqr-throughput-server-remainder.jsonl",
+      "seconds": 5.01
+    },
+    "TestSubscriptionStoreDisconnectCleanupDoesNotReenterTransportOnce": {
+      "result": "pass",
+      "log": "stqr-throughput-server-extra.jsonl",
+      "seconds": 1.96
+    },
+    "TestObjectSubscriptionCanceledCloseStillReleases": {
+      "result": "pass",
+      "log": "stqr-throughput-server-extra.jsonl",
+      "seconds": 1.95
+    },
+    "TestSubscriptionStoreCoalescesParallelColdReaders": {
+      "result": "pass",
+      "log": "stqr-throughput-parallel-tests.log",
+      "final_recheck": "stqr-throughput-integration-final.log"
+    },
+    "TestSubscriptionStorePausedOwnerDoesNotBlockIndependentRange": {
+      "result": "pass",
+      "log": "stqr-throughput-parallel-tests.log",
+      "final_recheck": "stqr-throughput-integration-final.log"
+    }
+  },
+  "totals": {
+    "pass": 259,
+    "skip": 9
+  },
+  "final_checks": [
+    {
+      "command": "go test -race ./client ./cmd/stqr-fuse -count=1 -timeout=2m",
+      "result": "pass",
+      "log": "stqr-throughput-client-final.log"
+    },
+    {
+      "command": "STQR_TEST_FUSE=1 STQR_FUSE_BINARY=<race binary> go test -race ./server -run 'Test.*(Subscription|Kernel)' -count=1 -timeout=2m",
+      "result": "pass",
+      "log": "stqr-throughput-integration-final.log"
+    },
+    {
+      "command": "go vet ./...",
+      "result": "pass",
+      "log": "stqr-throughput-vet.log"
+    }
+  ],
+  "notes": [
+    "Full race run reached overall five-minute server package limit; server cases subsequently partitioned and run separately.",
+    "Final targeted race tests cover lifecycle, routing admission and actual FUSE mounts after the final edits.",
+    "Optional external acceptance tests remain skipped; see individual cases."
+  ],
+  "top_level_totals": {
+    "pass": 192,
+    "skip": 9
+  },
+  "totals_include_subtests": true
+}

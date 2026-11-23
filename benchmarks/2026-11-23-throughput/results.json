@@ -1,0 +1,2594 @@
+[
+  {
+    "case": "baseline_ro",
+    "test": "seq_read",
+    "rep": 0,
+    "seconds": 0.7065552901476622,
+    "units": 32,
+    "unit": "MiB",
+    "rate": 45.290156971738696
+  },
+  {
+    "case": "baseline_ro",
+    "test": "stat",
+    "rep": 0,
+    "seconds": 1.6455296031199396,
+    "units": 512,
+    "unit": "ops",
+    "rate": 311.1460280199415
+  },
+  {
+    "case": "baseline_ro",
+    "test": "stat_missing",
+    "rep": 0,
+    "seconds": 1.2238044529221952,
+    "units": 512,
+    "unit": "ops",
+    "rate": 418.36749227170117
+  },
+  {
+    "case": "baseline_ro",
+    "test": "open_read_close",
+    "rep": 0,
+    "seconds": 0.7073845211416483,
+    "units": 128,
+    "unit": "files",
+    "rate": 180.94826247176107
+  },
+  {
+    "case": "baseline_ro",
+    "test": "seq_read",
+    "rep": 1,
+    "seconds": 0.571431296877563,
+    "units": 32,
+    "unit": "MiB",
+    "rate": 55.99973290727274
+  },
+  {
+    "case": "baseline_ro",
+    "test": "stat",
+    "rep": 1,
+    "seconds": 2.017443693242967,
+    "units": 512,
+    "unit": "ops",
+    "rate": 253.78651295936726
+  },
+  {
+    "case": "baseline_ro",
+    "test": "stat_missing",
+    "rep": 1,
+    "seconds": 1.4248666362836957,
+    "units": 512,
+    "unit": "ops",
+    "rate": 359.3318749713914
+  },
+  {
+    "case": "baseline_ro",
+    "test": "open_read_close",
+    "rep": 1,
+    "seconds": 0.7913376619108021,
+    "units": 128,
+    "unit": "files",
+    "rate": 161.75143198786347
+  },
+  {
+    "case": "baseline_ro",
+    "test": "seq_read",
+    "rep": 2,
+    "seconds": 0.5783938337117434,
+    "units": 32,
+    "unit": "MiB",
+    "rate": 55.32562440136245
+  },
+  {
+    "case": "baseline_ro",
+    "test": "stat",
+    "rep": 2,
+    "seconds": 2.3155677020549774,
+    "units": 512,
+    "unit": "ops",
+    "rate": 221.11208389442453
+  },
+  {
+    "case": "baseline_ro",
+    "test": "stat_missing",
+    "rep": 2,
+    "seconds": 1.7392419730313122,
+    "units": 512,
+    "unit": "ops",
+    "rate": 294.3811200161177
+  },
+  {
+    "case": "baseline_ro",
+    "test": "open_read_close",
+    "rep": 2,
+    "seconds": 1.0420538340695202,
+    "units": 128,
+    "unit": "files",
+    "rate": 122.83434484389655
+  },
+  {
+    "case": "baseline_ro",
+    "test": "php_freq0_first",
+    "rep": 0,
+    "seconds": 1.650809942,
+    "units": 128,
+    "unit": "includes",
+    "rate": 77.53769634130299
+  },
+  {
+    "case": "baseline_ro",
+    "test": "php_freq0_warm",
+    "rep": 0,
+    "seconds": 1.7995701469999998,
+    "units": 384,
+    "unit": "includes",
+    "rate": 213.38429104314324
+  },
+  {
+    "case": "baseline_ro",
+    "test": "php_freq0_first",
+    "rep": 1,
+    "seconds": 1.536289276,
+    "units": 128,
+    "unit": "includes",
+    "rate": 83.31764206105153
+  },
+  {
+    "case": "baseline_ro",
+    "test": "php_freq0_warm",
+    "rep": 1,
+    "seconds": 1.901626987,
+    "units": 384,
+    "unit": "includes",
+    "rate": 201.93234668266726
+  },
+  {
+    "case": "baseline_ro",
+    "test": "php_freq0_first",
+    "rep": 2,
+    "seconds": 1.499119591,
+    "units": 128,
+    "unit": "includes",
+    "rate": 85.38344823751957
+  },
+  {
+    "case": "baseline_ro",
+    "test": "php_freq0_warm",
+    "rep": 2,
+    "seconds": 1.8206272179999998,
+    "units": 384,
+    "unit": "includes",
+    "rate": 210.91632389294537
+  },
+  {
+    "case": "baseline_ro",
+    "test": "php_freq2_first",
+    "rep": 0,
+    "seconds": 1.564586183,
+    "units": 128,
+    "unit": "includes",
+    "rate": 81.81076976825123
+  },
+  {
+    "case": "baseline_ro",
+    "test": "php_freq2_warm",
+    "rep": 0,
+    "seconds": 8.5604e-05,
+    "units": 384,
+    "unit": "includes",
+    "rate": 4485771.692911546
+  },
+  {
+    "case": "baseline_ro",
+    "test": "php_freq2_first",
+    "rep": 1,
+    "seconds": 1.40715235,
+    "units": 128,
+    "unit": "includes",
+    "rate": 90.96385334537514
+  },
+  {
+    "case": "baseline_ro",
+    "test": "php_freq2_warm",
+    "rep": 1,
+    "seconds": 9.7415e-05,
+    "units": 384,
+    "unit": "includes",
+    "rate": 3941898.064979726
+  },
+  {
+    "case": "baseline_ro",
+    "test": "php_freq2_first",
+    "rep": 2,
+    "seconds": 1.407175704,
+    "units": 128,
+    "unit": "includes",
+    "rate": 90.96234367616682
+  },
+  {
+    "case": "baseline_ro",
+    "test": "php_freq2_warm",
+    "rep": 2,
+    "seconds": 5.239e-05,
+    "units": 384,
+    "unit": "includes",
+    "rate": 7329643.061652987
+  },
+  {
+    "case": "improved_ro",
+    "test": "seq_read",
+    "rep": 0,
+    "seconds": 0.43960143672302365,
+    "units": 32,
+    "unit": "MiB",
+    "rate": 72.79321068316253
+  },
+  {
+    "case": "improved_ro",
+    "test": "stat",
+    "rep": 0,
+    "seconds": 0.40870912093669176,
+    "units": 512,
+    "unit": "ops",
+    "rate": 1252.7246732996393
+  },
+  {
+    "case": "improved_ro",
+    "test": "stat_missing",
+    "rep": 0,
+    "seconds": 0.3142750347033143,
+    "units": 512,
+    "unit": "ops",
+    "rate": 1629.1462682784982
+  },
+  {
+    "case": "improved_ro",
+    "test": "open_read_close",
+    "rep": 0,
+    "seconds": 0.07481715129688382,
+    "units": 128,
+    "unit": "files",
+    "rate": 1710.837659296596
+  },
+  {
+    "case": "improved_ro",
+    "test": "seq_read",
+    "rep": 1,
+    "seconds": 0.006086395122110844,
+    "units": 32,
+    "unit": "MiB",
+    "rate": 5257.627767830816
+  },
+  {
+    "case": "improved_ro",
+    "test": "stat",
+    "rep": 1,
+    "seconds": 0.24459098326042295,
+    "units": 512,
+    "unit": "ops",
+    "rate": 2093.2905750448663
+  },
+  {
+    "case": "improved_ro",
+    "test": "stat_missing",
+    "rep": 1,
+    "seconds": 0.24965286487713456,
+    "units": 512,
+    "unit": "ops",
+    "rate": 2050.847685052516
+  },
+  {
+    "case": "improved_ro",
+    "test": "open_read_close",
+    "rep": 1,
+    "seconds": 0.07635301910340786,
+    "units": 128,
+    "unit": "files",
+    "rate": 1676.4235586630127
+  },
+  {
+    "case": "improved_ro",
+    "test": "seq_read",
+    "rep": 2,
+    "seconds": 0.0058721257373690605,
+    "units": 32,
+    "unit": "MiB",
+    "rate": 5449.4745908382465
+  },
+  {
+    "case": "improved_ro",
+    "test": "stat",
+    "rep": 2,
+    "seconds": 0.29628110490739346,
+    "units": 512,
+    "unit": "ops",
+    "rate": 1728.0886007227234
+  },
+  {
+    "case": "improved_ro",
+    "test": "stat_missing",
+    "rep": 2,
+    "seconds": 0.2852744278497994,
+    "units": 512,
+    "unit": "ops",
+    "rate": 1794.76304223656
+  },
+  {
+    "case": "improved_ro",
+    "test": "open_read_close",
+    "rep": 2,
+    "seconds": 0.07997795101255178,
+    "units": 128,
+    "unit": "files",
+    "rate": 1600.4411013219333
+  },
+  {
+    "case": "improved_ro",
+    "test": "php_freq0_first",
+    "rep": 0,
+    "seconds": 0.202426735,
+    "units": 128,
+    "unit": "includes",
+    "rate": 632.3275430984944
+  },
+  {
+    "case": "improved_ro",
+    "test": "php_freq0_warm",
+    "rep": 0,
+    "seconds": 0.207907976,
+    "units": 384,
+    "unit": "includes",
+    "rate": 1846.970988741673
+  },
+  {
+    "case": "improved_ro",
+    "test": "php_freq0_first",
+    "rep": 1,
+    "seconds": 0.145093232,
+    "units": 128,
+    "unit": "includes",
+    "rate": 882.1913898781992
+  },
+  {
+    "case": "improved_ro",
+    "test": "php_freq0_warm",
+    "rep": 1,
+    "seconds": 0.21103838400000002,
+    "units": 384,
+    "unit": "includes",
+    "rate": 1819.574205988992
+  },
+  {
+    "case": "improved_ro",
+    "test": "php_freq0_first",
+    "rep": 2,
+    "seconds": 0.170678147,
+    "units": 128,
+    "unit": "includes",
+    "rate": 749.9495527098733
+  },
+  {
+    "case": "improved_ro",
+    "test": "php_freq0_warm",
+    "rep": 2,
+    "seconds": 0.183285566,
+    "units": 384,
+    "unit": "includes",
+    "rate": 2095.091328686515
+  },
+  {
+    "case": "improved_ro",
+    "test": "php_freq2_first",
+    "rep": 0,
+    "seconds": 0.134504571,
+    "units": 128,
+    "unit": "includes",
+    "rate": 951.640520826612
+  },
+  {
+    "case": "improved_ro",
+    "test": "php_freq2_warm",
+    "rep": 0,
+    "seconds": 4.8693e-05,
+    "units": 384,
+    "unit": "includes",
+    "rate": 7886143.798903333
+  },
+  {
+    "case": "improved_ro",
+    "test": "php_freq2_first",
+    "rep": 1,
+    "seconds": 0.137083709,
+    "units": 128,
+    "unit": "includes",
+    "rate": 933.736042989616
+  },
+  {
+    "case": "improved_ro",
+    "test": "php_freq2_warm",
+    "rep": 1,
+    "seconds": 5.2559e-05,
+    "units": 384,
+    "unit": "includes",
+    "rate": 7306075.077531916
+  },
+  {
+    "case": "improved_ro",
+    "test": "php_freq2_first",
+    "rep": 2,
+    "seconds": 0.163562649,
+    "units": 128,
+    "unit": "includes",
+    "rate": 782.5747551936506
+  },
+  {
+    "case": "improved_ro",
+    "test": "php_freq2_warm",
+    "rep": 2,
+    "seconds": 4.9814999999999997e-05,
+    "units": 384,
+    "unit": "includes",
+    "rate": 7708521.529659742
+  },
+  {
+    "case": "baseline_rw",
+    "test": "seq_read",
+    "rep": 0,
+    "seconds": 0.7155254548415542,
+    "units": 32,
+    "unit": "MiB",
+    "rate": 44.722378195596235
+  },
+  {
+    "case": "baseline_rw",
+    "test": "stat",
+    "rep": 0,
+    "seconds": 2.3305318909697235,
+    "units": 512,
+    "unit": "ops",
+    "rate": 219.6923380383176
+  },
+  {
+    "case": "baseline_rw",
+    "test": "stat_missing",
+    "rep": 0,
+    "seconds": 1.8065840536728501,
+    "units": 512,
+    "unit": "ops",
+    "rate": 283.40779326546453
+  },
+  {
+    "case": "baseline_rw",
+    "test": "open_read_close",
+    "rep": 0,
+    "seconds": 1.1125633330084383,
+    "units": 128,
+    "unit": "files",
+    "rate": 115.04963016701285
+  },
+  {
+    "case": "baseline_rw",
+    "test": "seq_write_fsync",
+    "rep": 0,
+    "seconds": 12.155080238822848,
+    "units": 32,
+    "unit": "MiB",
+    "rate": 2.6326440773128965
+  },
+  {
+    "case": "baseline_rw",
+    "test": "create_close",
+    "rep": 0,
+    "seconds": 2.838327892590314,
+    "units": 64,
+    "unit": "files",
+    "rate": 22.548487145222794
+  },
+  {
+    "case": "baseline_rw",
+    "test": "create_fsync",
+    "rep": 0,
+    "seconds": 1.2872122819535434,
+    "units": 32,
+    "unit": "files",
+    "rate": 24.859924387479474
+  },
+  {
+    "case": "baseline_rw",
+    "test": "unlink",
+    "rep": 0,
+    "seconds": 1.6991621139459312,
+    "units": 96,
+    "unit": "files",
+    "rate": 56.49843485331783
+  },
+  {
+    "case": "baseline_rw",
+    "test": "seq_read",
+    "rep": 1,
+    "seconds": 0.7327719312161207,
+    "units": 32,
+    "unit": "MiB",
+    "rate": 43.66979497548747
+  },
+  {
+    "case": "baseline_rw",
+    "test": "stat",
+    "rep": 1,
+    "seconds": 2.2596807149238884,
+    "units": 512,
+    "unit": "ops",
+    "rate": 226.58068311090818
+  },
+  {
+    "case": "baseline_rw",
+    "test": "stat_missing",
+    "rep": 1,
+    "seconds": 1.7740941536612809,
+    "units": 512,
+    "unit": "ops",
+    "rate": 288.59798615725197
+  },
+  {
+    "case": "baseline_rw",
+    "test": "open_read_close",
+    "rep": 1,
+    "seconds": 0.872474635951221,
+    "units": 128,
+    "unit": "files",
+    "rate": 146.7091359744197
+  },
+  {
+    "case": "baseline_rw",
+    "test": "seq_write_fsync",
+    "rep": 1,
+    "seconds": 11.323568142019212,
+    "units": 32,
+    "unit": "MiB",
+    "rate": 2.825964360231578
+  },
+  {
+    "case": "baseline_rw",
+    "test": "create_close",
+    "rep": 1,
+    "seconds": 2.7339233583770692,
+    "units": 64,
+    "unit": "files",
+    "rate": 23.40958088817535
+  },
+  {
+    "case": "baseline_rw",
+    "test": "create_fsync",
+    "rep": 1,
+    "seconds": 1.3064202689565718,
+    "units": 32,
+    "unit": "files",
+    "rate": 24.494414822236465
+  },
+  {
+    "case": "baseline_rw",
+    "test": "unlink",
+    "rep": 1,
+    "seconds": 1.5858128918334842,
+    "units": 96,
+    "unit": "files",
+    "rate": 60.536776119285285
+  },
+  {
+    "case": "baseline_rw",
+    "test": "seq_read",
+    "rep": 2,
+    "seconds": 0.5217842129059136,
+    "units": 32,
+    "unit": "MiB",
+    "rate": 61.32803409629056
+  },
+  {
+    "case": "baseline_rw",
+    "test": "stat",
+    "rep": 2,
+    "seconds": 1.577213394921273,
+    "units": 512,
+    "unit": "ops",
+    "rate": 324.62316237528313
+  },
+  {
+    "case": "baseline_rw",
+    "test": "stat_missing",
+    "rep": 2,
+    "seconds": 1.0930659766308963,
+    "units": 512,
+    "unit": "ops",
+    "rate": 468.407224217254
+  },
+  {
+    "case": "baseline_rw",
+    "test": "open_read_close",
+    "rep": 2,
+    "seconds": 0.6086218343116343,
+    "units": 128,
+    "unit": "files",
+    "rate": 210.31121919043707
+  },
+  {
+    "case": "baseline_rw",
+    "test": "seq_write_fsync",
+    "rep": 2,
+    "seconds": 10.859901815652847,
+    "units": 32,
+    "unit": "MiB",
+    "rate": 2.946619641982123
+  },
+  {
+    "case": "baseline_rw",
+    "test": "create_close",
+    "rep": 2,
+    "seconds": 2.0175096383318305,
+    "units": 64,
+    "unit": "files",
+    "rate": 31.722277199586582
+  },
+  {
+    "case": "baseline_rw",
+    "test": "create_fsync",
+    "rep": 2,
+    "seconds": 0.9791699224151671,
+    "units": 32,
+    "unit": "files",
+    "rate": 32.680742399716024
+  },
+  {
+    "case": "baseline_rw",
+    "test": "unlink",
+    "rep": 2,
+    "seconds": 1.2824422889389098,
+    "units": 96,
+    "unit": "files",
+    "rate": 74.85716965823875
+  },
+  {
+    "case": "baseline_rw",
+    "test": "php_freq0_first",
+    "rep": 0,
+    "seconds": 1.225949219,
+    "units": 128,
+    "unit": "includes",
+    "rate": 104.40889232296986
+  },
+  {
+    "case": "baseline_rw",
+    "test": "php_freq0_warm",
+    "rep": 0,
+    "seconds": 1.142400507,
+    "units": 384,
+    "unit": "includes",
+    "rate": 336.1343046042608
+  },
+  {
+    "case": "baseline_rw",
+    "test": "php_freq0_first",
+    "rep": 1,
+    "seconds": 0.979042179,
+    "units": 128,
+    "unit": "includes",
+    "rate": 130.74002606378002
+  },
+  {
+    "case": "baseline_rw",
+    "test": "php_freq0_warm",
+    "rep": 1,
+    "seconds": 1.231616776,
+    "units": 384,
+    "unit": "includes",
+    "rate": 311.7852951363176
+  },
+  {
+    "case": "baseline_rw",
+    "test": "php_freq0_first",
+    "rep": 2,
+    "seconds": 1.405136111,
+    "units": 128,
+    "unit": "includes",
+    "rate": 91.09437797375061
+  },
+  {
+    "case": "baseline_rw",
+    "test": "php_freq0_warm",
+    "rep": 2,
+    "seconds": 1.3091683600000001,
+    "units": 384,
+    "unit": "includes",
+    "rate": 293.3159796193058
+  },
+  {
+    "case": "baseline_rw",
+    "test": "php_freq2_first",
+    "rep": 0,
+    "seconds": 1.117391382,
+    "units": 128,
+    "unit": "includes",
+    "rate": 114.55252122214773
+  },
+  {
+    "case": "baseline_rw",
+    "test": "php_freq2_warm",
+    "rep": 0,
+    "seconds": 7.1146e-05,
+    "units": 384,
+    "unit": "includes",
+    "rate": 5397351.924212184
+  },
+  {
+    "case": "baseline_rw",
+    "test": "php_freq2_first",
+    "rep": 1,
+    "seconds": 1.211528222,
+    "units": 128,
+    "unit": "includes",
+    "rate": 105.65168658530844
+  },
+  {
+    "case": "baseline_rw",
+    "test": "php_freq2_warm",
+    "rep": 1,
+    "seconds": 6.9943e-05,
+    "units": 384,
+    "unit": "includes",
+    "rate": 5490184.864818495
+  },
+  {
+    "case": "baseline_rw",
+    "test": "php_freq2_first",
+    "rep": 2,
+    "seconds": 1.006053734,
+    "units": 128,
+    "unit": "includes",
+    "rate": 127.22978472638918
+  },
+  {
+    "case": "baseline_rw",
+    "test": "php_freq2_warm",
+    "rep": 2,
+    "seconds": 5.249e-05,
+    "units": 384,
+    "unit": "includes",
+    "rate": 7315679.176986093
+  },
+  {
+    "case": "improved_rw",
+    "test": "seq_read",
+    "rep": 0,
+    "seconds": 0.2903822283260524,
+    "units": 32,
+    "unit": "MiB",
+    "rate": 110.19958137406798
+  },
+  {
+    "case": "improved_rw",
+    "test": "stat",
+    "rep": 0,
+    "seconds": 0.3603504439815879,
+    "units": 512,
+    "unit": "ops",
+    "rate": 1420.8390985808267
+  },
+  {
+    "case": "improved_rw",
+    "test": "stat_missing",
+    "rep": 0,
+    "seconds": 0.2969734971411526,
+    "units": 512,
+    "unit": "ops",
+    "rate": 1724.0595707321468
+  },
+  {
+    "case": "improved_rw",
+    "test": "open_read_close",
+    "rep": 0,
+    "seconds": 0.09140062239021063,
+    "units": 128,
+    "unit": "files",
+    "rate": 1400.4281005170628
+  },
+  {
+    "case": "improved_rw",
+    "test": "seq_write_fsync",
+    "rep": 0,
+    "seconds": 1.9336829213425517,
+    "units": 32,
+    "unit": "MiB",
+    "rate": 16.548731773347036
+  },
+  {
+    "case": "improved_rw",
+    "test": "create_close",
+    "rep": 0,
+    "seconds": 1.7627966050058603,
+    "units": 64,
+    "unit": "files",
+    "rate": 36.305946935827706
+  },
+  {
+    "case": "improved_rw",
+    "test": "create_fsync",
+    "rep": 0,
+    "seconds": 0.8254601308144629,
+    "units": 32,
+    "unit": "files",
+    "rate": 38.76625751558264
+  },
+  {
+    "case": "improved_rw",
+    "test": "unlink",
+    "rep": 0,
+    "seconds": 0.8519473359920084,
+    "units": 96,
+    "unit": "files",
+    "rate": 112.68302152528888
+  },
+  {
+    "case": "improved_rw",
+    "test": "seq_read",
+    "rep": 1,
+    "seconds": 0.26396646862849593,
+    "units": 32,
+    "unit": "MiB",
+    "rate": 121.22751865516872
+  },
+  {
+    "case": "improved_rw",
+    "test": "stat",
+    "rep": 1,
+    "seconds": 0.2058476284146309,
+    "units": 512,
+    "unit": "ops",
+    "rate": 2487.276651877175
+  },
+  {
+    "case": "improved_rw",
+    "test": "stat_missing",
+    "rep": 1,
+    "seconds": 0.18051469419151545,
+    "units": 512,
+    "unit": "ops",
+    "rate": 2836.334195912041
+  },
+  {
+    "case": "improved_rw",
+    "test": "open_read_close",
+    "rep": 1,
+    "seconds": 0.06306230695918202,
+    "units": 128,
+    "unit": "files",
+    "rate": 2029.7386215643812
+  },
+  {
+    "case": "improved_rw",
+    "test": "seq_write_fsync",
+    "rep": 1,
+    "seconds": 1.9997390150092542,
+    "units": 32,
+    "unit": "MiB",
+    "rate": 16.002088152414185
+  },
+  {
+    "case": "improved_rw",
+    "test": "create_close",
+    "rep": 1,
+    "seconds": 1.641503604594618,
+    "units": 64,
+    "unit": "files",
+    "rate": 38.988644204534225
+  },
+  {
+    "case": "improved_rw",
+    "test": "create_fsync",
+    "rep": 1,
+    "seconds": 0.8175338869914412,
+    "units": 32,
+    "unit": "files",
+    "rate": 39.14210836906263
+  },
+  {
+    "case": "improved_rw",
+    "test": "unlink",
+    "rep": 1,
+    "seconds": 0.8425858560949564,
+    "units": 96,
+    "unit": "files",
+    "rate": 113.93497684013003
+  },
+  {
+    "case": "improved_rw",
+    "test": "seq_read",
+    "rep": 2,
+    "seconds": 0.2182364920154214,
+    "units": 32,
+    "unit": "MiB",
+    "rate": 146.62992290830428
+  },
+  {
+    "case": "improved_rw",
+    "test": "stat",
+    "rep": 2,
+    "seconds": 0.23571293614804745,
+    "units": 512,
+    "unit": "ops",
+    "rate": 2172.1336485258544
+  },
+  {
+    "case": "improved_rw",
+    "test": "stat_missing",
+    "rep": 2,
+    "seconds": 0.275385573040694,
+    "units": 512,
+    "unit": "ops",
+    "rate": 1859.2114116462494
+  },
+  {
+    "case": "improved_rw",
+    "test": "open_read_close",
+    "rep": 2,
+    "seconds": 0.08660575887188315,
+    "units": 128,
+    "unit": "files",
+    "rate": 1477.9617622120463
+  },
+  {
+    "case": "improved_rw",
+    "test": "seq_write_fsync",
+    "rep": 2,
+    "seconds": 1.9978366792201996,
+    "units": 32,
+    "unit": "MiB",
+    "rate": 16.01732530633601
+  },
+  {
+    "case": "improved_rw",
+    "test": "create_close",
+    "rep": 2,
+    "seconds": 1.6780234319157898,
+    "units": 64,
+    "unit": "files",
+    "rate": 38.14011102749117
+  },
+  {
+    "case": "improved_rw",
+    "test": "create_fsync",
+    "rep": 2,
+    "seconds": 0.8303916836157441,
+    "units": 32,
+    "unit": "files",
+    "rate": 38.5360314070868
+  },
+  {
+    "case": "improved_rw",
+    "test": "unlink",
+    "rep": 2,
+    "seconds": 0.8673336347565055,
+    "units": 96,
+    "unit": "files",
+    "rate": 110.68405069630553
+  },
+  {
+    "case": "improved_rw",
+    "test": "php_freq0_first",
+    "rep": 0,
+    "seconds": 0.12594423,
+    "units": 128,
+    "unit": "includes",
+    "rate": 1016.3228597292627
+  },
+  {
+    "case": "improved_rw",
+    "test": "php_freq0_warm",
+    "rep": 0,
+    "seconds": 0.173950356,
+    "units": 384,
+    "unit": "includes",
+    "rate": 2207.526381837356
+  },
+  {
+    "case": "improved_rw",
+    "test": "php_freq0_first",
+    "rep": 1,
+    "seconds": 0.13204383,
+    "units": 128,
+    "unit": "includes",
+    "rate": 969.3750931035551
+  },
+  {
+    "case": "improved_rw",
+    "test": "php_freq0_warm",
+    "rep": 1,
+    "seconds": 0.11948030600000001,
+    "units": 384,
+    "unit": "includes",
+    "rate": 3213.9187859127173
+  },
+  {
+    "case": "improved_rw",
+    "test": "php_freq0_first",
+    "rep": 2,
+    "seconds": 0.084091034,
+    "units": 128,
+    "unit": "includes",
+    "rate": 1522.1599011376172
+  },
+  {
+    "case": "improved_rw",
+    "test": "php_freq0_warm",
+    "rep": 2,
+    "seconds": 0.115398782,
+    "units": 384,
+    "unit": "includes",
+    "rate": 3327.5914471956903
+  },
+  {
+    "case": "improved_rw",
+    "test": "php_freq2_first",
+    "rep": 0,
+    "seconds": 0.091997891,
+    "units": 128,
+    "unit": "includes",
+    "rate": 1391.336242697129
+  },
+  {
+    "case": "improved_rw",
+    "test": "php_freq2_warm",
+    "rep": 0,
+    "seconds": 4.4585999999999996e-05,
+    "units": 384,
+    "unit": "includes",
+    "rate": 8612568.967837438
+  },
+  {
+    "case": "improved_rw",
+    "test": "php_freq2_first",
+    "rep": 1,
+    "seconds": 0.086827372,
+    "units": 128,
+    "unit": "includes",
+    "rate": 1474.189498675602
+  },
+  {
+    "case": "improved_rw",
+    "test": "php_freq2_warm",
+    "rep": 1,
+    "seconds": 5.1308e-05,
+    "units": 384,
+    "unit": "includes",
+    "rate": 7484212.988227957
+  },
+  {
+    "case": "improved_rw",
+    "test": "php_freq2_first",
+    "rep": 2,
+    "seconds": 0.092088794,
+    "units": 128,
+    "unit": "includes",
+    "rate": 1389.9628221865953
+  },
+  {
+    "case": "improved_rw",
+    "test": "php_freq2_warm",
+    "rep": 2,
+    "seconds": 4.7972e-05,
+    "units": 384,
+    "unit": "includes",
+    "rate": 8004669.390477778
+  },
+  {
+    "case": "baseline_overlay",
+    "test": "seq_read",
+    "rep": 0,
+    "seconds": 0.6042793248780072,
+    "units": 32,
+    "unit": "MiB",
+    "rate": 52.95564266816544
+  },
+  {
+    "case": "baseline_overlay",
+    "test": "stat",
+    "rep": 0,
+    "seconds": 2.0508364187553525,
+    "units": 512,
+    "unit": "ops",
+    "rate": 249.6542363484707
+  },
+  {
+    "case": "baseline_overlay",
+    "test": "stat_missing",
+    "rep": 0,
+    "seconds": 1.8028956078924239,
+    "units": 512,
+    "unit": "ops",
+    "rate": 283.9876018104706
+  },
+  {
+    "case": "baseline_overlay",
+    "test": "open_read_close",
+    "rep": 0,
+    "seconds": 1.1481107887811959,
+    "units": 128,
+    "unit": "files",
+    "rate": 111.48749863754998
+  },
+  {
+    "case": "baseline_overlay",
+    "test": "seq_write_fsync",
+    "rep": 0,
+    "seconds": 8.919793755747378,
+    "units": 32,
+    "unit": "MiB",
+    "rate": 3.587526895381536
+  },
+  {
+    "case": "baseline_overlay",
+    "test": "create_close",
+    "rep": 0,
+    "seconds": 12.389626471325755,
+    "units": 64,
+    "unit": "files",
+    "rate": 5.165611743672823
+  },
+  {
+    "case": "baseline_overlay",
+    "test": "create_fsync",
+    "rep": 0,
+    "seconds": 7.111745989415795,
+    "units": 32,
+    "unit": "files",
+    "rate": 4.499598276938556
+  },
+  {
+    "case": "baseline_overlay",
+    "test": "unlink",
+    "rep": 0,
+    "seconds": 1.2760728779248893,
+    "units": 96,
+    "unit": "files",
+    "rate": 75.2308129580438
+  },
+  {
+    "case": "baseline_overlay",
+    "test": "seq_read",
+    "rep": 1,
+    "seconds": 0.5713860760442913,
+    "units": 32,
+    "unit": "MiB",
+    "rate": 56.00416485738708
+  },
+  {
+    "case": "baseline_overlay",
+    "test": "stat",
+    "rep": 1,
+    "seconds": 3.5318517819978297,
+    "units": 512,
+    "unit": "ops",
+    "rate": 144.96644582020986
+  },
+  {
+    "case": "baseline_overlay",
+    "test": "stat_missing",
+    "rep": 1,
+    "seconds": 2.769560519605875,
+    "units": 512,
+    "unit": "ops",
+    "rate": 184.86687558387808
+  },
+  {
+    "case": "baseline_overlay",
+    "test": "open_read_close",
+    "rep": 1,
+    "seconds": 1.8884040168486536,
+    "units": 128,
+    "unit": "files",
+    "rate": 67.7821053429048
+  },
+  {
+    "case": "baseline_overlay",
+    "test": "seq_write_fsync",
+    "rep": 1,
+    "seconds": 8.587085390929133,
+    "units": 32,
+    "unit": "MiB",
+    "rate": 3.7265263524458283
+  },
+  {
+    "case": "baseline_overlay",
+    "test": "create_close",
+    "rep": 1,
+    "seconds": 16.403765164781362,
+    "units": 64,
+    "unit": "files",
+    "rate": 3.901543295523825
+  },
+  {
+    "case": "baseline_overlay",
+    "test": "create_fsync",
+    "rep": 1,
+    "seconds": 9.16480927914381,
+    "units": 32,
+    "unit": "files",
+    "rate": 3.491616576552424
+  },
+  {
+    "case": "baseline_overlay",
+    "test": "unlink",
+    "rep": 1,
+    "seconds": 3.679148832336068,
+    "units": 96,
+    "unit": "files",
+    "rate": 26.092991714892108
+  },
+  {
+    "case": "baseline_overlay",
+    "test": "seq_read",
+    "rep": 2,
+    "seconds": 0.752863546833396,
+    "units": 32,
+    "unit": "MiB",
+    "rate": 42.50438228095191
+  },
+  {
+    "case": "baseline_overlay",
+    "test": "stat",
+    "rep": 2,
+    "seconds": 5.873324124608189,
+    "units": 512,
+    "unit": "ops",
+    "rate": 87.17380296701327
+  },
+  {
+    "case": "baseline_overlay",
+    "test": "stat_missing",
+    "rep": 2,
+    "seconds": 4.481217494234443,
+    "units": 512,
+    "unit": "ops",
+    "rate": 114.25466419756279
+  },
+  {
+    "case": "baseline_overlay",
+    "test": "open_read_close",
+    "rep": 2,
+    "seconds": 2.642759189940989,
+    "units": 128,
+    "unit": "files",
+    "rate": 48.43422756307137
+  },
+  {
+    "case": "baseline_overlay",
+    "test": "seq_write_fsync",
+    "rep": 2,
+    "seconds": 8.585030225571245,
+    "units": 32,
+    "unit": "MiB",
+    "rate": 3.727418443406905
+  },
+  {
+    "case": "baseline_overlay",
+    "test": "create_close",
+    "rep": 2,
+    "seconds": 15.359860906377435,
+    "units": 64,
+    "unit": "files",
+    "rate": 4.1667043985682914
+  },
+  {
+    "case": "baseline_overlay",
+    "test": "create_fsync",
+    "rep": 2,
+    "seconds": 9.735432925168425,
+    "units": 32,
+    "unit": "files",
+    "rate": 3.2869621973638523
+  },
+  {
+    "case": "baseline_overlay",
+    "test": "unlink",
+    "rep": 2,
+    "seconds": 3.6916019930504262,
+    "units": 96,
+    "unit": "files",
+    "rate": 26.004970248884757
+  },
+  {
+    "case": "baseline_overlay",
+    "test": "php_freq0_first",
+    "rep": 0,
+    "seconds": 4.665612503,
+    "units": 128,
+    "unit": "includes",
+    "rate": 27.43476872922809
+  },
+  {
+    "case": "baseline_overlay",
+    "test": "php_freq0_warm",
+    "rep": 0,
+    "seconds": 4.886061495,
+    "units": 384,
+    "unit": "includes",
+    "rate": 78.59090606881524
+  },
+  {
+    "case": "baseline_overlay",
+    "test": "php_freq0_first",
+    "rep": 1,
+    "seconds": 4.515356527,
+    "units": 128,
+    "unit": "includes",
+    "rate": 28.347706152241123
+  },
+  {
+    "case": "baseline_overlay",
+    "test": "php_freq0_warm",
+    "rep": 1,
+    "seconds": 4.755714261,
+    "units": 384,
+    "unit": "includes",
+    "rate": 80.74496887860859
+  },
+  {
+    "case": "baseline_overlay",
+    "test": "php_freq0_first",
+    "rep": 2,
+    "seconds": 4.666981406,
+    "units": 128,
+    "unit": "includes",
+    "rate": 27.426721656837902
+  },
+  {
+    "case": "baseline_overlay",
+    "test": "php_freq0_warm",
+    "rep": 2,
+    "seconds": 4.743949618,
+    "units": 384,
+    "unit": "includes",
+    "rate": 80.94521040927293
+  },
+  {
+    "case": "baseline_overlay",
+    "test": "php_freq2_first",
+    "rep": 0,
+    "seconds": 4.589774348,
+    "units": 128,
+    "unit": "includes",
+    "rate": 27.888081263902695
+  },
+  {
+    "case": "baseline_overlay",
+    "test": "php_freq2_warm",
+    "rep": 0,
+    "seconds": 4.9275e-05,
+    "units": 384,
+    "unit": "includes",
+    "rate": 7792998.477929985
+  },
+  {
+    "case": "baseline_overlay",
+    "test": "php_freq2_first",
+    "rep": 1,
+    "seconds": 4.651798006,
+    "units": 128,
+    "unit": "includes",
+    "rate": 27.516242071324367
+  },
+  {
+    "case": "baseline_overlay",
+    "test": "php_freq2_warm",
+    "rep": 1,
+    "seconds": 4.9665e-05,
+    "units": 384,
+    "unit": "includes",
+    "rate": 7731803.08064029
+  },
+  {
+    "case": "baseline_overlay",
+    "test": "php_freq2_first",
+    "rep": 2,
+    "seconds": 4.690531793,
+    "units": 128,
+    "unit": "includes",
+    "rate": 27.28901660810041
+  },
+  {
+    "case": "baseline_overlay",
+    "test": "php_freq2_warm",
+    "rep": 2,
+    "seconds": 5.5446e-05,
+    "units": 384,
+    "unit": "includes",
+    "rate": 6925657.3963856725
+  },
+  {
+    "case": "improved_overlay",
+    "test": "seq_read",
+    "rep": 0,
+    "seconds": 0.3307082140818238,
+    "units": 32,
+    "unit": "MiB",
+    "rate": 96.76203564778272
+  },
+  {
+    "case": "improved_overlay",
+    "test": "stat",
+    "rep": 0,
+    "seconds": 0.6441699806600809,
+    "units": 512,
+    "unit": "ops",
+    "rate": 794.8212667025459
+  },
+  {
+    "case": "improved_overlay",
+    "test": "stat_missing",
+    "rep": 0,
+    "seconds": 0.42297259299084544,
+    "units": 512,
+    "unit": "ops",
+    "rate": 1210.480320674303
+  },
+  {
+    "case": "improved_overlay",
+    "test": "open_read_close",
+    "rep": 0,
+    "seconds": 0.1920850477181375,
+    "units": 128,
+    "unit": "files",
+    "rate": 666.3714928390738
+  },
+  {
+    "case": "improved_overlay",
+    "test": "seq_write_fsync",
+    "rep": 0,
+    "seconds": 2.0298754908144474,
+    "units": 32,
+    "unit": "MiB",
+    "rate": 15.764513707764722
+  },
+  {
+    "case": "improved_overlay",
+    "test": "create_close",
+    "rep": 0,
+    "seconds": 2.8230791711248457,
+    "units": 64,
+    "unit": "files",
+    "rate": 22.670281674920023
+  },
+  {
+    "case": "improved_overlay",
+    "test": "create_fsync",
+    "rep": 0,
+    "seconds": 1.3521201596595347,
+    "units": 32,
+    "unit": "files",
+    "rate": 23.66653567835098
+  },
+  {
+    "case": "improved_overlay",
+    "test": "unlink",
+    "rep": 0,
+    "seconds": 0.872853634878993,
+    "units": 96,
+    "unit": "files",
+    "rate": 109.98407540951449
+  },
+  {
+    "case": "improved_overlay",
+    "test": "seq_read",
+    "rep": 1,
+    "seconds": 0.4681179062463343,
+    "units": 32,
+    "unit": "MiB",
+    "rate": 68.35884629279887
+  },
+  {
+    "case": "improved_overlay",
+    "test": "stat",
+    "rep": 1,
+    "seconds": 0.4313135980628431,
+    "units": 512,
+    "unit": "ops",
+    "rate": 1187.0713149308147
+  },
+  {
+    "case": "improved_overlay",
+    "test": "stat_missing",
+    "rep": 1,
+    "seconds": 0.3317633359692991,
+    "units": 512,
+    "unit": "ops",
+    "rate": 1543.2687837675342
+  },
+  {
+    "case": "improved_overlay",
+    "test": "open_read_close",
+    "rep": 1,
+    "seconds": 0.143290045671165,
+    "units": 128,
+    "unit": "files",
+    "rate": 893.2930365152233
+  },
+  {
+    "case": "improved_overlay",
+    "test": "seq_write_fsync",
+    "rep": 1,
+    "seconds": 1.9608233431354165,
+    "units": 32,
+    "unit": "MiB",
+    "rate": 16.319675156881303
+  },
+  {
+    "case": "improved_overlay",
+    "test": "create_close",
+    "rep": 1,
+    "seconds": 3.9718832899816334,
+    "units": 64,
+    "unit": "files",
+    "rate": 16.113262985704683
+  },
+  {
+    "case": "improved_overlay",
+    "test": "create_fsync",
+    "rep": 1,
+    "seconds": 1.9727998999878764,
+    "units": 32,
+    "unit": "files",
+    "rate": 16.220600984517816
+  },
+  {
+    "case": "improved_overlay",
+    "test": "unlink",
+    "rep": 1,
+    "seconds": 2.63365586893633,
+    "units": 96,
+    "unit": "files",
+    "rate": 36.45123158735696
+  },
+  {
+    "case": "improved_overlay",
+    "test": "seq_read",
+    "rep": 2,
+    "seconds": 0.42934048594906926,
+    "units": 32,
+    "unit": "MiB",
+    "rate": 74.53291978571063
+  },
+  {
+    "case": "improved_overlay",
+    "test": "stat",
+    "rep": 2,
+    "seconds": 0.44628833094611764,
+    "units": 512,
+    "unit": "ops",
+    "rate": 1147.2403925833678
+  },
+  {
+    "case": "improved_overlay",
+    "test": "stat_missing",
+    "rep": 2,
+    "seconds": 0.36577117210254073,
+    "units": 512,
+    "unit": "ops",
+    "rate": 1399.7822656632582
+  },
+  {
+    "case": "improved_overlay",
+    "test": "open_read_close",
+    "rep": 2,
+    "seconds": 0.1710256109945476,
+    "units": 128,
+    "unit": "files",
+    "rate": 748.4259185256219
+  },
+  {
+    "case": "improved_overlay",
+    "test": "seq_write_fsync",
+    "rep": 2,
+    "seconds": 2.033939231187105,
+    "units": 32,
+    "unit": "MiB",
+    "rate": 15.733016753565078
+  },
+  {
+    "case": "improved_overlay",
+    "test": "create_close",
+    "rep": 2,
+    "seconds": 4.0185292433016,
+    "units": 64,
+    "unit": "files",
+    "rate": 15.926224776559788
+  },
+  {
+    "case": "improved_overlay",
+    "test": "create_fsync",
+    "rep": 2,
+    "seconds": 1.9550352171063423,
+    "units": 32,
+    "unit": "files",
+    "rate": 16.36799159421965
+  },
+  {
+    "case": "improved_overlay",
+    "test": "unlink",
+    "rep": 2,
+    "seconds": 2.8316975659690797,
+    "units": 96,
+    "unit": "files",
+    "rate": 33.90192552824628
+  },
+  {
+    "case": "improved_overlay",
+    "test": "php_freq0_first",
+    "rep": 0,
+    "seconds": 0.28532659,
+    "units": 128,
+    "unit": "includes",
+    "rate": 448.6087328909654
+  },
+  {
+    "case": "improved_overlay",
+    "test": "php_freq0_warm",
+    "rep": 0,
+    "seconds": 0.416186122,
+    "units": 384,
+    "unit": "includes",
+    "rate": 922.6641151672039
+  },
+  {
+    "case": "improved_overlay",
+    "test": "php_freq0_first",
+    "rep": 1,
+    "seconds": 0.228016962,
+    "units": 128,
+    "unit": "includes",
+    "rate": 561.3617464125323
+  },
+  {
+    "case": "improved_overlay",
+    "test": "php_freq0_warm",
+    "rep": 1,
+    "seconds": 0.291658564,
+    "units": 384,
+    "unit": "includes",
+    "rate": 1316.6080046941463
+  },
+  {
+    "case": "improved_overlay",
+    "test": "php_freq0_first",
+    "rep": 2,
+    "seconds": 0.289358558,
+    "units": 128,
+    "unit": "includes",
+    "rate": 442.3577477186626
+  },
+  {
+    "case": "improved_overlay",
+    "test": "php_freq0_warm",
+    "rep": 2,
+    "seconds": 0.302990642,
+    "units": 384,
+    "unit": "includes",
+    "rate": 1267.3658746199826
+  },
+  {
+    "case": "improved_overlay",
+    "test": "php_freq2_first",
+    "rep": 0,
+    "seconds": 0.275387839,
+    "units": 128,
+    "unit": "includes",
+    "rate": 464.799028398636
+  },
+  {
+    "case": "improved_overlay",
+    "test": "php_freq2_warm",
+    "rep": 0,
+    "seconds": 5.9132e-05,
+    "units": 384,
+    "unit": "includes",
+    "rate": 6493945.748494892
+  },
+  {
+    "case": "improved_overlay",
+    "test": "php_freq2_first",
+    "rep": 1,
+    "seconds": 0.245022398,
+    "units": 128,
+    "unit": "includes",
+    "rate": 522.401221458946
+  },
+  {
+    "case": "improved_overlay",
+    "test": "php_freq2_warm",
+    "rep": 1,
+    "seconds": 4.9173e-05,
+    "units": 384,
+    "unit": "includes",
+    "rate": 7809163.5653712405
+  },
+  {
+    "case": "improved_overlay",
+    "test": "php_freq2_first",
+    "rep": 2,
+    "seconds": 0.287012966,
+    "units": 128,
+    "unit": "includes",
+    "rate": 445.97288332959846
+  },
+  {
+    "case": "improved_overlay",
+    "test": "php_freq2_warm",
+    "rep": 2,
+    "seconds": 5.5455000000000004e-05,
+    "units": 384,
+    "unit": "includes",
+    "rate": 6924533.405463889
+  },
+  {
+    "case": "final_ro",
+    "test": "seq_read",
+    "rep": 0,
+    "seconds": 0.23241778509691358,
+    "units": 32,
+    "unit": "MiB",
+    "rate": 137.68309506373035
+  },
+  {
+    "case": "final_ro",
+    "test": "stat",
+    "rep": 0,
+    "seconds": 0.10622801585122943,
+    "units": 512,
+    "unit": "ops",
+    "rate": 4819.820796775942
+  },
+  {
+    "case": "final_ro",
+    "test": "stat_missing",
+    "rep": 0,
+    "seconds": 0.027343627996742725,
+    "units": 512,
+    "unit": "ops",
+    "rate": 18724.654974862566
+  },
+  {
+    "case": "final_ro",
+    "test": "open_read_close",
+    "rep": 0,
+    "seconds": 0.021218218840658665,
+    "units": 128,
+    "unit": "files",
+    "rate": 6032.551599228702
+  },
+  {
+    "case": "final_ro",
+    "test": "seq_read",
+    "rep": 1,
+    "seconds": 0.006330311298370361,
+    "units": 32,
+    "unit": "MiB",
+    "rate": 5055.043660844593
+  },
+  {
+    "case": "final_ro",
+    "test": "stat",
+    "rep": 1,
+    "seconds": 0.03704333398491144,
+    "units": 512,
+    "unit": "ops",
+    "rate": 13821.65007632814
+  },
+  {
+    "case": "final_ro",
+    "test": "stat_missing",
+    "rep": 1,
+    "seconds": 0.031466009095311165,
+    "units": 512,
+    "unit": "ops",
+    "rate": 16271.526473190224
+  },
+  {
+    "case": "final_ro",
+    "test": "open_read_close",
+    "rep": 1,
+    "seconds": 0.018709314987063408,
+    "units": 128,
+    "unit": "files",
+    "rate": 6841.511839877935
+  },
+  {
+    "case": "final_ro",
+    "test": "seq_read",
+    "rep": 2,
+    "seconds": 0.0061310697346925735,
+    "units": 32,
+    "unit": "MiB",
+    "rate": 5219.317571765404
+  },
+  {
+    "case": "final_ro",
+    "test": "stat",
+    "rep": 2,
+    "seconds": 0.03836297011002898,
+    "units": 512,
+    "unit": "ops",
+    "rate": 13346.20334482786
+  },
+  {
+    "case": "final_ro",
+    "test": "stat_missing",
+    "rep": 2,
+    "seconds": 0.030499896965920925,
+    "units": 512,
+    "unit": "ops",
+    "rate": 16786.941954987044
+  },
+  {
+    "case": "final_ro",
+    "test": "open_read_close",
+    "rep": 2,
+    "seconds": 0.017469521146267653,
+    "units": 128,
+    "unit": "files",
+    "rate": 7327.0468565388865
+  },
+  {
+    "case": "final_ro",
+    "test": "php_freq0_first",
+    "rep": 0,
+    "seconds": 0.025999657,
+    "units": 128,
+    "unit": "includes",
+    "rate": 4923.141870679294
+  },
+  {
+    "case": "final_ro",
+    "test": "php_freq0_warm",
+    "rep": 0,
+    "seconds": 0.027061691,
+    "units": 384,
+    "unit": "includes",
+    "rate": 14189.800629975414
+  },
+  {
+    "case": "final_ro",
+    "test": "php_freq0_first",
+    "rep": 1,
+    "seconds": 0.030609526,
+    "units": 128,
+    "unit": "includes",
+    "rate": 4181.7047411972335
+  },
+  {
+    "case": "final_ro",
+    "test": "php_freq0_warm",
+    "rep": 1,
+    "seconds": 0.025922869,
+    "units": 384,
+    "unit": "includes",
+    "rate": 14813.175192915567
+  },
+  {
+    "case": "final_ro",
+    "test": "php_freq0_first",
+    "rep": 2,
+    "seconds": 0.024937911,
+    "units": 128,
+    "unit": "includes",
+    "rate": 5132.7474863471925
+  },
+  {
+    "case": "final_ro",
+    "test": "php_freq0_warm",
+    "rep": 2,
+    "seconds": 0.025598881999999996,
+    "units": 384,
+    "unit": "includes",
+    "rate": 15000.655106734741
+  },
+  {
+    "case": "final_ro",
+    "test": "php_freq2_first",
+    "rep": 0,
+    "seconds": 0.027018218,
+    "units": 128,
+    "unit": "includes",
+    "rate": 4737.544126707394
+  },
+  {
+    "case": "final_ro",
+    "test": "php_freq2_warm",
+    "rep": 0,
+    "seconds": 4.1248e-05,
+    "units": 384,
+    "unit": "includes",
+    "rate": 9309542.280837858
+  },
+  {
+    "case": "final_ro",
+    "test": "php_freq2_first",
+    "rep": 1,
+    "seconds": 0.02715583,
+    "units": 128,
+    "unit": "includes",
+    "rate": 4713.536651245791
+  },
+  {
+    "case": "final_ro",
+    "test": "php_freq2_warm",
+    "rep": 1,
+    "seconds": 4.5868e-05,
+    "units": 384,
+    "unit": "includes",
+    "rate": 8371849.655533269
+  },
+  {
+    "case": "final_ro",
+    "test": "php_freq2_first",
+    "rep": 2,
+    "seconds": 0.02773234,
+    "units": 128,
+    "unit": "includes",
+    "rate": 4615.549931956697
+  },
+  {
+    "case": "final_ro",
+    "test": "php_freq2_warm",
+    "rep": 2,
+    "seconds": 4.7059e-05,
+    "units": 384,
+    "unit": "includes",
+    "rate": 8159969.40011475
+  },
+  {
+    "case": "final_rw",
+    "test": "seq_read",
+    "rep": 0,
+    "seconds": 0.3060132167302072,
+    "units": 32,
+    "unit": "MiB",
+    "rate": 104.57064679076396
+  },
+  {
+    "case": "final_rw",
+    "test": "stat",
+    "rep": 0,
+    "seconds": 0.09186118096113205,
+    "units": 512,
+    "unit": "ops",
+    "rate": 5573.6274522383455
+  },
+  {
+    "case": "final_rw",
+    "test": "stat_missing",
+    "rep": 0,
+    "seconds": 0.025639088824391365,
+    "units": 512,
+    "unit": "ops",
+    "rate": 19969.50841376689
+  },
+  {
+    "case": "final_rw",
+    "test": "open_read_close",
+    "rep": 0,
+    "seconds": 0.018689878284931183,
+    "units": 128,
+    "unit": "files",
+    "rate": 6848.626729859482
+  },
+  {
+    "case": "final_rw",
+    "test": "seq_write_fsync",
+    "rep": 0,
+    "seconds": 1.983270063996315,
+    "units": 32,
+    "unit": "MiB",
+    "rate": 16.134968495172856
+  },
+  {
+    "case": "final_rw",
+    "test": "create_close",
+    "rep": 0,
+    "seconds": 1.653995592147112,
+    "units": 64,
+    "unit": "files",
+    "rate": 38.69417808841877
+  },
+  {
+    "case": "final_rw",
+    "test": "create_fsync",
+    "rep": 0,
+    "seconds": 0.8363163191825151,
+    "units": 32,
+    "unit": "files",
+    "rate": 38.26303429219156
+  },
+  {
+    "case": "final_rw",
+    "test": "unlink",
+    "rep": 0,
+    "seconds": 0.8674912741407752,
+    "units": 96,
+    "unit": "files",
+    "rate": 110.66393733479936
+  },
+  {
+    "case": "final_rw",
+    "test": "seq_read",
+    "rep": 1,
+    "seconds": 0.2768964166752994,
+    "units": 32,
+    "unit": "MiB",
+    "rate": 115.56668152020389
+  },
+  {
+    "case": "final_rw",
+    "test": "stat",
+    "rep": 1,
+    "seconds": 0.03575259307399392,
+    "units": 512,
+    "unit": "ops",
+    "rate": 14320.639595017898
+  },
+  {
+    "case": "final_rw",
+    "test": "stat_missing",
+    "rep": 1,
+    "seconds": 0.0294601540081203,
+    "units": 512,
+    "unit": "ops",
+    "rate": 17379.40676952585
+  },
+  {
+    "case": "final_rw",
+    "test": "open_read_close",
+    "rep": 1,
+    "seconds": 0.02159491740167141,
+    "units": 128,
+    "unit": "files",
+    "rate": 5927.320656947409
+  },
+  {
+    "case": "final_rw",
+    "test": "seq_write_fsync",
+    "rep": 1,
+    "seconds": 2.0186785496771336,
+    "units": 32,
+    "unit": "MiB",
+    "rate": 15.851954242599975
+  },
+  {
+    "case": "final_rw",
+    "test": "create_close",
+    "rep": 1,
+    "seconds": 1.7108128410764039,
+    "units": 64,
+    "unit": "files",
+    "rate": 37.4091183228042
+  },
+  {
+    "case": "final_rw",
+    "test": "create_fsync",
+    "rep": 1,
+    "seconds": 0.843848722986877,
+    "units": 32,
+    "unit": "files",
+    "rate": 37.92148892129999
+  },
+  {
+    "case": "final_rw",
+    "test": "unlink",
+    "rep": 1,
+    "seconds": 0.90187061810866,
+    "units": 96,
+    "unit": "files",
+    "rate": 106.44542362553565
+  },
+  {
+    "case": "final_rw",
+    "test": "seq_read",
+    "rep": 2,
+    "seconds": 0.2877155770547688,
+    "units": 32,
+    "unit": "MiB",
+    "rate": 111.2209506609667
+  },
+  {
+    "case": "final_rw",
+    "test": "stat",
+    "rep": 2,
+    "seconds": 0.037465529050678015,
+    "units": 512,
+    "unit": "ops",
+    "rate": 13665.895370313323
+  },
+  {
+    "case": "final_rw",
+    "test": "stat_missing",
+    "rep": 2,
+    "seconds": 0.033073503989726305,
+    "units": 512,
+    "unit": "ops",
+    "rate": 15480.669969503191
+  },
+  {
+    "case": "final_rw",
+    "test": "open_read_close",
+    "rep": 2,
+    "seconds": 0.02107676863670349,
+    "units": 128,
+    "unit": "files",
+    "rate": 6073.03720064082
+  },
+  {
+    "case": "final_rw",
+    "test": "seq_write_fsync",
+    "rep": 2,
+    "seconds": 2.153970956802368,
+    "units": 32,
+    "unit": "MiB",
+    "rate": 14.856282021325358
+  },
+  {
+    "case": "final_rw",
+    "test": "create_close",
+    "rep": 2,
+    "seconds": 1.9288138267584145,
+    "units": 64,
+    "unit": "files",
+    "rate": 33.18101473150423
+  },
+  {
+    "case": "final_rw",
+    "test": "create_fsync",
+    "rep": 2,
+    "seconds": 0.8704782598651946,
+    "units": 32,
+    "unit": "files",
+    "rate": 36.76140057185993
+  },
+  {
+    "case": "final_rw",
+    "test": "unlink",
+    "rep": 2,
+    "seconds": 0.9204476410523057,
+    "units": 96,
+    "unit": "files",
+    "rate": 104.29707863692018
+  },
+  {
+    "case": "final_rw",
+    "test": "php_freq0_first",
+    "rep": 0,
+    "seconds": 0.037339329,
+    "units": 128,
+    "unit": "includes",
+    "rate": 3428.020894537232
+  },
+  {
+    "case": "final_rw",
+    "test": "php_freq0_warm",
+    "rep": 0,
+    "seconds": 0.033329283,
+    "units": 384,
+    "unit": "includes",
+    "rate": 11521.399965309784
+  },
+  {
+    "case": "final_rw",
+    "test": "php_freq0_first",
+    "rep": 1,
+    "seconds": 0.029491074,
+    "units": 128,
+    "unit": "includes",
+    "rate": 4340.296321524269
+  },
+  {
+    "case": "final_rw",
+    "test": "php_freq0_warm",
+    "rep": 1,
+    "seconds": 0.026975227,
+    "units": 384,
+    "unit": "includes",
+    "rate": 14235.283358319839
+  },
+  {
+    "case": "final_rw",
+    "test": "php_freq0_first",
+    "rep": 2,
+    "seconds": 0.02852418,
+    "units": 128,
+    "unit": "includes",
+    "rate": 4487.4208478560995
+  },
+  {
+    "case": "final_rw",
+    "test": "php_freq0_warm",
+    "rep": 2,
+    "seconds": 0.025098787999999997,
+    "units": 384,
+    "unit": "includes",
+    "rate": 15299.543547680472
+  },
+  {
+    "case": "final_rw",
+    "test": "php_freq2_first",
+    "rep": 0,
+    "seconds": 0.025079883,
+    "units": 128,
+    "unit": "includes",
+    "rate": 5103.692070652802
+  },
+  {
+    "case": "final_rw",
+    "test": "php_freq2_warm",
+    "rep": 0,
+    "seconds": 4.8804e-05,
+    "units": 384,
+    "unit": "includes",
+    "rate": 7868207.5239734445
+  },
+  {
+    "case": "final_rw",
+    "test": "php_freq2_first",
+    "rep": 1,
+    "seconds": 0.024153416,
+    "units": 128,
+    "unit": "includes",
+    "rate": 5299.457434923491
+  },
+  {
+    "case": "final_rw",
+    "test": "php_freq2_warm",
+    "rep": 1,
+    "seconds": 4.4605e-05,
+    "units": 384,
+    "unit": "includes",
+    "rate": 8608900.347494677
+  },
+  {
+    "case": "final_rw",
+    "test": "php_freq2_first",
+    "rep": 2,
+    "seconds": 0.023839016,
+    "units": 128,
+    "unit": "includes",
+    "rate": 5369.349137565074
+  },
+  {
+    "case": "final_rw",
+    "test": "php_freq2_warm",
+    "rep": 2,
+    "seconds": 6.9723e-05,
+    "units": 384,
+    "unit": "includes",
+    "rate": 5507508.2827761285
+  },
+  {
+    "case": "final_overlay",
+    "test": "seq_read",
+    "rep": 0,
+    "seconds": 0.2980749700218439,
+    "units": 32,
+    "unit": "MiB",
+    "rate": 107.35554212302675
+  },
+  {
+    "case": "final_overlay",
+    "test": "stat",
+    "rep": 0,
+    "seconds": 0.13561783684417605,
+    "units": 512,
+    "unit": "ops",
+    "rate": 3775.314603994786
+  },
+  {
+    "case": "final_overlay",
+    "test": "stat_missing",
+    "rep": 0,
+    "seconds": 0.02601590659469366,
+    "units": 512,
+    "unit": "ops",
+    "rate": 19680.267460078834
+  },
+  {
+    "case": "final_overlay",
+    "test": "open_read_close",
+    "rep": 0,
+    "seconds": 0.017618495039641857,
+    "units": 128,
+    "unit": "files",
+    "rate": 7265.092717170123
+  },
+  {
+    "case": "final_overlay",
+    "test": "seq_write_fsync",
+    "rep": 0,
+    "seconds": 2.040094888303429,
+    "units": 32,
+    "unit": "MiB",
+    "rate": 15.68554491434055
+  },
+  {
+    "case": "final_overlay",
+    "test": "create_close",
+    "rep": 0,
+    "seconds": 2.5754871647804976,
+    "units": 64,
+    "unit": "files",
+    "rate": 24.84966761830264
+  },
+  {
+    "case": "final_overlay",
+    "test": "create_fsync",
+    "rep": 0,
+    "seconds": 1.263850302901119,
+    "units": 32,
+    "unit": "files",
+    "rate": 25.31945431080346
+  },
+  {
+    "case": "final_overlay",
+    "test": "unlink",
+    "rep": 0,
+    "seconds": 0.9422415178269148,
+    "units": 96,
+    "unit": "files",
+    "rate": 101.88470597369148
+  },
+  {
+    "case": "final_overlay",
+    "test": "seq_read",
+    "rep": 1,
+    "seconds": 0.29636419797316194,
+    "units": 32,
+    "unit": "MiB",
+    "rate": 107.97525550943183
+  },
+  {
+    "case": "final_overlay",
+    "test": "stat",
+    "rep": 1,
+    "seconds": 0.05329678626731038,
+    "units": 512,
+    "unit": "ops",
+    "rate": 9606.582982922471
+  },
+  {
+    "case": "final_overlay",
+    "test": "stat_missing",
+    "rep": 1,
+    "seconds": 0.033859053160995245,
+    "units": 512,
+    "unit": "ops",
+    "rate": 15121.509676171654
+  },
+  {
+    "case": "final_overlay",
+    "test": "open_read_close",
+    "rep": 1,
+    "seconds": 0.02509960997849703,
+    "units": 128,
+    "unit": "files",
+    "rate": 5099.680836063122
+  },
+  {
+    "case": "final_overlay",
+    "test": "seq_write_fsync",
+    "rep": 1,
+    "seconds": 1.9367627436295152,
+    "units": 32,
+    "unit": "MiB",
+    "rate": 16.522416132412605
+  },
+  {
+    "case": "final_overlay",
+    "test": "create_close",
+    "rep": 1,
+    "seconds": 3.7005373439751565,
+    "units": 64,
+    "unit": "files",
+    "rate": 17.294785608419375
+  },
+  {
+    "case": "final_overlay",
+    "test": "create_fsync",
+    "rep": 1,
+    "seconds": 1.8657417907379568,
+    "units": 32,
+    "unit": "files",
+    "rate": 17.151355111868423
+  },
+  {
+    "case": "final_overlay",
+    "test": "unlink",
+    "rep": 1,
+    "seconds": 2.5077196559868753,
+    "units": 96,
+    "unit": "files",
+    "rate": 38.281791096868304
+  },
+  {
+    "case": "final_overlay",
+    "test": "seq_read",
+    "rep": 2,
+    "seconds": 0.24087705463171005,
+    "units": 32,
+    "unit": "MiB",
+    "rate": 132.84785488981726
+  },
+  {
+    "case": "final_overlay",
+    "test": "stat",
+    "rep": 2,
+    "seconds": 0.047249475959688425,
+    "units": 512,
+    "unit": "ops",
+    "rate": 10836.099016988468
+  },
+  {
+    "case": "final_overlay",
+    "test": "stat_missing",
+    "rep": 2,
+    "seconds": 0.025226382073014975,
+    "units": 512,
+    "unit": "ops",
+    "rate": 20296.21205760194
+  },
+  {
+    "case": "final_overlay",
+    "test": "open_read_close",
+    "rep": 2,
+    "seconds": 0.019374452996999025,
+    "units": 128,
+    "unit": "files",
+    "rate": 6606.638134239266
+  },
+  {
+    "case": "final_overlay",
+    "test": "seq_write_fsync",
+    "rep": 2,
+    "seconds": 2.1150865834206343,
+    "units": 32,
+    "unit": "MiB",
+    "rate": 15.12940427632416
+  },
+  {
+    "case": "final_overlay",
+    "test": "create_close",
+    "rep": 2,
+    "seconds": 3.7143754409626126,
+    "units": 64,
+    "unit": "files",
+    "rate": 17.230352993991865
+  },
+  {
+    "case": "final_overlay",
+    "test": "create_fsync",
+    "rep": 2,
+    "seconds": 2.0237850197590888,
+    "units": 32,
+    "unit": "files",
+    "rate": 15.811956155209252
+  },
+  {
+    "case": "final_overlay",
+    "test": "unlink",
+    "rep": 2,
+    "seconds": 2.6360122147016227,
+    "units": 96,
+    "unit": "files",
+    "rate": 36.41864763167135
+  },
+  {
+    "case": "final_overlay",
+    "test": "php_freq0_first",
+    "rep": 0,
+    "seconds": 0.048019965,
+    "units": 128,
+    "unit": "includes",
+    "rate": 2665.5579611522
+  },
+  {
+    "case": "final_overlay",
+    "test": "php_freq0_warm",
+    "rep": 0,
+    "seconds": 0.032962402,
+    "units": 384,
+    "unit": "includes",
+    "rate": 11649.636455498601
+  },
+  {
+    "case": "final_overlay",
+    "test": "php_freq0_first",
+    "rep": 1,
+    "seconds": 0.031388952,
+    "units": 128,
+    "unit": "includes",
+    "rate": 4077.867907154084
+  },
+  {
+    "case": "final_overlay",
+    "test": "php_freq0_warm",
+    "rep": 1,
+    "seconds": 0.033481492,
+    "units": 384,
+    "unit": "includes",
+    "rate": 11469.022945572437
+  },
+  {
+    "case": "final_overlay",
+    "test": "php_freq0_first",
+    "rep": 2,
+    "seconds": 0.031838841,
+    "units": 128,
+    "unit": "includes",
+    "rate": 4020.2468425279676
+  },
+  {
+    "case": "final_overlay",
+    "test": "php_freq0_warm",
+    "rep": 2,
+    "seconds": 0.034331524,
+    "units": 384,
+    "unit": "includes",
+    "rate": 11185.055460980991
+  },
+  {
+    "case": "final_overlay",
+    "test": "php_freq2_first",
+    "rep": 0,
+    "seconds": 0.032790595,
+    "units": 128,
+    "unit": "includes",
+    "rate": 3903.5583221347465
+  },
+  {
+    "case": "final_overlay",
+    "test": "php_freq2_warm",
+    "rep": 0,
+    "seconds": 4.6008e-05,
+    "units": 384,
+    "unit": "includes",
+    "rate": 8346374.543557643
+  },
+  {
+    "case": "final_overlay",
+    "test": "php_freq2_first",
+    "rep": 1,
+    "seconds": 0.03388387,
+    "units": 128,
+    "unit": "includes",
+    "rate": 3777.6086379743515
+  },
+  {
+    "case": "final_overlay",
+    "test": "php_freq2_warm",
+    "rep": 1,
+    "seconds": 4.8112e-05,
+    "units": 384,
+    "unit": "includes",
+    "rate": 7981376.787495842
+  },
+  {
+    "case": "final_overlay",
+    "test": "php_freq2_first",
+    "rep": 2,
+    "seconds": 0.0340258,
+    "units": 128,
+    "unit": "includes",
+    "rate": 3761.8513010715396
+  },
+  {
+    "case": "final_overlay",
+    "test": "php_freq2_warm",
+    "rep": 2,
+    "seconds": 7.1177e-05,
+    "units": 384,
+    "unit": "includes",
+    "rate": 5395001.194205994
+  }
+]

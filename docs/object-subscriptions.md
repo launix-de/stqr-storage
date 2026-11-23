@@ -1,0 +1,117 @@
+# Object subscriptions and filesystem caches
+
+A bucket WebSocket can subscribe to an object using `SUBSCRIBE` (`0x0110`). The
+server advertises `CapabilityObjectSubscriptions` (`512`) in HELLO. Commands use
+the existing authenticated bucket connection; READ permission is required.
+No second listener process or per-read communication through stored objects is
+introduced.
+
+The initial response contains a consistent snapshot, its native version, a
+subscription ID and a cursor. Snapshot copying and listener registration use the
+same native volume read handle. Mutations publish their update under the write
+handle which committed them, so there is no GET-to-registration gap. Disk ACKs
+retain the native durability contract. A slow reader never holds up a mutation
+waiting for notification delivery or an ACK.
+
+```go
+sub, err := conn.Subscribe(ctx, objectID, client.SubscribeOptions{})
+if err != nil { return err }
+defer sub.Close(ctx)
+
+bytes, info, cursor, err := sub.Snapshot()
+// Wait on sub.Changes(), then take another Snapshot(). Changes coalesce;
+// Snapshot returns the latest complete version rather than individual deltas.
+```
+
+`SubscribeOptions` also supports a byte window and an optional resume cursor.
+The server currently sends complete replacement windows and DELETE events,
+using the specified OBJECT_UPDATE wire format. Full subscriptions receive whole
+object snapshots; a ranged subscription retains its original offset and length.
+The SDK checks cursors and previous/new versions, rejects incomplete update sets
+and validates payload hashes before publishing a snapshot.
+
+The native snapshot transfer streams when necessary. The buffered Go subscription
+API accepts snapshots up to 16 MiB, like the buffered object APIs. A filesystem
+cache can fall back to an ordinary read when a snapshot cannot be cached.
+
+## Bounded retention and resynchronization
+
+The current implementation uses explicit fresh snapshots rather than promising
+durable replay across socket loss or node restart. Reusing a subscription ID
+with a resume cursor on a new registration returns a complete snapshot with a
+strictly later cursor. Call `Close` before reusing an ID on a live client.
+
+Unacknowledged publication is bounded by 16 events and 1 MiB per subscription,
+and 64 MiB across a node. A single pushed replacement is limited to 1 MiB;
+larger updates require resynchronization. There are at most 2,048 subscriptions
+per socket and 16,384 per node. The SDK sends cumulative SUBSCRIPTION_ACK frames.
+A retention overflow sends RESYNC_REQUIRED and releases that descriptor. A full
+socket send queue closes the socket; it never drops a change while leaving its
+snapshot apparently valid. Unexpected cursor/version gaps also invalidate the
+SDK snapshot.
+
+A range fence ends affected source subscriptions with RESYNC_REQUIRED before
+final handoff readiness. New subscriptions cannot enter that fenced range.
+This is the explicit resnapshot handoff variant: no live descriptor is silently
+left behind or represented as transferred to the target. The next subscription
+learns the committed owner through normal redirects and obtains its snapshot
+there. Independent ranges remain subscribed. SHORT/transport loss invalidates
+snapshots; reconnect/resume likewise uses a fresh authoritative snapshot.
+Permission revocation ends affected subscribed sessions.
+
+Notifications are asynchronous. A writer's ACK on one socket does not mean an
+update has already arrived on another socket. This is not a linearizable
+cross-client read cache or a multi-object transaction mechanism. Once a gap,
+owner change, revocation or socket loss is observed, an invalid snapshot is
+never used as a current cache entry.
+
+## Lifetime and resource ownership
+
+The SDK transport registry contains `weak.Pointer[Subscription]`, not owning
+references to subscription objects. `runtime.AddCleanup` sends FF UNSUBSCRIBE
+when an abandoned object is collected. Its cleanup argument contains the client
+and ID, never the subscription itself. `Close(ctx)` immediately invalidates the
+local snapshot and awaits the server's unsubscribe barrier. If its context
+cannot complete that barrier, FF cleanup still releases the descriptor. Late
+frames are ignored after local removal.
+
+Filesystem caches use an LRU with an explicit byte budget and a hard limit of
+1,024 entries. Eviction and close release subscriptions proactively; GC cleanup
+is the fallback for abandoned handles. There are no immortal goroutines or
+strong transport references keeping each cache entry alive.
+
+Concurrent cold reads of the same object share one subscription request. Cache
+backend requests wait for capacity on their own routed connection (at most eight
+filesystem requests in flight), so a paused owner does not hold slots needed by
+an independent owner. Closing the cache cancels its outstanding backend requests
+and wakes waiting readers. Cache hits do not enter this transport queue.
+
+## FUSE
+
+`stqr-fuse` enables a subscription-backed cache by default, with 32 MiB per
+bucket. Set `--metadata-cache-bytes=0` to disable it. Nodes which do not implement
+the feature are read through the normal native API without retaining an
+unsubscribed snapshot. Range payload reads continue to use native range methods;
+the kernel page cache remains the main file-content cache.
+
+Kernel entry, attribute and negative lookup timeouts remain zero: no blind TTL
+is used to hide metadata changes. Readonly opens can keep page-cache data only
+when their inode version is covered by a live subscription and matches the
+previous open. Changing versions drops that cache. Updates and subscription
+loss also invalidate live FUSE inodes through a bounded notification worker;
+root/overlay namespace changes conservatively invalidate all live nodes.
+Callbacks never block the WebSocket reader on a kernel notification.
+
+Readonly close avoids a redundant remote Stat. Completed writes still have
+synchronous native acknowledgements. FUSE negotiates requests up to 1 MiB to
+reduce per-chunk protocol and commit overhead; buffered reads can use kernel
+readahead. Writeback caching is not enabled.
+
+Overlay readers reuse a decoded manifest only while its freshly obtained root
+version/runtime and root bytes match. The manifest is immutable to readers;
+namespace edits and fsck work on copies. The retained decoded manifest is limited
+to a 1 MiB encoded body. Existing lower-content version checks remain in force.
+Subscriptions do not rebase an overlay after maintenance rewrites its lower.
+
+The kernel-module client is unchanged by this Go/FUSE implementation. It must
+negotiate and implement the same commands before using subscribed metadata.

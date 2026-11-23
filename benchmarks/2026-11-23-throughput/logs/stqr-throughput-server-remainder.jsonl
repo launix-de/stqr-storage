@@ -1,0 +1,20 @@
+{"Time":"2026-11-23T08:15:01.232871739+01:00","Action":"start","Package":"github.com/launix-de/stqr-storage/server"}
+{"Time":"2026-11-23T08:15:01.246357092+01:00","Action":"run","Package":"github.com/launix-de/stqr-storage/server","Test":"TestRolePromotionEnablesLoginAndDemotionRevokesIt"}
+{"Time":"2026-11-23T08:15:01.246376369+01:00","Action":"output","Package":"github.com/launix-de/stqr-storage/server","Test":"TestRolePromotionEnablesLoginAndDemotionRevokesIt","Output":"=== RUN   TestRolePromotionEnablesLoginAndDemotionRevokesIt\n"}
+{"Time":"2026-11-23T08:15:03.706454123+01:00","Action":"output","Package":"github.com/launix-de/stqr-storage/server","Test":"TestRolePromotionEnablesLoginAndDemotionRevokesIt","Output":"--- PASS: TestRolePromotionEnablesLoginAndDemotionRevokesIt (2.46s)\n"}
+{"Time":"2026-11-23T08:15:03.706496284+01:00","Action":"pass","Package":"github.com/launix-de/stqr-storage/server","Test":"TestRolePromotionEnablesLoginAndDemotionRevokesIt","Elapsed":2.46}
+{"Time":"2026-11-23T08:15:03.706503969+01:00","Action":"run","Package":"github.com/launix-de/stqr-storage/server","Test":"TestUserAuthorizationAndValidation"}
+{"Time":"2026-11-23T08:15:03.706507185+01:00","Action":"output","Package":"github.com/launix-de/stqr-storage/server","Test":"TestUserAuthorizationAndValidation","Output":"=== RUN   TestUserAuthorizationAndValidation\n"}
+{"Time":"2026-11-23T08:15:04.665407861+01:00","Action":"output","Package":"github.com/launix-de/stqr-storage/server","Test":"TestUserAuthorizationAndValidation","Output":"--- PASS: TestUserAuthorizationAndValidation (0.96s)\n"}
+{"Time":"2026-11-23T08:15:04.665435444+01:00","Action":"pass","Package":"github.com/launix-de/stqr-storage/server","Test":"TestUserAuthorizationAndValidation","Elapsed":0.96}
+{"Time":"2026-11-23T08:15:04.665544482+01:00","Action":"run","Package":"github.com/launix-de/stqr-storage/server","Test":"TestRecoveryQuotaRejectionDoesNotFreezeCluster"}
+{"Time":"2026-11-23T08:15:04.665549651+01:00","Action":"output","Package":"github.com/launix-de/stqr-storage/server","Test":"TestRecoveryQuotaRejectionDoesNotFreezeCluster","Output":"=== RUN   TestRecoveryQuotaRejectionDoesNotFreezeCluster\n"}
+{"Time":"2026-11-23T08:15:10.866301493+01:00","Action":"output","Package":"github.com/launix-de/stqr-storage/server","Test":"TestRecoveryQuotaRejectionDoesNotFreezeCluster","Output":"--- PASS: TestRecoveryQuotaRejectionDoesNotFreezeCluster (6.20s)\n"}
+{"Time":"2026-11-23T08:15:10.866340307+01:00","Action":"pass","Package":"github.com/launix-de/stqr-storage/server","Test":"TestRecoveryQuotaRejectionDoesNotFreezeCluster","Elapsed":6.2}
+{"Time":"2026-11-23T08:15:10.866392677+01:00","Action":"run","Package":"github.com/launix-de/stqr-storage/server","Test":"TestRecoveryRequiresCompleteCohort"}
+{"Time":"2026-11-23T08:15:10.866397997+01:00","Action":"output","Package":"github.com/launix-de/stqr-storage/server","Test":"TestRecoveryRequiresCompleteCohort","Output":"=== RUN   TestRecoveryRequiresCompleteCohort\n"}
+{"Time":"2026-11-23T08:15:15.874771545+01:00","Action":"output","Package":"github.com/launix-de/stqr-storage/server","Test":"TestRecoveryRequiresCompleteCohort","Output":"--- PASS: TestRecoveryRequiresCompleteCohort (5.01s)\n"}
+{"Time":"2026-11-23T08:15:15.874799108+01:00","Action":"pass","Package":"github.com/launix-de/stqr-storage/server","Test":"TestRecoveryRequiresCompleteCohort","Elapsed":5.01}
+{"Time":"2026-11-23T08:15:15.874861106+01:00","Action":"output","Package":"github.com/launix-de/stqr-storage/server","Output":"PASS\n"}
+{"Time":"2026-11-23T08:15:16.88396284+01:00","Action":"output","Package":"github.com/launix-de/stqr-storage/server","Output":"ok  \tgithub.com/launix-de/stqr-storage/server\t15.651s\n"}
+{"Time":"2026-11-23T08:15:16.883995653+01:00","Action":"pass","Package":"github.com/launix-de/stqr-storage/server","Elapsed":15.651}

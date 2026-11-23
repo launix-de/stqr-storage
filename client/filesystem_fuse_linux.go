@@ -10,6 +10,7 @@ import (
 	"os"
 	"runtime"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 	"weak"
@@ -23,16 +24,19 @@ import (
 // OIDs are never truncated to 64 bits to synthesize kernel inode numbers.
 type FSNode struct {
 	fusefs.Inode
-	filesystem FilesystemView
-	numbers    *fsInodeNumbers
-	identity   *fsInodeIdentity
-	id         ObjectID
+	filesystem    FilesystemView
+	numbers       *fsInodeNumbers
+	identity      *fsInodeIdentity
+	coherent      *atomic.Bool
+	openedVersion atomic.Uint64
+	id            ObjectID
 }
 
 type fsInodeNumbers struct {
-	mu   sync.Mutex
-	next uint64
-	ids  map[ObjectID]weak.Pointer[fsInodeIdentity]
+	mu    sync.Mutex
+	next  uint64
+	ids   map[ObjectID]weak.Pointer[fsInodeIdentity]
+	nodes map[ObjectID]weak.Pointer[FSNode]
 }
 type fsInodeIdentity struct {
 	ino   uint64
@@ -69,6 +73,9 @@ func (s *fsInodeNumbers) acquire(id ObjectID) *fsInodeIdentity {
 			current := entry.Value()
 			if current == nil || current.ino == arg.ino {
 				delete(arg.table.ids, arg.id)
+				if arg.table.nodes[arg.id].Value() == nil {
+					delete(arg.table.nodes, arg.id)
+				}
 			}
 		}
 	}, fsIdentityCleanup{s, id, identity.ino})
@@ -78,11 +85,14 @@ func (f *Filesystem) FUSERoot() *FSNode {
 	return NewFUSERoot(f)
 }
 func NewFUSERoot(view FilesystemView) *FSNode {
-	numbers := &fsInodeNumbers{next: 1, ids: map[ObjectID]weak.Pointer[fsInodeIdentity]{}}
-	return &FSNode{filesystem: view, id: FilesystemRootID(), numbers: numbers, identity: numbers.acquire(FilesystemRootID())}
+	numbers := &fsInodeNumbers{next: 1, ids: map[ObjectID]weak.Pointer[fsInodeIdentity]{}, nodes: map[ObjectID]weak.Pointer[FSNode]{}}
+	root := &FSNode{coherent: &atomic.Bool{}, filesystem: view, id: FilesystemRootID(), numbers: numbers, identity: numbers.acquire(FilesystemRootID())}
+	numbers.nodes[root.id] = weak.Make(root)
+	return root
 }
 
 type fsOpenFile struct {
+	writable bool
 	append   bool
 	identity *fsInodeIdentity
 }
@@ -102,10 +112,16 @@ func MountFilesystem(view FilesystemView, mountpoint string, opt FSMountOptions)
 	if opt.ReadOnly {
 		options = append(options, "ro")
 	}
-	return fusefs.Mount(mountpoint, NewFUSERoot(view), &fusefs.Options{
-		MountOptions: fuse.MountOptions{FsName: "stqr", Name: "stqr", Debug: opt.Debug, AllowOther: opt.AllowOther, Options: options},
+	root := NewFUSERoot(view)
+	mounted, err := fusefs.Mount(mountpoint, root, &fusefs.Options{
+		MountOptions: fuse.MountOptions{FsName: "stqr", Name: "stqr", Debug: opt.Debug, AllowOther: opt.AllowOther, Options: options, MaxWrite: 1 << 20, MaxReadAhead: 1 << 20},
 		EntryTimeout: &zero, AttrTimeout: &zero, NegativeTimeout: &zero, NullPermissions: true,
 	})
+	if err != nil {
+		return nil, err
+	}
+	root.startInvalidations(mounted)
+	return mounted, nil
 }
 func fsErrno(err error) syscall.Errno {
 	if err == nil {
@@ -167,7 +183,12 @@ func fillFSAttr(out *fuse.Attr, info FSInfo) {
 func (n *FSNode) child(ctx context.Context, info FSInfo, out *fuse.EntryOut) *fusefs.Inode {
 	fillFSAttr(&out.Attr, info)
 	identity := n.numbers.acquire(info.ID)
-	return n.NewInode(ctx, &FSNode{filesystem: n.filesystem, id: info.ID, numbers: n.numbers, identity: identity}, fusefs.StableAttr{Mode: fsMode(info) & syscall.S_IFMT, Ino: identity.ino})
+	child := n.NewInode(ctx, &FSNode{filesystem: n.filesystem, id: info.ID, numbers: n.numbers, identity: identity, coherent: n.coherent}, fusefs.StableAttr{Mode: fsMode(info) & syscall.S_IFMT, Ino: identity.ino})
+	node := child.Operations().(*FSNode)
+	n.numbers.mu.Lock()
+	n.numbers.nodes[info.ID] = weak.Make(node)
+	n.numbers.mu.Unlock()
+	return child
 }
 func (n *FSNode) Getattr(ctx context.Context, fh fusefs.FileHandle, out *fuse.AttrOut) syscall.Errno {
 	info, err := n.filesystem.Stat(ctx, n.id)
@@ -229,7 +250,7 @@ func (n *FSNode) Create(ctx context.Context, name string, flags, mode uint32, ou
 		return nil, nil, 0, fsErrno(err)
 	}
 	child := n.child(ctx, info, out)
-	return child, &fsOpenFile{append: flags&syscall.O_APPEND != 0, identity: child.Operations().(*FSNode).identity}, fuse.FOPEN_DIRECT_IO, 0
+	return child, &fsOpenFile{writable: true, append: flags&syscall.O_APPEND != 0, identity: child.Operations().(*FSNode).identity}, fuse.FOPEN_DIRECT_IO, 0
 }
 func (n *FSNode) Open(ctx context.Context, flags uint32) (fusefs.FileHandle, uint32, syscall.Errno) {
 	info, err := n.filesystem.Stat(ctx, n.id)
@@ -253,7 +274,15 @@ func (n *FSNode) Open(ctx context.Context, flags uint32) (fusefs.FileHandle, uin
 	if flags&(syscall.O_WRONLY|syscall.O_RDWR) != 0 {
 		openFlags = fuse.FOPEN_DIRECT_IO
 	}
-	return &fsOpenFile{append: flags&syscall.O_APPEND != 0, identity: n.identity}, openFlags, 0
+	if openFlags == 0 && n.coherent != nil && n.coherent.Load() {
+		if source, ok := n.filesystem.(interface{ subscribed(ObjectID, uint64) bool }); ok && source.subscribed(n.id, info.Version) {
+			previous := n.openedVersion.Swap(info.Version)
+			if previous == info.Version {
+				openFlags = fuse.FOPEN_KEEP_CACHE
+			}
+		}
+	}
+	return &fsOpenFile{writable: flags&(syscall.O_WRONLY|syscall.O_RDWR) != 0, append: flags&syscall.O_APPEND != 0, identity: n.identity}, openFlags, 0
 }
 func (n *FSNode) Read(ctx context.Context, fh fusefs.FileHandle, dst []byte, offset int64) (fuse.ReadResult, syscall.Errno) {
 	count, err := n.filesystem.ReadAt(ctx, n.id, dst, offset)
@@ -279,6 +308,9 @@ func (n *FSNode) Fsync(ctx context.Context, fh fusefs.FileHandle, flags uint32) 
 	return fsErrno(n.filesystem.Sync(ctx, n.id))
 }
 func (n *FSNode) Flush(ctx context.Context, fh fusefs.FileHandle) syscall.Errno {
+	if h, ok := fh.(*fsOpenFile); ok && !h.writable {
+		return fsErrno(ctx.Err())
+	}
 	return fsErrno(n.filesystem.Sync(ctx, n.id))
 }
 func (n *FSNode) Unlink(ctx context.Context, name string) syscall.Errno {
@@ -345,3 +377,75 @@ var (
 	_ fusefs.NodeUnlinker  = (*FSNode)(nil)
 	_ fusefs.NodeRmdirer   = (*FSNode)(nil)
 )
+
+// Invalidation must not block the WebSocket reader: kernel notification can
+// wait for a page currently being read by another FUSE request. Coalesce bursts
+// in a bounded queue and conservatively invalidate all live nodes on overflow.
+func (n *FSNode) startInvalidations(server *fuse.Server) {
+	source, ok := n.filesystem.(interface {
+		watchChanges(func(ObjectID)) (func(), bool)
+	})
+	if !ok {
+		return
+	}
+	changes := make(chan ObjectID, 128)
+	wake := make(chan struct{}, 1)
+	done := make(chan struct{})
+	var all atomic.Bool
+	stop, enabled := source.watchChanges(func(id ObjectID) {
+		select {
+		case changes <- id:
+		default:
+			all.Store(true)
+		}
+		select {
+		case wake <- struct{}{}:
+		default:
+		}
+	})
+	if !enabled {
+		stop()
+		return
+	}
+	n.coherent.Store(true)
+	table := n.numbers
+	go func() { server.Wait(); stop(); close(done) }()
+	go func() {
+		for {
+			select {
+			case <-done:
+				return
+			case <-wake:
+			}
+			ids := map[ObjectID]bool{}
+		drain:
+			for {
+				select {
+				case id := <-changes:
+					ids[id] = true
+				default:
+					break drain
+				}
+			}
+			invalidateAll := all.Swap(false) || ids[FilesystemRootID()]
+			var nodes []*FSNode
+			table.mu.Lock()
+			for id, p := range table.nodes {
+				node := p.Value()
+				if node == nil {
+					delete(table.nodes, id)
+				} else if invalidateAll || ids[id] {
+					nodes = append(nodes, node)
+				}
+			}
+			table.mu.Unlock()
+			for _, node := range nodes {
+				node.openedVersion.Store(0)
+				node.NotifyContent(0, 0)
+				for name := range node.Children() {
+					node.NotifyEntry(name)
+				}
+			}
+		}
+	}()
+}

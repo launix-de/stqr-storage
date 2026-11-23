@@ -286,3 +286,12 @@ mmap, LOCK_EX, touch, whiteouts, remount and overlay fsck. With a freshly built
 binary, `STQR_FUSE_BINARY=/absolute/path/stqr-fuse` runs those mounts through the
 actual CLI and its separate readonly endpoint/credentials. All fixtures use
 temporary volumes/buckets; they do not use the developer's `fuse` bucket.
+
+## Subscription-backed metadata caching
+
+`stqr-fuse` uses a bounded object-subscription cache (default 32 MiB per bucket).
+Use `--metadata-cache-bytes=0` to disable it. Changes, permission loss and owner
+handoffs invalidate dependent snapshots; caching does not depend on a TTL.
+Readonly closes avoid redundant Stat calls and FUSE requests can reach 1 MiB.
+See [object subscriptions](object-subscriptions.md) for the wire contract,
+resnapshot behavior, memory limits and Go GC/AddCleanup lifetime rules.

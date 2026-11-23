@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"weak"
 
 	"github.com/gorilla/websocket"
 )
@@ -22,6 +23,9 @@ import (
 // cluster statistics. IDs are native 256-bit object addresses, never rehashed.
 // It is safe to call methods concurrently; Close is idempotent.
 type Client struct {
+	subMu                        sync.Mutex
+	subscriptions                map[ID]weak.Pointer[Subscription]
+	subscriptionSources          map[ID]*objectTransport
 	endpoint, username, password string
 	bucket                       BucketID
 	runtime                      ID
@@ -111,7 +115,7 @@ func (c *Client) connectEndpoint(ctx context.Context, endpoint string) (*objectT
 		conn.Close()
 		return nil, ErrProtocol
 	}
-	t := newObjectTransport(conn, func(m Message) error { return c.learnGoAway(endpoint, m) })
+	t := newObjectTransport(conn, c, func(m Message) error { return c.learnGoAway(endpoint, m) })
 	hello := Encoder{}
 	hello.U16(1)
 	hello.U16(1)
@@ -306,6 +310,11 @@ func (c *Client) do(ctx context.Context, opcode uint16, body []byte, id RequestI
 			t, e = c.connectionFor(ctx, endpoint, node)
 		}
 		if e == nil {
+			if m.Opcode == ObjectSubscribe && len(m.Body) >= 96 {
+				var subscription ID
+				copy(subscription[:], m.Body[80:96])
+				c.bindSubscriptionTransport(subscription, t)
+			}
 			r, er := t.roundTrip(ctx, m, mutation, upload)
 			if er == nil {
 				return r, nil
