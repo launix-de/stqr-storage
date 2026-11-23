@@ -1,0 +1,421 @@
+ok  	github.com/launix-de/stqr-storage	6.237s
+ok  	github.com/launix-de/stqr-storage/client	2.226s
+ok  	github.com/launix-de/stqr-storage/cmd/stqr-fuse	1.012s
+panic: test timed out after 5m0s
+	running tests:
+		TestDaemonBucketDeletionReclaimsEveryNode (1s)
+
+goroutine 6811 [running]:
+testing.(*M).startAlarm.func1()
+	/home/carli/go/pkg/mod/golang.org/toolchain@v0.0.1-go1.24.0.linux-amd64/src/testing/testing.go:2484 +0x605
+created by time.goFunc
+	/home/carli/go/pkg/mod/golang.org/toolchain@v0.0.1-go1.24.0.linux-amd64/src/time/sleep.go:215 +0x45
+
+goroutine 1 [chan receive]:
+testing.(*T).Run(0xc0001aa380, {0x11c1374, 0x29}, 0x12019f0)
+	/home/carli/go/pkg/mod/golang.org/toolchain@v0.0.1-go1.24.0.linux-amd64/src/testing/testing.go:1859 +0x91e
+testing.runTests.func1(0xc0001aa380)
+	/home/carli/go/pkg/mod/golang.org/toolchain@v0.0.1-go1.24.0.linux-amd64/src/testing/testing.go:2279 +0x86
+testing.tRunner(0xc0001aa380, 0xc0001e9ae0)
+	/home/carli/go/pkg/mod/golang.org/toolchain@v0.0.1-go1.24.0.linux-amd64/src/testing/testing.go:1792 +0x226
+testing.runTests(0xc000010078, {0x182d080, 0xc5, 0xc5}, {0x7?, 0x0?, 0x18301a0?})
+	/home/carli/go/pkg/mod/golang.org/toolchain@v0.0.1-go1.24.0.linux-amd64/src/testing/testing.go:2277 +0x96d
+testing.(*M).Run(0xc0000cc6e0)
+	/home/carli/go/pkg/mod/golang.org/toolchain@v0.0.1-go1.24.0.linux-amd64/src/testing/testing.go:2142 +0xeeb
+main.main()
+	_testmain.go:443 +0x165
+
+goroutine 6826 [select]:
+github.com/launix-de/stqr-storage/server.(*peerConnection).dispatchRequestQueue(0xc0003800e0, 0xc0001ca3f0)
+	/home/carli/projekte/stqr/.worktrees/throughput-improvements/server/peer_duplex.go:108 +0x6c5
+github.com/launix-de/stqr-storage/server.(*peerConnection).requestLoop(...)
+	/home/carli/projekte/stqr/.worktrees/throughput-improvements/server/peer_duplex.go:96
+github.com/launix-de/stqr-storage/server.(*Server).dialPeer.func3()
+	/home/carli/projekte/stqr/.worktrees/throughput-improvements/server/peer.go:154 +0xac
+created by github.com/launix-de/stqr-storage/server.(*Server).dialPeer in goroutine 6822
+	/home/carli/projekte/stqr/.worktrees/throughput-improvements/server/peer.go:154 +0x1153
+
+goroutine 6803 [select]:
+github.com/launix-de/stqr-storage/server.(*rangeManager).start.func1()
+	/home/carli/projekte/stqr/.worktrees/throughput-improvements/server/range_planner.go:29 +0x245
+created by github.com/launix-de/stqr-storage/server.(*rangeManager).start in goroutine 6769
+	/home/carli/projekte/stqr/.worktrees/throughput-improvements/server/range_planner.go:24 +0x105
+
+goroutine 6804 [IO wait]:
+internal/poll.runtime_pollWait(0x7b0a40fd1b98, 0x72)
+	/home/carli/go/pkg/mod/golang.org/toolchain@v0.0.1-go1.24.0.linux-amd64/src/runtime/netpoll.go:351 +0x85
+internal/poll.(*pollDesc).wait(0xc000279020, 0x72, 0x0)
+	/home/carli/go/pkg/mod/golang.org/toolchain@v0.0.1-go1.24.0.linux-amd64/src/internal/poll/fd_poll_runtime.go:84 +0xb1
+internal/poll.(*pollDesc).waitRead(...)
+	/home/carli/go/pkg/mod/golang.org/toolchain@v0.0.1-go1.24.0.linux-amd64/src/internal/poll/fd_poll_runtime.go:89
+internal/poll.(*FD).Accept(0xc000279000)
+	/home/carli/go/pkg/mod/golang.org/toolchain@v0.0.1-go1.24.0.linux-amd64/src/internal/poll/fd_unix.go:620 +0x505
+net.(*netFD).accept(0xc000279000)
+	/home/carli/go/pkg/mod/golang.org/toolchain@v0.0.1-go1.24.0.linux-amd64/src/net/fd_unix.go:172 +0x45
+net.(*TCPListener).accept(0xc000023200)
+	/home/carli/go/pkg/mod/golang.org/toolchain@v0.0.1-go1.24.0.linux-amd64/src/net/tcpsock_posix.go:159 +0x4e
+net.(*TCPListener).Accept(0xc000023200)
+	/home/carli/go/pkg/mod/golang.org/toolchain@v0.0.1-go1.24.0.linux-amd64/src/net/tcpsock.go:380 +0x65
+net/http.(*Server).Serve(0xc000132000, {0x1393290, 0xc000023200})
+	/home/carli/go/pkg/mod/golang.org/toolchain@v0.0.1-go1.24.0.linux-amd64/src/net/http/server.go:3424 +0x65f
+created by github.com/launix-de/stqr-storage/server.startDaemonTestNode in goroutine 6769
+	/home/carli/projekte/stqr/.worktrees/throughput-improvements/server/cluster_daemon_test.go:58 +0xa45
+
+goroutine 6769 [sleep]:
+time.Sleep(0x17d7840)
+	/home/carli/go/pkg/mod/golang.org/toolchain@v0.0.1-go1.24.0.linux-amd64/src/runtime/time.go:338 +0x165
+github.com/launix-de/stqr-storage/server.startAutomaticDaemonPair(0xc0004a3340, {0x0, 0x0, 0x0?})
+	/home/carli/projekte/stqr/.worktrees/throughput-improvements/server/range_daemon_test.go:263 +0x7d5
+github.com/launix-de/stqr-storage/server.TestDaemonBucketDeletionReclaimsEveryNode(0xc0004a3340)
+	/home/carli/projekte/stqr/.worktrees/throughput-improvements/server/range_daemon_test.go:783 +0x46
+testing.tRunner(0xc0004a3340, 0x12019f0)
+	/home/carli/go/pkg/mod/golang.org/toolchain@v0.0.1-go1.24.0.linux-amd64/src/testing/testing.go:1792 +0x226
+created by testing.(*T).Run in goroutine 1
+	/home/carli/go/pkg/mod/golang.org/toolchain@v0.0.1-go1.24.0.linux-amd64/src/testing/testing.go:1851 +0x8f3
+
+goroutine 6784 [select]:
+github.com/launix-de/stqr-storage/server.(*Server).statsLoop(0xc000720008)
+	/home/carli/projekte/stqr/.worktrees/throughput-improvements/server/stats.go:180 +0x25d
+created by github.com/launix-de/stqr-storage/server.Open in goroutine 6769
+	/home/carli/projekte/stqr/.worktrees/throughput-improvements/server/server.go:309 +0x3bcb
+
+goroutine 6807 [select]:
+github.com/launix-de/stqr-storage/server.(*peerConnection).dispatchRequestQueue(0xc00042e000, 0xc000180620)
+	/home/carli/projekte/stqr/.worktrees/throughput-improvements/server/peer_duplex.go:108 +0x6c5
+github.com/launix-de/stqr-storage/server.(*peerConnection).requestLoop(...)
+	/home/carli/projekte/stqr/.worktrees/throughput-improvements/server/peer_duplex.go:96
+github.com/launix-de/stqr-storage/server.(*Server).dialPeer.func3()
+	/home/carli/projekte/stqr/.worktrees/throughput-improvements/server/peer.go:154 +0xac
+created by github.com/launix-de/stqr-storage/server.(*Server).dialPeer in goroutine 6818
+	/home/carli/projekte/stqr/.worktrees/throughput-improvements/server/peer.go:154 +0x1153
+
+goroutine 6806 [IO wait]:
+internal/poll.runtime_pollWait(0x7b0a41a84f50, 0x72)
+	/home/carli/go/pkg/mod/golang.org/toolchain@v0.0.1-go1.24.0.linux-amd64/src/runtime/netpoll.go:351 +0x85
+internal/poll.(*pollDesc).wait(0xc0002781a0, 0x72, 0x0)
+	/home/carli/go/pkg/mod/golang.org/toolchain@v0.0.1-go1.24.0.linux-amd64/src/internal/poll/fd_poll_runtime.go:84 +0xb1
+internal/poll.(*pollDesc).waitRead(...)
+	/home/carli/go/pkg/mod/golang.org/toolchain@v0.0.1-go1.24.0.linux-amd64/src/internal/poll/fd_poll_runtime.go:89
+internal/poll.(*FD).Read(0xc000278180, {0xc0002d4000, 0x1000, 0x1000})
+	/home/carli/go/pkg/mod/golang.org/toolchain@v0.0.1-go1.24.0.linux-amd64/src/internal/poll/fd_unix.go:165 +0x453
+net.(*netFD).Read(0xc000278180, {0xc0002d4000, 0x1000, 0x1000})
+	/home/carli/go/pkg/mod/golang.org/toolchain@v0.0.1-go1.24.0.linux-amd64/src/net/fd_posix.go:55 +0x4b
+net.(*conn).Read(0xc000526000, {0xc0002d4000, 0x1000, 0x1000})
+	/home/carli/go/pkg/mod/golang.org/toolchain@v0.0.1-go1.24.0.linux-amd64/src/net/net.go:194 +0xad
+bufio.(*Reader).fill(0xc000410840)
+	/home/carli/go/pkg/mod/golang.org/toolchain@v0.0.1-go1.24.0.linux-amd64/src/bufio/bufio.go:113 +0x2a4
+bufio.(*Reader).Peek(0xc000410840, 0x2)
+	/home/carli/go/pkg/mod/golang.org/toolchain@v0.0.1-go1.24.0.linux-amd64/src/bufio/bufio.go:152 +0xc5
+github.com/gorilla/websocket.(*Conn).read(0xc000340160, 0x2)
+	/home/carli/go/pkg/mod/github.com/gorilla/websocket@v1.5.3/conn.go:371 +0x53
+github.com/gorilla/websocket.(*Conn).advanceFrame(0xc000340160)
+	/home/carli/go/pkg/mod/github.com/gorilla/websocket@v1.5.3/conn.go:809 +0x11b
+github.com/gorilla/websocket.(*Conn).NextReader(0xc000340160)
+	/home/carli/go/pkg/mod/github.com/gorilla/websocket@v1.5.3/conn.go:1009 +0x134
+github.com/gorilla/websocket.(*Conn).ReadMessage(0xc000340160)
+	/home/carli/go/pkg/mod/github.com/gorilla/websocket@v1.5.3/conn.go:1093 +0x2f
+github.com/launix-de/stqr-storage/server.(*peerConnection).readLoop(0xc00042e000)
+	/home/carli/projekte/stqr/.worktrees/throughput-improvements/server/peer.go:292 +0xc9
+github.com/launix-de/stqr-storage/server.(*Server).dialPeer.func2()
+	/home/carli/projekte/stqr/.worktrees/throughput-improvements/server/peer.go:153 +0x93
+created by github.com/launix-de/stqr-storage/server.(*Server).dialPeer in goroutine 6818
+	/home/carli/projekte/stqr/.worktrees/throughput-improvements/server/peer.go:153 +0x1093
+
+goroutine 6805 [select]:
+github.com/launix-de/stqr-storage/server.(*peerConnection).writeLoop(0xc00042e000)
+	/home/carli/projekte/stqr/.worktrees/throughput-improvements/server/peer.go:278 +0x19d
+github.com/launix-de/stqr-storage/server.(*Server).dialPeer.func1()
+	/home/carli/projekte/stqr/.worktrees/throughput-improvements/server/peer.go:152 +0x93
+created by github.com/launix-de/stqr-storage/server.(*Server).dialPeer in goroutine 6818
+	/home/carli/projekte/stqr/.worktrees/throughput-improvements/server/peer.go:152 +0xfd3
+
+goroutine 6681 [select]:
+github.com/launix-de/stqr-storage/server.(*wsSession).controlRequestLoop(0xc0003a2000)
+	/home/carli/projekte/stqr/.worktrees/throughput-improvements/server/transport.go:363 +0x1a5
+github.com/launix-de/stqr-storage/server.(*Server).serveWebSocket.func5()
+	/home/carli/projekte/stqr/.worktrees/throughput-improvements/server/transport.go:147 +0x93
+created by github.com/launix-de/stqr-storage/server.(*Server).serveWebSocket in goroutine 6677
+	/home/carli/projekte/stqr/.worktrees/throughput-improvements/server/transport.go:147 +0x153d
+
+goroutine 6823 [select]:
+github.com/launix-de/stqr-storage/server.(*peerConnection).nextPush(0xc00042e000, {0x13940d8, 0xc00041e000})
+	/home/carli/projekte/stqr/.worktrees/throughput-improvements/server/peer.go:338 +0x189
+github.com/launix-de/stqr-storage/server.(*Server).observePeer(0xc000720008, 0xc00042e000, 0xc00026e8a0)
+	/home/carli/projekte/stqr/.worktrees/throughput-improvements/server/peer_stats.go:91 +0xc05
+github.com/launix-de/stqr-storage/server.(*Server).startPeerObservation.func1()
+	/home/carli/projekte/stqr/.worktrees/throughput-improvements/server/peer_stats.go:63 +0x16f
+created by github.com/launix-de/stqr-storage/server.(*Server).startPeerObservation in goroutine 6818
+	/home/carli/projekte/stqr/.worktrees/throughput-improvements/server/peer_stats.go:53 +0xa8b
+
+goroutine 6680 [select]:
+github.com/launix-de/stqr-storage/server.(*wsSession).requestLoop(0xc0003a2000)
+	/home/carli/projekte/stqr/.worktrees/throughput-improvements/server/transport.go:252 +0x3f6
+github.com/launix-de/stqr-storage/server.(*Server).serveWebSocket.func4()
+	/home/carli/projekte/stqr/.worktrees/throughput-improvements/server/transport.go:145 +0x93
+created by github.com/launix-de/stqr-storage/server.(*Server).serveWebSocket in goroutine 6677
+	/home/carli/projekte/stqr/.worktrees/throughput-improvements/server/transport.go:145 +0x1453
+
+goroutine 6780 [select]:
+github.com/launix-de/stqr-storage/server.(*Server).startS3Maintenance.func1()
+	/home/carli/projekte/stqr/.worktrees/throughput-improvements/server/s3_maintenance.go:110 +0x2ac
+created by github.com/launix-de/stqr-storage/server.(*Server).startS3Maintenance in goroutine 6769
+	/home/carli/projekte/stqr/.worktrees/throughput-improvements/server/s3_maintenance.go:101 +0xa5
+
+goroutine 6802 [select]:
+github.com/launix-de/stqr-storage/server.(*clusterController).start.func1()
+	/home/carli/projekte/stqr/.worktrees/throughput-improvements/server/cluster_controller.go:100 +0x279
+created by github.com/launix-de/stqr-storage/server.(*clusterController).start in goroutine 6769
+	/home/carli/projekte/stqr/.worktrees/throughput-improvements/server/cluster_controller.go:95 +0x105
+
+goroutine 6837 [select]:
+github.com/launix-de/stqr-storage/server.(*wsSession).requestLoop(0xc0002132c0)
+	/home/carli/projekte/stqr/.worktrees/throughput-improvements/server/transport.go:252 +0x3f6
+github.com/launix-de/stqr-storage/server.(*Server).serveWebSocket.func4()
+	/home/carli/projekte/stqr/.worktrees/throughput-improvements/server/transport.go:145 +0x93
+created by github.com/launix-de/stqr-storage/server.(*Server).serveWebSocket in goroutine 6850
+	/home/carli/projekte/stqr/.worktrees/throughput-improvements/server/transport.go:145 +0x1453
+
+goroutine 6810 [select]:
+github.com/launix-de/stqr-storage/server.(*peerConnection).nextPush(0xc0003800e0, {0x13940d8, 0xc000216730})
+	/home/carli/projekte/stqr/.worktrees/throughput-improvements/server/peer.go:338 +0x189
+github.com/launix-de/stqr-storage/server.(*Server).observePeer(0xc000720708, 0xc0003800e0, 0xc000aa7230)
+	/home/carli/projekte/stqr/.worktrees/throughput-improvements/server/peer_stats.go:91 +0xc05
+github.com/launix-de/stqr-storage/server.(*Server).startPeerObservation.func1()
+	/home/carli/projekte/stqr/.worktrees/throughput-improvements/server/peer_stats.go:63 +0x16f
+created by github.com/launix-de/stqr-storage/server.(*Server).startPeerObservation in goroutine 6822
+	/home/carli/projekte/stqr/.worktrees/throughput-improvements/server/peer_stats.go:53 +0xa8b
+
+goroutine 6819 [select]:
+github.com/launix-de/stqr-storage/server.(*clusterController).start.func1()
+	/home/carli/projekte/stqr/.worktrees/throughput-improvements/server/cluster_controller.go:100 +0x279
+created by github.com/launix-de/stqr-storage/server.(*clusterController).start in goroutine 6769
+	/home/carli/projekte/stqr/.worktrees/throughput-improvements/server/cluster_controller.go:95 +0x105
+
+goroutine 6824 [select]:
+github.com/launix-de/stqr-storage/server.(*peerConnection).writeLoop(0xc0003800e0)
+	/home/carli/projekte/stqr/.worktrees/throughput-improvements/server/peer.go:278 +0x19d
+github.com/launix-de/stqr-storage/server.(*Server).dialPeer.func1()
+	/home/carli/projekte/stqr/.worktrees/throughput-improvements/server/peer.go:152 +0x93
+created by github.com/launix-de/stqr-storage/server.(*Server).dialPeer in goroutine 6822
+	/home/carli/projekte/stqr/.worktrees/throughput-improvements/server/peer.go:152 +0xfd3
+
+goroutine 6808 [select]:
+github.com/launix-de/stqr-storage/server.(*peerConnection).dispatchRequestQueue(0xc00042e000, 0xc000180700)
+	/home/carli/projekte/stqr/.worktrees/throughput-improvements/server/peer_duplex.go:108 +0x6c5
+github.com/launix-de/stqr-storage/server.(*peerConnection).controlRequestLoop(...)
+	/home/carli/projekte/stqr/.worktrees/throughput-improvements/server/peer_duplex.go:97
+github.com/launix-de/stqr-storage/server.(*Server).dialPeer.func4()
+	/home/carli/projekte/stqr/.worktrees/throughput-improvements/server/peer.go:155 +0xac
+created by github.com/launix-de/stqr-storage/server.(*Server).dialPeer in goroutine 6818
+	/home/carli/projekte/stqr/.worktrees/throughput-improvements/server/peer.go:155 +0x1213
+
+goroutine 6677 [IO wait]:
+internal/poll.runtime_pollWait(0x7b0a41a855e0, 0x72)
+	/home/carli/go/pkg/mod/golang.org/toolchain@v0.0.1-go1.24.0.linux-amd64/src/runtime/netpoll.go:351 +0x85
+internal/poll.(*pollDesc).wait(0xc000150020, 0x72, 0x0)
+	/home/carli/go/pkg/mod/golang.org/toolchain@v0.0.1-go1.24.0.linux-amd64/src/internal/poll/fd_poll_runtime.go:84 +0xb1
+internal/poll.(*pollDesc).waitRead(...)
+	/home/carli/go/pkg/mod/golang.org/toolchain@v0.0.1-go1.24.0.linux-amd64/src/internal/poll/fd_poll_runtime.go:89
+internal/poll.(*FD).Read(0xc000150000, {0xc00039f000, 0x1000, 0x1000})
+	/home/carli/go/pkg/mod/golang.org/toolchain@v0.0.1-go1.24.0.linux-amd64/src/internal/poll/fd_unix.go:165 +0x453
+net.(*netFD).Read(0xc000150000, {0xc00039f000, 0x1000, 0x1000})
+	/home/carli/go/pkg/mod/golang.org/toolchain@v0.0.1-go1.24.0.linux-amd64/src/net/fd_posix.go:55 +0x4b
+net.(*conn).Read(0xc00008c000, {0xc00039f000, 0x1000, 0x1000})
+	/home/carli/go/pkg/mod/golang.org/toolchain@v0.0.1-go1.24.0.linux-amd64/src/net/net.go:194 +0xad
+bufio.(*Reader).fill(0xc00028a660)
+	/home/carli/go/pkg/mod/golang.org/toolchain@v0.0.1-go1.24.0.linux-amd64/src/bufio/bufio.go:113 +0x2a4
+bufio.(*Reader).Peek(0xc00028a660, 0x2)
+	/home/carli/go/pkg/mod/golang.org/toolchain@v0.0.1-go1.24.0.linux-amd64/src/bufio/bufio.go:152 +0xc5
+github.com/gorilla/websocket.(*Conn).read(0xc0003c42c0, 0x2)
+	/home/carli/go/pkg/mod/github.com/gorilla/websocket@v1.5.3/conn.go:371 +0x53
+github.com/gorilla/websocket.(*Conn).advanceFrame(0xc0003c42c0)
+	/home/carli/go/pkg/mod/github.com/gorilla/websocket@v1.5.3/conn.go:809 +0x11b
+github.com/gorilla/websocket.(*Conn).NextReader(0xc0003c42c0)
+	/home/carli/go/pkg/mod/github.com/gorilla/websocket@v1.5.3/conn.go:1009 +0x134
+github.com/gorilla/websocket.(*Conn).ReadMessage(0xc0003c42c0)
+	/home/carli/go/pkg/mod/github.com/gorilla/websocket@v1.5.3/conn.go:1093 +0x2f
+github.com/launix-de/stqr-storage/server.(*Server).serveWebSocket(0xc000720708, {0x13931b8, 0xc000380000}, 0xc000298140, {0x0, {0x0, 0x0, 0x0, 0x0, 0x0, ...}, ...})
+	/home/carli/projekte/stqr/.worktrees/throughput-improvements/server/transport.go:150 +0x168e
+github.com/launix-de/stqr-storage/server.(*Server).Handler.func1({0x13931b8, 0xc000380000}, 0xc000298140)
+	/home/carli/projekte/stqr/.worktrees/throughput-improvements/server/http.go:159 +0x4ad7
+net/http.HandlerFunc.ServeHTTP(0xc000196020, {0x13931b8, 0xc000380000}, 0xc000298140)
+	/home/carli/go/pkg/mod/golang.org/toolchain@v0.0.1-go1.24.0.linux-amd64/src/net/http/server.go:2294 +0x48
+net/http.serverHandler.ServeHTTP({0xc0002ce330?}, {0x13931b8, 0xc000380000}, 0xc000298140)
+	/home/carli/go/pkg/mod/golang.org/toolchain@v0.0.1-go1.24.0.linux-amd64/src/net/http/server.go:3301 +0x2a2
+net/http.(*conn).serve(0xc0001ba2d0, {0x13940a0, 0xc0000ce6f0})
+	/home/carli/go/pkg/mod/golang.org/toolchain@v0.0.1-go1.24.0.linux-amd64/src/net/http/server.go:2102 +0x1305
+created by net/http.(*Server).Serve in goroutine 6804
+	/home/carli/go/pkg/mod/golang.org/toolchain@v0.0.1-go1.24.0.linux-amd64/src/net/http/server.go:3454 +0x8ca
+
+goroutine 6836 [select]:
+github.com/launix-de/stqr-storage/server.(*wsSession).writeLoop(0xc0002132c0)
+	/home/carli/projekte/stqr/.worktrees/throughput-improvements/server/transport.go:213 +0x26c
+github.com/launix-de/stqr-storage/server.(*Server).serveWebSocket.func3()
+	/home/carli/projekte/stqr/.worktrees/throughput-improvements/server/transport.go:144 +0x93
+created by github.com/launix-de/stqr-storage/server.(*Server).serveWebSocket in goroutine 6850
+	/home/carli/projekte/stqr/.worktrees/throughput-improvements/server/transport.go:144 +0x1393
+
+goroutine 6825 [IO wait]:
+internal/poll.runtime_pollWait(0x7b0a41a85810, 0x72)
+	/home/carli/go/pkg/mod/golang.org/toolchain@v0.0.1-go1.24.0.linux-amd64/src/runtime/netpoll.go:351 +0x85
+internal/poll.(*pollDesc).wait(0xc0003cc320, 0x72, 0x0)
+	/home/carli/go/pkg/mod/golang.org/toolchain@v0.0.1-go1.24.0.linux-amd64/src/internal/poll/fd_poll_runtime.go:84 +0xb1
+internal/poll.(*pollDesc).waitRead(...)
+	/home/carli/go/pkg/mod/golang.org/toolchain@v0.0.1-go1.24.0.linux-amd64/src/internal/poll/fd_poll_runtime.go:89
+internal/poll.(*FD).Read(0xc0003cc300, {0xc0004ba000, 0x1000, 0x1000})
+	/home/carli/go/pkg/mod/golang.org/toolchain@v0.0.1-go1.24.0.linux-amd64/src/internal/poll/fd_unix.go:165 +0x453
+net.(*netFD).Read(0xc0003cc300, {0xc0004ba000, 0x1000, 0x1000})
+	/home/carli/go/pkg/mod/golang.org/toolchain@v0.0.1-go1.24.0.linux-amd64/src/net/fd_posix.go:55 +0x4b
+net.(*conn).Read(0xc000296008, {0xc0004ba000, 0x1000, 0x1000})
+	/home/carli/go/pkg/mod/golang.org/toolchain@v0.0.1-go1.24.0.linux-amd64/src/net/net.go:194 +0xad
+bufio.(*Reader).fill(0xc0000000c0)
+	/home/carli/go/pkg/mod/golang.org/toolchain@v0.0.1-go1.24.0.linux-amd64/src/bufio/bufio.go:113 +0x2a4
+bufio.(*Reader).Peek(0xc0000000c0, 0x2)
+	/home/carli/go/pkg/mod/golang.org/toolchain@v0.0.1-go1.24.0.linux-amd64/src/bufio/bufio.go:152 +0xc5
+github.com/gorilla/websocket.(*Conn).read(0xc0001b8420, 0x2)
+	/home/carli/go/pkg/mod/github.com/gorilla/websocket@v1.5.3/conn.go:371 +0x53
+github.com/gorilla/websocket.(*Conn).advanceFrame(0xc0001b8420)
+	/home/carli/go/pkg/mod/github.com/gorilla/websocket@v1.5.3/conn.go:809 +0x11b
+github.com/gorilla/websocket.(*Conn).NextReader(0xc0001b8420)
+	/home/carli/go/pkg/mod/github.com/gorilla/websocket@v1.5.3/conn.go:1009 +0x134
+github.com/gorilla/websocket.(*Conn).ReadMessage(0xc0001b8420)
+	/home/carli/go/pkg/mod/github.com/gorilla/websocket@v1.5.3/conn.go:1093 +0x2f
+github.com/launix-de/stqr-storage/server.(*peerConnection).readLoop(0xc0003800e0)
+	/home/carli/projekte/stqr/.worktrees/throughput-improvements/server/peer.go:292 +0xc9
+github.com/launix-de/stqr-storage/server.(*Server).dialPeer.func2()
+	/home/carli/projekte/stqr/.worktrees/throughput-improvements/server/peer.go:153 +0x93
+created by github.com/launix-de/stqr-storage/server.(*Server).dialPeer in goroutine 6822
+	/home/carli/projekte/stqr/.worktrees/throughput-improvements/server/peer.go:153 +0x1093
+
+goroutine 6781 [select]:
+github.com/launix-de/stqr-storage/server.(*Server).statsLoop(0xc000720708)
+	/home/carli/projekte/stqr/.worktrees/throughput-improvements/server/stats.go:180 +0x25d
+created by github.com/launix-de/stqr-storage/server.Open in goroutine 6769
+	/home/carli/projekte/stqr/.worktrees/throughput-improvements/server/server.go:309 +0x3bcb
+
+goroutine 6827 [select]:
+github.com/launix-de/stqr-storage/server.(*peerConnection).dispatchRequestQueue(0xc0003800e0, 0xc0001ca460)
+	/home/carli/projekte/stqr/.worktrees/throughput-improvements/server/peer_duplex.go:108 +0x6c5
+github.com/launix-de/stqr-storage/server.(*peerConnection).controlRequestLoop(...)
+	/home/carli/projekte/stqr/.worktrees/throughput-improvements/server/peer_duplex.go:97
+github.com/launix-de/stqr-storage/server.(*Server).dialPeer.func4()
+	/home/carli/projekte/stqr/.worktrees/throughput-improvements/server/peer.go:155 +0xac
+created by github.com/launix-de/stqr-storage/server.(*Server).dialPeer in goroutine 6822
+	/home/carli/projekte/stqr/.worktrees/throughput-improvements/server/peer.go:155 +0x1213
+
+goroutine 6783 [select]:
+github.com/launix-de/stqr-storage/server.(*Server).startS3Maintenance.func1()
+	/home/carli/projekte/stqr/.worktrees/throughput-improvements/server/s3_maintenance.go:110 +0x2ac
+created by github.com/launix-de/stqr-storage/server.(*Server).startS3Maintenance in goroutine 6769
+	/home/carli/projekte/stqr/.worktrees/throughput-improvements/server/s3_maintenance.go:101 +0xa5
+
+goroutine 6679 [select]:
+github.com/launix-de/stqr-storage/server.(*wsSession).writeLoop(0xc0003a2000)
+	/home/carli/projekte/stqr/.worktrees/throughput-improvements/server/transport.go:213 +0x26c
+github.com/launix-de/stqr-storage/server.(*Server).serveWebSocket.func3()
+	/home/carli/projekte/stqr/.worktrees/throughput-improvements/server/transport.go:144 +0x93
+created by github.com/launix-de/stqr-storage/server.(*Server).serveWebSocket in goroutine 6677
+	/home/carli/projekte/stqr/.worktrees/throughput-improvements/server/transport.go:144 +0x1393
+
+goroutine 6782 [select]:
+github.com/launix-de/stqr-storage/server.(*Server).startQuotaWorker.func1()
+	/home/carli/projekte/stqr/.worktrees/throughput-improvements/server/quota_peer.go:169 +0x28f
+created by github.com/launix-de/stqr-storage/server.(*Server).startQuotaWorker in goroutine 6769
+	/home/carli/projekte/stqr/.worktrees/throughput-improvements/server/quota_peer.go:164 +0x105
+
+goroutine 6821 [IO wait]:
+internal/poll.runtime_pollWait(0x7b0a40fd1dc8, 0x72)
+	/home/carli/go/pkg/mod/golang.org/toolchain@v0.0.1-go1.24.0.linux-amd64/src/runtime/netpoll.go:351 +0x85
+internal/poll.(*pollDesc).wait(0xc000278020, 0x72, 0x0)
+	/home/carli/go/pkg/mod/golang.org/toolchain@v0.0.1-go1.24.0.linux-amd64/src/internal/poll/fd_poll_runtime.go:84 +0xb1
+internal/poll.(*pollDesc).waitRead(...)
+	/home/carli/go/pkg/mod/golang.org/toolchain@v0.0.1-go1.24.0.linux-amd64/src/internal/poll/fd_poll_runtime.go:89
+internal/poll.(*FD).Accept(0xc000278000)
+	/home/carli/go/pkg/mod/golang.org/toolchain@v0.0.1-go1.24.0.linux-amd64/src/internal/poll/fd_unix.go:620 +0x505
+net.(*netFD).accept(0xc000278000)
+	/home/carli/go/pkg/mod/golang.org/toolchain@v0.0.1-go1.24.0.linux-amd64/src/net/fd_unix.go:172 +0x45
+net.(*TCPListener).accept(0xc0000230c0)
+	/home/carli/go/pkg/mod/golang.org/toolchain@v0.0.1-go1.24.0.linux-amd64/src/net/tcpsock_posix.go:159 +0x4e
+net.(*TCPListener).Accept(0xc0000230c0)
+	/home/carli/go/pkg/mod/golang.org/toolchain@v0.0.1-go1.24.0.linux-amd64/src/net/tcpsock.go:380 +0x65
+net/http.(*Server).Serve(0xc000132400, {0x1393290, 0xc0000230c0})
+	/home/carli/go/pkg/mod/golang.org/toolchain@v0.0.1-go1.24.0.linux-amd64/src/net/http/server.go:3424 +0x65f
+created by github.com/launix-de/stqr-storage/server.startDaemonTestNode in goroutine 6769
+	/home/carli/projekte/stqr/.worktrees/throughput-improvements/server/cluster_daemon_test.go:58 +0xa45
+
+goroutine 6822 [chan receive]:
+github.com/launix-de/stqr-storage/server.(*Server).runKnownPeer(0xc000720708, {{0xc00024e080?, 0x0?}, {0xc00049e018?, 0x0?}})
+	/home/carli/projekte/stqr/.worktrees/throughput-improvements/server/peer_manager.go:65 +0x379
+github.com/launix-de/stqr-storage/server.(*Server).startPeerContactsLocked.func1({{0xc00024e080?, 0xc0005bafd0?}, {0xc00049e018?, 0x41f330?}})
+	/home/carli/projekte/stqr/.worktrees/throughput-improvements/server/peer_manager.go:38 +0xd4
+created by github.com/launix-de/stqr-storage/server.(*Server).startPeerContactsLocked in goroutine 6680
+	/home/carli/projekte/stqr/.worktrees/throughput-improvements/server/peer_manager.go:38 +0x353
+
+goroutine 6850 [IO wait]:
+internal/poll.runtime_pollWait(0x7b0a41a853b0, 0x72)
+	/home/carli/go/pkg/mod/golang.org/toolchain@v0.0.1-go1.24.0.linux-amd64/src/runtime/netpoll.go:351 +0x85
+internal/poll.(*pollDesc).wait(0xc000278120, 0x72, 0x0)
+	/home/carli/go/pkg/mod/golang.org/toolchain@v0.0.1-go1.24.0.linux-amd64/src/internal/poll/fd_poll_runtime.go:84 +0xb1
+internal/poll.(*pollDesc).waitRead(...)
+	/home/carli/go/pkg/mod/golang.org/toolchain@v0.0.1-go1.24.0.linux-amd64/src/internal/poll/fd_poll_runtime.go:89
+internal/poll.(*FD).Read(0xc000278100, {0xc0002f1000, 0x1000, 0x1000})
+	/home/carli/go/pkg/mod/golang.org/toolchain@v0.0.1-go1.24.0.linux-amd64/src/internal/poll/fd_unix.go:165 +0x453
+net.(*netFD).Read(0xc000278100, {0xc0002f1000, 0x1000, 0x1000})
+	/home/carli/go/pkg/mod/golang.org/toolchain@v0.0.1-go1.24.0.linux-amd64/src/net/fd_posix.go:55 +0x4b
+net.(*conn).Read(0xc000526040, {0xc0002f1000, 0x1000, 0x1000})
+	/home/carli/go/pkg/mod/golang.org/toolchain@v0.0.1-go1.24.0.linux-amd64/src/net/net.go:194 +0xad
+bufio.(*Reader).fill(0xc0004111a0)
+	/home/carli/go/pkg/mod/golang.org/toolchain@v0.0.1-go1.24.0.linux-amd64/src/bufio/bufio.go:113 +0x2a4
+bufio.(*Reader).Peek(0xc0004111a0, 0x2)
+	/home/carli/go/pkg/mod/golang.org/toolchain@v0.0.1-go1.24.0.linux-amd64/src/bufio/bufio.go:152 +0xc5
+github.com/gorilla/websocket.(*Conn).read(0xc000340420, 0x2)
+	/home/carli/go/pkg/mod/github.com/gorilla/websocket@v1.5.3/conn.go:371 +0x53
+github.com/gorilla/websocket.(*Conn).advanceFrame(0xc000340420)
+	/home/carli/go/pkg/mod/github.com/gorilla/websocket@v1.5.3/conn.go:809 +0x11b
+github.com/gorilla/websocket.(*Conn).NextReader(0xc000340420)
+	/home/carli/go/pkg/mod/github.com/gorilla/websocket@v1.5.3/conn.go:1009 +0x134
+github.com/gorilla/websocket.(*Conn).ReadMessage(0xc000340420)
+	/home/carli/go/pkg/mod/github.com/gorilla/websocket@v1.5.3/conn.go:1093 +0x2f
+github.com/launix-de/stqr-storage/server.(*Server).serveWebSocket(0xc000720008, {0x13931b8, 0xc00042e0e0}, 0xc0001e4280, {0x0, {0x0, 0x0, 0x0, 0x0, 0x0, ...}, ...})
+	/home/carli/projekte/stqr/.worktrees/throughput-improvements/server/transport.go:150 +0x168e
+github.com/launix-de/stqr-storage/server.(*Server).Handler.func1({0x13931b8, 0xc00042e0e0}, 0xc0001e4280)
+	/home/carli/projekte/stqr/.worktrees/throughput-improvements/server/http.go:159 +0x4ad7
+net/http.HandlerFunc.ServeHTTP(0xc000252240, {0x13931b8, 0xc00042e0e0}, 0xc0001e4280)
+	/home/carli/go/pkg/mod/golang.org/toolchain@v0.0.1-go1.24.0.linux-amd64/src/net/http/server.go:2294 +0x48
+net/http.serverHandler.ServeHTTP({0xc0003bc030?}, {0x13931b8, 0xc00042e0e0}, 0xc0001e4280)
+	/home/carli/go/pkg/mod/golang.org/toolchain@v0.0.1-go1.24.0.linux-amd64/src/net/http/server.go:3301 +0x2a2
+net/http.(*conn).serve(0xc00021a090, {0x13940a0, 0xc000aa7bf0})
+	/home/carli/go/pkg/mod/golang.org/toolchain@v0.0.1-go1.24.0.linux-amd64/src/net/http/server.go:2102 +0x1305
+created by net/http.(*Server).Serve in goroutine 6821
+	/home/carli/go/pkg/mod/golang.org/toolchain@v0.0.1-go1.24.0.linux-amd64/src/net/http/server.go:3454 +0x8ca
+
+goroutine 6838 [select]:
+github.com/launix-de/stqr-storage/server.(*wsSession).controlRequestLoop(0xc0002132c0)
+	/home/carli/projekte/stqr/.worktrees/throughput-improvements/server/transport.go:363 +0x1a5
+github.com/launix-de/stqr-storage/server.(*Server).serveWebSocket.func5()
+	/home/carli/projekte/stqr/.worktrees/throughput-improvements/server/transport.go:147 +0x93
+created by github.com/launix-de/stqr-storage/server.(*Server).serveWebSocket in goroutine 6850
+	/home/carli/projekte/stqr/.worktrees/throughput-improvements/server/transport.go:147 +0x153d
+
+goroutine 6785 [select]:
+github.com/launix-de/stqr-storage/server.(*Server).startQuotaWorker.func1()
+	/home/carli/projekte/stqr/.worktrees/throughput-improvements/server/quota_peer.go:169 +0x28f
+created by github.com/launix-de/stqr-storage/server.(*Server).startQuotaWorker in goroutine 6769
+	/home/carli/projekte/stqr/.worktrees/throughput-improvements/server/quota_peer.go:164 +0x105
+
+goroutine 6820 [select]:
+github.com/launix-de/stqr-storage/server.(*rangeManager).start.func1()
+	/home/carli/projekte/stqr/.worktrees/throughput-improvements/server/range_planner.go:29 +0x245
+created by github.com/launix-de/stqr-storage/server.(*rangeManager).start in goroutine 6769
+	/home/carli/projekte/stqr/.worktrees/throughput-improvements/server/range_planner.go:24 +0x105
+
+goroutine 6818 [chan receive]:
+github.com/launix-de/stqr-storage/server.(*Server).runKnownPeer(0xc000720008, {{0xc0002807e0?, 0xc0002e0ea8?}, {0xc000224150?, 0xc0002e0fc0?}})
+	/home/carli/projekte/stqr/.worktrees/throughput-improvements/server/peer_manager.go:65 +0x379
+github.com/launix-de/stqr-storage/server.(*Server).startPeerContactsLocked.func1({{0xc0002807e0?, 0x18301a0?}, {0xc000224150?, 0xc0006a7aa0?}})
+	/home/carli/projekte/stqr/.worktrees/throughput-improvements/server/peer_manager.go:38 +0xd4
+created by github.com/launix-de/stqr-storage/server.(*Server).startPeerContactsLocked in goroutine 6769
+	/home/carli/projekte/stqr/.worktrees/throughput-improvements/server/peer_manager.go:38 +0x353
+FAIL	github.com/launix-de/stqr-storage/server	300.045s
+ok  	github.com/launix-de/stqr-storage/volume	30.718s
+FAIL

@@ -97,6 +97,9 @@ func (c *Client) CheckOverlayFilesystem(ctx context.Context, lower FilesystemSto
 }
 func checkOverlayFilesystem(ctx context.Context, o *OverlayFilesystem, store fsCheckStore) (FSCheckResult, error) {
 	s, info, blob, err := o.state(ctx)
+	if err == nil {
+		s = cloneOverlayState(s)
+	}
 	if err != nil {
 		return FSCheckResult{}, err
 	}

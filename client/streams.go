@@ -48,7 +48,7 @@ func (t *objectTransport) streamMessage(m Message) error {
 	if p.canceled {
 		return nil
 	}
-	if p.opcode != objectGet && p.opcode != objectGetRange {
+	if p.opcode != objectGet && p.opcode != objectGetRange && p.opcode != ObjectSubscribe {
 		return ErrProtocol
 	}
 	switch m.Opcode {

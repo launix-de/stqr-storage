@@ -27,6 +27,7 @@ type managedVolume struct {
 // Server currently owns one node. opMu serializes local administrative commits;
 // it is not a distributed lock or a substitute for placement authority.
 type Server struct {
+	objectSubscriptions    objectSubscriptionRegistry
 	recoveryVolumes        map[volume.ID]*stagedRecoveryVolume
 	authority              *volumeAuthorityState
 	mu                     sync.RWMutex

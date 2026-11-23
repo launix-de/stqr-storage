@@ -1,0 +1,24 @@
+{
+  "baseline_commit": "9eecb96",
+  "worktree_branch": "throughput-improvements",
+  "final_sources_sha256": {
+    "client/filesystem.go": "b963e79ed982583e7b80a19fccf30864c9bd093d0c18c379d5901ad4a246fa01",
+    "client/filesystem_directory_cache.go": "6787445aec67099ccc944c676c63bf661cfb2d14ca5079bfcb14f82a64b7338f",
+    "client/filesystem_fuse_linux.go": "dfa2f3a9171deb897048e20ffd9712c5f61f8c66113e85454b0b216e6d3a96ac",
+    "client/filesystem_overlay.go": "1f9b6aa254319eaf5736e86cc9125206100a070a98abf1b9b3d6eccac311138d",
+    "client/filesystem_subscription_cache.go": "3970420f0a3dbbb5e471eef5108efe52ce13116b646323969a001b3a4d8795a5",
+    "client/subscription.go": "d470ea07d88e225d05adbb028ac0f35ec0adb1216d6ba61d77b843867e3aa09d",
+    "client/subscription_protocol.go": "2fa03cb60473515a762bf941bd02a59e933a8a3cdd213b62306c4a16e47d4099",
+    "client/transport.go": "6e129ec515c13a43b775787e88053192c0c8771354a7a6ae2fce3d475f96e203",
+    "server/object_subscriptions.go": "6c6605d9d4d5ae3623e7a4fcc26b9707db8d3f26b76e45fc03499335edfe6efa",
+    "server/object_subscriptions_test.go": "898e0dedb3371ec8a74d3fcc6e834e7cf8a3b3c2b69cfcf0465f06427890e203"
+  },
+  "benchmark_note": "Same local new server for baseline and improved FUSE binaries. Three repetitions. Baseline 9eecb96, improved_v1 before decoded-directory and namespace-versioned negative-upper optimizations, final includes both. Kernel metadata timeouts remain zero.",
+  "benchmark_binary_sha256": {
+    "baseline-fuse": "c766954eb48c51a292741449bd5ca11b889926bf5aa248b7e00346c87888df79",
+    "stqr-fuse-v1": "0939fe9b4e410048430bca070e9f2f97e18ab353bad419a737a5dc75f9f0147c",
+    "stqr-fuse": "f81a99d743cac9014d0c55b69012577938b9548277f50109669dcdf874f90fc2",
+    "stqr": "eab8749bc21d05ace65468a50dbfe0cc981cb30526bf44045c6dc1d665d8ba1a"
+  },
+  "note": "Final source hashes describe the reviewed worktree; timed binaries were built before final cancellation/admission review. Functional final-tree tests are recorded separately."
+}

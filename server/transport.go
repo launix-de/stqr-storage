@@ -137,7 +137,7 @@ func (s *Server) serveWebSocket(w http.ResponseWriter, r *http.Request, p princi
 	s.mu.Unlock()
 	s.opMu.Unlock()
 	if !authorization.expires.IsZero() {
-		expiry := time.AfterFunc(time.Until(authorization.expires), func() { authorization.invalid.Store(true) })
+		expiry := time.AfterFunc(time.Until(authorization.expires), func() { authorization.invalid.Store(true); s.endRevokedSubscriptions(ws) })
 		defer expiry.Stop()
 	}
 	defer func() { ws.close(); s.wsMu.Lock(); delete(s.sockets, ws); s.wsMu.Unlock() }()
@@ -174,7 +174,7 @@ func (s *Server) serveWebSocket(w http.ResponseWriter, r *http.Request, p princi
 			}
 			continue
 		}
-		if m.Opcode >= 0x0100 && m.Opcode <= 0x0108 || m.Opcode == client.BucketMaintenance || m.Opcode == client.BucketScan {
+		if m.Opcode >= 0x0100 && m.Opcode <= 0x0108 || m.Opcode == client.ObjectSubscribe || m.Opcode == client.BucketMaintenance || m.Opcode == client.BucketScan {
 			if !ws.registerObjectContext(m.ID) {
 				return
 			}
@@ -234,6 +234,7 @@ func (ws *wsSession) writeLoop() {
 func (ws *wsSession) requestLoop() {
 	defer ws.close()
 	defer ws.releaseMaintenance()
+	defer ws.server.objectSubscriptions.closeSession(ws)
 	defer func() {
 		ws.objectMu.Lock()
 		for id, r := range ws.objectContexts {
@@ -266,7 +267,7 @@ func (ws *wsSession) requestLoop() {
 			if status == 0 {
 				continue
 			}
-			if m.Opcode >= 0x0100 && m.Opcode <= 0x0108 || m.Opcode == client.BucketMaintenance || m.Opcode == client.BucketScan {
+			if m.Opcode >= 0x0100 && m.Opcode <= 0x0108 || m.Opcode == client.ObjectSubscribe || m.Opcode == client.BucketMaintenance || m.Opcode == client.BucketScan {
 				ws.releaseObjectContext(m.ID)
 			}
 			if m.Kind == client.Request {
