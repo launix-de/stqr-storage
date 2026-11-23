@@ -1711,6 +1711,9 @@ ADMIN oder ausdrücklich ADMIN_READ für reine Leseoperationen. `C` bedeutet glo
 | 0x2021 | USER_LIST / Q | leer => `users:Vec(User)`; nach Benutzername sortiert, ausschließlich öffentliche Accountfelder, keine Passwortverifier |
 | 0x2022 | BUCKET_LIST / Q | `after_name:Text,limit:u32` (1..1000) => `page_json:Text` mit `{buckets:[BucketDescription...],next:Text}`; leeres after_name startet, leeres next beendet die Liste; nur Admin, User-Freigaben als Unterarray je Bucket, keine internen Retry-Belege; Listenansicht ergänzt bei endlicher logischer Quota `used_bytes:u64` als Live-Belegung (bei Lesefehlern stattdessen `usage_error:Text`, niemals eine vorgetäuschte Nullbelegung) |
 | 0x2023 | BUCKET_QUOTA_CAPACITY / Q | `bucket:ID,strategy:u8,object_size_profile:u8,previous_overhead_ppm:u32` => `used:u64,available_physical:u64,reserved_other_physical:u64,maximum:u64,nodes:u32,overhead_ppm:u32,profiles:Vec(key:u8,label:Text,typical_bytes:u64,overhead_ppm:u32)`; ID null = neuer Bucket; Profil 255 bewahrt eine bestehende Pauschale, sonst wird sie aus dem Format berechnet |
+| 0x2028 | BUCKET_CLEAR / Q, Admin | `bucket:ID` => `objects:u64`; offline, Single-Node-Maintenance; persistente Replay-Sperre |
+| 0x2029 | BUCKET_CLONE / Q, Admin | `source:ID,target:ID` => `objects:u64`; Ziel leer, beide offline; kopiert IDs/Payloads, keine Versionen/Grants |
+| 0x202a | BUCKET_MAINTENANCE_STATUS / Q, Admin | leer => leer bei verfügbarer Single-Node-Exklusion, sonst 501; rein lesender Preflight |
 | 0x201e | VOLUME_CAPACITY_GET / Q / L | leer => `filesystem_available:u64,ram_available:u64,ram_limit:u64`; Available-Wert für das aktive Volume-Verzeichnis, verfügbarer System-RAM und wirksame RAM-Grenze nach optionalem Budget |
 | 0x2024 | NODE_ADMIN_REQUEST / Q/F / L | `target:ID,opcode:u16,body:Blob` => Status/Folgeheader/result des inneren Befehls; Operations-ID bleibt die ID des äußeren Requests; kein beliebiges URL-Ziel |
 | 0x2025 | USER_S3_KEY_LIST / Q | `user_id:ID` => `access_key_ids:Vec(Text)`; nur IDs, keine Secrets |
@@ -2192,7 +2195,7 @@ Hier stehen nur noch nicht entschiedene Details. Bereits geklärt sind: Intranet
 ### 20.4 Frontends und spätere Features
 
 - Multi-Mount-FUSE: CAS-/Intent-Protokolle für Rename/Link/Unlink über mehrere Metadatenobjekte und Recovery. Alte Testcaches sind bis SUBSCRIBE erlaubt; bei dessen Einführung müssen Cache-/Kernel-Sichtbarkeit konsistent umgesetzt werden.
-- S3: binäre Objektformate mit Metadaten-/Payload-Envelope und native Inventur für LIST sowie Prefix/Pagination. LIST und Range-GET gehören zum ersten integrierten Umfang; Multipart einschließlich Recovery/Cleanup sowie Copy, Sammellöschen und Bucket-Discovery sind implementierter Umfang. Blockdevice: ABI, Flush-/Trim-/Resize-Vertrag und QEMU-Adapter.
+- S3: binäre Objektformate mit Metadaten-/Payload-Envelope und native Inventur für LIST sowie Prefix/Pagination. LIST und Range-GET gehören zum ersten integrierten Umfang; Multipart einschließlich Recovery/Cleanup sowie Copy, Sammellöschen und Bucket-Discovery sind implementierter Umfang. Blockdevice: NBD-Frontend mit Flush/FUA und Standard-QEMU-Anbindung ist implementiert; Trim/Resize und verteilte Exklusion bleiben Ausbau.
 - SUBSCRIBE/UNSUBSCRIBE: Journal-Retention, Resync für langsame Leser, Relay-/Reconnect-Handoff und Ende durch Rechteentzug. Snapshot-/Versionsbarriere und Übergabe bei Migration stehen bereits fest.
 - CACHE-Strategie: Verdrängungs-/Miss-Verhalten und Klassenwahl; bis dahin reserviert und Aktivierung mit 501 ablehnen. RAM-Replikation und Replica-Restore gehören zu v1.
 - ENet: Channel-Pool, optionale cgo-Builds, HTTP-Authentifizierung zur Sessionbindung, Transportversion und Ordered-Stream-Reconnect-Barrieren; RELIABLE_UNORDERED ist kein nativer ENet-Modus (§13.9). Keine TLS-/Zertifikatsabhängigkeit hinzufügen.
@@ -2286,7 +2289,7 @@ STQR reduziert einige spezifische Zielkonflikte anderer Systeme, **beseitigt abe
 | Platzierung nach echten Bytes | Geplant | Teilweise via externe/ergänzende Mechanismen | Vorhanden | Volumenbasierte Mechanismen |
 | Clientseitig direktes Routing | Geplant | Ja, native Ceph-Clients | Teils / abhängig vom Request-Pfad | Ja, je nach API-Pfad |
 | Kleine Objekte | Beispiel-Workload 2–250 KiB, kein Größenlimit | Allgemeiner Object Store | Datenbankorientiert | Blob-orientierte Engine |
-| Native VM-/Dateisystem-Integration | NBD/FUSE geplant | Reif: RBD/CephFS | Nicht primärer Zweck | Verschiedene Frontends |
+| Native VM-/Dateisystem-Integration | FUSE und NBD-Frontend; exklusive NBD-Exports derzeit Single-Node | Reif: RBD/CephFS | Nicht primärer Zweck | Verschiedene Frontends |
 | Produktionsreife | Erst zu entwickeln | Hoch | Hoch | Etabliert |
 
 Diese Tabelle bewertet **Ausrichtung und Architektur**, nicht aktuelle Benchmark-Sieger oder zugesicherte Eigenschaften einer noch nicht implementierten Version.
@@ -2388,3 +2391,7 @@ Die drei wichtigsten technischen Verträge sind:
 Diese Verträge haben Vorrang vor einer einzelnen Performanceoptimierung. Damit ist STQR als **Single-Node-First, Range-Partitioned Distributed Object Store** vollständig genug umrissen, um die Detailprotokolle und einen implementierbaren Go-Prototyp daraus abzuleiten.
 
 Die Bucket-Kontingentwahl verwendet dieselben dekadisch gestuften, bidirektionalen Größenregler wie Volumes und einen „Maximum“-Knopf. Grundlage ist freier nutzbarer Platz der passenden Datenvolumes über die verfügbaren Node-Kapazitätsbilder, abzüglich ungenutzter Garantien anderer Buckets; der Admin-Speicher bleibt ausgeschlossen. Beim absoluten Kontingent eines vorhandenen Buckets kommt seine bereits genutzte logische Größe hinzu. Die Umrechnung in planbare logische Bytes berücksichtigt das gewählte Profil „Typische Objektgröße“, darunter „1M (Blockdevices)“. Ein Prozentfeld wird nicht angezeigt. Der aktuelle Collector liefert die einzelne lokale Node; Peer-Aggregation verwendet später dieselben Kapazitätsbilder ohne erfundene Remote-Werte.
+
+### Networkboot- und QEMU-Frontend
+
+`networkboot/` enthält den separaten Boot-Gateway und NBD-Adapter. QEMU nutzt Standard-NBD ohne Neukompilierung; sparse Disks liegen als native Dateisystemdateien im Bucket. Exklusive NBD-Exports, Clear und Clone setzen bis zur Implementierung verteilter Maintenance eine Single-Node-Membership voraus. Der Bootpfad nutzt HTTP, NFSv3, SquashFS und ein privates temporäres ext4-Overlay auf einem NBD/STQR-Bucket (optional RAM); PAM aktiviert separat persönliche `username_home`-Buckets. Details, Metadatenvertrag und aktuelle Grenzen stehen in `networkboot/README.md`.

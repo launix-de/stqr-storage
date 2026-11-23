@@ -1,0 +1,17 @@
+# Example: adjust interface, addresses, loaders and bucket before enabling.
+[Unit]
+Description=STQR network boot gateway
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/sbin/stqr-networkboot --config /etc/stqr-networkboot.json --base-bucket ubuntu-desktop-v1 --server 192.168.1.10 --interface eno1 --clients 192.168.1.0/24
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+TimeoutStopSec=120
+KillMode=mixed
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

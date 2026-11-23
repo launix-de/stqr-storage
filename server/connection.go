@@ -15,6 +15,7 @@ import (
 // revoke the capability instead of making data requests reread account/ACL data.
 type connectionAuthorization struct {
 	admin, clusterPeer bool
+	offlineCopy        bool // private offline clear/clone owner; never accepted from wire
 	accountID          string
 	accountRevision    [32]byte
 	bucket             *Bucket

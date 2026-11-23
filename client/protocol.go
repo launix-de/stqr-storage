@@ -47,6 +47,9 @@ const (
 	BucketRevoke            uint16 = 0x200a
 	BucketList              uint16 = 0x2022
 	BucketQuotaCapacity     uint16 = 0x2023
+	BucketClear             uint16 = 0x2028
+	BucketClone             uint16 = 0x2029
+	BucketMaintenanceStatus uint16 = 0x202a
 	PlacementGroupList      uint16 = 0x2030
 	PlacementGroupSet       uint16 = 0x2031
 	PlacementGroupDelete    uint16 = 0x2032

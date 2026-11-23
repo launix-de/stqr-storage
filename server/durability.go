@@ -117,7 +117,16 @@ func (s *Server) executeSync(ctx context.Context, m client.Message, ws *wsSessio
 	if ws != nil && (ws.authorization == nil || ws.authorization.bucket != b) {
 		return nil, 0, ErrBucketForbidden
 	}
-	if _, err = b.authorize(p, BucketRead|BucketWrite|BucketAppend|BucketDelete); err != nil {
+	permission := BucketRead
+	if ws != nil && ws.authorization != nil {
+		for _, candidate := range []BucketPermissions{BucketRead, BucketWrite, BucketAppend, BucketDelete} {
+			if ws.authorization.permissions&candidate != 0 {
+				permission = candidate
+				break
+			}
+		}
+	}
+	if _, err = b.authorize(p, permission); err != nil {
 		return nil, 0, err
 	}
 	s.opMu.Lock()

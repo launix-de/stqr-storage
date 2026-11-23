@@ -1,0 +1,137 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-3.0-only
+"""Privileged helper called only by pam_stqr. Passwords arrive on stdin."""
+import argparse
+import fcntl
+import json
+import os
+from pathlib import Path
+import pwd
+import re
+import stat
+import subprocess
+import tempfile
+
+RUN = Path('/run/stqr-home')
+CONFIG = Path('/etc/security/stqr-home.json')
+
+def trusted(path):
+    st = path.lstat()
+    if not stat.S_ISREG(st.st_mode) or st.st_uid != 0 or st.st_mode & 0o077:
+        raise RuntimeError('configuration must be a root-owned regular 0600 file')
+    return json.loads(path.read_text())
+
+def mounted(path):
+    for line in Path('/proc/self/mountinfo').read_text().splitlines():
+        fields = line.split()
+        if fields[4] == str(path):
+            return True
+    return False
+
+def save_state(path, state):
+    fd, temporary = tempfile.mkstemp(prefix='.state-', dir=RUN)
+    try:
+        with os.fdopen(fd, 'w') as f:
+            json.dump(state, f)
+        os.replace(temporary, path)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+
+def main():
+    p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument('action', choices=['check', 'open', 'close'])
+    p.add_argument('username')
+    p.add_argument('session', nargs='?', default='')
+    args = p.parse_args()
+    if os.geteuid() != 0 or not re.fullmatch(r'[a-zA-Z_][a-zA-Z0-9_.-]{0,63}', args.username):
+        p.error('root and a simple local username required')
+    if args.action != 'check' and not re.fullmatch('[0-9a-f]{32}', args.session):
+        p.error('session identifier required')
+    account = pwd.getpwnam(args.username)
+    home = Path('/home') / args.username
+    parent = home.parent.lstat()
+    if not stat.S_ISDIR(parent.st_mode) or parent.st_uid != 0 or parent.st_mode & 0o022:
+        p.error('/home must be a root-owned directory, not writable by other users')
+    if account.pw_uid == 0 or account.pw_dir != str(home):
+        p.error('only non-root accounts with /home/username are supported')
+    config = trusted(CONFIG)
+    uri = config['uri']
+    ctl = Path(config.get('bootctl', '/usr/libexec/stqr-bootctl'))
+    mount = Path(config.get('mount_helper', '/sbin/mount.kstqr'))
+    if not ctl.is_absolute() or not mount.is_absolute():
+        p.error('helper paths must be absolute')
+    ctl=ctl.resolve(strict=True)
+    mount=mount.resolve(strict=True)
+    for executable in [ctl, mount]:
+        for parent in executable.parents:
+            entry=parent.stat()
+            if entry.st_uid!=0 or entry.st_mode & 0o022:
+                p.error('helper parent directories must be root-owned and not writable by other users')
+        st = executable.stat()
+        if not stat.S_ISREG(st.st_mode) or st.st_uid != 0 or st.st_mode & 0o022:
+            p.error('helpers must be root-owned absolute executables, not writable by other users')
+    RUN.mkdir(mode=0o700, exist_ok=True)
+    st = RUN.lstat()
+    if not stat.S_ISDIR(st.st_mode) or st.st_uid != 0 or st.st_mode & 0o077:
+        p.error('unsafe runtime directory')
+    lock = os.open(RUN / f'{account.pw_uid}.lock', os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(lock, 'w') as lockfile:
+        fcntl.flock(lockfile, fcntl.LOCK_EX)
+        statefile = RUN / f'{account.pw_uid}.json'
+        state = json.loads(statefile.read_text()) if statefile.exists() else {'sessions': [], 'mounted': False}
+        if args.action == 'close':
+            if args.session not in state['sessions']:
+                return
+            state['sessions'].remove(args.session)
+            if not state['sessions'] and state['mounted']:
+                # Never lazy/force unmount a home that still has live users.
+                result = subprocess.run(['/bin/umount', '--', str(home)])
+                if result.returncode == 0:
+                    state['mounted'] = False
+            save_state(statefile, state)
+            return
+        password = os.read(0, 4097).decode()
+        if not password or len(password) > 4096 or '\n' in password or '\x00' in password:
+            p.error('a password of at most 4096 bytes is required on stdin')
+        with tempfile.TemporaryDirectory(prefix='credentials-', dir=RUN) as temporary:
+            credentials = Path(temporary)
+            cfg = credentials / 'client.json'
+            fd = os.open(cfg, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            with os.fdopen(fd, 'w') as f:
+                json.dump({'uri': uri, 'username': args.username, 'password': password}, f)
+            result = subprocess.run([str(ctl), '--config', str(cfg), 'resolve', args.username + '_home'],
+                                    check=True, capture_output=True, text=True)
+            bucket = result.stdout.strip()
+            if not re.fullmatch('[0-9a-f]{32}', bucket):
+                raise RuntimeError('invalid home bucket identifier')
+            if args.action == 'check':
+                return
+            if args.session in state['sessions']:
+                return
+            if not state['mounted']:
+                if home.is_symlink() or mounted(home):
+                    raise RuntimeError('home is a symlink or mounted outside this helper')
+                if home.exists() and any(home.iterdir()):
+                    raise RuntimeError('refusing to hide a nonempty local home')
+                home.mkdir(mode=0o000, exist_ok=True)
+                mountcreds = credentials / 'mount'
+                fd = os.open(mountcreds, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                with os.fdopen(fd, 'w') as f:
+                    f.write(f'username={args.username}\npassword={password}\n')
+                subprocess.run([str(mount), '--uri', uri, '--bucket', bucket,
+                    '--credentials', str(mountcreds), '-o', 'nosuid,nodev', '--init', str(home)], check=True)
+                try:
+                    os.chown(home, account.pw_uid, account.pw_gid)
+                    os.chmod(home, 0o700)
+                except BaseException:
+                    subprocess.run(['/bin/umount', '--', str(home)])
+                    raise
+                state['mounted'] = True
+            elif not mounted(home):
+                raise RuntimeError('tracked home unexpectedly disappeared')
+            state['sessions'].append(args.session)
+            save_state(statefile, state)
+
+if __name__ == '__main__':
+    main()

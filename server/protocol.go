@@ -374,6 +374,26 @@ func (s *Server) dispatchAs(m client.Message, ws *wsSession, p principal) ([]byt
 		}
 		return client.ResponseBody(200, result, ""), 200
 	}
+	if m.Opcode == client.BucketMaintenanceStatus {
+		if err := s.requireAdmin(p); err != nil {
+			return client.ResponseBody(403, nil, err.Error()), 403
+		}
+		if len(m.Body) != 0 {
+			return client.ResponseBody(400, nil, "empty body required"), 400
+		}
+		if view := s.currentSystem.Load(); view != nil && len(view.manifest.Membership.Members) > 1 {
+			return client.ResponseBody(501, nil, "cluster-wide exclusive maintenance is unavailable"), 501
+		}
+		return client.ResponseBody(200, nil, ""), 200
+	}
+	if m.Opcode == client.BucketClear || m.Opcode == client.BucketClone {
+		result, err := s.executeBucketCopy(s.ctx, m, p)
+		if err != nil {
+			status := objectStatus(err)
+			return client.ResponseBody(status, nil, err.Error()), status
+		}
+		return client.ResponseBody(200, result, ""), 200
+	}
 	if bucketAdminOpcode(m.Opcode) {
 		result, status, err := s.executeBuckets(m, p)
 		if err != nil {

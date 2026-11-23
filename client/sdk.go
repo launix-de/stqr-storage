@@ -297,7 +297,20 @@ func (c *Client) do(ctx context.Context, opcode uint16, body []byte, id RequestI
 	if maintenance != nil {
 		// A reconnect loses exclusive ownership. Never resume a sweep against a
 		// potentially changed graph; the operator must start a fresh fsck.
-		return maintenance.roundTrip(ctx, m, mutation, upload)
+		outgoing := m
+		if mutation && upload == nil && ctx.Value(acceptedContextKey{}) == true && maintenance.capabilities&CapabilityDurability != 0 {
+			outgoing = acceptedMessage(m)
+		}
+		r, err := maintenance.roundTrip(ctx, outgoing, mutation, upload)
+		if err == nil {
+			if mark := r.headers[DurabilityHeader]; len(mark) > 0 {
+				if err = c.observeDurability(maintenance, mark); err != nil {
+					r.close()
+					return wireReply{}, err
+				}
+			}
+		}
+		return r, err
 	}
 	backoff := 100 * time.Millisecond
 	for {

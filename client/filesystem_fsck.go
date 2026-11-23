@@ -110,7 +110,7 @@ func (c *Client) scanObjectEntries(ctx context.Context, after *ObjectID, limit u
 	return objects, next, nil
 }
 
-func checkFilesystem(ctx context.Context, store fsCheckStore) (FSCheckResult, error) {
+func checkFilesystem(ctx context.Context, store fsCheckStore, opaqueRoots ...ObjectID) (FSCheckResult, error) {
 	var result FSCheckResult
 	if raw, _, err := store.Get(ctx, FilesystemRootID()); err == nil && len(raw) >= 4 && string(raw[:4]) == "STOR" {
 		return result, ErrOverlayNeedsLower
@@ -137,6 +137,15 @@ func checkFilesystem(ctx context.Context, store fsCheckStore) (FSCheckResult, er
 		} else if refs != uint64(record.count) {
 			return result, fmt.Errorf("inode %s link count does not match namespace; nothing deleted: %w", id, ErrFSFormat)
 		}
+	}
+	for _, id := range opaqueRoots {
+		if _, ok := inventory[id]; !ok {
+			return result, fmt.Errorf("missing opaque root %s; nothing deleted: %w", id, ErrNotFound)
+		}
+		if role := mark.roles[id]; role != 0 && role != 4 {
+			return result, ErrFSFormat
+		}
+		mark.roles[id] = 4
 	}
 	return filesystemSweep(ctx, store, inventory, mark.roles)
 }
@@ -333,4 +342,17 @@ func (m *fsCheckMarker) segment(ctx context.Context, segment fsSegment, depth ui
 		}
 	}
 	return nil
+}
+
+// BeginMaintenance excludes other bucket clients until Close. It is intended for
+// offline tools and exclusive block-device exports. It never reconnects after a
+// lost session, and fails if distributed exclusion is unavailable.
+func (c *Client) BeginMaintenance(ctx context.Context) error { return c.beginMaintenance(ctx) }
+
+// CheckFilesystemWithOpaqueRoots validates the filesystem graph while retaining
+// application-owned opaque objects. Call BeginMaintenance successfully first,
+// then read/validate the application's root manifest under that same exclusion.
+// A dedicated connection must be closed afterward. Missing roots abort the sweep.
+func (c *Client) CheckFilesystemWithOpaqueRoots(ctx context.Context, roots []ObjectID) (FSCheckResult, error) {
+	return checkFilesystem(ctx, c, roots...)
 }

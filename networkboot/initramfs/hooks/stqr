@@ -1,0 +1,16 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-3.0-only
+PREREQ=""
+prereqs() { echo "$PREREQ"; }
+case "$1" in prereqs) prereqs; exit 0;; esac
+. /usr/share/initramfs-tools/hook-functions
+manual_add_modules nfs
+manual_add_modules nfsv3
+manual_add_modules overlay
+manual_add_modules squashfs
+manual_add_modules loop
+manual_add_modules nbd
+manual_add_modules ext4
+copy_exec /usr/lib/stqr-networkboot/nbd-client /bin/stqr-nbd-client
+copy_exec /sbin/mkfs.ext4 /sbin/mkfs.ext4
+# MODULES=most should be used when the image is intended for physical clients.

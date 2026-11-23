@@ -1,0 +1,4 @@
+/bin/
+/stqr-bootctl
+__pycache__/
+*.pyc

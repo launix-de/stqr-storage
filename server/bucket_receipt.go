@@ -9,5 +9,6 @@ type BucketReceipt struct {
 	Digest  string `json:"digest"`
 	Opcode  uint16 `json:"opcode"`
 	Status  int    `json:"status"`
+	Objects uint64 `json:"objects,omitempty"`
 	Running bool   `json:"running,omitempty"`
 }
