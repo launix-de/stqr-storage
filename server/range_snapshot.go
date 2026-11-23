@@ -115,7 +115,7 @@ func (r *rangeManager) receiveSnapshot(m client.Message, actor client.ID, force 
 	schema := d.U16()
 	var id [32]byte
 	copy(id[:], d.Take(32))
-	if schema != 1 || d.Err != nil {
+	if (schema != 1 && !(schema == 2 && m.Opcode == peerRangeSnapshotEnd)) || d.Err != nil {
 		return nil, client.ErrProtocol
 	}
 	t, snapshot, err := r.snapshot(id)
@@ -308,7 +308,7 @@ func (r *rangeManager) receiveSnapshot(m client.Message, actor client.ID, force 
 			if err != nil && !errors.Is(err, volume.ErrNotFound) {
 				return err
 			}
-			return h.Restore(o.key, info, source, volume.Options{InFlightAllowance: allowance})
+			return h.Restore(o.key, info, source, volume.Options{InFlightAllowance: allowance, ImportShadow: true})
 		}()
 		r.consumed(t, store, reservedBefore)
 		r.server.opMu.Unlock()
@@ -372,7 +372,7 @@ func (r *rangeManager) receiveSnapshot(m client.Message, actor client.ID, force 
 				if err != nil {
 					return err
 				}
-				err = h.RestoreRequestWithOptions(record, volume.Options{InFlightAllowance: allowance})
+				err = h.RestoreRequestWithOptions(record, volume.Options{InFlightAllowance: allowance, ImportShadow: true})
 				h.Close()
 				r.consumed(t, store, before)
 				if err != nil {
@@ -392,15 +392,22 @@ func (r *rangeManager) receiveSnapshot(m client.Message, actor client.ID, force 
 		return nil, nil
 	case peerRangeSnapshotEnd:
 		digest := d.Take(32)
+		quotaUsed := uint64(0)
+		if schema == 2 {
+			quotaUsed = d.U64()
+		}
 		if d.Done() != nil || snapshot.object != nil || !bytes.Equal(digest, snapshot.digest.Sum(nil)) {
 			return nil, client.ErrProtocol
+		}
+		if err := r.checkPhysicalActivation(t, quotaUsed); err != nil {
+			return nil, err
 		}
 		if !snapshot.final {
 			return append([]byte{}, digest...), nil
 		}
 		var sum [32]byte
 		copy(sum[:], digest)
-		proof, err := r.readyWithForce(id, sum, false, force, snapshot.logicalUsed)
+		proof, err := r.readyWithForce(id, sum, false, force, snapshot.logicalUsed, quotaUsed)
 		if err != nil {
 			return nil, err
 		}
@@ -580,13 +587,44 @@ func (r *rangeManager) sendSnapshot(ctx context.Context, p rangePlan, final bool
 	}
 	var sum [32]byte
 	copy(sum[:], digest.Sum(nil))
+	quotaUsed := uint64(0)
+	if !final {
+		var err error
+		quotaUsed, err = r.physicalFootprint(p)
+		if err != nil {
+			return sum, client.Proof{}, err
+		}
+	}
 	if final {
+		var err error
 		r.mu.Lock()
+		ready := r.txns[id].sourceReady.RecordSequence != 0
+		priorQuota := r.txns[id].quotaUsed
+		r.mu.Unlock()
+		if ready {
+			quotaUsed = priorQuota
+		} else {
+			quotaUsed, err = r.physicalFootprint(p)
+		}
+		if err != nil {
+			return sum, client.Proof{}, err
+		}
+		r.mu.Lock()
+		r.txns[id].pendingQuota = quotaUsed
 		r.txns[id].pendingUsed = logicalUsed
 		r.mu.Unlock()
+		if quotaUsed != 0 {
+			if _, err := r.ready(id, sum, true, logicalUsed, quotaUsed); err != nil {
+				return sum, client.Proof{}, err
+			}
+		}
 	}
 	e = rangeMessage(peerRangeSnapshotEnd, id)
 	e.B = append(e.B, sum[:]...)
+	if quotaUsed != 0 {
+		e.B[0] = 2
+		e.U64(quotaUsed)
+	}
 	body, err := r.call(ctx, p.Target, peerRangeSnapshotEnd, e.B)
 	if err != nil {
 		return sum, client.Proof{}, err

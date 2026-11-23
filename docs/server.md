@@ -182,8 +182,8 @@ remain for later compaction/cleanup. A volume drain persists replacement bucket
 locations before detaching the source.
 
 Native GET/GET_RANGE/STAT, PUT/PUT_RANGE, APPEND, TRUNC, DELETE and CAS now dispatch
-to methods on `Bucket`. They enforce authorization, configured codec and logical
-absolute quota. HDD buckets may use SSD; SSD buckets never fall back to HDD, and
+to methods on `Bucket`. They enforce authorization, configured codec and logical/physical
+absolute quotas plus physically backed guarantees. HDD buckets may use SSD; SSD buckets never fall back to HDD, and
 user data never falls back to the admin volume. Atomicity, disk flushes and
 request-ID deduplication come from the volume engine. The client connection
 remains bound to URL, username, password and bucket ID. Streaming uploads are
@@ -192,8 +192,9 @@ downloads spool a consistent snapshot (at most 1 GiB per request) before streami
 outside volume locks. A learned single-node RAM runtime is retained across client
 reconnects; requests from a lost runtime return 410.
 
-Multinode replication, guaranteed-capacity reservations, finite physical bucket
-quotas and nonempty RAM/disk conversions remain unsupported and return 501.
+Multinode data replication and nonempty RAM/disk conversions remain unsupported
+and return 501. Logical/physical absolute quotas and guaranteed reservations are
+implemented for the current single-copy data path.
 There is no fabricated redundancy/quota success or implicit user bucket creation.
 
 The working tree remains uncommitted until the requested UI/volume-management review.
@@ -248,11 +249,11 @@ read throughput and write throughput. Capacity/used/free and throughput reuse
 exactly the same pushed node snapshot and time window as the Volumes view,
 including system-volume overhead; no additional polling or I/O scan is needed.
 Bucket count/state includes the complete list, unaffected by the search filter.
-Per-bucket quota bars remain separate logical-accounting values.
+Per-bucket quota bars use their configured logical or physical accounting.
 
-Finite logical quotas show a live used/limit bar in the bucket list, refreshed
+Finite quotas show a live used/limit bar in the bucket list, refreshed
 every three seconds while the view is open. BUCKET_LIST includes optional live
-`used_bytes` values from the same logical accounting as quota admission; these
+`used_bytes` values from the same accounting as quota admission; these
 are not persisted in bucket descriptions. Usage errors show an unavailable value
 rather than an empty bar.
 All actions use the existing queued binary messages. Quota-only edits use
@@ -269,17 +270,18 @@ creates a second bucket. Closing that form leaves the created bucket intact.
 
 Quota inputs use exact uint64 byte counts, including zero. Unsafe JSON integer
 tokens in bucket pages are preserved before parsing so policy versions and quotas
-are not rounded by JavaScript. More than one node replica, guaranteed reservations,
-and finite physical quotas remain unavailable in the form until server support.
+are not rounded by JavaScript. Guaranteed reservations and finite physical quotas
+are editable. Multiple data replicas remain unavailable until replication support.
 
 
 Bucket forms provide a discrete two-way quota slider and Maximum action.
 BUCKET_QUOTA_CAPACITY (0x2023) returns the current physical free/reserved capacity,
 the logical maximum and calculated typical-object-size profiles. There is no
 editable metadata percentage. The 1M (Blockdevices) profile is the default for
-new buckets. Capacity currently covers the single local node; peer aggregation
-is an explicit extension point. Existing usage is included in an edited bucket's
-absolute maximum. Exact logical values and slider endpoints stay BigInt values.
+new buckets. Capacity aggregates committed members and the selected PG mask.
+The edited bucket can reuse its own protected reserve; other buckets' reserves
+remain deducted. Physical accounting uses physical free bytes directly; logical
+accounting applies the selected profile. Values and slider endpoints stay BigInt.
 # Offline filesystem collection
 
 The bucket-bound WebSocket supports BUCKET_MAINTENANCE (0x0115) and BUCKET_SCAN
@@ -596,8 +598,8 @@ covers HDD and RAM, restart during transition, retirement of old storage, safe
 unassignment/deletion and create-request retries without resurrection. A PG
 editor in the dashboard has not been built yet.
 
-The complete cluster milestone is still pending. Guaranteed physical capacity,
-finite physical bucket quotas and recovery of a pending global control decision during forceful loss remain. The broader
+The complete cluster milestone is still pending. Data replication and some
+uncommitted global-control recovery cases during forceful loss remain. The broader
 acceptance gate is not closed by the focused two-host test alone.
 Data replication is optional for the requested milestone and is not advertised
 as implemented. A transport-only heartbeat or two dashboard rows is insufficient
@@ -855,7 +857,7 @@ volume and show **PG-Listen fortsetzen**; retries do not create another volume.
 These operations can also target another node through the existing node wrapper.
 
 Current implementation limits still apply: multiple synchronous data replicas,
-EC, active read caches, guaranteed reservations and nonempty disk/RAM conversion
+EC, active read caches and nonempty disk/RAM conversion
 are not implemented. Moving these settings into a PG does not enable them;
 unsupported replica/conversion requests fail explicitly.
 
@@ -892,3 +894,82 @@ The PG list supplies derived `bucket_count` and `pending_buckets`, avoiding a
 complete bucket download for its overview. User selectors search bounded API
 pages and resolve existing grants by explicit IDs. Periodic bucket usage refresh
 is restricted to visible rows instead of reloading every visited page.
+
+
+## Physically backed bucket quotas
+
+For the current one-copy data path, absolute quotas support logical or physical
+accounting and guarantees can be configured through the native API/dashboard.
+Physical accounting includes actual codec allocations, descriptors, checksums,
+append arenas, tombstones, retained retry records and deterministic shared metadata
+shares. Six initial volume metadata pages, WAL scratch and local recovery metadata
+are operational overhead. Shared metadata above that baseline is split by record
+count, with stable bucket-ID rounding. Index counters are reconstructed once on
+open and then updated by changed keys; they do not require a full scan per append.
+
+The volume admission hook runs after planning and before WAL publication. It checks
+all affected physical quota balances and the remaining guarantees, so a failed PUT,
+range write, APPEND, TRUNC, CAS or DELETE cannot publish partial bytes or a receipt.
+A logical sparse length consumes no unallocated physical payload. A repeated request
+uses its original receipt and is not charged twice. Reclaim reduces usage only after
+its committed physical release; changes in shared shares must also fit the affected
+bucket budgets. This can defer cleanup until that bucket obtains credits/headroom.
+
+The ALL system manifest persists per-bucket/node/volume `QuotaReserves` backing.
+A residual max-flow allocator respects PG masks, class eligibility and overlapping
+volume choices; HDD may use SSD, SSD cannot use HDD, RAM cannot use disk. PREPARE
+checks the actual local devices/free bytes before READY. Under Linux, file volumes
+that back guarantees are conservatively fully preallocated using fallocate with
+KEEP_SIZE: no payload or length change, no thin-file capacity claim. This can reject
+a small guarantee on a much larger sparse volume if the filesystem cannot back the
+whole volume. Raw-device provisioning and RAM/custom-backend pool contracts remain
+with their providers. Initial G or an increase that cannot be backed returns 507
+without publishing the policy. A prepared guarantee remains protected through
+reconnect/restart until the durable decision resolves it.
+
+Absolute credits use their configured accounting unit. Physical handoffs bind a
+`quota_used` debit/credit in both READY records and COMMIT, retain its value over
+retries/restarts and check the post-handoff source/destination budgets. Incoming
+fenced copies and obsolete source copies are temporary operating space rather
+than extra required replicas charged to the absolute quota. Codec/layout expansion
+requires existing free credits. There is no timeout refund or quota creation.
+
+Imports transfer only their own bucket's unused guarantee into a disjoint import
+reserve; other guarantees remain protected. The journal and canonical indexes
+reconstruct this overlap before requests are accepted after restart. DRAIN
+reassigns guarantees through ALL, and a volume cannot detach while it still backs
+a promise. The lowest-ID node's explicit DRAIN does not block another member from
+coordinating that administrative reallocation; SHORT/offline status alone never
+revokes ownership or promises. Draining/recovery administration can wait or return
+507 if the surviving generally placeable volumes cannot cover the guarantees.
+Recovery-only volumes are not a new general guarantee pool. Replica/failure-domain
+multipliers will extend this allocator when data replication is implemented.
+
+Existing BucketStats heartbeat fields now carry maintained logical/physical bytes,
+live object counts and remaining physical backing. These pushes perform no object
+index/payload scan. The bucket list uses matching-accounting bars and reports an
+underestimated logical guarantee when the typical-object profile no longer covers
+remaining physical needs. Missing/stale member images remain unknown, not zero.
+
+New peer requests are 0x1072 QUOTA_PHYSICAL (claim-bound JSON snapshot) and 0x1073
+QUOTA_PREVIEW (bucket ID -> per-volume remaining own physical reservation).
+QUOTA_CHECKPOINT schema 3 adds a planned-image digest (zero without recovery) and
+per-bucket physical-measure flags; its JSON response optionally contains Physical.
+RANGE_SNAPSHOT_END schema 2, RANGE_STATE schema 3 and RangeHandoffCommit schema 3
+carry quota_used. PHYSICAL_QUOTAS capability 2048 gates guarantees/physical quotas
+on all participants and prevents admitting older peers into such a cluster.
+BUCKET_GROUP_CAPACITY schema 2 adds the requested accounting byte; schema 1 remains
+logical and object-client Policy/Map encodings remain unchanged.
+
+
+Normal global quota changes prepare ALL local resource promises before the
+requester persists its irreversible result. A remote 507 aborts the entire
+unpublished proposal, including earlier local READY reservations. ABORT restores
+the old reservation counters immediately. QuotaProtocol=1 remains in subsequent
+manifests even after disabling/deleting the last physical/guaranteed bucket, so
+older nodes cannot be admitted into an undecodable physical-credit history.
+Local migration copies and their retry records have persistent import markers;
+unpinned local cohorts keep selecting the original writer until explicit target
+placement commits. Bulk snapshot completion preflights the physical budget before
+source fencing; an impossible 507 cancels the unfenced handoff. The final READY
+and COMMIT checks still enforce the exact resulting quota after codec/layout changes.

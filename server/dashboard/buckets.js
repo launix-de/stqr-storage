@@ -6,13 +6,19 @@ import {formatSize,sizeLabel,sizeSteps} from './size.js';
 const $=id=>document.getElementById(id),SYSTEM='53545152535953010000000000000000';
 const quotaText=n=>BigInt(n)<1024n?`${n}B`:formatSize(BigInt(n));
 const policyBytes=b=>String(writeBucketPolicy(new Writer(),b).bytes());
-function bucketUsage(b,escape){
+function quotaUsageBase(b,escape){
  const l=b.policy.limits,accounting=l.quota_accounting==='logical'?'Logisch':'Physisch';
  if(l.absolute_unlimited)return `<span class="bucket-quota">Unbegrenzt</span><div class="bucket-sub">${accounting}</div>`;
  const quota=BigInt(l.absolute_quota_bytes);
  if(b.used_bytes==null)return `<span class="bucket-quota">${escape(quotaText(quota))}</span><div class="bucket-sub" title="${escape(b.usage_error??'')}">Belegung nicht verfügbar · ${accounting}</div>`;
  const used=BigInt(b.used_bytes),percent=quota>0n?Number((used*10000n/quota)>10000n?10000n:used*10000n/quota)/100:used>0n?100:0;
  return `<div class="bucket-usage"><div class="usage-label"><strong title="${used} Bytes belegt">${escape(used<1024n?quotaText(used):sizeLabel(used))}</strong><span title="${quota} Bytes Kontingent">von ${escape(quotaText(quota))}</span></div><div class="usage-track" role="progressbar" aria-label="${escape('Kontingent für '+b.name)}" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${percent}" aria-valuetext="${escape(quotaText(used)+' von '+quotaText(quota))}"><i class="usage-used" data-percent="${percent}"></i></div><div class="bucket-sub">${accounting}</div></div>`;
+}
+function bucketUsage(b,escape){
+ let html=quotaUsageBase(b,escape),g=BigInt(b.policy.limits.guaranteed_quota_bytes);if(g===0n)return html;
+ html+=`<div class="bucket-sub">${escape(quotaText(g))} garantiert${b.guaranteed_remaining_physical!=null?' · '+escape(quotaText(b.guaranteed_remaining_physical))+' physisch geschützt':''}</div>`;
+ if(BigInt(b.guarantee_estimate_shortfall??0)>0n)html+=`<div class="error">Zusicherung unterdeckt · ${escape(quotaText(b.guarantee_estimate_shortfall))} Reserve fehlt</div>`;
+ return html;
 }
 const permissions=[[1,'Lesen'],[2,'Schreiben'],[4,'Anhängen'],[8,'Löschen']];
 export function setupBucketViews({connection,escape,toast,showView}){
@@ -24,22 +30,27 @@ export function setupBucketViews({connection,escape,toast,showView}){
  $('bucket-pg').onchange=()=>{applyGroup();refreshQuota()};
  const pager=new EndlessList({container:$('bucket-rows').closest('.storage-panel'),visible:()=>!$('buckets-view').hidden,fetchPage:(after,limit,query)=>connection().listBucketsPage(after,limit,query),entries:page=>page.buckets,onUpdate:(items,state)=>{buckets=items;pageMeta=state.meta;render(state);schedulePoll()},onError:e=>{$('buckets-error').textContent=e.message},onLoading:busy=>{$('refresh-buckets').disabled=busy}});
  async function load(){const seq=++epoch;clearTimeout(poll);$('buckets-error').textContent='';try{groups=await fetchGroups();if(seq!==epoch)return;await pager.reset($('bucket-search').value.trim())}catch(e){if(seq===epoch)$('buckets-error').textContent=e.message}}
- function schedulePoll(){clearTimeout(poll);if(!$('buckets-view').hidden&&buckets.some(b=>!b.policy.limits.absolute_unlimited||b.desired_policy||b.state==='deleting'))poll=setTimeout(refreshVisible,3000)}
+ function schedulePoll(){clearTimeout(poll);if(!$('buckets-view').hidden&&buckets.some(b=>!b.policy.limits.absolute_unlimited||BigInt(b.policy.limits.guaranteed_quota_bytes)>0n||b.desired_policy||b.state==='deleting'))poll=setTimeout(refreshVisible,3000)}
  async function refreshVisible(){
   if($('buckets-view').hidden)return;const seq=epoch;
   const ids=[...$('bucket-rows').querySelectorAll('[data-bucket]')].filter(row=>{const r=row.getBoundingClientRect();return r.bottom>=0&&r.top<=innerHeight}).map(row=>row.dataset.bucket);
   if(!ids.length){schedulePoll();return}
   try{const page=await connection().listBucketsPage('',Math.max(1,Math.min(1000,ids.length)),$('bucket-search').value.trim(),ids);if(seq!==epoch)return;
    const updates=new Map(page.buckets.map(b=>[b.id,b])),removed=new Set(ids.filter(id=>!updates.has(id)));pager.items=pager.items.filter(b=>!removed.has(b.id)).map(b=>updates.get(b.id)??b);buckets=pager.items;pageMeta.all_total=page.all_total;if(removed.size)pageMeta.total=Math.max(0,(pageMeta.total??buckets.length)-removed.size);
-   for(const row of $('bucket-rows').querySelectorAll('[data-bucket]')){const b=updates.get(row.dataset.bucket);if(removed.has(row.dataset.bucket)){row.remove();continue}if(b){const wrapper=document.createElement('tbody');wrapper.innerHTML=rowHTML(b);row.replaceWith(wrapper.firstElementChild)}}if(!buckets.length)$('bucket-rows').innerHTML='<tr><td colspan="7" class="empty">Keine passenden Buckets.</td></tr>';bindRows();pager.status();$('bucket-count').textContent=String(pageMeta.total??buckets.length);$('nav-buckets-count').textContent=String(page.all_total);$('bucket-metric-count').textContent=String(page.all_total);
+   for(const row of $('bucket-rows').querySelectorAll('[data-bucket]')){const b=updates.get(row.dataset.bucket);if(removed.has(row.dataset.bucket)){row.remove();continue}if(b){const wrapper=document.createElement('tbody');wrapper.innerHTML=rowHTML(b);row.replaceChildren(...wrapper.firstElementChild.childNodes)}}if(!buckets.length)$('bucket-rows').innerHTML='<tr><td colspan="7" class="empty">Keine passenden Buckets.</td></tr>';bindRows();pager.status();$('bucket-count').textContent=String(pageMeta.total??buckets.length);$('nav-buckets-count').textContent=String(page.all_total);$('bucket-metric-count').textContent=String(page.all_total);
   }catch(e){if(seq===epoch)$('buckets-error').textContent=e.message}finally{if(seq===epoch)schedulePoll()}
  }
- function render({append=false,added=buckets}={}){
+ function render({append=false,added=buckets,loading=false}={}){
   $('bucket-count').textContent=String(pageMeta.total??buckets.length);$('nav-buckets-count').textContent=String(pageMeta.all_total??buckets.length);
   const active=pageMeta.active??0,locked=pageMeta.locked??0;
   $('bucket-summary').textContent=`${active} aktiv${locked?' · '+locked+' gesperrt':''}`;
   $('bucket-metric-count').textContent=String(pageMeta.all_total??buckets.length);$('bucket-metric-state').textContent=$('bucket-summary').textContent;
-  const html=(append?added:buckets).map(rowHTML).join('');if(append)$('bucket-rows').insertAdjacentHTML('beforeend',html);else $('bucket-rows').innerHTML=html||'<tr><td colspan="7" class="empty">Keine passenden Buckets.</td></tr>';bindRows();
+  if(loading&&!append)return;
+  const table=$('bucket-rows');if(append)table.insertAdjacentHTML('beforeend',added.map(rowHTML).join(''));else{
+   const previous=new Map([...table.querySelectorAll('[data-bucket]')].map(row=>[row.dataset.bucket,row]));
+   const rows=buckets.map(b=>{const wrapper=document.createElement('tbody');wrapper.innerHTML=rowHTML(b);const next=wrapper.firstElementChild,row=previous.get(b.id);if(!row)return next;row.replaceChildren(...next.childNodes);return row});
+   if(rows.length)table.replaceChildren(...rows);else table.innerHTML='<tr><td colspan="7" class="empty">Keine passenden Buckets.</td></tr>';
+  }bindRows();
  }
  function rowHTML(b){
    const p=b.policy,system=b.id===SYSTEM,busy=b.state==='deleting',locked=b.state==='locked';
@@ -96,14 +107,14 @@ export function setupBucketViews({connection,escape,toast,showView}){
  function updateFields(){
   const ram=$('bucket-storage').value==='ram';$('bucket-storage-note').textContent=ram?'RAM-Inhalte bleiben nur erhalten, solange eine Replik lebt.':'HDD darf bei Bedarf auf SSD liegen. SSD bleibt auf SSD.';
   const unlimited=$('bucket-unlimited').checked;$('bucket-quota').disabled=unlimited;$('bucket-quota').required=!unlimited;if(unlimited)$('bucket-quota').setCustomValidity('');
-  for(const o of $('bucket-accounting').options)o.disabled=!unlimited&&o.value==='physical';if(!unlimited)$('bucket-accounting').value='logical';
+  $('bucket-object-size').disabled=$('bucket-accounting').value==='physical';
   $('bucket-replicas-field').hidden=$('bucket-placement').value==='everywhere';syncQuota();
  }
- $('bucket-storage').onchange=()=>{updateFields();refreshQuota()};$('bucket-object-size').onchange=()=>refreshQuota();for(const id of ['bucket-unlimited','bucket-placement'])$(id).onchange=updateFields;
+ $('bucket-storage').onchange=()=>{updateFields();refreshQuota()};$('bucket-object-size').onchange=()=>refreshQuota();$('bucket-accounting').onchange=()=>{updateFields();refreshQuota()};for(const id of ['bucket-unlimited','bucket-placement'])$(id).onchange=updateFields;
  async function refreshQuota(){
   clearTimeout(quotaPoll);const seq=++quotaEpoch,owner=editor,strategy=$('bucket-storage').value,profile=Number($('bucket-object-size').value);
   quotaInfo=null;syncQuota();$('bucket-create-submit').disabled=true;
-  try{const info=await connection().bucketQuotaCapacity(owner.create?'0'.repeat(32):owner.bucket.id,strategy,profile,owner.bucket.policy.limits.metadata_reserve_ppm,$('bucket-pg').value);
+  try{const info=await connection().bucketQuotaCapacity(owner.create?'0'.repeat(32):owner.bucket.id,strategy,profile,owner.bucket.policy.limits.metadata_reserve_ppm,$('bucket-pg').value,$('bucket-accounting').value);
    if(seq!==quotaEpoch||editor!==owner||!$('bucket-create-dialog').open)return;
    quotaInfo=info;const match=info.profiles.find(p=>p.overhead===info.overhead),selected=profile===255&&match?match.key:profile;
    $('bucket-object-size').innerHTML=(selected===255?'<option value="255">Bestehende Einstellung</option>':'')+info.profiles.map(p=>`<option value="${p.key}">${escape(p.label)}</option>`).join('');$('bucket-object-size').value=String(selected);
@@ -131,7 +142,8 @@ export function setupBucketViews({connection,escape,toast,showView}){
  function readEditor(){
   if(!quotaInfo)throw Error('Kapazität wird noch ermittelt.');const base=editor.bucket,p=structuredClone(base.policy),unlimited=$('bucket-unlimited').checked;
   const group=groups.find(g=>g.id===$('bucket-pg').value);if(!group)throw Error('Bitte eine Placement Group auswählen.');Object.assign(p,structuredClone((group.desired??group.effective).storage));p.placement_group=group.id;
-  p.limits={...p.limits,quota_accounting:$('bucket-accounting').value,absolute_unlimited:unlimited,absolute_quota_bytes:unlimited?base.policy.limits.absolute_quota_bytes:parseQuota($('bucket-quota').value).toString(),metadata_reserve_ppm:quotaInfo.overhead};
+  p.limits={...p.limits,quota_accounting:$('bucket-accounting').value,absolute_unlimited:unlimited,absolute_quota_bytes:unlimited?base.policy.limits.absolute_quota_bytes:parseQuota($('bucket-quota').value).toString(),metadata_reserve_ppm:quotaInfo.overhead,guaranteed_quota_bytes:parseQuota($('bucket-guaranteed').value).toString()};
+  if(!unlimited&&BigInt(p.limits.guaranteed_quota_bytes)>BigInt(p.limits.absolute_quota_bytes))throw Error('Garantierter Platz darf die maximale Größe nicht überschreiten.');
   const name=$('bucket-name').value;if(!name||new TextEncoder().encode(name).length>255||name.includes('\0'))throw Error('Der Name muss 1 bis 255 UTF-8-Bytes lang sein.');
   return {...base,name,policy:p};
  }

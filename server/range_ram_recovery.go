@@ -7,11 +7,11 @@ import (
 )
 
 type ramTargetState struct {
-	boot, sourceBoot client.ID
-	ready, committed bool
-	digest           [32]byte
-	logicalUsed      uint64
-	proof            client.Proof
+	boot, sourceBoot       client.ID
+	ready, committed       bool
+	digest                 [32]byte
+	logicalUsed, quotaUsed uint64
+	proof                  client.Proof
 }
 
 func (r *rangeManager) targetRAMState(ctx context.Context, p rangePlan) (ramTargetState, error) {
@@ -27,10 +27,13 @@ func (r *rangeManager) targetRAMState(ctx context.Context, p rangePlan) (ramTarg
 	if d.Bool() {
 		state.proof, err = client.DecodeProof(d.Take(56))
 	}
-	if schema == 2 {
+	if schema >= 2 {
 		state.logicalUsed = d.U64()
 	}
-	if (schema != 1 && schema != 2) || err != nil || d.Done() != nil || state.boot == (client.ID{}) || state.ready && state.proof.Node != p.Target {
+	if schema == 3 {
+		state.quotaUsed = d.U64()
+	}
+	if (schema != 1 && schema != 2 && schema != 3) || err != nil || d.Done() != nil || state.boot == (client.ID{}) || state.ready && state.proof.Node != p.Target {
 		return ramTargetState{}, client.ErrProtocol
 	}
 	return state, nil
@@ -65,11 +68,11 @@ func (r *rangeManager) prepareRAMRecovery(ctx context.Context, p rangePlan, t *r
 			if !fenced {
 				return true, errControlConflict
 			}
-			source, err := r.readyWithForce(p.id(), state.digest, true, forceScopeContext(ctx), state.logicalUsed)
+			source, err := r.readyWithForce(p.id(), state.digest, true, forceScopeContext(ctx), state.logicalUsed, state.quotaUsed)
 			if err != nil {
 				return true, err
 			}
-			_, err = r.commitWithForce(rangeCommit{ID: p.id(), Digest: state.digest, LogicalUsed: state.logicalUsed, Source: source, Target: state.proof}, forceScopeContext(ctx))
+			_, err = r.commitWithForce(rangeCommit{ID: p.id(), Digest: state.digest, LogicalUsed: state.logicalUsed, QuotaUsed: state.quotaUsed, Source: source, Target: state.proof}, forceScopeContext(ctx))
 			return true, err
 		}
 		if !sourceLive {
@@ -125,7 +128,11 @@ func (r *rangeManager) ramStateReply(id [32]byte, actor client.ID) ([]byte, erro
 		return nil, errControlConflict
 	}
 	e := client.Encoder{}
-	e.U16(2)
+	schema := uint16(2)
+	if t.quotaUsed != 0 {
+		schema = 3
+	}
+	e.U16(schema)
 	e.ID(r.server.boot)
 	e.ID(t.sourceBoot)
 	live := t.targetReady.RecordSequence != 0 && (!t.plan.ram() || t.targetBoot == r.server.boot)
@@ -141,6 +148,9 @@ func (r *rangeManager) ramStateReply(id [32]byte, actor client.ID) ([]byte, erro
 		e.B = append(e.B, proof...)
 	}
 	e.U64(t.logicalUsed)
+	if schema == 3 {
+		e.U64(t.quotaUsed)
+	}
 	return e.B, nil
 }
 

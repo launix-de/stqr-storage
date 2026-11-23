@@ -272,3 +272,35 @@ before admitting further writes. It invalidates source claims before a migration
 FENCE. A disk without this provenance, an incomplete cohort or an unresolved
 source fence cannot be adopted merely because it contains an object index.
 See specification §8.2.3 for the administrative recovery protocol.
+
+
+## Bucket accounting and trusted admission
+
+`SetAdmission` reconstructs five counters per bucket from the canonical index;
+transactions subsequently update changed object/request keys, not a complete RAM
+directory or a full scan per write. `Handle.StorageUsage` reports actual private
+allocations and deterministic shared metadata shares. `SetOwnershipFilter` and
+`OwnedStorageUsage` distinguish authoritative copies from migration operating
+space; the server supplies a comparable placement stamp and a pure predicate.
+Callbacks must not acquire node/config/range locks or reenter volumes. The server
+uses immutable accounting/range images to preserve the statistics lock order.
+The optional post-commit observer receives immutable All/Owned snapshots.
+
+Admission inspects the completed allocation plan before WAL publication and can
+reject it without publishing bytes, index entries, a request receipt or counters.
+It returns the required physical guarantee remainder; import allowances remain
+separate. Extra redo pages beyond fixed scratch must also fit unprotected space.
+`EnsurePhysicalBacking` conservatively preallocates Linux file volumes using
+KEEP_SIZE before persistent guarantee READY; size and payload stay unchanged.
+
+The OBJ2 flag byte at offset 25 uses bit 0 for tombstones, bit 1 for segmented
+layout and now bit 2 for a trusted imported copy. REQ2 byte 102 bit 0 marks an
+imported retry record; it participates in the existing CRC. `Restore` and
+`RestoreRequestWithOptions` set these markers via `Options.ImportShadow`.
+An unpinned local cohort must not select these copies as writers/snapshot sources
+or count them as additional required copies. Committed explicit placement at that
+volume makes them canonical. This is important for local volume migrations near
+an absolute quota, including restart before COMMIT. Public object Info and the
+native object wire format stay unchanged. Whole-volume Export/Import preserves
+both marker types and replaces initialized accounting counters atomically with
+the imported root; omitted frame fields are reset before decoding the next frame.

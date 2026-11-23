@@ -156,7 +156,7 @@ those owners and migrates ranges as capacity and placement requirements change.
 | Object API | `Get`, `Put`, ranged access, atomic `Append`, `Trunc`, `Delete`, `Stat`, whole-object and ranged CAS, streaming transfers and retry deduplication |
 | Storage | File and Linux raw-device volumes, volatile RAM volumes, checksums, crash recovery and raw/gzip/LZ4/xz storage |
 | Placement | Bucket storage classes and placement groups, automatic capacity distribution and migration for policy changes |
-| Dashboard | Users, bucket grants, S3 access keys, quota configuration, node and volume management, live statistics and maintenance operations |
+| Dashboard | Users, bucket grants, S3 access keys, logical/physical quotas and protected guarantees, node and volume management, live statistics and maintenance operations |
 | Go client | Authenticated, bucket-bound connections, direct routing to range owners, reconnects and request IDs for retry deduplication |
 | S3 | GET/HEAD/PUT/DELETE, range and conditional requests, listing, multipart uploads, server-side copy, bulk delete, checksums, SigV4 and presigned URLs |
 | Linux FUSE | Read/write and readonly mounts, permissions, sparse files, rename, directory removal and offline `--fsck` |
@@ -167,8 +167,8 @@ capacity; it does not yet create redundant copies or provide failover for that
 owner's data. Replication, read-cache tiers and erasure coding remain part of the
 vision below. Integration tests exercise multiple daemon processes on one host;
 large multi-host deployments and petabyte-scale operation still need field
-validation and reproducible benchmarks. Distributed quota enforcement also
-remains under development.
+validation and reproducible benchmarks. Distributed logical/physical quota credits
+and volume-backed guarantees are implemented for the current single-copy path.
 
 The native store offers atomic operations per object. Applications and frontends
 build their own coordination above that interface; STQR does not provide a

@@ -90,6 +90,7 @@ func (s *Server) installSystemView(view *systemView) error {
 		}
 	}
 	s.currentSystem.Store(view)
+	s.pendingQuotas.Store(nil)
 	s.dirtyVolumeAuthority()
 	if q := s.quotas; q != nil {
 		q.mu.Lock()
@@ -108,6 +109,9 @@ func (s *Server) installSystemView(view *systemView) error {
 	} else {
 		s.resyncMovedSubscriptions(view.placement)
 		s.placement.Store(view.placement)
+	}
+	if err := s.applyQuotaProtectionLocked(); err != nil {
+		return err
 	}
 	if s.scopes != nil {
 		if err := s.ensureVolumeAuthorityLocked(); err != nil {

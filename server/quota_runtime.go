@@ -22,15 +22,17 @@ type quotaNodeAllocation struct {
 type quotaAllocation struct {
 	Bucket, Epoch client.ID
 	Limit         uint64
+	Accounting    string `json:",omitempty"`
 	Nodes         []quotaNodeAllocation
 }
 
 type quotaDemand struct {
-	bucket    volume.ID
-	object    volume.ObjectID
-	growth    uint64
-	until     time.Time
-	exhausted bool
+	bucket     volume.ID
+	object     volume.ObjectID
+	growth     uint64
+	until      time.Time
+	activation bool
+	exhausted  bool
 }
 type quotaManager struct {
 	ledger   *quotaLedger
@@ -89,11 +91,10 @@ func (s *Server) quotaAllowance(bucket client.ID) (uint64, error) {
 	l.mu.Lock()
 	grantSequence := l.sequence
 	l.mu.Unlock()
+	rangeImage := s.quotaRanges.Load()
 	var rangeSequence uint64
-	if r := s.scopes; r != nil {
-		r.mu.Lock()
-		rangeSequence = r.journal.sequence
-		r.mu.Unlock()
+	if rangeImage != nil {
+		rangeSequence = rangeImage.sequence
 	}
 	q := s.quotas
 	q.mu.Lock()
@@ -119,26 +120,25 @@ func (s *Server) quotaAllowance(bucket client.ID) (uint64, error) {
 		return 0, err
 	}
 	value.Add(value, delta)
-	if r := s.scopes; r != nil {
-		r.mu.Lock()
-		for _, t := range r.txns {
-			if t.plan.Before.Bucket == bucket && r.active(t) && t.plan.Source == node && t.plan.ram() && t.sourceBoot != s.boot && t.decision == nil {
-				r.mu.Unlock()
-				return 0, fail(503, "RAM handoff must recover before quota admission")
-			}
-			if t.decision == nil || t.plan.Before.Bucket != bucket || t.commitProof.RecordSequence <= base.Ranges || t.plan.Source == t.plan.Target {
+	if rangeImage != nil {
+		if rangeImage.blocked[bucket] {
+			return 0, fail(503, "RAM handoff must recover before quota admission")
+		}
+		for _, d := range rangeImage.deltas {
+			if d.bucket != bucket || d.sequence <= base.Ranges {
 				continue
 			}
-			// Only participant commits change this node's allowance. Observing
-			// another pair's historical decision grants no local capacity.
-			n := new(big.Int).SetUint64(t.decision.LogicalUsed)
-			if t.plan.Source == node {
+			used := d.logical
+			if a.Accounting == "physical" {
+				used = d.physical
+			}
+			n := new(big.Int).SetUint64(used)
+			if d.source {
 				value.Sub(value, n)
-			} else if t.plan.Target == node {
+			} else {
 				value.Add(value, n)
 			}
 		}
-		r.mu.Unlock()
 	}
 	if value.Sign() < 0 || !value.IsUint64() || value.Uint64() > a.Limit {
 		return 0, volume.ErrCorrupt
@@ -155,13 +155,17 @@ func (s *Server) quotaAllowance(bucket client.ID) (uint64, error) {
 // Demand hints reserve no durable authority. Their short lifetime only avoids
 // lending freshly obtained credits away before the original client retries;
 // it never expires a grant, a peer, or an ownership promise.
-func (q *quotaManager) reserveHints(bucket volume.ID, except *volume.ObjectID) uint64 {
+func (q *quotaManager) reserveHints(bucket volume.ID, except *volume.ObjectID, used ...uint64) uint64 {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	var total uint64
 	for _, h := range q.demands {
 		if h.bucket == bucket && (except == nil || h.object != *except) && time.Now().Before(h.until) {
-			total = addCapacity(total, h.growth)
+			growth := h.growth
+			if h.activation && len(used) > 0 {
+				growth = subtractCapacity(growth, used[0])
+			}
+			total = addCapacity(total, growth)
 		}
 	}
 	return total
@@ -205,4 +209,18 @@ func (q *quotaManager) fulfilled(bucket volume.ID, object volume.ObjectID) {
 
 func sortQuotaNodes(nodes []quotaNodeAllocation) {
 	sort.Slice(nodes, func(i, j int) bool { return nodes[i].Node.String() < nodes[j].Node.String() })
+}
+
+func (q *quotaManager) requestActivation(bucket volume.ID, object volume.ObjectID, allowance uint64) bool {
+	if !q.request(bucket, object, allowance) {
+		return false
+	}
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	for i, h := range q.demands {
+		if h.bucket == bucket && h.object == object {
+			q.demands[i].activation = true
+		}
+	}
+	return true
 }

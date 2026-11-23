@@ -213,3 +213,6 @@ func (m NodeHelloAck) validMembership() bool {
 	}
 	return len(m.Membership.Members) > 0 && m.Generation > 0
 }
+
+// CapabilityPhysicalQuotas gates volume-backed guarantees and physical credit handoffs.
+const CapabilityPhysicalQuotas uint64 = 2048

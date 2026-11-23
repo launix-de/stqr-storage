@@ -19,12 +19,15 @@ func (b *Bucket) administrativeUsage(ctx context.Context, p principal) (uint64, 
 		return 0, fail(503, "bucket has unavailable recovery ranges")
 	}
 	if b.server.controller == nil {
-		return b.logicalUsage()
+		return b.accountedUsage()
 	}
 	return b.clusterLogicalUsage(ctx, p)
 }
 
 func (b *Bucket) clusterLogicalUsage(ctx context.Context, p principal) (uint64, error) {
+	return b.clusterUsageAs(ctx, p, b.storageDescription().Policy.Limits.Accounting)
+}
+func (b *Bucket) clusterUsageAs(ctx context.Context, p principal, accounting string) (uint64, error) {
 	s := b.server
 	entries := s.placement.Load().bucketEntries(client.ID(b.ID()))
 	stamp := inventoryStamp(entries, client.ID{})
@@ -35,12 +38,19 @@ func (b *Bucket) clusterLogicalUsage(ctx context.Context, p principal) (uint64, 
 	var total uint64
 	for _, node := range s.inventoryOwners(b.ID()) {
 		e := client.Encoder{}
-		e.U16(1)
+		schema := uint16(1)
+		if accounting == "physical" {
+			schema = 2
+		}
+		e.U16(schema)
 		e.ID(client.ID(b.ID()))
 		e.ID(client.ID(actor))
 		e.Text(p.User.Name)
 		ownerStamp := inventoryStamp(entries, node)
 		e.B = append(e.B, ownerStamp[:]...)
+		if schema == 2 {
+			e.U8(1)
+		}
 		body, err := (peerControlParticipants{runtime: s.control}).call(ctx, node, peerBucketUsage, e.B)
 		if err != nil {
 			if errors.Is(err, context.DeadlineExceeded) {
@@ -88,13 +98,21 @@ func (s *Server) administrativeQuotaCapacity(id volume.ID, strategy uint8, p pri
 		}
 		description := b.Describe()
 		group, maskVersion = description.Policy.PlacementGroup, description.Policy.PlacementMaskVersion
-		used, err = b.clusterLogicalUsage(ctx, p)
+		accounting := description.Policy.Limits.Accounting
+		if len(selection) > 0 {
+			accounting = selection[0].Limits.Accounting
+		}
+		used, err = b.clusterUsageAs(ctx, p, accounting)
 		if err != nil {
 			return bucketQuotaCapacity{}, err
 		}
 	}
 	if len(selection) > 0 {
 		group, maskVersion = selection[0].PlacementGroup, selection[0].PlacementMaskVersion
+	}
+	shares, err := s.quotaPreviewShares(ctx, view, id)
+	if err != nil {
+		return bucketQuotaCapacity{}, err
 	}
 	local := s.CollectStats(client.StatsFilter{})
 	images := map[client.ID]client.StatsSnapshot{local.Node: local}
@@ -128,30 +146,12 @@ func (s *Server) administrativeQuotaCapacity(id volume.ID, strategy uint8, p pri
 			}
 			class := int(v.Class)
 			node.Free[class] = addCapacity(node.Free[class], addCapacity(v.AdmissionFreePhysical, v.GuaranteedRemainingPhysical))
-			node.Reserved[class] = addCapacity(node.Reserved[class], v.GuaranteedRemainingPhysical)
+			node.Reserved[class] = addCapacity(node.Reserved[class], subtractCapacity(v.GuaranteedRemainingPhysical, shares[member.ID][v.ID.String()]))
 		}
 		nodes = append(nodes, node)
 	}
 	var guarantees [3]uint64
-	for _, description := range s.bucketSnapshots() {
-		if description.ID == id.String() || description.ID == systemBucket.String() || description.DeletionComplete || description.Policy.Limits.Guaranteed == 0 {
-			continue
-		}
-		bid, err := bucketID(description.ID)
-		if err != nil {
-			return bucketQuotaCapacity{}, err
-		}
-		b, err := s.Bucket(bid)
-		if err != nil {
-			return bucketQuotaCapacity{}, err
-		}
-		usage, err := b.clusterLogicalUsage(ctx, p)
-		if err != nil {
-			return bucketQuotaCapacity{}, err
-		}
-		class := int(bucketClass(description.Policy))
-		guarantees[class] = addCapacity(guarantees[class], unusedGuarantee(description.Policy, usage))
-	}
+
 	if s.currentSystem.Load() != view {
 		return bucketQuotaCapacity{}, fail(503, "cluster configuration changed during capacity measurement")
 	}

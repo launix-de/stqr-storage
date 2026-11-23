@@ -478,7 +478,7 @@ func (s *Server) execute(m client.Message, ws *wsSession) ([]byte, int, error) {
 			s.control.ledger.mu.Unlock()
 		}
 		if s.scopes != nil {
-			caps |= client.CapabilityRangeHandoff | client.CapabilityExclusion | client.CapabilityControlRecovery | client.CapabilityVolumeRecovery | client.CapabilityRecoveryFenceClearance
+			caps |= client.CapabilityRangeHandoff | client.CapabilityExclusion | client.CapabilityControlRecovery | client.CapabilityVolumeRecovery | client.CapabilityRecoveryFenceClearance | client.CapabilityPhysicalQuotas
 		}
 		if s.retiring() {
 			caps |= client.CapabilityRetiringNode

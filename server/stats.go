@@ -117,6 +117,7 @@ func (s *Server) CollectStats(filter client.StatsFilter) client.StatsSnapshot {
 			snap.ReasonBits |= 1 << 3
 		}
 	}
+	s.collectQuotaStats(&snap, filter)
 	sort.Slice(snap.Volumes, func(i, j int) bool { return snap.Volumes[i].ID.String() < snap.Volumes[j].ID.String() })
 	return snap
 }

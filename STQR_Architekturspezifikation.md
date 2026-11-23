@@ -357,6 +357,73 @@ placement_group:
 - DELETE/TRUNC reduzieren logische Nutzung nach Commit, physische Nutzung erst nach tatsächlicher sicherer Freigabe. Geschützte G-Reserven werden dadurch nicht zu frei verbrauchbarem Fremdplatz. SSD-Fallback, Migration und GC dürfen sie ebenfalls nicht aufzehren.
 - Die verteilte Vergabe trennt **physische Node-/Volume-Kontingente** und bei logischem Accounting zusätzliche **logische Wachstumskontingente pro Bucket/Primary**. Die Summe bereits genutzter und noch ausstehend verfügbarer logischer Kontingente darf A nicht überschreiten. Replikation verbraucht die logische Quota nur einmal, physische Kontingente dagegen auf jeder Kopie. Nodes reservieren lokal innerhalb beider Grenzen; Kontingentübertragung ist eine geordnete Kontrollentscheidung und Migration übergibt Restkontingente ohne doppelte Vergabe. Physische Reserven allein garantieren keine harte logische Obergrenze.
 
+### 5.5.1 Umgesetzter Quota-Pfad bei einer Datenkopie
+
+Logische und physische Absolute-Quotas sowie garantierte Kontingente sind für den
+aktuellen Ein-Kopie-Datenpfad umgesetzt. Replikation/gewöhnliches EVERYWHERE bleiben
+gesonderte Erweiterungen; solche Policies werden weiterhin mit 501 abgelehnt.
+
+- Das ALL-committete System-Manifest enthält zusätzlich zu den übertragbaren
+  Absolute-Credits `QuotaReserves: Vec{Bucket,Node,Volume,Backing}`. Die Summe der
+  Backing-Beträge entspricht G bzw. `ceil(G*(1+metadata_reserve_ppm/1e6))` bei
+  logischen Quotas. Ein Max-Flow über Bucket-/Volume-Kanten berücksichtigt die
+  wirksamen bzw. freizugebenden PG-Masken und HDD→SSD/RAM-Klassenregeln. Eine bloße
+  clusterweite Freisumme genügt nicht. Nur aktive, allgemein platzierbare Volumes
+  dürfen neue Garantien decken; gesonderte Recovery-Volumes sind kein allgemeiner
+  Reservepool. Nicht erfüllbare Änderungen liefern vor READY 507.
+- Bei normalen Kontrollrunden werden die Quota-Ressourcen auf **ALL** vorbereitet,
+  bevor der Koordinator sein unwiderrufliches Request-Ergebnis persistiert.
+  Lehnt eine Node mit 507 ab, werden alle bereits ausgestellten READY-Reservierungen
+  durch den bestehenden dauerhaften ALL-ABORT-Pfad zurückgenommen.
+- Jede Node prüft vor READY die eigenen Volume-IDs, Klassen und freien physischen
+  Bytes erneut. Reguläre Datei-Volumes mit Garantiezusagen werden unter Linux
+  konservativ vollständig mit `fallocate(KEEP_SIZE)` physisch hinterlegt; ein
+  dünnes `ftruncate` ist kein Kapazitätsbeleg. Kann das Dateisystem diese ganze
+  Volume-Kapazität nicht decken, scheitert die Zusage mit 507, auch wenn nur G
+  selbst kleiner wäre. Vorhandene Nutzdaten und Dateilänge bleiben unverändert.
+  Raw-Devices sind bereits provisioniert; RAM und eigene VolumeIO-Backends müssen
+  ihren physischen Poolvertrag selbst erfüllen. Hinterlegung ist keine Garantie
+  gegen externe Storage-/Thin-Provisioning-Ausfälle außerhalb der Node.
+- Vor Veröffentlichung jeder Storage-Transaktion prüft ein Admission-Callback
+  den fertigen Allokationsplan. Bei Ablehnung bleiben Payloadsicht, Index,
+  Retry-Beleg und Quota-Zähler unverändert. Die Counter liegen pro Bucket, nicht
+  pro Objekt, im RAM und werden beim Öffnen einmal aus dem Index rekonstruiert;
+  danach werden nur veränderte Objekt-/Request-Keys fortgeschrieben.
+- Physisch zählen Objekt-Deskriptoren, tatsächlich allozierte komprimierte Daten,
+  Prüfsummen, Erweiterungslisten, gesamte Append-Arenen, Tombstones und erhaltene
+  Retry-Records. Gemeinsame Metadaten oberhalb der anfänglichen sechs Volume-
+  Metadatenseiten und der lokalen Recovery-Metadaten werden bytegenau nach Anzahl
+  der Objekt-/Request-Records verteilt; Rundungsreste gehen in Bucket-ID-Reihenfolge.
+  Die Grundseiten, WAL-Scratch und lokale Volume-Verwaltung sind Betriebsaufwand,
+  kein mehrfach kontierter Bucket-Inhalt. Null-Lücken belegen keine Payloadbytes.
+  Veränderte Shared-Anteile werden für alle betroffenen physischen Quotas geprüft;
+  auch Reclaim/GC darf keine fremde harte Quota überschreiten und wartet nötigenfalls
+  auf Credits bzw. zusätzlichen Spielraum.
+- Nicht autoritative eingehende/ausgehende Migrationskopien bleiben physischer
+  Betriebs-/Importbedarf und werden nicht als zusätzliche Pflichtkopie auf A
+  kontiert. Beide READYs und COMMIT binden das verschobene physische Kontingent;
+  vor Source-/Target-COMMIT werden die resultierenden Budgets nochmals geprüft.
+  Physische Machbarkeit wird schon vor dem Source-FENCE beim Bulk-Snapshot-Ende
+  geprüft; ein hartes 507 beendet die noch ungefencete Übergabe. OBJ2-Flagbyte 25
+  Bit 2 und REQ2-Byte 102 Bit 0 kennzeichnen importierte Kopien/Belege persistent.
+  Bis zum expliziten Placement dort werden diese in einem lokalen unpinned Cohort
+  weder als Schreib-/Snapshotquelle noch als zusätzliche Pflichtkopie gewählt.
+  Layout-/Codec-Mehrbedarf braucht vorhandene freie Credits, keine neue Quota.
+- Ein Import darf nur die eigene ungenutzte Garantiereserve in die disjunkte
+  In-flight-Reserve überführen. Fremde Garantien bleiben geschützt. Checkpoints
+  sowie Neustarts rekonstruieren die Kontingente und Importüberlappung vor I/O.
+  CURRENT und vorbereitete Zusagen bleiben bis zur verbindlichen Entscheidung
+  geschützt. Ein Drain verschiebt Zusagen über denselben ALL-Kontrollpfad; ein
+  Volume mit noch bestehender Zusage wird nicht freigegeben. SHORT/Ausfall allein
+  widerruft keine Zusage. Reichen die verbleibenden geeigneten Volumes nicht,
+  wartet der Drain bzw. wird eine administrative Neuzuteilung mit 507 abgelehnt.
+- Heartbeats enthalten die vorhandenen `BucketStats` mit logischen Bytes,
+  zugerechneten physischen Bytes, Objektzahl und physischer Restreserve aus den
+  fortgeschriebenen Countern. Keine Payload-/Index-Vollsuche pro 3-s-Update.
+  Das Dashboard bietet G sowie logische/physische A an, zeigt die passende
+  Belegung und meldet bei logischen Zusagen einen nach dem Profil erkennbaren
+  Reservefehlbetrag. Fehlende Peer-Statistik wird nicht als Null ausgegeben.
+
 ### 5.6 Kompression und Platzierungsmodus
 
 - Zentrale PG-Option **`compression`**: `raw`, `gzip`, `lz4`, `xz`; Standard `raw`. Das Volumeformat trägt das tatsächlich gewählte Verfahren je Objektversion, zusätzlich Block-/Extent-Metadaten zur unabhängigen Dekodierung (§9.8). Die native API liest/schreibt immer logische unkomprimierte Bytes.
@@ -1318,6 +1385,8 @@ Nur authentifizierte NODE-Rolle, gebunden an Membership-Epoch. In der Tabelle be
 | 0x1068 | FORCE_CONTROL_STATE / Q | `schema:u16=1` => JSON `{Schema,Node,Current,Slot,Committed}`; COMMIT samt Proposal, ALL-READY und eigenem durable COMMIT-Proof; nur gebundene Kontrollteilnehmer |
 | 0x1069 | FORCE_CONSTRUCTION / Q | `claim:Blob(GlobalClaim)` => leer nach dauerhafter Konstruktionsbarriere; nur Initiator des exakt reservierten FORCE-Slots |
 | 0x1070 | FORCE_ADOPT_COMMIT / Q | `schema:u16,user:ID,username:Text,request:Blob(FORCE_DISCONNECT-Body),proposal:Blob(GlobalProposal),ready:Blob(Certificate),witness:Proof` => `applied:Proof`; übernimmt ausschließlich eine bereits verbindliche, lokal vorbereitete Elternentscheidung |
+| 0x1072 | QUOTA_PHYSICAL / Q | `JSON(GlobalClaim)` => `JSON{Node,Volumes:[{ID,Class,Free,Active,Usage:[{Bucket,Logical,Physical,Objects}]}]}`; ausschließlich für den eigenen identischen ALL-Slot, Kandidaten für physische Zusagen |
+| 0x1073 | QUOTA_PREVIEW / Q | `bucket:ID` => `JSON{volume_id:remaining_own_physical,...}`; nur authentisierte Cluster-Mitglieder, administrative Vorschau, kein Admission-Beleg |
 | 0x1071 | VOLUME_RECOVERY_READY / Q | `claim:Blob(ControlClaim),image:Digest` => `ready:Proof`; ausschließlich vom im Claim gebundenen Teilnehmer an das Übernahmeziel, nur für die identische lokal persistierte READY-Entscheidung |
 
 
@@ -1365,7 +1434,7 @@ Storage-Vertrag; sie ändern keine gemeinsame PG und erzeugen keine Overrides.
 | 0x2031 | PLACEMENT_GROUP_SET / Q, Schema 2 | `schema:u16=2,group:ID,expected_revision:u64,name:Text,settings:Blob(JSON PlacementMask)` => Admin-ACK; die Versionsnummer der neuen PG-Version vergibt der Server |
 | 0x2033 | BUCKET_SET_PLACEMENT_GROUP / Q, Schema 2 | `schema:u16=2,bucket:ID,expected_policy_version:u64,group:Opt(ID),limits:BucketLimitsWire` => Admin-ACK; fehlende PG bedeutet Standard-PG |
 | 0x2034 | BUCKET_CREATE_IN_GROUP / Q | `schema:u16=1,bucket:ID,name:Text,group:ID,limits:BucketLimitsWire` => Admin-ACK |
-| 0x2035 | BUCKET_GROUP_CAPACITY / Q | `schema:u16=1,group:ID,bucket:ID,strategy:u8,profile:u8,overhead:u32` => bisherige Kontingentvorschau unter der Ziel-PG-Maske; Klasse aus der PG, Null-Bucket-ID für Neuanlage |
+| 0x2035 | BUCKET_GROUP_CAPACITY / Q | `schema:u16=1,group:ID,bucket:ID,strategy:u8,profile:u8,overhead:u32`; Schema 2 ergänzt `accounting:u8` am Ende => Kontingentvorschau unter der Ziel-PG-Maske; Klasse aus der PG, Null-Bucket-ID für Neuanlage |
 | 0x2036 | VOLUME_ADD_WITH_GROUPS / Q, node-lokal | bisheriger VOLUME_ADD-Body, danach `schema:u16=1,groups:Vec(ID)` => Admin-ACK; persistente Placement-Sperre bis zur Aufnahme in die gewählten Listen |
 | 0x2037 | VOLUME_PLACEMENT_RELEASE / Q, node-lokal | `volume:ID` => Admin-ACK nach Prüfung der Listenergänzungen; unvollständige Blacklist-Änderungen liefern 409 |
 | 0x2038 | USER_LIST_PAGE / Q | `schema:u16=1,after_name:Text,limit:u32,query:Text,ids:Vec(ID)` => `Text(JSON{users,next,total,all_total})`; nur ID, Name, numerische Rolle und Disabled-Zustand, keine Verifier |
@@ -1405,6 +1474,7 @@ RangeHandoffPlan = schema:u16=2,before:Blob(MapPatch),after:Blob(MapPatch),
                    moving_prefix:u16,compression:u8,physical_reserve:u64,attempt:ID
 RangeHandoffCommit = schema:u16=2,plan:Digest,snapshot:Digest,
                      source_ready:Proof,target_ready:Proof,logical_used:u64
+# Schema 3 ergänzt quota_used:u64 für physische Absolute-Credits.
 RangeObjectRecord = bucket:ID,object:OID,version:u64,length:u64,
                     compression:u8,deleted:Bool
 RangeRequestRecord = request:ID,record:RangeObjectRecord,
@@ -1507,7 +1577,7 @@ LOST-Ranges werden durch verspätete historische PREPAREs nicht erneut bereinigt
 
 
 
-Der konkrete logische Quota-Pfad verteilt eine endliche Absolute-Quota als
+Der konkrete logische bzw. physische Quota-Pfad verteilt eine endliche Absolute-Quota als
 Schreibbudgets auf die Nodes. Die Summe aller Budgets entspricht der Bucket-Grenze.
 Eine Node bestätigt Wachstum ausschließlich aus ihrem eigenen Budget; bereits
 vorhandenes Budget benötigt keinen erreichbaren zentralen Koordinator. Bei Mangel
@@ -1534,15 +1604,35 @@ Snapshots; Tombstones und Retry-Records zählen nicht. Quelle und Ziel berechnen
 diesen Wert selbst und binden ihn in ihre READY-Journale. Die Quelle gibt dieses
 Budget erst mit ihrem COMMIT ab; das Ziel erhält es erst mit seinem COMMIT. Bei
 Migration innerhalb derselben Node bleibt das Gesamtbudget unverändert.
-Commit-Schema 1 wird für alte Belege mit `logical_used=0` dekodiert; aktuelle
-Übergaben schreiben Schema 2. Das Objektclient-Policy-/Map-Format ändert sich nicht.
+Commit-Schema 1 wird für alte Belege mit `logical_used=0` dekodiert; logische
+Übergaben schreiben Schema 2. Physische Quotas verwenden Schema 3 mit zusätzlichem
+`quota_used:u64`, dem exakt auf die Zielnode übertragenen Absolute-Kontingent.
+Die Source-READY wird vor dem finalen Target-READY dauerhaft gespeichert, damit
+ein Retry denselben Betrag behält. Das Objektclient-Policy-/Map-Format bleibt gleich.
 
 ```text
 QuotaGrant = schema:u16=1,transfer:ID,bucket:ID,quota_epoch:ID,
              source:ID,target:ID,bytes:u64,debit:Proof
 QuotaNodeSnapshot (JSON) = {"Node":ID,"Grants":u64,"Ranges":u64,
-  "Buckets":[{"Bucket":ID,"Allowance":u64,"Used":u64},...]}
+  "Buckets":[{"Bucket":ID,"Allowance":u64,"Used":u64,"Physical":u64?},...]}
 ```
+
+QUOTA_CHECKPOINT Schema 3 enthält nach dem Claim immer `planned_system_image:Digest`
+(Null, wenn kein Recovery-Kandidat vorliegt), danach
+`Vec(bucket:ID,measure_usage:Bool,measure_physical:Bool)`.
+`Physical` erscheint in der JSON-Antwort nur für eine angeforderte physische Messung.
+Schema 1/2 bleiben für bestehende logische Quotas unverändert.
+RANGE_SNAPSHOT_END Schema 2 ergänzt nach dem Snapshot-Digest `quota_used:u64`;
+Schema 1 bleibt ohne dieses Feld. RANGE_STATE Schema 3 ergänzt nach dem logischen
+Messwert ebenfalls `quota_used:u64`, einschließlich Recovery versiegelter RAM-Ziele.
+Die Capability `PHYSICAL_QUOTAS=2048` schützt diese Erweiterungen und die Zusagen
+im System-Manifest: erst nach Unterstützung aller betroffenen Nodes aktivieren;
+ein älterer Kandidat wird bei vorhandenen Quota-Features nicht verbindlich aufgenommen.
+
+Die Aktivierung wird im System-Manifest monoton als `QuotaProtocol=1` bewahrt,
+auch nachdem der letzte solche Bucket entfernt wurde: alte physische Scope-Belege
+können weiterhin im Recovery-/Archivgraph vorkommen. Ein Downgrade ohne diese
+Capability darf sie nicht nachträglich als logische Credits deuten.
 
 Die lokale logische Belegung wird pro Bucket als einzelner Zähler gecacht und
 mit erfolgreichen Storage-Commits fortgeschrieben. Retry-Ergebnisse verändern ihn
@@ -1556,12 +1646,13 @@ keine fremde Bucket-Reserve verbrauchen. Der Verbrauch wird innerhalb des physis
 Commits anhand des Netto-Wachstums verrechnet; ein Retry belastet ihn nicht erneut.
 Das alte `UseGuaranteed` erlaubt dem vertrauenswürdigen Besitzer den Zugriff auf die
 gesamte Volume-Reserve und eignet sich deshalb nicht für geteilte Bucket-Garantien.
-Persistente Bucket-Reserveverteilung und Wiederherstellung benötigen zusätzlich
-entsprechende Allokationsbelege; das Budget-Argument allein ersetzt diese nicht.
+Die persistenten `QuotaReserves` und die transaktionalen Admission-Callbacks aus
+§5.5.1 setzen die Verteilung/Wiederherstellung um; ein Budget-Argument allein ist
+weiterhin kein Beleg.
 
-Die physische Aufnahme kann unabhängig davon 507 melden. Garantierte physische
-Kapazität und endliche physische Bucket-Quotas werden durch logische Credits
-nicht zugesichert; sie benötigen eigene physische Reservierungen.
+Die physische Aufnahme kann unabhängig davon 507 melden. Absolute-Credits werden
+in der jeweiligen Accounting-Einheit geführt; die Garantie-Zusagen sind davon
+unabhängige, im System-Manifest gebundene physische Reservierungen (§5.5.1).
 
 Der Snapshot-Digest bindet in Übertragungsreihenfolge je Objekt
 `u8=0,RangeObjectRecord,Objektdigest` und je Retry `u8=1,RangeRequestRecord`.
@@ -2144,7 +2235,7 @@ Hier stehen nur noch nicht entschiedene Details. Bereits geklärt sind: Intranet
 ### 20.2 API-Randfälle und Ressourcen
 
 - GET_RANGE genau am/hinter EOF: leerer Erfolg oder 416? Null-Längen und Integerüberläufe; TRUNC bei fehlendem Objekt. PUT_RANGE-Neuanlage, Nullfüllung und TRUNC-Vergrößerung sind entschieden.
-- Queue-/Staging-/In-flight-Budgets, Stream-Cancellation und konkrete Kontingentgrößen; verteilte logische Credits und physische Reserven müssen beide gelten. Metadaten-/Codecaufschläge für Quota-Konfiguration konservativ bestimmen.
+- Weitere Messungen zu Queue-/Staging-/In-flight-Budgets und Kontingentgrößen. Logische/physische Absolute-Credits, persistente Volume-Garantien und konservative Objektgrößenprofile sind für den aktuellen Ein-Kopie-Pfad umgesetzt (§5.5.1); Replica-/Failure-Domain-Erweiterung folgt mit der Replikation.
 - Exakte Hash-Domain-/Key-Längenkodierung und Golden Vectors Go/JS/C/Rust. Native 256-Bit-IDs gelten definitionsgemäß als eindeutig.
 
 ### 20.3 Protokoll und Betrieb

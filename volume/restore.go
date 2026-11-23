@@ -85,7 +85,7 @@ func (v *Volume) restoreLocked(k Key, info Info, source ExtentSource, opts Optio
 	if e != nil {
 		return e
 	}
-	o := &object{Info: info, Spans: spans, Segmented: opts.restoreSegmented}
+	o := &object{importShadow: opts.ImportShadow, Info: info, Spans: spans, Segmented: opts.restoreSegmented}
 	if old != nil {
 		o.Base, o.Size = old.Base, old.Size
 	}
@@ -106,7 +106,7 @@ func (v *Volume) restoreLocked(k Key, info Info, source ExtentSource, opts Optio
 	if e = t.saveObject(k, o); e != nil {
 		return e
 	}
-	if e = t.saveReceipt(opts.RequestID, dedupe{k, fp, Result{Info: info}}); e != nil {
+	if e = t.saveReceipt(opts.RequestID, dedupe{importShadow: opts.ImportShadow, Key: k, Fingerprint: fp, Result: Result{Info: info}}); e != nil {
 		return e
 	}
 	if e = t.commitReserved(opts.UseGuaranteed, opts.InFlightAllowance, opts.GuaranteedAllowance); e != nil {
@@ -130,7 +130,7 @@ func (v *Volume) restoreRequestLocked(x RequestRecord, opts Options) error {
 		return nil
 	}
 	t := v.transaction()
-	if e = t.saveReceipt(x.ID, dedupe{x.Key, x.Fingerprint, x.Result}); e != nil {
+	if e = t.saveReceipt(x.ID, dedupe{importShadow: opts.ImportShadow, Key: x.Key, Fingerprint: x.Fingerprint, Result: x.Result}); e != nil {
 		return e
 	}
 	return t.commitReserved(opts.UseGuaranteed, opts.InFlightAllowance, opts.GuaranteedAllowance)

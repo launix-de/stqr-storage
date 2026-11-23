@@ -19,8 +19,10 @@ import (
 // TODO(multinode): combine admitted peers using the same accounting as admission.
 type bucketListEntry struct {
 	BucketDescription
-	UsedBytes  *uint64 `json:"used_bytes,omitempty"`
-	UsageError string  `json:"usage_error,omitempty"`
+	UsedBytes                   *uint64 `json:"used_bytes,omitempty"`
+	UsageError                  string  `json:"usage_error,omitempty"`
+	GuaranteedRemainingPhysical *uint64 `json:"guaranteed_remaining_physical,omitempty"`
+	GuaranteeEstimateShortfall  *uint64 `json:"guarantee_estimate_shortfall,omitempty"`
 }
 
 func bucketAdminOpcode(op uint16) bool {
@@ -153,7 +155,7 @@ func (s *Server) executeBuckets(m client.Message, p principal) ([]byte, int, err
 			}
 			b.Receipts = nil
 			entry := bucketListEntry{BucketDescription: b}
-			if !b.Policy.Limits.Unlimited && b.Policy.Limits.Accounting == "logical" {
+			if !b.Policy.Limits.Unlimited {
 				id, e := bucketID(b.ID)
 				if e != nil {
 					return nil, 0, e
@@ -169,6 +171,7 @@ func (s *Server) executeBuckets(m client.Message, p principal) ([]byte, int, err
 					entry.UsedBytes = &used
 				}
 			}
+			s.addQuotaDiagnostics(&entry)
 			encoded, e := json.Marshal(entry)
 			if e != nil {
 				return nil, 0, e
@@ -385,10 +388,10 @@ func (s *Server) executeBuckets(m client.Message, p principal) ([]byte, int, err
 	if err = bucketLocalPolicy(description.Policy); err != nil {
 		return nil, 0, err
 	}
-	if !description.Policy.Limits.Unlimited {
+	if !description.Policy.Limits.Unlimited && !s.metadataPreview {
 		usage := uint64(0)
 		if m.Opcode != client.BucketCreate && m.Opcode != client.BucketCreateInGroup {
-			usage, err = b.logicalUsage()
+			usage, err = b.accountedUsageFor(description.Policy)
 			if err != nil {
 				return nil, 0, err
 			}

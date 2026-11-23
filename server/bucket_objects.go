@@ -113,12 +113,6 @@ func bucketLocalPolicy(p BucketPolicy) error {
 	if p.Redundancy.Mode == "replication" && p.PlacementMode == "count" && p.Redundancy.Replicas != 1 {
 		return fail(501, "multiple-node replication is not implemented")
 	}
-	if p.Limits.Guaranteed != 0 {
-		return fail(501, "bucket guaranteed reservations are not implemented")
-	}
-	if !p.Limits.Unlimited && p.Limits.Accounting != "logical" {
-		return fail(501, "finite physical bucket quotas are not implemented")
-	}
 	return nil
 }
 func (b *Bucket) selectVolume(d BucketDescription, key volume.Key, request volume.ID, create bool) (*volume.Volume, volume.Info, bool, error) {
@@ -158,6 +152,16 @@ func (b *Bucket) selectVolume(d BucketDescription, key volume.Key, request volum
 			}
 		}
 		info, err := h.RecordInfo(key)
+		if err == nil && b.server.controller != nil {
+			if entry, ok := b.server.placement.Load().lookup(client.ID(key.Bucket), client.ObjectID(key.Object)); ok && len(entry.Locations) == 1 && entry.Locations[0].Volume == (client.ID{}) {
+				shadow, e := h.ImportShadow(key)
+				if e != nil {
+					err = e
+				} else if shadow {
+					err = volume.ErrNotFound
+				}
+			}
+		}
 		h.Close()
 		if err == nil {
 			if !found || info.Version > latest.Version {
@@ -417,6 +421,9 @@ func (b *Bucket) mutate(ctx context.Context, p principal, id volume.ObjectID, op
 		}
 		d = saved.Describe()
 	}
+	if err := s.refreshQuotaProtectionLocked(); err != nil {
+		return volume.Result{}, err
+	}
 	if err := s.ensureVolumeAuthorityLocked(); err != nil {
 		return volume.Result{}, err
 	}
@@ -436,7 +443,7 @@ func (b *Bucket) mutate(ctx context.Context, p principal, id volume.ObjectID, op
 		codec = retry.Info.Compression
 	}
 	opt.Compression = &codec
-	if !repeated && !d.Policy.Limits.Unlimited {
+	if !repeated && !d.Policy.Limits.Unlimited && d.Policy.Limits.Accounting == "logical" {
 		oldLength := old.Length
 		if old.Deleted {
 			oldLength = 0
@@ -551,6 +558,13 @@ func (b *Bucket) mutate(ctx context.Context, p principal, id volume.ObjectID, op
 	b.updateUsage(oldLength, newLength, repeated, err)
 	b.usage.mu.Unlock()
 	usageLocked = false
+	var quotaFull *physicalQuotaFull
+	if errors.As(err, &quotaFull) {
+		if quotaFull.Waiting {
+			return result, fail(503, "waiting for physical bucket growth credits")
+		}
+		return result, err
+	}
 	if errors.Is(err, volume.ErrFull) && !errors.Is(err, volume.ErrRecovery) && !repeated && s.scopes != nil {
 		needed := addCapacity(length, 64<<10)
 		if opcode == 0x0105 || opcode == 0x0106 {

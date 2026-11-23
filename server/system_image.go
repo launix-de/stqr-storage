@@ -22,9 +22,11 @@ import (
 // Local volume configuration, local admin-operation receipts and the mergeable
 // discovery directory are not copied into another node's configuration.
 type systemManifest struct {
-	VolumeRecoveries     []volumeRecoveryOrigin `json:",omitempty"`
-	Quotas               []quotaAllocation      `json:",omitempty"`
-	Shutdown             *clusterShutdown       `json:",omitempty"`
+	VolumeRecoveries     []volumeRecoveryOrigin     `json:",omitempty"`
+	QuotaReserves        []quotaPhysicalReservation `json:",omitempty"`
+	QuotaProtocol        uint16                     `json:",omitempty"`
+	Quotas               []quotaAllocation          `json:",omitempty"`
+	Shutdown             *clusterShutdown           `json:",omitempty"`
 	Schema               uint16
 	Cluster              client.ID
 	Sequence             uint64
@@ -97,7 +99,7 @@ func (b *systemBundle) add(data []byte) volume.ObjectID {
 // roots contains each prospective member's persistent metadata volume identity;
 // ranges are the previously agreed current placement/checkpoint, not a plan
 // which can silently move ownership during membership admission.
-func (s *Server) captureSystemImage(membership client.Membership, sequence, generation, revision uint64, roots map[client.ID]volume.ID, ranges []client.MapPatch) (*systemBundle, error) {
+func (s *Server) captureSystemImage(membership client.Membership, sequence, generation, revision uint64, roots map[client.ID]volume.ID, ranges []client.MapPatch, reserves ...[]quotaPhysicalReservation) (*systemBundle, error) {
 	if !validateControlMembership(membership) || membership.Epoch == 0 || sequence == 0 || generation == 0 || revision == 0 {
 		return nil, ErrBucketInvalid
 	}
@@ -162,8 +164,15 @@ func (s *Server) captureSystemImage(membership client.Membership, sequence, gene
 	bundle := &systemBundle{Objects: make(map[volume.ObjectID][]byte)}
 	manifest := systemManifest{Schema: 1, Cluster: membership.Cluster, Sequence: sequence, Membership: membership, Generation: generation, Revision: revision}
 	if view := s.currentSystem.Load(); view != nil {
+		manifest.QuotaProtocol = view.manifest.QuotaProtocol
 		manifest.Shutdown = view.manifest.Shutdown
 		manifest.VolumeRecoveries = cloneRecoveryOrigins(view.manifest.VolumeRecoveries)
+	}
+	if quotaPoliciesRequired(s.bucketSnapshots()) {
+		manifest.QuotaProtocol = 1
+	}
+	if len(reserves) > 0 {
+		manifest.QuotaReserves = reserves[0]
 	}
 	raw, err = json.Marshal(accounts)
 	if err != nil {
@@ -400,6 +409,9 @@ func decodeSystemView(root volume.ObjectID, load func(volume.ObjectID) ([]byte, 
 	if err := validateRecoveryOrigins(view); err != nil {
 		return nil, err
 	}
+	if err := validatePhysicalReservations(view); err != nil {
+		return nil, err
+	}
 	if err := validateQuotaAllocations(view); err != nil {
 		return nil, err
 	}
@@ -531,10 +543,16 @@ func (s *Server) prepareSystemImage(ledger *controlLedger, proposal controlPropo
 			return client.Proof{}, volume.ErrCorrupt
 		}
 		s.opMu.Lock()
-		defer s.opMu.Unlock()
-		if err := s.syncVolumes(); err != nil {
+		err := s.syncVolumes()
+		s.opMu.Unlock()
+		if err != nil {
 			return client.Proof{}, err
 		}
+	}
+	s.opMu.Lock()
+	defer s.opMu.Unlock()
+	if err := s.prepareQuotaProtection(view); err != nil {
+		return client.Proof{}, err
 	}
 	return ledger.prepare(proposal)
 }

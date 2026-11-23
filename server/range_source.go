@@ -30,6 +30,14 @@ func (r *rangeManager) selectSnapshotSource(p rangePlan, key volume.Key) (*volum
 			return nil, err
 		}
 		info, err := h.RecordInfo(key)
+		if err == nil && pin == (volume.ID{}) {
+			shadow, e := h.ImportShadow(key)
+			if e != nil {
+				err = e
+			} else if shadow {
+				err = volume.ErrNotFound
+			}
+		}
 		h.Close()
 		if errors.Is(err, volume.ErrNotFound) {
 			continue

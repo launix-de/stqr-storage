@@ -31,6 +31,7 @@ func (r *rangeManager) consumed(t *rangeTxn, store *volume.Volume, before uint64
 	}
 	r.mu.Lock()
 	t.remaining -= min(t.remaining, before-after)
+	r.publishQuotaImportsLocked()
 	r.mu.Unlock()
 }
 
@@ -95,6 +96,10 @@ func (r *rangeManager) restoreReservations() error {
 		t.remaining = t.plan.Physical - min(t.plan.Physical, used)
 		totals[t.plan.Volume] = addCapacity(totals[t.plan.Volume], t.remaining)
 	}
+	r.publishQuotaImportsLocked()
+	if err := r.server.applyQuotaProtectionLocked(); err != nil {
+		return err
+	}
 	for id, total := range totals {
 		store := r.server.volumes[id.String()]
 		if store == nil {
@@ -123,5 +128,9 @@ func (r *rangeManager) releaseReserveLocked(t *rangeTxn) error {
 	if err != nil {
 		return err
 	}
-	return store.SetInFlightReserve(total)
+	r.publishQuotaImportsLocked()
+	if err := store.SetInFlightReserve(total); err != nil {
+		return err
+	}
+	return r.server.refreshVolumeQuota(store)
 }

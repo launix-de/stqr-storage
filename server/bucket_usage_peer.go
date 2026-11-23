@@ -18,7 +18,14 @@ func (s *Server) receiveBucketUsage(ctx context.Context, body []byte, actor clie
 	schema, bucket, user, name := d.U16(), volume.ID(d.ID()), d.ID(), d.Text()
 	var stamp [32]byte
 	copy(stamp[:], d.Take(32))
-	if schema != 1 || d.Done() != nil || bucket == systemBucket {
+	accounting := "logical"
+	if schema == 2 {
+		if d.U8() != 1 {
+			return nil, client.ErrProtocol
+		}
+		accounting = "physical"
+	}
+	if (schema != 1 && schema != 2) || d.Done() != nil || bucket == systemBucket {
 		return nil, client.ErrProtocol
 	}
 	view := s.currentSystem.Load()
@@ -43,7 +50,9 @@ func (s *Server) receiveBucketUsage(ctx context.Context, body []byte, actor clie
 	if err := b.inventoryAvailable(entries); err != nil {
 		return nil, err
 	}
-	used, err := b.logicalUsage()
+	policy := b.storageDescription().Policy
+	policy.Limits.Accounting = accounting
+	used, err := b.accountedUsageFor(policy)
 	if err != nil {
 		return nil, err
 	}

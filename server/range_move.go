@@ -58,6 +58,9 @@ func (r *rangeManager) move(ctx context.Context, p rangePlan) (retErr error) {
 		stage = "bulk copy"
 		if !fenced {
 			if _, _, err := r.sendSnapshot(ctx, p, false); err != nil {
+				if statusOf(err) == 507 {
+					return r.cancelBeforeFence(ctx, p, err)
+				}
 				return err
 			}
 		}
@@ -83,7 +86,7 @@ func (r *rangeManager) move(ctx context.Context, p rangePlan) (retErr error) {
 			return err
 		}
 		stage = "source commit"
-		if _, err := r.commit(rangeCommit{ID: id, Digest: digest, LogicalUsed: t.logicalUsed, Source: source, Target: target}); err != nil {
+		if _, err := r.commit(rangeCommit{ID: id, Digest: digest, LogicalUsed: t.logicalUsed, QuotaUsed: t.quotaUsed, Source: source, Target: target}); err != nil {
 			return err
 		}
 	}

@@ -37,12 +37,14 @@ const (
 type rangeCommit struct {
 	ID, Digest     [32]byte
 	LogicalUsed    uint64
+	QuotaUsed      uint64
 	Source, Target client.Proof
 }
 type rangeEvent struct {
 	Exclusion        *controlClaim
 	Boot, SourceBoot client.ID
 	LogicalUsed      uint64
+	QuotaUsed        uint64
 	PeerBoot         client.ID
 	Object           *rangeObjectMemo
 	ID, Digest       [32]byte
@@ -53,6 +55,7 @@ type rangeEvent struct {
 type rangeTxn struct {
 	sourceBoot, targetBoot                                        client.ID
 	logicalUsed, pendingUsed                                      uint64
+	quotaUsed, pendingQuota                                       uint64
 	aborted                                                       bool
 	forceRetired                                                  bool
 	forcePromotion                                                *controlClaim
@@ -116,10 +119,13 @@ func (s *Server) initRanges(dataDir string) error {
 	if err := r.retireLostRAMTargets(); err != nil {
 		return err
 	}
+	r.publishQuotaRangesLocked()
 	if err := r.restoreReservations(); err != nil {
 		return err
 	}
 	r.publishActivityLocked()
+	r.publishQuotaImportsLocked()
+	r.publishQuotaRangesLocked()
 	return nil
 }
 func (r *rangeManager) persist(kind uint16, event rangeEvent) (client.Proof, error) {
@@ -135,6 +141,8 @@ func (r *rangeManager) persist(kind uint16, event rangeEvent) (client.Proof, err
 		return client.Proof{}, err
 	}
 	r.publishActivityLocked()
+	r.publishQuotaImportsLocked()
+	r.publishQuotaRangesLocked()
 	return proof, nil
 }
 func (r *rangeManager) replay(record controlRecord) error {
@@ -219,6 +227,9 @@ func (r *rangeManager) replay(record controlRecord) error {
 		}
 		t.digest = event.Digest
 		t.logicalUsed = event.LogicalUsed
+		t.quotaUsed = event.QuotaUsed
+		t.pendingQuota = event.QuotaUsed
+		t.pendingUsed = event.LogicalUsed
 		t.sourceReady = record.Proof
 	case rangeTargetRestored:
 		if t.plan.Target != r.node || t.targetReady.RecordSequence == 0 || t.decision != nil || !t.plan.ram() || event.Boot == (client.ID{}) || event.Boot == t.targetBoot || event.Digest != t.digest || t.aborted {
@@ -240,6 +251,9 @@ func (r *rangeManager) replay(record controlRecord) error {
 		}
 		t.digest = event.Digest
 		t.logicalUsed = event.LogicalUsed
+		t.quotaUsed = event.QuotaUsed
+		t.pendingQuota = event.QuotaUsed
+		t.pendingUsed = event.LogicalUsed
 		t.targetReady = record.Proof
 		t.targetBoot = event.Boot
 	case rangeCommitted, rangeObserved, rangeRAMCommitLost:
@@ -279,10 +293,10 @@ func (r *rangeManager) validCommit(t *rangeTxn, c rangeCommit, observed bool) bo
 		return false
 	}
 	if !observed {
-		if t.plan.Source == r.node && (t.sourceReady != c.Source || t.digest != c.Digest || t.logicalUsed != c.LogicalUsed) {
+		if t.plan.Source == r.node && (t.sourceReady != c.Source || t.digest != c.Digest || t.logicalUsed != c.LogicalUsed || t.quotaUsed != c.QuotaUsed) {
 			return false
 		}
-		if t.plan.Target == r.node && (t.targetReady != c.Target || t.digest != c.Digest || t.logicalUsed != c.LogicalUsed) {
+		if t.plan.Target == r.node && (t.targetReady != c.Target || t.digest != c.Digest || t.logicalUsed != c.LogicalUsed || t.quotaUsed != c.QuotaUsed) {
 			return false
 		}
 	}
@@ -316,6 +330,9 @@ func (r *rangeManager) reserve(p rangePlan, sourceBoot ...client.ID) error {
 	}
 	r.server.opMu.Lock()
 	defer r.server.opMu.Unlock()
+	if err := r.server.refreshQuotaProtectionLocked(); err != nil {
+		return err
+	}
 	if r.server.clusterPaused() {
 		return fail(503, "cluster shutdown is pending")
 	}
@@ -387,15 +404,32 @@ func (r *rangeManager) reserve(p rangePlan, sourceBoot ...client.ID) error {
 			}
 		}
 		stats := store.Stats()
-		if p.Physical > stats.AdmissionFreePhysical {
+		h, err := store.Open(false)
+		if err != nil {
+			return err
+		}
+		u, err := h.StorageUsage()
+		h.Close()
+		if err != nil {
+			return err
+		}
+		owned := r.server.bucketVolumeGuarantee(p.Before.Bucket, client.ID(p.Volume), u)
+		owned = subtractCapacity(owned, r.server.importReserved(p.Before.Bucket, client.ID(p.Volume)))
+		if p.Physical > addCapacity(stats.AdmissionFreePhysical, owned) {
 			return volume.ErrFull
 		}
+		discount := min(owned, p.Physical)
+		if err := store.SetGuaranteedReserve(subtractCapacity(stats.GuaranteedRemainingPhysical, discount)); err != nil {
+			return err
+		}
 		if err := store.SetInFlightReserve(addCapacity(stats.InFlightReservedPhysical, p.Physical)); err != nil {
+			_ = store.SetGuaranteedReserve(stats.GuaranteedRemainingPhysical)
 			return err
 		}
 		_, err = r.persist(rangeReserved, rangeEvent{ID: id, Plan: wire, SourceBoot: boot})
 		if err != nil {
 			_ = store.SetInFlightReserve(stats.InFlightReservedPhysical)
+			_ = store.SetGuaranteedReserve(stats.GuaranteedRemainingPhysical)
 		}
 		return err
 	}
@@ -510,7 +544,12 @@ func (r *rangeManager) readyWithForce(id, digest [32]byte, source bool, force *c
 		proof = t.sourceReady
 	}
 	if proof.RecordSequence != 0 {
-		if t.digest != digest || t.logicalUsed != used {
+		if t.digest != digest || t.logicalUsed != used || t.quotaUsed != func() uint64 {
+			if len(logicalUsed) > 1 {
+				return logicalUsed[1]
+			}
+			return t.pendingQuota
+		}() {
 			return client.Proof{}, errControlConflict
 		}
 		if !source && t.plan.ram() && t.targetBoot != r.server.boot {
@@ -520,7 +559,11 @@ func (r *rangeManager) readyWithForce(id, digest [32]byte, source bool, force *c
 		}
 		return proof, nil
 	}
-	event := rangeEvent{ID: id, Digest: digest, LogicalUsed: used}
+	quotaUsed := t.pendingQuota
+	if len(logicalUsed) > 1 {
+		quotaUsed = logicalUsed[1]
+	}
+	event := rangeEvent{ID: id, Digest: digest, LogicalUsed: used, QuotaUsed: quotaUsed}
 	if !source && t.plan.ram() {
 		event.Boot = r.server.boot
 	}
@@ -532,6 +575,21 @@ func (r *rangeManager) commit(c rangeCommit) (client.Proof, error) {
 func (r *rangeManager) commitWithForce(c rangeCommit, force *controlClaim) (proof client.Proof, err error) {
 	r.server.opMu.Lock()
 	defer r.server.opMu.Unlock()
+	r.mu.Lock()
+	activation := r.txns[c.ID]
+	needsActivation := activation != nil && activation.plan.Target == r.node && activation.decision == nil
+	needsSource := activation != nil && activation.plan.Source == r.node && activation.decision == nil
+	r.mu.Unlock()
+	if needsSource {
+		if err := r.checkPhysicalSourceLocked(activation, c.QuotaUsed); err != nil {
+			return client.Proof{}, err
+		}
+	}
+	if needsActivation {
+		if err := r.checkPhysicalActivationLocked(activation, c.QuotaUsed); err != nil {
+			return client.Proof{}, err
+		}
+	}
 	r.mu.Lock()
 	defer func() {
 		txn := r.txns[c.ID]
@@ -546,6 +604,9 @@ func (r *rangeManager) commitWithForce(c rangeCommit, force *controlClaim) (proo
 		}
 		r.mu.Unlock()
 		if err == nil {
+			if err = r.server.refreshQuotaProtectionLocked(); err != nil {
+				return
+			}
 			if store != nil {
 				err = r.server.ensureVolumeAuthorityLocked(map[volume.ID]uint64{store.Identity().VolumeID: budget})
 				r.consumed(txn, store, before)

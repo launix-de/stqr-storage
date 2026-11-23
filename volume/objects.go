@@ -215,6 +215,7 @@ func (v *Volume) loadDedupe(id ID) (dedupe, bool, error) {
 	if string(b[:4]) != "REQ2" || checksum(b[:140]) != diskOrder.Uint32(b[140:]) {
 		return d, false, ErrCorrupt
 	}
+	d.importShadow = b[102]&1 != 0
 	copy(d.Key.Bucket[:], b[4:20])
 	copy(d.Key.Object[:], b[20:52])
 	copy(d.Fingerprint[:], b[52:84])
@@ -227,6 +228,9 @@ func (t *transaction) saveReceipt(id ID, d dedupe) error {
 	}
 	b := make([]byte, receiptBytes)
 	copy(b, "REQ2")
+	if d.importShadow {
+		b[102] = 1
+	}
 	copy(b[4:20], d.Key.Bucket[:])
 	copy(b[20:52], d.Key.Object[:])
 	copy(b[52:84], d.Fingerprint[:])
@@ -445,7 +449,7 @@ func (v *Volume) mutateWithRetryLocked(op uint8, k Key, offset, length uint64, s
 	result := Result{Info: o.Info, Offset: offset}
 	var fp [32]byte
 	copy(fp[:], h.Sum(nil))
-	if e = t.saveReceipt(opts.RequestID, dedupe{k, fp, result}); e != nil {
+	if e = t.saveReceipt(opts.RequestID, dedupe{Key: k, Fingerprint: fp, Result: result}); e != nil {
 		return Result{}, e
 	}
 	if e = t.commitReserved(opts.UseGuaranteed, opts.InFlightAllowance, opts.GuaranteedAllowance); e != nil {

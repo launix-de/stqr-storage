@@ -32,6 +32,14 @@ import (
 // this package. They may reserve physical capacity and manage the lifecycle.
 type Volume struct {
 	mu               sync.RWMutex
+	accountMu        sync.Mutex
+	accounting       map[ID]bucketAllocation
+	owned            map[ID]bucketAllocation
+	ownerStamp       any
+	ownerFilter      func(Key, bool) bool
+	admission        Admission
+	observer         func(StorageSnapshot)
+	overlay          *transaction
 	dev              VolumeIO
 	sb               Superblock
 	cache            *objectCache

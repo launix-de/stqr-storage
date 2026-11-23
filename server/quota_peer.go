@@ -9,7 +9,9 @@ import (
 	"github.com/launix-de/stqr-storage/volume"
 )
 
-func quotaPeerOpcode(op uint16) bool { return op >= peerQuotaCheckpoint && op <= peerQuotaAck }
+func quotaPeerOpcode(op uint16) bool {
+	return op >= peerQuotaCheckpoint && op <= peerQuotaAck || op == peerQuotaPhysical || op == peerQuotaPreview
+}
 func encodeQuotaGrant(g quotaGrant) ([]byte, error) {
 	proof, err := g.Debit.MarshalBinary()
 	if err != nil {
@@ -48,6 +50,12 @@ func (s *Server) quotaControlBusy() bool {
 func (s *Server) quotaPeerMessage(m client.Message, actor client.ID) ([]byte, error) {
 	if m.Kind != client.Request || s.quotas == nil {
 		return nil, client.ErrProtocol
+	}
+	if m.Opcode == peerQuotaPreview {
+		return s.quotaPreview(m.Body, actor)
+	}
+	if m.Opcode == peerQuotaPhysical {
+		return s.quotaPhysicalSnapshot(m.Body, actor)
 	}
 	if m.Opcode == peerQuotaCheckpoint {
 		return s.quotaCheckpoint(m.Body, actor)
@@ -101,11 +109,12 @@ func (s *Server) quotaPeerMessage(m client.Message, actor client.ID) ([]byte, er
 		if err != nil {
 			return nil, err
 		}
-		used, err := b.logicalUsage()
+		used, err := b.accountedUsage()
 		if err != nil {
 			return nil, err
 		}
-		free := subtractCapacity(subtractCapacity(allowance, used), q.reserveHints(volume.ID(bucket), nil))
+		used = max(used, s.heldPhysicalQuota(bucket))
+		free := subtractCapacity(subtractCapacity(allowance, used), q.reserveHints(volume.ID(bucket), nil, used))
 		amount := min(needed, free)
 		e := client.Encoder{}
 		e.Bool(amount != 0)
@@ -212,7 +221,7 @@ func (s *Server) fulfillQuotaDemand(h quotaDemand) {
 		s.opMu.Unlock()
 		return
 	}
-	if err := s.checkObjectOwner(h.bucket, h.object); err != nil {
+	if err := s.checkObjectOwner(h.bucket, h.object); err != nil && !h.activation {
 		s.opMu.Unlock()
 		q.fulfilled(h.bucket, h.object)
 		return
@@ -227,16 +236,22 @@ func (s *Server) fulfillQuotaDemand(h quotaDemand) {
 		s.opMu.Unlock()
 		return
 	}
-	used, err := b.logicalUsage()
+	used, err := b.accountedUsage()
 	s.opMu.Unlock()
 	if err != nil {
 		return
 	}
-	available := subtractCapacity(subtractCapacity(allowance, used), q.reserveHints(h.bucket, &h.object))
-	if available >= h.growth {
+	available := subtractCapacity(subtractCapacity(allowance, used), q.reserveHints(h.bucket, &h.object, used))
+	if !h.activation && available >= h.growth {
 		return
 	}
 	needed := h.growth - available
+	if h.activation {
+		if allowance >= h.growth {
+			return
+		}
+		needed = h.growth - allowance
+	}
 	allAnswered := true
 	for _, member := range view.manifest.Membership.Members {
 		if member.ID == q.ledger.node {

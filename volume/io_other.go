@@ -24,3 +24,5 @@ func fileSize(f *os.File) (int64, error) {
 func (f *FileIO) Alignment() uint32 { return PageSize }
 
 func openVolumeFile(path string) (*os.File, error) { return os.OpenFile(path, os.O_RDWR, 0) }
+
+func ensureFileBacking(f *os.File, size int64) error { return ErrUnsupported }

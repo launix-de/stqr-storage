@@ -73,6 +73,13 @@ type Server struct {
 	controller             *clusterController
 	currentSystem          atomic.Pointer[systemView]
 	placement              atomic.Pointer[placementImage]
+	quotaNode              client.ID
+	quotaUsage             atomic.Pointer[quotaUsageImage]
+	quotaPolicies          atomic.Pointer[quotaPolicyImage]
+	quotaRanges            atomic.Pointer[quotaRangeImage]
+	quotaImports           atomic.Pointer[quotaImportImage]
+	pendingQuotas          atomic.Pointer[systemView]
+	quotaHooked            map[volume.ID]*volume.Volume
 	quotas                 *quotaManager
 	scopes                 *rangeManager
 }
@@ -276,6 +283,9 @@ func Open(opts Options) (s *Server, err error) {
 		if e = s.initRanges(dataDir); e != nil {
 			return s, e
 		}
+	}
+	if e = s.restoreQuotaProtection(); e != nil {
+		return s, e
 	}
 	if e = s.recoverOperations(); e != nil {
 		return s, e

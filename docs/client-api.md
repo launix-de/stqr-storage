@@ -157,9 +157,10 @@ Tests cover real client/server streaming (including transfers above the receive
 queue size), conditional writes, durable retries after drain/restart, bucket
 isolation, quota limits, grant revocation, codec/tier changes and RAM resets.
 Protocol-peer tests additionally cover request multiplexing, cancellation and a
-committed mutation whose connection fails before the reply. Multinode routing,
-multiple-node replicas, guaranteed reservations and finite physical quotas remain
-explicit unsupported features; the server never acknowledges those guarantees.
+committed mutation whose connection fails before the reply. Multinode routing, logical/physical absolute quotas and volume-backed guaranteed
+reservations are implemented for the current single-copy path, including migration
+and restart. Multiple synchronous data replicas remain explicitly unsupported;
+the server never acknowledges unimplemented redundancy.
 
 ## Native readonly and overlay mounts
 

@@ -217,6 +217,12 @@ func (t *transaction) insertAt(off uint64, key indexKey, value uint64) (treeEntr
 	return t.summary(off, n), &r, nil
 }
 func (t *transaction) set(root *uint64, key indexKey, value uint64) error {
+	if root == &t.sb.ObjectRoot {
+		if t.changed == nil {
+			t.changed = make(map[indexKey]bool)
+		}
+		t.changed[key] = true
+	}
 	count := len(t.freeSiblings)
 	defer func() { t.freeSiblings = t.freeSiblings[:count] }()
 	left, right, e := t.insertAt(*root, key, value)
@@ -300,6 +306,12 @@ func (t *transaction) deleteAt(off uint64, key indexKey) (treeEntry, error) {
 	return t.summary(off, n), nil
 }
 func (t *transaction) remove(root *uint64, key indexKey) error {
+	if root == &t.sb.ObjectRoot {
+		if t.changed == nil {
+			t.changed = make(map[indexKey]bool)
+		}
+		t.changed[key] = true
+	}
 	_, e := t.deleteAt(*root, key)
 	if e != nil {
 		return e

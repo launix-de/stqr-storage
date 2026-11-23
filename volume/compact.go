@@ -211,13 +211,14 @@ func (v *Volume) scrubLocked() error {
 // Snapshot frames carry logical ranges, never physical offsets. Keeping a fixed
 // chunk size also makes semantic export digests stable across format revisions.
 type snapshotFrame struct {
-	Kind      string
-	Key       Key           `json:",omitzero"`
-	Info      Info          `json:",omitzero"`
-	Offset    uint64        `json:",omitzero"`
-	Data      []byte        `json:",omitzero"`
-	Request   RequestRecord `json:",omitzero"`
-	Segmented bool          `json:",omitzero"`
+	Kind         string
+	Key          Key           `json:",omitzero"`
+	Info         Info          `json:",omitzero"`
+	Offset       uint64        `json:",omitzero"`
+	Data         []byte        `json:",omitzero"`
+	Request      RequestRecord `json:",omitzero"`
+	Segmented    bool          `json:",omitzero"`
+	ImportShadow bool          `json:",omitzero"`
 }
 
 func (v *Volume) Export(dst io.Writer) error {
@@ -248,7 +249,7 @@ func (v *Volume) Export(dst io.Writer) error {
 		if e != nil {
 			return e
 		}
-		if e = enc.Encode(snapshotFrame{Kind: "object", Key: k, Info: o.Info, Segmented: o.Segmented}); e != nil {
+		if e = enc.Encode(snapshotFrame{Kind: "object", Key: k, Info: o.Info, Segmented: o.Segmented, ImportShadow: o.importShadow}); e != nil {
 			return e
 		}
 		buf := make([]byte, 64<<10)
@@ -269,7 +270,13 @@ func (v *Volume) Export(dst io.Writer) error {
 	if e != nil {
 		return e
 	}
-	if e = v.scanRequestsLocked(func(r RequestRecord) error { return enc.Encode(snapshotFrame{Kind: "request", Request: r}) }); e != nil {
+	if e = v.scanRequestsLocked(func(r RequestRecord) error {
+		d, _, err := v.loadDedupe(r.ID)
+		if err != nil {
+			return err
+		}
+		return enc.Encode(snapshotFrame{Kind: "request", Request: r, ImportShadow: d.importShadow})
+	}); e != nil {
 		return e
 	}
 	return enc.Encode(snapshotFrame{Kind: "complete"})
@@ -318,6 +325,7 @@ func (v *Volume) Import(src io.Reader, codec *Compression) error {
 	}
 	defer temp.Close()
 	for {
+		f = snapshotFrame{}
 		if e = d.Decode(&f); e != nil {
 			return ErrCorrupt
 		}
@@ -360,9 +368,9 @@ func (v *Volume) Import(src io.Reader, codec *Compression) error {
 						return err
 					}
 				}
-			}, Options{restoreSegmented: f.Segmented})
+			}, Options{restoreSegmented: f.Segmented, ImportShadow: f.ImportShadow})
 		case "request":
-			e = h.RestoreRequest(f.Request)
+			e = h.RestoreRequestWithOptions(f.Request, Options{ImportShadow: f.ImportShadow})
 		default:
 			e = ErrCorrupt
 		}
@@ -412,6 +420,19 @@ func (v *Volume) Import(src io.Reader, codec *Compression) error {
 		}
 	}
 	t := v.transaction()
+	if v.accounting != nil {
+		if err := temp.initAccounting(); err != nil {
+			return err
+		}
+		t.replaceAccounting = true
+		t.replacementAll = temp.accounting
+		if v.owned != nil {
+			if err := temp.SetOwnershipFilter(v.ownerStamp, v.ownerFilter); err != nil {
+				return err
+			}
+			t.replacementOwned = temp.owned
+		}
+	}
 	t.sb = temp.sb
 	t.sb.Generation = max(v.sb.Generation, temp.sb.Generation)
 	t.sb.Sequence = max(v.sb.Sequence, temp.sb.Sequence)

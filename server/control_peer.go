@@ -94,7 +94,14 @@ func (r *controlRuntime) execute(op uint16, body []byte, actor client.ID) ([]byt
 			}
 			return nil, err
 		}
+		if r.server != nil {
+			r.server.opMu.Lock()
+			defer r.server.opMu.Unlock()
+		}
 		proof, err = r.ledger.abortClaim(claim)
+		if err == nil && r.server != nil {
+			err = r.server.refreshQuotaProtectionLocked()
+		}
 	case client.PeerControlPrepare:
 		proposal, decodeErr := decodeControlProposal(body)
 		if decodeErr != nil {
@@ -115,7 +122,14 @@ func (r *controlRuntime) execute(op uint16, body []byte, actor client.ID) ([]byt
 		if op == client.PeerControlCommit {
 			proof, err = r.ledger.commit(decision, certificate)
 		} else {
+			if r.server != nil {
+				r.server.opMu.Lock()
+				defer r.server.opMu.Unlock()
+			}
 			err = r.ledger.release(decision, certificate)
+			if err == nil && r.server != nil {
+				err = r.server.refreshQuotaProtectionLocked()
+			}
 			if err == nil {
 				proof, err = r.ledger.releasedProof(decision)
 			}
