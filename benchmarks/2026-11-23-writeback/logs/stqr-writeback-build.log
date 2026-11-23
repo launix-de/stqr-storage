@@ -1,0 +1,22 @@
+make: Entering directory '/home/carli/projekte/stqr/.worktrees/kernel-throughput/kernel/kstqr'
+make -C /lib/modules/7.0.0-38-generic/build M=/home/carli/projekte/stqr/.worktrees/kernel-throughput/kernel/kstqr modules
+make[1]: Entering directory '/usr/src/linux-headers-7.0.0-38-generic'
+make[2]: Entering directory '/home/carli/projekte/stqr/.worktrees/kernel-throughput/kernel/kstqr'
+warning: the compiler differs from the one used to build the kernel
+  The kernel was built by: x86_64-linux-gnu-gcc (Ubuntu 15.2.0-16ubuntu1) 15.2.0
+  You are using:           gcc (Ubuntu 15.2.0-16ubuntu1) 15.2.0
+warning: pahole version differs from the one used to build the kernel
+  The kernel was built with: 131
+  You are using:             0
+  CC [M]  vfs.o
+  CC [M]  protocol.o
+  CC [M]  cache.o
+  LD [M]  kstqr.o
+  MODPOST Module.symvers
+  CC [M]  kstqr.mod.o
+  LD [M]  kstqr.ko
+  BTF [M] kstqr.ko
+Skipping BTF generation for kstqr.ko due to unavailability of vmlinux
+make[2]: Leaving directory '/home/carli/projekte/stqr/.worktrees/kernel-throughput/kernel/kstqr'
+make[1]: Leaving directory '/usr/src/linux-headers-7.0.0-38-generic'
+make: Leaving directory '/home/carli/projekte/stqr/.worktrees/kernel-throughput/kernel/kstqr'

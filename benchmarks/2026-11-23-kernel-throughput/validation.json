@@ -1,0 +1,43 @@
+{
+  "checks": [
+    {
+      "check": "Go client, CLI and volume race tests",
+      "result": "pass",
+      "log": "logs/stqr-kernel-throughput-go-tests.log"
+    },
+    {
+      "check": "C ASan/UBSan + Go race + subscription/FUSE/kernel integration",
+      "result": "pass",
+      "log": "logs/stqr-kernel-throughput-integration.log"
+    },
+    {
+      "check": "Final kernel VM with forced disconnect/resync and fsck",
+      "result": "pass",
+      "log": "logs/stqr-kernel-throughput-final-tests.log"
+    },
+    {
+      "check": "FUSE POSIX mounted integration race test",
+      "result": "pass",
+      "log": "logs/stqr-kernel-throughput-fuse-posix.log"
+    },
+    {
+      "check": "make -C kernel/kstqr; make -C client/c check",
+      "result": "pass",
+      "logs": [
+        "logs/stqr-kernel-throughput-build.log",
+        "logs/stqr-c-throughput-build.log"
+      ]
+    },
+    {
+      "check": "go vet ./...",
+      "result": "pass",
+      "log": "logs/stqr-kernel-throughput-vet.log"
+    }
+  ],
+  "notes": [
+    "Kernel module was loaded only inside disposable VMs.",
+    "Functional tests cover cache budgets, disabled-cache fallback, external content/permission/namespace/mmap invalidation, socket loss/reconnect, resync, dirty writeback recovery, remount, unload and post-exit fsck.",
+    "Initial merge regression failures were corrected; retained final Go test logs are successful reruns.",
+    "Final build also includes a conservative rejection of non-increasing pushed versions."
+  ]
+}

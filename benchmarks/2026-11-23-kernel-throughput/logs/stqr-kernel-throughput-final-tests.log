@@ -1,0 +1,5 @@
+=== RUN   TestKSTQRVirtualMachine
+    kstqr_linux_test.go:412: Standalone kernel mount, Go interoperability, filesystem operations and clean unload passed
+--- PASS: TestKSTQRVirtualMachine (41.35s)
+PASS
+ok  	github.com/launix-de/stqr-storage/server	42.361s

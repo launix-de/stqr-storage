@@ -1,0 +1,212 @@
+[
+  {
+    "test": "seq_read_mib_s",
+    "rep": 0,
+    "seconds": 10.609988123,
+    "rate": 0.754,
+    "case": "baseline"
+  },
+  {
+    "test": "stat_ops_s",
+    "rep": 0,
+    "seconds": 0.817336098,
+    "rate": 626.425,
+    "case": "baseline"
+  },
+  {
+    "test": "missing_stat_ops_s",
+    "rep": 0,
+    "seconds": 0.126200911,
+    "rate": 2028.512,
+    "case": "baseline"
+  },
+  {
+    "test": "small_read_files_s",
+    "rep": 0,
+    "seconds": 0.219171867,
+    "rate": 584.017,
+    "case": "baseline"
+  },
+  {
+    "test": "parallel_small_read_files_s",
+    "rep": 0,
+    "seconds": 0.854859699,
+    "rate": 598.929,
+    "case": "baseline"
+  },
+  {
+    "test": "seq_read_mib_s",
+    "rep": 1,
+    "seconds": 0.265935701,
+    "rate": 30.082,
+    "case": "baseline"
+  },
+  {
+    "test": "stat_ops_s",
+    "rep": 1,
+    "seconds": 0.841446326,
+    "rate": 608.476,
+    "case": "baseline"
+  },
+  {
+    "test": "missing_stat_ops_s",
+    "rep": 1,
+    "seconds": 0.138088111,
+    "rate": 1853.889,
+    "case": "baseline"
+  },
+  {
+    "test": "small_read_files_s",
+    "rep": 1,
+    "seconds": 0.218768149,
+    "rate": 585.094,
+    "case": "baseline"
+  },
+  {
+    "test": "parallel_small_read_files_s",
+    "rep": 1,
+    "seconds": 0.895330318,
+    "rate": 571.856,
+    "case": "baseline"
+  },
+  {
+    "test": "seq_read_mib_s",
+    "rep": 2,
+    "seconds": 0.261690989,
+    "rate": 30.57,
+    "case": "baseline"
+  },
+  {
+    "test": "stat_ops_s",
+    "rep": 2,
+    "seconds": 0.876131593,
+    "rate": 584.387,
+    "case": "baseline"
+  },
+  {
+    "test": "missing_stat_ops_s",
+    "rep": 2,
+    "seconds": 0.137525706,
+    "rate": 1861.47,
+    "case": "baseline"
+  },
+  {
+    "test": "small_read_files_s",
+    "rep": 2,
+    "seconds": 0.219560365,
+    "rate": 582.983,
+    "case": "baseline"
+  },
+  {
+    "test": "parallel_small_read_files_s",
+    "rep": 2,
+    "seconds": 0.886281393,
+    "rate": 577.695,
+    "case": "baseline"
+  },
+  {
+    "test": "seq_read_mib_s",
+    "rep": 0,
+    "seconds": 0.171653707,
+    "rate": 46.605,
+    "case": "improved"
+  },
+  {
+    "test": "stat_ops_s",
+    "rep": 0,
+    "seconds": 0.048755821,
+    "rate": 10501.31,
+    "case": "improved"
+  },
+  {
+    "test": "missing_stat_ops_s",
+    "rep": 0,
+    "seconds": 0.000269857,
+    "rate": 948650.582,
+    "case": "improved"
+  },
+  {
+    "test": "small_read_files_s",
+    "rep": 0,
+    "seconds": 0.000798398,
+    "rate": 160321.043,
+    "case": "improved"
+  },
+  {
+    "test": "parallel_small_read_files_s",
+    "rep": 0,
+    "seconds": 0.002165923,
+    "rate": 236388.828,
+    "case": "improved"
+  },
+  {
+    "test": "seq_read_mib_s",
+    "rep": 1,
+    "seconds": 0.000779062,
+    "rate": 10268.759,
+    "case": "improved"
+  },
+  {
+    "test": "stat_ops_s",
+    "rep": 1,
+    "seconds": 0.001121814,
+    "rate": 456403.646,
+    "case": "improved"
+  },
+  {
+    "test": "missing_stat_ops_s",
+    "rep": 1,
+    "seconds": 0.000248095,
+    "rate": 1031862.794,
+    "case": "improved"
+  },
+  {
+    "test": "small_read_files_s",
+    "rep": 1,
+    "seconds": 0.000552637,
+    "rate": 231616.776,
+    "case": "improved"
+  },
+  {
+    "test": "parallel_small_read_files_s",
+    "rep": 1,
+    "seconds": 0.001332079,
+    "rate": 384361.588,
+    "case": "improved"
+  },
+  {
+    "test": "seq_read_mib_s",
+    "rep": 2,
+    "seconds": 0.000626024,
+    "rate": 12779.063,
+    "case": "improved"
+  },
+  {
+    "test": "stat_ops_s",
+    "rep": 2,
+    "seconds": 0.001122806,
+    "rate": 456000.413,
+    "case": "improved"
+  },
+  {
+    "test": "missing_stat_ops_s",
+    "rep": 2,
+    "seconds": 0.000247404,
+    "rate": 1034744.79,
+    "case": "improved"
+  },
+  {
+    "test": "small_read_files_s",
+    "rep": 2,
+    "seconds": 0.000539622,
+    "rate": 237203.079,
+    "case": "improved"
+  },
+  {
+    "test": "parallel_small_read_files_s",
+    "rep": 2,
+    "seconds": 0.003927588,
+    "rate": 130359.905,
+    "case": "improved"
+  }
+]

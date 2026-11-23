@@ -10,7 +10,7 @@ import (
 
 const peerBucketUsage uint16 = 0x1064
 
-// Dashboard aggregation asks owners for their maintained scalar count instead
+// Dashboard and filesystem-capacity aggregation ask for maintained scalar counts instead
 // of transferring every object's metadata every three seconds. Counts remain
 // administrative measurements; they never authorize distributed quota growth.
 func (s *Server) receiveBucketUsage(ctx context.Context, body []byte, actor client.ID) ([]byte, error) {
@@ -18,16 +18,20 @@ func (s *Server) receiveBucketUsage(ctx context.Context, body []byte, actor clie
 	schema, bucket, user, name := d.U16(), volume.ID(d.ID()), d.ID(), d.Text()
 	var stamp [32]byte
 	copy(stamp[:], d.Take(32))
-	if schema != 1 || d.Done() != nil || bucket == systemBucket {
+	if (schema != 1 && schema != 2) || d.Done() != nil || bucket == systemBucket {
 		return nil, client.ErrProtocol
 	}
 	view := s.currentSystem.Load()
 	if view == nil || !hasControlNode(membershipIDs(view.manifest.Membership), actor) {
 		return nil, ErrBucketForbidden
 	}
-	account, err := s.findAccount(name)
-	if err != nil || account.ID != user.String() || account.Disabled || account.Role != "ADMIN" {
-		return nil, ErrBucketForbidden
+	if schema == 1 {
+		account, err := s.findAccount(name)
+		if err != nil || account.ID != user.String() || account.Disabled || account.Role != "ADMIN" {
+			return nil, ErrBucketForbidden
+		}
+	} else if user != (client.ID{}) || name != "" {
+		return nil, client.ErrProtocol
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, err

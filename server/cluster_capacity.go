@@ -25,20 +25,38 @@ func (b *Bucket) administrativeUsage(ctx context.Context, p principal) (uint64, 
 }
 
 func (b *Bucket) clusterLogicalUsage(ctx context.Context, p principal) (uint64, error) {
+	return b.clusterUsage(ctx, p, false)
+}
+
+// Internal capacity aggregation reveals only the authorized bucket totals to clients.
+// Member nodes may query maintained counters for reservation accounting.
+func (b *Bucket) clusterUsage(ctx context.Context, p principal, internal bool) (uint64, error) {
 	s := b.server
 	entries := s.placement.Load().bucketEntries(client.ID(b.ID()))
 	stamp := inventoryStamp(entries, client.ID{})
-	actor, err := parseID(p.User.ID)
-	if err != nil {
-		return 0, ErrBucketForbidden
+	var actor volume.ID
+	if !internal {
+		var err error
+		actor, err = parseID(p.User.ID)
+		if err != nil {
+			return 0, ErrBucketForbidden
+		}
 	}
 	var total uint64
 	for _, node := range s.inventoryOwners(b.ID()) {
 		e := client.Encoder{}
-		e.U16(1)
+		if internal {
+			e.U16(2)
+		} else {
+			e.U16(1)
+		}
 		e.ID(client.ID(b.ID()))
 		e.ID(client.ID(actor))
-		e.Text(p.User.Name)
+		if internal {
+			e.Text("")
+		} else {
+			e.Text(p.User.Name)
+		}
 		ownerStamp := inventoryStamp(entries, node)
 		e.B = append(e.B, ownerStamp[:]...)
 		body, err := (peerControlParticipants{runtime: s.control}).call(ctx, node, peerBucketUsage, e.B)
@@ -69,6 +87,10 @@ func (b *Bucket) clusterLogicalUsage(ctx context.Context, p principal) (uint64, 
 }
 
 func (s *Server) administrativeQuotaCapacity(id volume.ID, strategy uint8, p principal, selection ...BucketPolicy) (bucketQuotaCapacity, error) {
+	return s.quotaCapacitySnapshot(s.ctx, id, strategy, p, false, selection...)
+}
+
+func (s *Server) quotaCapacitySnapshot(ctx context.Context, id volume.ID, strategy uint8, p principal, internal bool, selection ...BucketPolicy) (bucketQuotaCapacity, error) {
 	view := s.currentSystem.Load()
 	if s.controller == nil || view == nil || len(view.manifest.Membership.Members) <= 1 {
 		return s.bucketQuotaCapacity(id, strategy, selection...)
@@ -76,7 +98,7 @@ func (s *Server) administrativeQuotaCapacity(id volume.ID, strategy uint8, p pri
 	if strategy > 2 {
 		return bucketQuotaCapacity{}, fail(400, "invalid storage strategy")
 	}
-	ctx, cancel := context.WithTimeout(s.ctx, 3*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
 	var used uint64
 	group := ""
@@ -88,7 +110,7 @@ func (s *Server) administrativeQuotaCapacity(id volume.ID, strategy uint8, p pri
 		}
 		description := b.Describe()
 		group, maskVersion = description.Policy.PlacementGroup, description.Policy.PlacementMaskVersion
-		used, err = b.clusterLogicalUsage(ctx, p)
+		used, err = b.clusterUsage(ctx, p, internal)
 		if err != nil {
 			return bucketQuotaCapacity{}, err
 		}
@@ -100,7 +122,7 @@ func (s *Server) administrativeQuotaCapacity(id volume.ID, strategy uint8, p pri
 	images := map[client.ID]client.StatsSnapshot{local.Node: local}
 	s.peerStatsMu.RLock()
 	for node, observation := range s.peerStats {
-		if observation.snapshot != nil {
+		if observation.snapshot != nil && (!internal || observation.online) {
 			images[node] = *observation.snapshot
 		}
 	}
@@ -145,7 +167,7 @@ func (s *Server) administrativeQuotaCapacity(id volume.ID, strategy uint8, p pri
 		if err != nil {
 			return bucketQuotaCapacity{}, err
 		}
-		usage, err := b.clusterLogicalUsage(ctx, p)
+		usage, err := b.clusterUsage(ctx, p, internal)
 		if err != nil {
 			return bucketQuotaCapacity{}, err
 		}

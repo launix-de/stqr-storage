@@ -1,0 +1,7 @@
+make: Entering directory '/home/carli/projekte/stqr/.worktrees/kernel-throughput/client/c'
+cc -Iinclude -Isrc -O2 -g -std=c11 -Wall -Wextra -Werror -Wpedantic -fPIC -c src/core.c -o src/core.o
+ar rcs libstqr.a src/core.o src/posix.o
+cc -Iinclude -Isrc -O2 -g -std=c11 -Wall -Wextra -Werror -Wpedantic -o tests/integration tests/integration.c libstqr.a -lcrypto
+./tests/integration
+local API validation passed; network tests run through STQR_TEST_C=1 go test ./server
+make: Leaving directory '/home/carli/projekte/stqr/.worktrees/kernel-throughput/client/c'

@@ -59,6 +59,8 @@ type AppendResult struct {
 // MutationOptions must be preserved across retries. Nil preconditions are absent;
 // pointers allow an explicit expected length/version of zero.
 type MutationOptions struct {
+	Accepted bool // opt-in weaker ACK; Sync confirms durability
+
 	RequestID                       RequestID
 	ExpectedVersion, ExpectedLength *uint64
 	Absent                          bool

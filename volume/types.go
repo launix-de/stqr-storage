@@ -132,6 +132,8 @@ type Result struct {
 // deduplication for a local operation; servers must supply nonzero IDs for retries.
 // A nil Compression keeps an existing object's codec, or selects Raw on creation.
 type Options struct {
+	Accepted bool // weaker ACK; visible until grouped checkpoint, default is durable
+
 	RequestID                       ID
 	Compression                     *Compression
 	ExpectedVersion, ExpectedLength *uint64

@@ -1,0 +1,22 @@
+{
+  "baseline_commit": "fa63967",
+  "subscription_base": "84fbbef",
+  "integration_merge": "8477391fe77132130575cc1d05d46f326a951110",
+  "final_source_sha256": {
+    "client/c/src/core.c": "7ccaa0ef1bcb0b4ace3e266c2d4c852fe02c0891c59f9af16503e40285c13620",
+    "client/c/src/port.h": "81f872f44686fce67ae34ac8f558e77928e6d4bce5bcefcb0a09bf4b4da65274",
+    "client/c/src/posix.c": "6834fe080d4e2d1d52be5b9467119f78140ae70841392701dbf23c8791989377",
+    "client/c/include/stqr.h": "c2ed675bfeae77260090c284006cfd6cb806db40f0f11a99d6f90f0b7c6a6679",
+    "kernel/kstqr/cache.c": "24aa8fdbaf80e94c7563d33f567b6d91c5518e8c007ec54a018e6957defde5d4",
+    "kernel/kstqr/vfs.c": "ca673fb07551ff25afea55200346bc2aca6650059e3d2a9bfb36f735fb3eb87c",
+    "kernel/kstqr/objects.c": "e0f9d16c6cce1fec74d85a74b80fee8b5644b2c53b8bc31713747d5448d2d489",
+    "kernel/kstqr/port.c": "84b3d3a61dca95e713ecf5be3901eaf228533b1d13afa946b67d742fe6176d07",
+    "kernel/kstqr/kstqr.h": "63ba0cc761940640570eb21f1b16af38f5d8caf9fba10c7740de74faebf82817",
+    "kernel/kstqr/tests/coherence.c": "b2f06337a8da1327ef41d049b9392c82d6b25c2ec7bb7f3d72ad60e9bfc678bc",
+    "kernel/kstqr/tests/throughput.c": "5851c501fd439485004a087d853278997aa5a16ba0946a1166c099385182969c",
+    "server/kstqr_linux_test.go": "05b4c5de62034cee0d43da84ca193e57853102fcbfccc29f60756600dba63bb0"
+  },
+  "baseline_module_sha256": "248e257a8d358afcb85a5ca2d7b8a85ce4ab6a41eee65085d0cbf93294c1783b",
+  "final_module_sha256": "067b0d684a53d602cd6c00b534f22bc28659b882510ee077bcd173c927426a0b",
+  "note": "Final module/source hashes include the subsequent reconnect-invalidation refinement. Timed improved module hash was not retained separately; see method and checked-in source/harness."
+}

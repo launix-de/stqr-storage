@@ -83,6 +83,10 @@ func (t *transaction) candidate(start, length, n, alignment uint64) (uint64, boo
 	off := (start + alignment - 1) / alignment * alignment
 	for off <= end && n <= end-off {
 		blocked := false
+		if t.v.deferred != nil && overlap(allocation{off, n, false}, t.v.deferred.journal) {
+			off = (t.v.deferred.journal.off + t.v.deferred.journal.n + alignment - 1) / alignment * alignment
+			continue
+		}
 		for _, list := range [][]allocation{t.busy, t.retired} {
 			for _, x := range list {
 				if t.reusable.n > 0 && x.off >= t.reusable.off && x.off+x.n <= t.reusable.off+t.reusable.n {
@@ -258,30 +262,28 @@ func (t *transaction) freeSpan(off, n uint64) error {
 	if e != nil {
 		return e
 	}
-	if hasPrevious {
-		p := keyOffset(previous.key)
-		if p+previous.value > off {
-			return ErrCorrupt
-		}
-		if p+previous.value == off {
-			if e = t.remove(&t.sb.FreeRoot, previous.key); e != nil {
-				return e
-			}
-			off = p
-			n += previous.value
-		}
+	p, q := keyOffset(previous.key), keyOffset(next.key)
+	if hasPrevious && p+previous.value > off || hasNext && off+n > q {
+		return ErrCorrupt
 	}
-	if hasNext {
-		q := keyOffset(next.key)
-		if off+n > q {
-			return ErrCorrupt
+	mergePrevious := hasPrevious && p+previous.value == off
+	mergeNext := hasNext && off+n == q
+	if mergePrevious {
+		length := previous.value + n
+		if mergeNext {
+			length += next.value
 		}
-		if off+n == q {
-			if e = t.remove(&t.sb.FreeRoot, next.key); e != nil {
-				return e
-			}
-			n += next.value
+		if e = t.set(&t.sb.FreeRoot, previous.key, length); e != nil {
+			return e
 		}
+		if mergeNext {
+			return t.remove(&t.sb.FreeRoot, next.key)
+		}
+		return nil
+	}
+	if mergeNext {
+		_, e = t.replaceKeyAt(t.sb.FreeRoot, next.key, spaceKey(off), n+next.value)
+		return e
 	}
 	return t.set(&t.sb.FreeRoot, spaceKey(off), n)
 }
@@ -312,12 +314,21 @@ func (v *Volume) readPage(off uint64) ([]byte, error) {
 		return nil, ErrCorrupt
 	}
 	b := make([]byte, PageSize)
-	if e := readFullAt(v.dev, b[:min(uint64(PageSize), v.limit-off)], off); e != nil {
+	var e error
+	if v.deferred != nil || v.staging != nil {
+		e = v.readLayer(b[:min(uint64(PageSize), v.limit-off)], off)
+	} else {
+		e = readFullAt(v.dev, b[:min(uint64(PageSize), v.limit-off)], off)
+	}
+	if e != nil {
 		return nil, e
 	}
 	return b, nil
 }
 func (v *Volume) readBytes(dst []byte, off uint64) error {
+	if v.deferred != nil || v.staging != nil {
+		return v.readLayer(dst, off)
+	}
 	for len(dst) > 0 {
 		at := off % PageSize
 		if at == 0 && len(dst) >= PageSize {
@@ -424,6 +435,45 @@ func (t *transaction) commitReserved(useGuaranteed bool, allowance, guaranteedAl
 	header, e := t.sb.MarshalBinary()
 	if e != nil {
 		return e
+	}
+	if t.v.staging != nil {
+		for off := range t.pages {
+			if err := t.v.stageWrite(t.pages[off], off); err != nil {
+				return err
+			}
+		}
+		for off := range t.spilled {
+			page, err := t.page(off)
+			if err != nil {
+				return err
+			}
+			if err = t.v.stageWrite(page, off); err != nil {
+				return err
+			}
+		}
+		count := len(t.v.deferred.pages)
+		for off := range t.v.staging {
+			if t.v.deferred.pages[off] == nil {
+				count++
+			}
+		}
+		if count > deferredPageLimit {
+			return errDeferredBudget
+		}
+		for off, page := range t.v.staging {
+			t.v.deferred.pages[off] = page
+		}
+		t.v.sb = t.sb
+		t.v.inFlightReserved -= consumed
+		t.v.guaranteed -= guaranteedConsumed
+		for off, page := range t.v.staging {
+			if string(page[:4]) == "BPT2" {
+				if node, err := decodeNode(page, t.sb.Identity.VolumeID); err == nil {
+					t.v.nodes.put(off, node)
+				}
+			}
+		}
+		return nil
 	}
 	all := make(map[uint64]bool, len(t.pages)+len(t.spilled))
 	for off := range t.pages {
@@ -560,6 +610,7 @@ func (t *transaction) commitReserved(useGuaranteed bool, allowance, guaranteedAl
 		return e
 	}
 	t.v.sb = t.sb
+	t.v.durableGeneration = t.sb.Generation
 	t.v.inFlightReserved -= consumed
 	t.v.guaranteed -= guaranteedConsumed
 	for off := range all {

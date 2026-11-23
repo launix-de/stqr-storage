@@ -405,6 +405,9 @@ func (b *Bucket) mutate(ctx context.Context, p principal, id volume.ObjectID, op
 		}
 		return volume.Result{}, err
 	}
+	if err := s.switchAcceptedVolume(b.ID(), v, opt.Accepted); err != nil {
+		return volume.Result{}, err
+	}
 	if old.Version == 0 && opcode != 0x0102 && opcode != 0x0106 && b.lostRange(id) {
 		return volume.Result{}, fail(410, "partial mutation cannot recreate a lost object")
 	}
@@ -529,6 +532,13 @@ func (b *Bucket) mutate(ctx context.Context, p principal, id volume.ObjectID, op
 		}
 	default:
 		err = volume.ErrUnsupported
+	}
+	if err == nil && opt.Accepted {
+		generation, gerr := h.Generation()
+		if gerr != nil {
+			return result, gerr
+		}
+		s.recordAccepted(b.ID(), v, generation)
 	}
 	if err == nil && !repeated && s.objectSubscriptions.watched(key) {
 		published, readErr := h.RecordInfo(key)

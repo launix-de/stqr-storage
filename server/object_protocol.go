@@ -70,6 +70,7 @@ type objectMutation struct {
 	digest         [32]byte
 	inline         []byte
 	stream         bool
+	accepted       bool
 }
 
 func (s *Server) parseObject(m client.Message, ws *wsSession, p principal) (*objectMutation, *client.Decoder, error) {
@@ -150,10 +151,23 @@ func (s *Server) parseObject(m client.Message, ws *wsSession, p principal) (*obj
 	return &objectMutation{message: m, bucket: b, object: oid}, d, nil
 }
 func (s *Server) executeObjects(m client.Message, ws *wsSession, p principal) ([]byte, int, error) {
+	accepted := m.Opcode == client.ObjectAccepted
+	if accepted {
+		if len(m.Body) < 82 {
+			return nil, 0, fail(400, "invalid accepted mutation")
+		}
+		inner := client.Decoder{B: m.Body[80:82]}
+		m.Opcode = inner.U16()
+		if m.Opcode < 0x102 || m.Opcode > 0x108 || m.Opcode == 0x107 {
+			return nil, 0, fail(400, "accepted wrapper requires mutation")
+		}
+		m.Body = append(append([]byte{}, m.Body[:80]...), m.Body[82:]...)
+	}
 	op, d, err := s.parseObject(m, ws, p)
 	if err != nil {
 		return nil, 0, err
 	}
+	op.accepted = accepted
 	ctx := s.ctx
 	if ws != nil {
 		ctx = ws.objectContext(m.ID)
@@ -255,6 +269,9 @@ func (s *Server) executeObjects(m client.Message, ws *wsSession, p principal) ([
 			return nil, 0, fail(400, "invalid mutation transfer")
 		}
 		if op.stream {
+			if accepted {
+				return nil, 0, fail(400, "accepted wrapper requires inline payload")
+			}
 			if len(op.inline) != 0 || ws == nil {
 				return nil, 0, fail(400, "streaming upload requires WebSocket")
 			}
@@ -298,6 +315,7 @@ func encodeObjectTransfer(e *client.Encoder, mode uint8, length uint64, digest [
 	e.Blob(data)
 }
 func (op *objectMutation) commit(ctx context.Context, p principal, src io.Reader, runtime client.ID) ([]byte, int, error) {
+	op.options.Accepted = op.accepted
 	ctx = bindObjectRequest(ctx, op.message)
 	var result volume.Result
 	var err error

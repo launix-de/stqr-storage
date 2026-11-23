@@ -74,6 +74,7 @@ func TestClusterQuotaDisplayUsesAllMembersWithoutBlockingLocalWrites(t *testing.
 	source.node.peerStatsMu.Lock()
 	source.node.peerStats[client.ID{0xfa}] = &peerObservation{snapshot: &client.StatsSnapshot{Node: client.ID{0xfa}, Volumes: []client.VolumeStats{{ID: client.ID{0xfb}, State: 1, CapacityPhysical: 1 << 30, AdmissionFreePhysical: 1 << 30}}}}
 	source.node.peerStatsMu.Unlock()
+
 	handle, err := target.node.volumes[vid.String()].store.Open(true)
 	if err != nil {
 		t.Fatal(err)
@@ -139,4 +140,18 @@ func TestClusterQuotaDisplayUsesAllMembersWithoutBlockingLocalWrites(t *testing.
 	if d.Err != nil || used != 1<<20 || nodes != 2 || available <= 8<<20 || available >= 16<<20 || maximum <= used {
 		t.Fatal("wrong global capacity/usage", used, available, maximum, nodes, d.Err)
 	}
+	// Filesystem clients use the same committed member pool, without requiring
+	// dashboard/admin access on the owner serving the usage counter.
+	capacity, err := c.Space(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	localCapacity, err := source.node.bucketQuotaCapacity(bucket.ID(), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if capacity.Used != 1<<20 || capacity.Free <= localCapacity.Available || !capacity.QuotaLimited {
+		t.Fatalf("filesystem space omitted remote storage: %+v, local %+v", capacity, localCapacity)
+	}
+
 }

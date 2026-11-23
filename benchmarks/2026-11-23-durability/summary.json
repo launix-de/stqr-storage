@@ -1,0 +1,698 @@
+{
+  "baseline": {
+    "direct_write_fsync": {
+      "rate": {
+        "median": 90.421,
+        "min": 90.419,
+        "max": 101.292,
+        "samples": [
+          90.421,
+          90.419,
+          101.292
+        ]
+      },
+      "seconds": {
+        "median": 0.088475041,
+        "min": 0.078979529,
+        "max": 0.088477285,
+        "samples": [
+          0.088475041,
+          0.088477285,
+          0.078979529
+        ]
+      },
+      "backend_syncs": {
+        "median": 96,
+        "min": 96,
+        "max": 96,
+        "samples": [
+          96,
+          96,
+          96
+        ]
+      },
+      "backend_bytes": {
+        "median": 9719808,
+        "min": 9490432,
+        "max": 9760768,
+        "samples": [
+          9490432,
+          9760768,
+          9719808
+        ]
+      },
+      "unit": "MiB/s"
+    },
+    "mmap_4k_commit": {
+      "rate": {
+        "median": 748.843,
+        "min": 732.442,
+        "max": 778.14,
+        "samples": [
+          732.442,
+          778.14,
+          748.843
+        ]
+      },
+      "seconds": {
+        "median": 0.042732573,
+        "min": 0.041123714,
+        "max": 0.043689488,
+        "samples": [
+          0.043689488,
+          0.041123714,
+          0.042732573
+        ]
+      },
+      "backend_syncs": {
+        "median": 128,
+        "min": 128,
+        "max": 128,
+        "samples": [
+          128,
+          128,
+          128
+        ]
+      },
+      "backend_bytes": {
+        "median": 1814528,
+        "min": 1810432,
+        "max": 1818624,
+        "samples": [
+          1814528,
+          1818624,
+          1810432
+        ]
+      },
+      "unit": "commits/s"
+    },
+    "mmap_dense_msync": {
+      "rate": {
+        "median": 67.482,
+        "min": 59.309,
+        "max": 68.75,
+        "samples": [
+          59.309,
+          68.75,
+          67.482
+        ]
+      },
+      "seconds": {
+        "median": 0.014818658,
+        "min": 0.014545396,
+        "max": 0.016860759,
+        "samples": [
+          0.016860759,
+          0.014545396,
+          0.014818658
+        ]
+      },
+      "backend_syncs": {
+        "median": 12,
+        "min": 12,
+        "max": 12,
+        "samples": [
+          12,
+          12,
+          12
+        ]
+      },
+      "backend_bytes": {
+        "median": 1204224,
+        "min": 1196032,
+        "max": 1212416,
+        "samples": [
+          1204224,
+          1196032,
+          1212416
+        ]
+      },
+      "unit": "MiB/s"
+    },
+    "mmap_sparse_msync": {
+      "rate": {
+        "median": 1.222,
+        "min": 1.19,
+        "max": 1.262,
+        "samples": [
+          1.262,
+          1.222,
+          1.19
+        ]
+      },
+      "seconds": {
+        "median": 0.102273575,
+        "min": 0.099084914,
+        "max": 0.10507987,
+        "samples": [
+          0.099084914,
+          0.102273575,
+          0.10507987
+        ]
+      },
+      "backend_syncs": {
+        "median": 384,
+        "min": 384,
+        "max": 384,
+        "samples": [
+          384,
+          384,
+          384
+        ]
+      },
+      "backend_bytes": {
+        "median": 4988928,
+        "min": 4907008,
+        "max": 5279744,
+        "samples": [
+          4907008,
+          5279744,
+          4988928
+        ]
+      },
+      "unit": "MiB/s"
+    }
+  },
+  "improved": {
+    "direct_write_fsync": {
+      "rate": {
+        "median": 82.696,
+        "min": 76.22,
+        "max": 85.312,
+        "samples": [
+          76.22,
+          82.696,
+          85.312
+        ]
+      },
+      "seconds": {
+        "median": 0.096739394,
+        "min": 0.09377295,
+        "max": 0.104958883,
+        "samples": [
+          0.104958883,
+          0.096739394,
+          0.09377295
+        ]
+      },
+      "backend_syncs": {
+        "median": 20,
+        "min": 20,
+        "max": 20,
+        "samples": [
+          20,
+          20,
+          20
+        ]
+      },
+      "backend_bytes": {
+        "median": 8925184,
+        "min": 8650752,
+        "max": 9007104,
+        "samples": [
+          8650752,
+          8925184,
+          9007104
+        ]
+      },
+      "unit": "MiB/s"
+    },
+    "mmap_4k_commit": {
+      "rate": {
+        "median": 763.288,
+        "min": 680.002,
+        "max": 779.695,
+        "samples": [
+          680.002,
+          779.695,
+          763.288
+        ]
+      },
+      "seconds": {
+        "median": 0.041923875,
+        "min": 0.041041691,
+        "max": 0.047058698,
+        "samples": [
+          0.047058698,
+          0.041041691,
+          0.041923875
+        ]
+      },
+      "backend_syncs": {
+        "median": 128,
+        "min": 128,
+        "max": 128,
+        "samples": [
+          128,
+          128,
+          128
+        ]
+      },
+      "backend_bytes": {
+        "median": 1892352,
+        "min": 1871872,
+        "max": 1916928,
+        "samples": [
+          1871872,
+          1916928,
+          1892352
+        ]
+      },
+      "unit": "commits/s"
+    },
+    "mmap_dense_msync": {
+      "rate": {
+        "median": 73.91,
+        "min": 42.884,
+        "max": 76.916,
+        "samples": [
+          73.91,
+          42.884,
+          76.916
+        ]
+      },
+      "seconds": {
+        "median": 0.013529961,
+        "min": 0.013001119,
+        "max": 0.023318524,
+        "samples": [
+          0.013529961,
+          0.023318524,
+          0.013001119
+        ]
+      },
+      "backend_syncs": {
+        "median": 4,
+        "min": 4,
+        "max": 4,
+        "samples": [
+          4,
+          4,
+          4
+        ]
+      },
+      "backend_bytes": {
+        "median": 1179648,
+        "min": 1118208,
+        "max": 1196032,
+        "samples": [
+          1118208,
+          1179648,
+          1196032
+        ]
+      },
+      "unit": "MiB/s"
+    },
+    "mmap_sparse_msync": {
+      "rate": {
+        "median": 1.515,
+        "min": 1.463,
+        "max": 1.637,
+        "samples": [
+          1.463,
+          1.515,
+          1.637
+        ]
+      },
+      "seconds": {
+        "median": 0.082510572,
+        "min": 0.076361357,
+        "max": 0.08542,
+        "samples": [
+          0.08542,
+          0.082510572,
+          0.076361357
+        ]
+      },
+      "backend_syncs": {
+        "median": 4,
+        "min": 4,
+        "max": 4,
+        "samples": [
+          4,
+          4,
+          4
+        ]
+      },
+      "backend_bytes": {
+        "median": 364544,
+        "min": 303104,
+        "max": 413696,
+        "samples": [
+          303104,
+          364544,
+          413696
+        ]
+      },
+      "unit": "MiB/s"
+    }
+  },
+  "ssd-baseline": {
+    "direct_write_fsync": {
+      "rate": {
+        "median": 27.779,
+        "min": 26.663,
+        "max": 27.809,
+        "samples": [
+          27.779,
+          26.663,
+          27.809
+        ]
+      },
+      "seconds": {
+        "median": 0.287990834,
+        "min": 0.287677948,
+        "max": 0.300043824,
+        "samples": [
+          0.287990834,
+          0.300043824,
+          0.287677948
+        ]
+      },
+      "backend_syncs": {
+        "median": 96,
+        "min": 96,
+        "max": 96,
+        "samples": [
+          96,
+          96,
+          96
+        ]
+      },
+      "backend_bytes": {
+        "median": 9711616,
+        "min": 9490432,
+        "max": 9748480,
+        "samples": [
+          9490432,
+          9748480,
+          9711616
+        ]
+      },
+      "unit": "MiB/s"
+    },
+    "mmap_4k_commit": {
+      "rate": {
+        "median": 116.704,
+        "min": 116.124,
+        "max": 119.851,
+        "samples": [
+          119.851,
+          116.704,
+          116.124
+        ]
+      },
+      "seconds": {
+        "median": 0.27419756,
+        "min": 0.266998164,
+        "max": 0.275567179,
+        "samples": [
+          0.266998164,
+          0.27419756,
+          0.275567179
+        ]
+      },
+      "backend_syncs": {
+        "median": 128,
+        "min": 128,
+        "max": 128,
+        "samples": [
+          128,
+          128,
+          128
+        ]
+      },
+      "backend_bytes": {
+        "median": 1810432,
+        "min": 1802240,
+        "max": 1818624,
+        "samples": [
+          1802240,
+          1818624,
+          1810432
+        ]
+      },
+      "unit": "commits/s"
+    },
+    "mmap_dense_msync": {
+      "rate": {
+        "median": 26.712,
+        "min": 26.531,
+        "max": 26.866,
+        "samples": [
+          26.531,
+          26.866,
+          26.712
+        ]
+      },
+      "seconds": {
+        "median": 0.037436488,
+        "min": 0.037222376,
+        "max": 0.037692137,
+        "samples": [
+          0.037692137,
+          0.037222376,
+          0.037436488
+        ]
+      },
+      "backend_syncs": {
+        "median": 12,
+        "min": 12,
+        "max": 12,
+        "samples": [
+          12,
+          12,
+          12
+        ]
+      },
+      "backend_bytes": {
+        "median": 1204224,
+        "min": 1196032,
+        "max": 1212416,
+        "samples": [
+          1204224,
+          1196032,
+          1212416
+        ]
+      },
+      "unit": "MiB/s"
+    },
+    "mmap_sparse_msync": {
+      "rate": {
+        "median": 0.149,
+        "min": 0.146,
+        "max": 0.16,
+        "samples": [
+          0.16,
+          0.146,
+          0.149
+        ]
+      },
+      "seconds": {
+        "median": 0.839577661,
+        "min": 0.78026723,
+        "max": 0.858086742,
+        "samples": [
+          0.78026723,
+          0.858086742,
+          0.839577661
+        ]
+      },
+      "backend_syncs": {
+        "median": 384,
+        "min": 384,
+        "max": 384,
+        "samples": [
+          384,
+          384,
+          384
+        ]
+      },
+      "backend_bytes": {
+        "median": 4988928,
+        "min": 4943872,
+        "max": 5271552,
+        "samples": [
+          4943872,
+          5271552,
+          4988928
+        ]
+      },
+      "unit": "MiB/s"
+    }
+  },
+  "ssd-improved": {
+    "direct_write_fsync": {
+      "rate": {
+        "median": 49.183,
+        "min": 47.185,
+        "max": 52.94,
+        "samples": [
+          49.183,
+          52.94,
+          47.185
+        ]
+      },
+      "seconds": {
+        "median": 0.162657901,
+        "min": 0.151113295,
+        "max": 0.169546223,
+        "samples": [
+          0.162657901,
+          0.151113295,
+          0.169546223
+        ]
+      },
+      "backend_syncs": {
+        "median": 20,
+        "min": 20,
+        "max": 28,
+        "samples": [
+          20,
+          20,
+          28
+        ]
+      },
+      "backend_bytes": {
+        "median": 8908800,
+        "min": 8650752,
+        "max": 9097216,
+        "samples": [
+          8650752,
+          8908800,
+          9097216
+        ]
+      },
+      "unit": "MiB/s"
+    },
+    "mmap_4k_commit": {
+      "rate": {
+        "median": 115.823,
+        "min": 114.817,
+        "max": 117.212,
+        "samples": [
+          114.817,
+          115.823,
+          117.212
+        ]
+      },
+      "seconds": {
+        "median": 0.276283463,
+        "min": 0.273010403,
+        "max": 0.278703974,
+        "samples": [
+          0.278703974,
+          0.276283463,
+          0.273010403
+        ]
+      },
+      "backend_syncs": {
+        "median": 128,
+        "min": 128,
+        "max": 128,
+        "samples": [
+          128,
+          128,
+          128
+        ]
+      },
+      "backend_bytes": {
+        "median": 1892352,
+        "min": 1871872,
+        "max": 1937408,
+        "samples": [
+          1871872,
+          1892352,
+          1937408
+        ]
+      },
+      "unit": "commits/s"
+    },
+    "mmap_dense_msync": {
+      "rate": {
+        "median": 39.801,
+        "min": 38.742,
+        "max": 40.209,
+        "samples": [
+          40.209,
+          38.742,
+          39.801
+        ]
+      },
+      "seconds": {
+        "median": 0.025125062,
+        "min": 0.024869914,
+        "max": 0.025811981,
+        "samples": [
+          0.024869914,
+          0.025811981,
+          0.025125062
+        ]
+      },
+      "backend_syncs": {
+        "median": 4,
+        "min": 4,
+        "max": 4,
+        "samples": [
+          4,
+          4,
+          4
+        ]
+      },
+      "backend_bytes": {
+        "median": 1183744,
+        "min": 1118208,
+        "max": 1204224,
+        "samples": [
+          1118208,
+          1183744,
+          1204224
+        ]
+      },
+      "unit": "MiB/s"
+    },
+    "mmap_sparse_msync": {
+      "rate": {
+        "median": 1.505,
+        "min": 1.328,
+        "max": 1.869,
+        "samples": [
+          1.328,
+          1.505,
+          1.869
+        ]
+      },
+      "seconds": {
+        "median": 0.083075312,
+        "min": 0.066869682,
+        "max": 0.094147873,
+        "samples": [
+          0.094147873,
+          0.083075312,
+          0.066869682
+        ]
+      },
+      "backend_syncs": {
+        "median": 4,
+        "min": 4,
+        "max": 12,
+        "samples": [
+          12,
+          4,
+          4
+        ]
+      },
+      "backend_bytes": {
+        "median": 409600,
+        "min": 364544,
+        "max": 450560,
+        "samples": [
+          450560,
+          364544,
+          409600
+        ]
+      },
+      "unit": "MiB/s"
+    }
+  }
+}

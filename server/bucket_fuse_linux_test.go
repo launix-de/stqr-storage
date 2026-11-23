@@ -53,6 +53,10 @@ func TestBucketFilesystemKernelNamespace(t *testing.T) {
 		mounted.Wait()
 	})
 	a, bb := filepath.Join(mountpoint, "a"), filepath.Join(mountpoint, "b")
+	var space syscall.Statfs_t
+	if err := syscall.Statfs(mountpoint, &space); err != nil || space.Blocks == 0 || space.Bavail == 0 {
+		t.Fatalf("statfs: %+v %v", space, err)
+	}
 	for _, path := range []string{a, bb} {
 		if err = os.Mkdir(path, 0755); err != nil {
 			t.Fatal(err)

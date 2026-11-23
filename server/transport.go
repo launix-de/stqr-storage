@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -27,6 +28,8 @@ type terminalFrame struct {
 }
 
 type wsSession struct {
+	durabilityCap atomic.Bool
+
 	terminal        chan terminalFrame
 	server          *Server
 	ctx             context.Context
@@ -174,7 +177,7 @@ func (s *Server) serveWebSocket(w http.ResponseWriter, r *http.Request, p princi
 			}
 			continue
 		}
-		if m.Opcode >= 0x0100 && m.Opcode <= 0x0108 || m.Opcode == client.ObjectSubscribe || m.Opcode == client.BucketMaintenance || m.Opcode == client.BucketScan {
+		if m.Opcode >= 0x0100 && m.Opcode <= 0x0108 || m.Opcode == client.ObjectSubscribe || m.Opcode == client.ObjectAccepted || m.Opcode == client.BucketStatFS || m.Opcode == client.BucketSync || m.Opcode == client.BucketMaintenance || m.Opcode == client.BucketScan {
 			if !ws.registerObjectContext(m.ID) {
 				return
 			}
@@ -267,7 +270,7 @@ func (ws *wsSession) requestLoop() {
 			if status == 0 {
 				continue
 			}
-			if m.Opcode >= 0x0100 && m.Opcode <= 0x0108 || m.Opcode == client.ObjectSubscribe || m.Opcode == client.BucketMaintenance || m.Opcode == client.BucketScan {
+			if m.Opcode >= 0x0100 && m.Opcode <= 0x0108 || m.Opcode == client.ObjectSubscribe || m.Opcode == client.ObjectAccepted || m.Opcode == client.BucketStatFS || m.Opcode == client.BucketSync || m.Opcode == client.BucketMaintenance || m.Opcode == client.BucketScan {
 				ws.releaseObjectContext(m.ID)
 			}
 			if m.Kind == client.Request {

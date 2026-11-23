@@ -311,11 +311,13 @@ func TestOverlayFsckPreservesUpperWhenOfflineLowerGcLostSource(t *testing.T) {
 	if err := lower.Unlink(ctx, FilesystemRootID(), "conf.json"); err != nil {
 		t.Fatal(err)
 	}
-	// Unlink alone retains the original native source object. A separate lower
-	// fsck currently cannot discover dependencies in an offline upper bucket.
-	if data := readOverlayFile(t, o, conf.ID); string(data) != "base-config" {
-		t.Fatal(string(data))
+	// Updating the persistent link count changes the source inode version.
+	// Its payload remains stored, but pinned overlay references are now stale.
+	if _, err := o.ReadAt(ctx, conf.ID, make([]byte, 1), 0); !errors.Is(err, syscall.ESTALE) {
+		t.Fatal(err)
 	}
+	// A separate lower fsck cannot discover dependencies in an offline upper.
+
 	if _, err := checkFilesystem(ctx, &fsckMemory{MemoryFilesystemStore: guard.MemoryFilesystemStore}); err != nil {
 		t.Fatal(err)
 	}

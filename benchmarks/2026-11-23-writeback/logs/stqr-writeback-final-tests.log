@@ -1,0 +1,23 @@
+=== RUN   TestCClient
+=== RUN   TestCClient/objects
+=== RUN   TestCClient/disconnect
+=== RUN   TestCClient/digest
+=== RUN   TestCClient/malformed
+=== RUN   TestCClient/wrong-id
+=== RUN   TestCClient/varint
+=== RUN   TestCClient/text
+=== RUN   TestCClient/subscription-digest
+--- PASS: TestCClient (4.44s)
+    --- PASS: TestCClient/objects (3.66s)
+    --- PASS: TestCClient/disconnect (0.02s)
+    --- PASS: TestCClient/digest (0.02s)
+    --- PASS: TestCClient/malformed (0.02s)
+    --- PASS: TestCClient/wrong-id (0.02s)
+    --- PASS: TestCClient/varint (0.02s)
+    --- PASS: TestCClient/text (0.02s)
+    --- PASS: TestCClient/subscription-digest (0.02s)
+=== RUN   TestKSTQRVirtualMachine
+    kstqr_linux_test.go:447: Standalone kernel mount, Go interoperability, filesystem operations and clean unload passed
+--- PASS: TestKSTQRVirtualMachine (37.91s)
+PASS
+ok  	github.com/launix-de/stqr-storage/server	43.376s
