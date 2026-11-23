@@ -233,7 +233,7 @@ func (s *Server) commitRecoveredVolumes(m client.Message, p principal) ([]byte, 
 		}
 		s.peerStatsMu.RLock()
 		observation := s.peerStats[member.ID]
-		capable := observation != nil && observation.online && observation.connection.Capabilities&client.CapabilityVolumeRecovery != 0
+		capable := observation != nil && observation.online && observation.connection.Capabilities&client.CapabilityRecoveryFenceClearance != 0
 		s.peerStatsMu.RUnlock()
 		if !capable {
 			return s.finishRecoveryAdminOperation(m.ID, fail(503, "required takeover participant is unavailable or needs an upgrade"))

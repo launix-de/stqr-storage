@@ -240,7 +240,7 @@ func (s *Server) forceDisconnect(m client.Message, actor principal) ([]byte, int
 		}
 		s.peerStatsMu.RLock()
 		o := s.peerStats[member.ID]
-		available := o != nil && o.online && o.connection.Capabilities&client.CapabilityControlRecovery != 0 && (!request.RecoverOnly || o.connection.Capabilities&client.CapabilityVolumeRecovery != 0)
+		available := o != nil && o.online && o.connection.Capabilities&client.CapabilityControlRecovery != 0 && (!request.RecoverOnly || o.connection.Capabilities&client.CapabilityRecoveryFenceClearance != 0)
 		s.peerStatsMu.RUnlock()
 		if !available {
 			return nil, 0, fail(503, "a required survivor is unavailable or needs an exclusion-capable upgrade")

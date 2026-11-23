@@ -116,6 +116,9 @@ func validateRecoveryOrigins(view *systemView) error {
 			return fmt.Errorf("%w: recovery origin digest/order", volume.ErrCorrupt)
 		}
 		old := origin.Before.Entries[0]
+		if err := validateRecoveryCancellations(origin); err != nil {
+			return fmt.Errorf("%w: invalid recovery cancellation: %v", volume.ErrCorrupt, err)
+		}
 		if len(old.Locations) != 1 || old.Runtime != (client.ID{}) || old.State != 0 && old.State != 5 || !hasControlNode(view.manifest.Membership.Excluded, old.Locations[0].Node) || origin.After.Start != old.Start || origin.After.PrefixBits != old.PrefixBits || origin.After.OwnerEpoch <= old.OwnerEpoch || len(origin.After.Locations) != 1 {
 			return fmt.Errorf("%w: recovery lineage: old state %d old epoch %d after epoch %d after locations %d source excluded %t", volume.ErrCorrupt, old.State, old.OwnerEpoch, origin.After.OwnerEpoch, len(origin.After.Locations), hasControlNode(view.manifest.Membership.Excluded, old.Locations[0].Node))
 		}

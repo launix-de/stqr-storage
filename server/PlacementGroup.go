@@ -184,6 +184,11 @@ func (p *placementGroupImage) allowsVersion(group string, version uint64, node, 
 	if p == nil {
 		return false
 	}
+	// Data PG masks select data volumes. In particular an empty blacklist
+	// must not silently spill payload into the System-PG's metadata devices.
+	if group != systemPlacementGroup.String() && p.allowsVersion(systemPlacementGroup.String(), 0, node, vol) {
+		return false
+	}
 	nodes := p.filters[group]
 	if version != 0 {
 		nodes = p.versions[group][version]

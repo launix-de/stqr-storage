@@ -14,11 +14,12 @@ const peerForceScopes uint16 = 0x1067
 // only after every survivor has promised the exact exclusion, so normal range
 // workers cannot advance the reported state while it is being reconciled.
 type forceScopeReport struct {
-	Plan       []byte
-	SourceLive bool
-	Ready      bool
-	Decision   *rangeCommit
-	Promoted   bool
+	Cancellation *client.Proof `json:",omitempty"`
+	Plan         []byte
+	SourceLive   bool
+	Ready        bool
+	Decision     *rangeCommit
+	Promoted     bool
 }
 type forceScopePage struct {
 	Next    uint64
@@ -54,11 +55,16 @@ func (s *Server) receiveForceScopes(body []byte, actor client.ID) ([]byte, error
 			t := r.txns[r.order[page.Next]]
 			page.Next++
 			pendingPromotion := t.forcePromotion != nil && equalControlClaim(*t.forcePromotion, claim)
-			if !r.active(t) && !pendingPromotion {
+			cancelled := claim.Exclusion.RecoverOnly && t.forceCancellation != nil && equalControlClaim(*t.forceCancellation, claim)
+			if !r.active(t) && !pendingPromotion && !cancelled {
 				continue
 			}
 			report := forceScopeReport{Plan: mustRangeWire(t.plan), SourceLive: t.plan.Source == r.node && (!t.plan.ram() || t.sourceBoot == s.boot), Ready: t.targetReady.RecordSequence != 0 && (!t.plan.ram() || t.targetBoot == s.boot)}
 			report.Promoted = pendingPromotion
+			if cancelled {
+				proof := t.cancellationProof
+				report.Cancellation = &proof
+			}
 			if t.decision != nil {
 				copy := *t.decision
 				report.Decision = &copy
@@ -178,6 +184,11 @@ func (c *clusterController) reconcileExcludedScopes(ctx context.Context, claim c
 				return nil, client.ErrProtocol
 			}
 			for _, report := range page.Reports {
+				// Cancellation is terminal for this attempt. Keep its proof in
+				// recovery reports, but never retry or promote the old transfer.
+				if report.Cancellation != nil {
+					continue
+				}
 				p, err := decodeRangePlan(report.Plan)
 				if err != nil || p.Source != node && p.Target != node {
 					return nil, client.ErrProtocol

@@ -56,6 +56,8 @@ type rangeTxn struct {
 	aborted                                                       bool
 	forceRetired                                                  bool
 	forcePromotion                                                *controlClaim
+	forceCancellation                                             *controlClaim
+	cancellationProof                                             client.Proof
 	abortObjectCursor                                             *volume.ObjectID
 	abortRequestCursor                                            *volume.ID
 	abortObjectsDone, abortRequestsDone                           bool
@@ -181,6 +183,8 @@ func (r *rangeManager) replay(record controlRecord) error {
 			return volume.ErrCorrupt
 		}
 		t.aborted = true
+		t.forceCancellation = event.Exclusion
+		t.cancellationProof = record.Proof
 		t.remaining = 0
 	case rangeRAMOfferLost:
 		if !t.plan.ram() || t.aborted || t.decision != nil || event.SourceBoot != t.sourceBoot || event.PeerBoot == (client.ID{}) || event.PeerBoot == t.sourceBoot {

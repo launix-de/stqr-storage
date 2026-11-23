@@ -790,3 +790,31 @@ format-2 volumes are upgraded in place when the new daemon writes; a previously
 failed format-2 node with no provenance still needs its original recovery state.
 Upgrading is one-way: older binaries reject format 3. Back up volumes and node
 configuration before upgrading.
+
+A source fence can now be resolved when the surviving migration target never
+published READY and durably cancelled that exact attempt under
+NODE_RECOVERY_BEGIN. After all survivors reserve the exclusion, the coordinator
+collects target cancellation proofs and seals the canonical plans and proofs
+into their recovery origins. Each target validates its own journal before
+voting READY. The original source's data file can then be adopted, including
+writes acknowledged after the interrupted bulk copy. A sealed or committed
+handoff is handled by the existing commit/promotion path; it is never reclassified
+as an unsealed cancellation. Unknown fences still return 409.
+
+Cancellation proofs survive a coordinator crash before recovery READY and remain
+immutable after publication. They do not become promises for later attempts.
+Cancelled import cleanup checks the exact volume/cohort, rather than treating
+every copy on the current owner's node as authoritative. This also releases
+obsolete high-version shadows without changing recovered data or retry receipts.
+
+HELLO capability bit 1024 (`CapabilityRecoveryFenceClearance`) covers these
+extended recovery origins. Recovery operations require capable survivors before
+starting; an older candidate is not bound into a new join once the parent graph
+contains such origins. Ordinary FORCE scope reports retain their existing shape.
+
+`TestRecoveryRebuildsCancellationEvidenceAfterCoordinatorRestart` interrupts the
+coordinator after target cancellation and before recovery READY.
+`TestSSHRecoveryFenceClearance` uses two real hosts, stops the source after its
+fence, moves only its data volume over SSH and checks content, versions and
+APPEND retry identity before and after restarting the surviving daemon. The
+temporary test nodes never modify the existing deployed PM2 process.

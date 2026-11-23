@@ -13,12 +13,34 @@ import (
 // returns 503. It never invents absence or accepts replacement writes. Completed
 // origins retain the allowed source-volume cohort for unpinned imported ranges.
 type volumeRecoveryOrigin struct {
-	ID       [32]byte
-	Before   client.MapPatch
-	After    client.RangeEntry
-	Complete bool
-	Target   client.ID
-	Volumes  []client.ID
+	CancelledMigrations []volumeRecoveryCancellation `json:",omitempty"`
+	ID                  [32]byte
+	Before              client.MapPatch
+	After               client.RangeEntry
+	Complete            bool
+	Target              client.ID
+	Volumes             []client.ID
+}
+
+type volumeRecoveryCancellation struct {
+	Plan  []byte
+	Proof client.Proof
+}
+
+func (o volumeRecoveryOrigin) acceptsVolumeClaim(claim volumeAuthorityEntry) bool {
+	if claim.Active && claim.Fence == ([32]byte{}) {
+		return true
+	}
+	if claim.Active || claim.Fence == ([32]byte{}) {
+		return false
+	}
+	for _, cancelled := range o.CancelledMigrations {
+		plan, err := decodeRangePlan(cancelled.Plan)
+		if err == nil && plan.id() == claim.Fence {
+			return true
+		}
+	}
+	return false
 }
 
 func recoveryOriginID(before client.MapPatch) [32]byte {

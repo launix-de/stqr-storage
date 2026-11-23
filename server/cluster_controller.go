@@ -152,6 +152,11 @@ func (c *clusterController) admitDiscovered(ctx context.Context) {
 		if hasControlNode(membershipIDs(base.Membership), peer.Node) {
 			continue
 		}
+		if !supportsRecoveryOrigins(s.currentSystem.Load(), peer.Capabilities) {
+			// Do not bind a join that cannot decode the immutable parent graph.
+			// It may reconnect after upgrading; no membership reset is implied.
+			continue
+		}
 		info, err := c.info(ctx, peer.Node)
 		if err != nil || info.base.Membership.Epoch != 0 {
 			continue
@@ -393,6 +398,11 @@ func (c *clusterController) finishReservedChange(ctx context.Context, claim cont
 		origins, err = c.server.recoveryOriginsForChange(patches, exclusion)
 		if err != nil {
 			return nil, 0, err
+		}
+		if exclusion.RecoverOnly {
+			if err := c.collectRecoveryCancellations(ctx, claim, origins); err != nil {
+				return nil, 0, err
+			}
 		}
 		if err := c.markExcludedRangesLost(patches, descriptions, exclusion, membership); err != nil {
 			return nil, 0, err

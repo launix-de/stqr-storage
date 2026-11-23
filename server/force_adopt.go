@@ -151,7 +151,7 @@ func (c *clusterController) adoptKnownForceParent(ctx context.Context, request f
 		if node != l.node {
 			c.server.peerStatsMu.RLock()
 			observation := c.server.peerStats[node]
-			available := observation != nil && observation.online && observation.connection.Capabilities&client.CapabilityControlRecovery != 0
+			available := observation != nil && observation.online && observation.connection.Capabilities&client.CapabilityControlRecovery != 0 && (!request.RecoverOnly || observation.connection.Capabilities&client.CapabilityRecoveryFenceClearance != 0)
 			c.server.peerStatsMu.RUnlock()
 			if !available {
 				return fail(503, "a bound control participant is unavailable or needs a recovery-capable upgrade")

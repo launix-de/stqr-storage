@@ -51,7 +51,7 @@ func (r *rangeManager) collectAbortedImports() error {
 			return false
 		}
 		for _, location := range entry.Locations {
-			if location.Node == r.node {
+			if location.Node == r.node && entry.State != 4 && s.volumeAllowedForEntry(client.ID(key.Bucket), entry, store.Identity().VolumeID, s.currentSystem.Load()) {
 				return true
 			}
 		}

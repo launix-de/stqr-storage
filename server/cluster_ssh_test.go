@@ -28,6 +28,10 @@ func TestSSHClusterAcceptance(t *testing.T) {
 	runSSHClusterAcceptance(t, false)
 }
 
+func TestSSHRecoveryFenceClearance(t *testing.T) {
+	runSSHClusterAcceptance(t, false, true)
+}
+
 func TestSSHPM2ClusterAcceptance(t *testing.T) {
 	if os.Getenv("STQR_TEST_PM2") != "1" {
 		t.Skip("set STQR_TEST_PM2=1 to use a disposable PM2 entry on the SSH host")
@@ -35,7 +39,7 @@ func TestSSHPM2ClusterAcceptance(t *testing.T) {
 	runSSHClusterAcceptance(t, true)
 }
 
-func runSSHClusterAcceptance(t *testing.T, usePM2 bool) {
+func runSSHClusterAcceptance(t *testing.T, usePM2 bool, recovery ...bool) {
 	t.Helper()
 	sshTarget := os.Getenv("STQR_TEST_SSH")
 	if sshTarget == "" {
@@ -105,7 +109,7 @@ func runSSHClusterAcceptance(t *testing.T, usePM2 bool) {
 		ln.Close()
 		t.Fatal(err)
 	}
-	s, err := Open(Options{ConfigPath: path})
+	s, err := Open(Options{ConfigPath: path, manualRanges: len(recovery) > 0 && recovery[0]})
 	if err != nil {
 		ln.Close()
 		t.Fatal(err)
@@ -217,11 +221,26 @@ func runSSHClusterAcceptance(t *testing.T, usePM2 bool) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, status, err := request(s.cfg.Node.Advertise, client.Message{Kind: client.Request, Opcode: client.NodeAdminRequest, ID: client.NewRequestID(), Body: wire}); err != nil || status >= 300 {
+	added, status, err := request(s.cfg.Node.Advertise, client.Message{Kind: client.Request, Opcode: client.NodeAdminRequest, ID: client.NewRequestID(), Body: wire})
+	if err != nil || status >= 300 {
 		t.Fatal("remote volume add through local node", status, err)
 	}
 	t.Log("remote volume added through local node")
 	bucket, _ := createProtocolBucket(t, s, "ssh-extension")
+	if len(recovery) > 0 && recovery[0] {
+		d := client.Decoder{B: added}
+		d.ID()
+		d.U8()
+		if !d.Bool() {
+			t.Fatal("remote volume identity missing")
+		}
+		remoteVolume := d.ID()
+		if d.Done() != nil {
+			t.Fatal("invalid remote volume reply")
+		}
+		runSSHRecoveryFence(t, sshRecoveryFixture{ctx: ctx, source: s, http: h, remote: peer, remoteDir: remoteDir, sshTarget: sshTarget, bucket: bucket, localVolume: localVolume.VolumeID, remoteVolume: remoteVolume, request: request, ssh: ssh, start: start})
+		return
+	}
 	c, err := client.Dial(ctx, s.cfg.Node.Advertise, admin.Username, admin.Password, client.BucketID(bucket.ID()))
 	if err != nil {
 		t.Fatal(err)

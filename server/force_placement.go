@@ -95,6 +95,9 @@ func (s *Server) prepareExclusionImage(view *systemView, proposal controlProposa
 	if !valid || !validExclusionClaim(proposal.Claim) {
 		return errControlConflict
 	}
+	if err := s.prepareRecoveryCancellations(view, proposal.Claim); err != nil {
+		return err
+	}
 	current := s.placement.Load()
 	if current == nil {
 		return errControlConflict

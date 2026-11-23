@@ -149,7 +149,8 @@ func (s *Server) stageRecoveryVolumeLocked(name, path string, actor *principal, 
 
 // All members of an unpinned source cohort must agree on the same active old
 // ownership. An index on one rescued disk does not prove a missing peer disk
-// was empty. A persistent source FENCE is rejected rather than guessed away.
+// was empty. A source FENCE requires the exact target cancellation sealed into
+// this origin by ALL survivors; an unexplained fence is never guessed away.
 func (s *Server) validateRecoveryCohort(origin volumeRecoveryOrigin, selected []client.ID) ([]client.ID, error) {
 	if origin.Complete || origin.After.State != 4 || len(origin.Before.Entries) != 1 {
 		return nil, errControlConflict
@@ -179,7 +180,7 @@ func (s *Server) validateRecoveryCohort(origin volumeRecoveryOrigin, selected []
 			if claim.Bucket != origin.Before.Bucket || !sameRangeAuthority(claim.Entry, before) {
 				continue
 			}
-			if !claim.Active || claim.Fence != ([32]byte{}) {
+			if !origin.acceptsVolumeClaim(claim) {
 				return nil, fail(409, "rescued range has an unresolved migration fence")
 			}
 			if len(claim.Cohort) == 0 || !hasControlNode(claim.Cohort, id) {
@@ -223,7 +224,7 @@ func (s *Server) validateRecoveryCohort(origin volumeRecoveryOrigin, selected []
 		}
 		found := false
 		for _, claim := range record.Entries {
-			if claim.Bucket == origin.Before.Bucket && sameRangeAuthority(claim.Entry, before) && claim.Active && claim.Fence == ([32]byte{}) && reflect.DeepEqual(claim.Cohort, cohort) {
+			if claim.Bucket == origin.Before.Bucket && sameRangeAuthority(claim.Entry, before) && origin.acceptsVolumeClaim(claim) && reflect.DeepEqual(claim.Cohort, cohort) {
 				found = true
 			}
 		}
