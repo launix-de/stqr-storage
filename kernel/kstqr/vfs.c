@@ -1112,12 +1112,27 @@ static int ks_show_stats(struct seq_file *m, struct dentry *root)
 }
 static int ks_statfs(struct dentry *d, struct kstatfs *s)
 {
-	(void)d;
+	struct ks_fs *f = d->d_sb->s_fs_info;
+	stqr_space space;
+	int err;
+	mutex_lock(&f->rpc[0].lock);
+	err = stqr_bucket_space(f->rpc[0].client, &space);
+	if (err == -ENOTCONN || err == -ECONNRESET || err == -EPIPE || err == -ETIMEDOUT) {
+		err = stqr_reconnect(f->rpc[0].client);
+		if (!err)
+			err = stqr_bucket_space(f->rpc[0].client, &space);
+	}
+	mutex_unlock(&f->rpc[0].lock);
+	if (err)
+		return err;
 	memset(s, 0, sizeof(*s));
 	s->f_type = KS_MAGIC;
 	s->f_bsize = 4096;
+	s->f_frsize = 4096;
 	s->f_namelen = 255;
-	/* No invented physical capacity: bucket capacity RPC is not implemented. */
+	s->f_blocks = space.total / 4096;
+	s->f_bfree = space.free / 4096;
+	s->f_bavail = space.available / 4096;
 	return 0;
 }
 static int ks_sync_fs(struct super_block *sb, int wait)

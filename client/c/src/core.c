@@ -725,6 +725,24 @@ int stqr_sync(stqr_client *c) {
     if (err || !mark.sequence) return err;
     return stqr_sync_through(c,&mark,&durable);
 }
+
+int stqr_bucket_space(stqr_client *c, stqr_space *space) {
+    struct buf b = {0}, r = {0}; stqr_id rid; stqr_space out = {0}; int err;
+    if (!c || !space) return -EINVAL;
+    err = stqr_request_id(&rid); if (err) return err;
+    put(&b, c->bucket.bytes, 16);
+    err = request(c, 0x11b, &b, rid, 0, &r, NULL);
+    if (!err) {
+        out.used = readnum(&r, 8); out.total = readnum(&r, 8);
+        out.free = readnum(&r, 8); out.available = readnum(&r, 8);
+        out.quota = readnum(&r, 8); out.quota_limited = boolean(&r);
+        err = done(&r);
+        if (!err && (out.free > out.total || out.used != out.total-out.free || out.available > out.free)) err = -EPROTO;
+    }
+    drop(&b); drop(&r);
+    if (!err) *space = out;
+    return err;
+}
 void stqr_note_durable(stqr_client *c, const stqr_commit_mark *mark) {
     if (!c || !mark || c->durability_lost) return;
     if (!memcmp(c->pending_mark.boot.bytes,mark->boot.bytes,16) && c->pending_mark.sequence <= mark->sequence)

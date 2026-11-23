@@ -57,6 +57,12 @@ int main(void) {
         stqr_close(c); puts("fault test passed"); return 0;
     }
     CHECK(stqr_stat(c,id,&info) == -ENOENT); CHECK(stqr_status(c) == 404);
+    {
+        stqr_space space;
+        CHECK(!stqr_bucket_space(c,&space));
+        CHECK(!space.quota_limited && space.total > 0 && space.available > 0);
+        CHECK(space.total-space.free == space.used && space.available <= space.free);
+    }
     o = fresh(); o.absent = 1;
     CHECK(!stqr_put(c,id,"hello",5,&o,&info)); CHECK(info.length == 5);
     CHECK(!stqr_get(c,id,&data,&n,&info)); CHECK(n == 5 && !memcmp(data,"hello",5)); stqr_free(data);

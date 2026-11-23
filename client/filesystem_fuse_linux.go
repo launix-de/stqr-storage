@@ -32,6 +32,22 @@ type FSNode struct {
 	id            ObjectID
 }
 
+func (n *FSNode) Statfs(ctx context.Context, out *fuse.StatfsOut) syscall.Errno {
+	s, ok := n.filesystem.(interface {
+		Space(context.Context) (BucketSpace, error)
+	})
+	if !ok {
+		return syscall.ENOTSUP
+	}
+	space, err := s.Space(ctx)
+	if err != nil {
+		return fsErrno(err)
+	}
+	*out = fuse.StatfsOut{Bsize: 4096, Frsize: 4096, NameLen: 255,
+		Blocks: space.Total / 4096, Bfree: space.Free / 4096, Bavail: space.Available / 4096}
+	return 0
+}
+
 type fsInodeNumbers struct {
 	mu    sync.Mutex
 	next  uint64

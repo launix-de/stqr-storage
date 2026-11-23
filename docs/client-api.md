@@ -14,8 +14,10 @@ info, err := conn.Put(ctx, objectID, payload, client.PutOptions{
 ```
 
 `Client` exposes only object operations inside that bucket: Get/GetRange,
-Put/PutRange, Append, Trunc, Delete, Stat, CAS, the necessary streaming variants
-Sync and Close. Object IDs are native `[32]byte` addresses. No per-call bucket argument,
+Put/PutRange, Append, Trunc, Delete, Stat, CAS, the necessary streaming variants,
+Space, Sync and Close. `Space(ctx)` reports bucket usage and remaining eligible
+cluster space, capped by a finite quota; [FUSE and kernel `df` reporting](space.md)
+use this same snapshot. Object IDs are native `[32]byte` addresses. No per-call bucket argument,
 Bucket(name), global multi-bucket handle, key-address alias API, administration
 or cluster metrics are offered. Another bucket requires another connection.
 The shared wire codec/statistics types remain in this package to avoid server /

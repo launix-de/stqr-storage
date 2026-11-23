@@ -8,6 +8,7 @@
 #include <sys/mman.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/statvfs.h>
 #include <sys/syscall.h>
 #include <sys/un.h>
 #include <sys/wait.h>
@@ -31,6 +32,10 @@ static void save(const char *path, const char *text)
 }
 int main(void)
 {
+    struct statvfs space;
+    REQUIRE(!statvfs("/mnt", &space));
+    REQUIRE(space.f_blocks > 0 && space.f_bavail > 0 && space.f_bfree <= space.f_blocks);
+    REQUIRE(space.f_frsize == 4096 && space.f_namemax == 255);
     char buf[128] = {0};
     int fd, old, parent;
     struct stat st;

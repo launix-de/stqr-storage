@@ -57,6 +57,13 @@ int stqr_get(stqr_client *, stqr_object_id, void **data, size_t *length, stqr_in
 int stqr_get_range(stqr_client *, stqr_object_id, stqr_u64 offset,
                    stqr_u64 length, void **data, size_t *actual, stqr_info *);
 int stqr_stat(stqr_client *, stqr_object_id, stqr_info *);
+/* Advisory cluster capacity for this bucket. Unlimited buckets report eligible
+ * free cluster storage; finite quotas cap free space. No space is reserved. */
+typedef struct {
+    stqr_u64 used, total, free, available, quota;
+    int quota_limited;
+} stqr_space;
+int stqr_bucket_space(stqr_client *, stqr_space *);
 int stqr_put(stqr_client *, stqr_object_id, const void *, size_t,
              const stqr_options *, stqr_info *);
 int stqr_put_range(stqr_client *, stqr_object_id, stqr_u64, const void *, size_t,

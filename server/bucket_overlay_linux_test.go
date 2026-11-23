@@ -194,10 +194,34 @@ func TestBucketNativeOverlayPHPCluster(t *testing.T) {
 	upperArgs := func(id string) []string {
 		return []string{"-uri", upperHost.URL, "-username", ua.Username, "-password", ua.Password, "--bucket", id, "--readonly-bucket", baseBucket.ID().String(), "--readonly-uri", lowerHost.URL, "--readonly-username", reader.Name, "--readonly-password", "bucket-test-password", "--whitelist=conf.json,fop-files/"}
 	}
+
+	// A finite upper has a distinguishable df size from the larger lower.
+	quota := client.Encoder{}
+	quota.ID(client.ID(upper1.ID()))
+	quota.U8(0)
+	quota.U64(0)
+	quota.Bool(false)
+	quota.U64(16 << 20)
+	quota.U32(150000)
+	quota.U64(upper1.Describe().Policy.Version)
+	if _, status, _ := adminBucketMessage(t, upperServer, client.BucketSetQuota, quota.B); status != 200 {
+		t.Fatal(status)
+	}
 	p1, stopRO1 := mount(ro1, true, roArgs)
 	p2, stopRO2 := mount(ro2, true, roArgs)
 	p3, stop1 := mount(o1, false, upperArgs(upper1.ID().String()))
 	p4, stop2 := mount(o2, false, upperArgs(upper2.ID().String()))
+
+	var lowerSpace, upperSpace syscall.Statfs_t
+	if err := syscall.Statfs(p1, &lowerSpace); err != nil {
+		t.Fatal(err)
+	}
+	if err := syscall.Statfs(p3, &upperSpace); err != nil {
+		t.Fatal(err)
+	}
+	if upperSpace.Blocks*uint64(upperSpace.Bsize) != 16<<20 || lowerSpace.Blocks <= upperSpace.Blocks {
+		t.Fatalf("overlay statfs must report upper quota: lower=%+v upper=%+v", lowerSpace, upperSpace)
+	}
 	for _, point := range []string{p1, p2} {
 		if e := os.WriteFile(filepath.Join(point, "conf.json"), []byte("bad"), 0600); !errors.Is(e, syscall.EROFS) {
 			t.Fatal("readonly mount permits mutation", e)

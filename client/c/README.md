@@ -6,6 +6,10 @@ through another language's SDK. URL, username, password and bucket ID are requir
 by `stqr_dial`. The server checks the grant at upgrade; it cannot be changed on an
 established connection.
 
+`stqr_bucket_space(client, &space)` returns live bucket usage and remaining
+eligible cluster space, capped by a finite quota. The kernel adapter uses it
+for `statfs`/`df`; see [capacity reporting](../../docs/space.md).
+
 Build with a C11 compiler, make and OpenSSL development headers:
 
 ```sh

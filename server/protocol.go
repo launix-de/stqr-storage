@@ -49,7 +49,7 @@ func (s *Server) dispatchAs(m client.Message, ws *wsSession, p principal) ([]byt
 		if p.connection.invalid.Load() {
 			return client.ResponseBody(403, nil, "connection authorization revoked"), 403
 		}
-		if p.connection.bucket != nil && m.Opcode != client.Hello && m.Opcode != client.Ping && !(m.Opcode >= 0x0100 && m.Opcode <= client.BucketObjectList || m.Opcode == client.ObjectAccepted || m.Opcode == client.BucketSync) {
+		if p.connection.bucket != nil && m.Opcode != client.Hello && m.Opcode != client.Ping && !(m.Opcode >= 0x0100 && m.Opcode <= client.BucketObjectList || m.Opcode == client.ObjectAccepted || m.Opcode == client.BucketStatFS || m.Opcode == client.BucketSync) {
 			return client.ResponseBody(403, nil, "bucket connection has no administrative privileges"), 403
 		}
 	}
@@ -286,7 +286,7 @@ func (s *Server) dispatchAs(m client.Message, ws *wsSession, p principal) ([]byt
 		return client.ResponseBody(403, nil, "cluster peer operation required"), 403
 	}
 
-	if !p.isAdmin() && m.Opcode != client.Hello && m.Opcode != client.Ping && !(m.Opcode >= 0x0100 && m.Opcode <= client.BucketObjectList || m.Opcode == client.ObjectAccepted || m.Opcode == client.BucketSync) {
+	if !p.isAdmin() && m.Opcode != client.Hello && m.Opcode != client.Ping && !(m.Opcode >= 0x0100 && m.Opcode <= client.BucketObjectList || m.Opcode == client.ObjectAccepted || m.Opcode == client.BucketStatFS || m.Opcode == client.BucketSync) {
 		return client.ResponseBody(403, nil, "administrator required"), 403
 	}
 	if s.clusterPaused() || s.forceFrozen() {
@@ -392,6 +392,18 @@ func (s *Server) dispatchAs(m client.Message, ws *wsSession, p principal) ([]byt
 	}
 	if (m.Opcode == client.ObjectAccepted || m.Opcode == client.BucketSync) && (ws == nil || !ws.durabilityCap.Load()) {
 		return client.ResponseBody(501, nil, "durability capability was not negotiated"), 501
+	}
+	if m.Opcode == client.BucketStatFS {
+		ctx := s.ctx
+		if ws != nil {
+			ctx = ws.objectContext(m.ID)
+		}
+		result, err := s.executeBucketStatFS(ctx, m, p)
+		if err != nil {
+			status := objectStatus(err)
+			return client.ResponseBody(status, nil, err.Error()), status
+		}
+		return client.ResponseBody(200, result, ""), 200
 	}
 	if m.Opcode == client.BucketSync {
 		ctx := s.ctx

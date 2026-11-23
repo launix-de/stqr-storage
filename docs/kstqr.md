@@ -199,8 +199,10 @@ send operation to avoid delaying a small payload behind its separate header.
 - Namespace editing materializes directory contents, limited to 16 MiB per
   directory; an intent is limited to 1 MiB and 1024 participants. Very large
   edits can fail with `E2BIG`. Index flattening needs further performance work.
-- `statfs` currently reports the filesystem type/block size/name limit, but zero
-  capacity values; use the server dashboard for actual storage accounting.
+- `statfs`/`df` report live bucket usage and available eligible cluster storage,
+  capped by a finite bucket quota. Without a quota the remaining cluster pool
+  is available. Measurements are advisory and do not reserve space; objects
+  awaiting offline fsck still count as used. See [capacity reporting](space.md).
 - Online object reclamation is pending. Unmount **all** clients of the bucket and
   use `stqr-fuse ... --fsck` for cleanup. The server's bucket-bound connection
   tracking prevents fsck maintenance while kernel mounts remain connected.
