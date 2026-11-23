@@ -69,6 +69,9 @@ func (f *Filesystem) directoryImage(ctx context.Context, n fsNode, entries []FSE
 	if uint64(len(data)) > f.directoryMemoryLimit {
 		return n, syscall.ENOMEM
 	}
+	if err = f.directoryLinks(ctx, &n, entries); err != nil {
+		return n, err
+	}
 	n.blob, err = f.blobFromBytes(ctx, data)
 	n.mtime = uint64(time.Now().UnixNano())
 	n.ctime = n.mtime
@@ -274,10 +277,18 @@ func (f *Filesystem) planRename(ctx context.Context, parent ObjectID, name strin
 		}
 		replacements[newParent] = n
 	}
-	if j >= 0 && flags != FSRenameExchange && target.node.kind == fsDirectory {
+	if j >= 0 && flags != FSRenameExchange {
 		add(target)
 		n := target.node
-		n.removed = true
+		if n.kind == fsDirectory {
+			n.removed = true
+		} else {
+			if fsLinks(n) == 0 {
+				return nil, false, nil
+			}
+			setFSLinks(&n, fsLinks(n)-1)
+		}
+		n.ctime = uint64(time.Now().UnixNano())
 		replacements[target.id] = n
 	}
 	if !consistent {

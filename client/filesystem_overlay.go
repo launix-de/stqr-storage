@@ -257,6 +257,15 @@ func (o *OverlayFilesystem) entries(ctx context.Context, s *overlayState, id Obj
 			return nil, err
 		}
 		for _, entry := range entries {
+			// An inherited alias must not resolve to an upper inode published
+			// for another name: that would bypass path-based write policies.
+			shadowed := false
+			if dir != nil {
+				_, shadowed = dir.entries[entry.Name]
+			}
+			if !shadowed && overlayUpperReference(s, entry.ID) {
+				return nil, syscall.EOPNOTSUPP
+			}
 			merged[entry.Name] = entry.ID
 		}
 	}
@@ -526,6 +535,9 @@ func (o *OverlayFilesystem) copyUp(ctx context.Context, id ObjectID) error {
 	}
 	if visible.Directory {
 		return syscall.EISDIR
+	}
+	if visible.Kind != FSRegular || visible.Nlink > 1 {
+		return syscall.EOPNOTSUPP
 	}
 	parentPath, name := "", p
 	if i := strings.LastIndex(p, "/"); i >= 0 {

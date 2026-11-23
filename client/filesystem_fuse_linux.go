@@ -157,7 +157,16 @@ func fsMode(info FSInfo) uint32 {
 	if info.Directory {
 		return syscall.S_IFDIR | info.Mode
 	}
-	return syscall.S_IFREG | info.Mode
+	kind := uint32(syscall.S_IFREG)
+	switch info.Kind {
+	case FSSymlink:
+		kind = syscall.S_IFLNK
+	case FSFIFO:
+		kind = syscall.S_IFIFO
+	case FSSocket:
+		kind = syscall.S_IFSOCK
+	}
+	return kind | info.Mode
 }
 func fillFSAttr(out *fuse.Attr, info FSInfo) {
 	out.Mode = fsMode(info)
@@ -171,12 +180,9 @@ func fillFSAttr(out *fuse.Attr, info FSInfo) {
 	out.Atimensec = uint32(info.AtimeNS % 1e9)
 	out.Ctime = info.CtimeNS / 1e9
 	out.Ctimensec = uint32(info.CtimeNS % 1e9)
-	out.Nlink = 1
-	if info.Directory {
-		out.Nlink = 2
-	}
-	if info.Removed {
-		out.Nlink = 0
+	out.Nlink = info.Nlink
+	if out.Nlink == 0 && info.Kind == 0 && !info.Removed {
+		out.Nlink = 1
 	}
 	out.Blksize = 4096
 }

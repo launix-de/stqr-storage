@@ -295,3 +295,12 @@ handoffs invalidate dependent snapshots; caching does not depend on a TTL.
 Readonly closes avoid redundant Stat calls and FUSE requests can reach 1 MiB.
 See [object subscriptions](object-subscriptions.md) for the wire contract,
 resnapshot behavior, memory limits and Go GC/AddCleanup lifetime rules.
+
+## Linux application inode features
+
+Normal filesystem views expose `Symlink`/`Readlink`, `Link`, `Mknod` for regular
+files/FIFOs/Unix sockets, and `GetXattr`, `SetXattr`, `ListXattr`, `RemoveXattr`.
+`FSInfo.Kind` distinguishes node types, and `FSInfo.Nlink` reports link counts.
+The FUSE adapter implements the corresponding Linux operations. These changes
+use STFS v5 and require upgrading every client accessing a bucket; see the
+[shared format and semantics guide](filesystem-posix.md) before deploying them.
