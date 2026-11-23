@@ -139,6 +139,7 @@ func (s *Server) invalidateUserConnections(id string) {
 	for ws := range s.sockets {
 		if ws.principal.User.ID == id && ws.authorization != nil && !ws.authorization.clusterPeer {
 			ws.authorization.invalid.Store(true)
+			s.endRevokedSubscriptions(ws)
 		}
 	}
 }
@@ -148,6 +149,7 @@ func (s *Server) invalidateSessionConnections(token string) {
 	for ws := range s.sockets {
 		if ws.principal.Cookie && ws.principal.SessionToken == token && ws.authorization != nil {
 			ws.authorization.invalid.Store(true)
+			s.endRevokedSubscriptions(ws)
 		}
 	}
 }
@@ -157,6 +159,7 @@ func (s *Server) invalidateDisallowedConnections() {
 	for ws := range s.sockets {
 		if !s.allowed(ws.request) && ws.authorization != nil {
 			ws.authorization.invalid.Store(true)
+			s.endRevokedSubscriptions(ws)
 		}
 	}
 }
@@ -187,6 +190,7 @@ func (s *Server) invalidateBucketConnections(b *Bucket, d BucketDescription) {
 		}
 		if d.DeletionComplete || d.State == BucketDeleting || permissions != auth.permissions {
 			auth.invalid.Store(true)
+			s.endRevokedSubscriptions(ws)
 		}
 	}
 }

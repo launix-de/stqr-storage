@@ -106,6 +106,7 @@ func (s *Server) installSystemView(view *systemView) error {
 			return err
 		}
 	} else {
+		s.resyncMovedSubscriptions(view.placement)
 		s.placement.Store(view.placement)
 	}
 	if s.scopes != nil {

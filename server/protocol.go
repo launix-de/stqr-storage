@@ -389,6 +389,18 @@ func (s *Server) dispatchAs(m client.Message, ws *wsSession, p principal) ([]byt
 		}
 		return client.ResponseBody(status, result, ""), status
 	}
+	if m.Opcode == client.ObjectSubscribe || m.Opcode == client.ObjectUnsubscribe || m.Opcode == client.SubscriptionAck {
+		result, status, err := s.executeObjectSubscription(m, ws, p)
+		if err != nil {
+			var redirect *objectRedirect
+			if errors.As(err, &redirect) {
+				return redirectResponse(redirect.patch), 301
+			}
+			status = objectStatus(err)
+			return client.ResponseBody(status, nil, err.Error()), status
+		}
+		return client.ResponseBody(status, result, ""), status
+	}
 	if m.Opcode >= 0x0100 && m.Opcode <= 0x0108 || m.Opcode == client.BucketMaintenance || m.Opcode == client.BucketScan || m.Opcode == client.BucketObjectList {
 		result, status, err := s.executeObjects(m, ws, p)
 		if errors.Is(err, errObjectStaged) {
@@ -457,7 +469,7 @@ func (s *Server) execute(m client.Message, ws *wsSession) ([]byte, int, error) {
 		s.mu.RUnlock()
 		e := client.Encoder{}
 		e.U16(1)
-		caps, membership, revision := client.CapabilityPeerTransport|client.CapabilityNodeAdmin, uint64(1), c.Generation
+		caps, membership, revision := client.CapabilityPeerTransport|client.CapabilityNodeAdmin|client.CapabilityObjectSubscriptions, uint64(1), c.Generation
 		if s.control != nil {
 			caps |= client.CapabilityClusterControl
 			s.control.ledger.mu.Lock()

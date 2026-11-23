@@ -472,6 +472,11 @@ func (r *rangeManager) fence(id [32]byte) error {
 		return err
 	}
 	_, err := r.persist(rangeFenced, rangeEvent{ID: id})
+	if err == nil {
+		r.server.objectSubscriptions.resyncWhere(func(key volume.Key) bool {
+			return client.ID(key.Bucket) == t.plan.Before.Bucket && t.plan.contains(key.Object)
+		})
+	}
 	return err
 }
 func (r *rangeManager) ready(id, digest [32]byte, source bool, logicalUsed ...uint64) (client.Proof, error) {
@@ -702,6 +707,7 @@ func (r *rangeManager) rebuildLocked() error {
 	if err != nil {
 		return err
 	}
+	r.server.resyncMovedSubscriptions(image)
 	r.server.placement.Store(image)
 	r.server.dirtyVolumeAuthority()
 	return nil
