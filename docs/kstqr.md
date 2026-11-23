@@ -132,8 +132,11 @@ connection and kernel thread receive changes even when applications are idle.
 No resident userspace process is introduced. Normal writes publish chunks of up
 to 1 MiB with synchronous acknowledgements. Competing larger append syscalls may
 interleave at chunk boundaries; they do not reserve an entire syscall as one
-operation. Mapped writeback still publishes individual folios; batching dirty
-folios is a remaining optimization. `MAP_SHARED` supports reads and writes;
+operation. Mapped writeback collects contiguous dirty folios into batches of
+at most 1 MiB. Gaps and the requested writeback range split batches; partial EOF
+pages are clipped. Pages remain under writeback until their batch is acknowledged.
+A failed batch redirties all of its pages and reports the error, preserving them
+for a later retry. There is no change to the synchronous server ACK contract. `MAP_SHARED` supports reads and writes;
 `MAP_PRIVATE` uses normal copy-on-write pages without modifying stored content.
 Mappings and ordinary I/O share the page cache within a mount. Truncation flushes
 dirty data before resizing; access to pages beyond the new EOF raises `SIGBUS`.
@@ -174,6 +177,12 @@ are reused. Normal reads do not persist atime. `/proc/self/mountstats` includes
 per-mount cache hit/miss, native GET/range/CAS and read-ahead-window counters.
 The native counters count logical calls before reconnect retries; subscription
 traffic is represented by cache misses rather than added to the native counters.
+Writeback batch/page/byte/error counters and cumulative nanosecond timings split
+native writes into inode snapshot, data/index preparation (including their RPCs)
+and inode publication. These are elapsed phase times, not CPU samples; concurrent
+writers' times can overlap. Ranged reads reconnect once on transport loss, just
+as full reads do. The C core submits each complete masked WebSocket frame in one
+send operation to avoid delaying a small payload behind its separate header.
 
 ## Current boundaries
 
@@ -242,7 +251,9 @@ through independent mounts, readonly/private/shared writable mmap, sparse
 open-unlink, rename flags, rmdir, remount and clean module unload.
 Mmap tests cover forked shared updates, SQLite WAL with concurrent processes,
 I/O buffers backed by mappings, truncation/EOF, writeback failure and recovery,
-explicit sync and unmount persistence. Subscription tests also cover external
+explicit sync and unmount persistence. Writeback cases additionally exercise
+noncontiguous pages, partial msync ranges, a 1 MiB boundary, partial EOF and
+multi-batch failure/retry; the Go client checks all recovered bytes after VM exit. Subscription tests also cover external
 Go-client updates to existing mmap pages, permissions, negative dentries,
 forced socket loss/reconnect, explicit resync and unlink; a 2-KiB cache exercises eviction and a disabled-cache mount checks fallback.
 
@@ -255,3 +266,8 @@ See [the measurements](../benchmarks/2026-11-23-kernel-throughput/README.md) for
 method, raw samples and the distinction between VM/RAM and SSD throughput.
 After the VM exits, the Go client reads the kernel-written data and its fsck
 validates and cleans the published object graph.
+
+`STQR_KERNEL_WRITE_BENCHMARK=1` runs the isolated VM write benchmark instead of
+the read benchmark: ordinary durable writes, dense/sparse mmap+msync and repeated
+4 KiB commits. It also records per-case CAS counts and phase timings. See
+[the writeback measurements](../benchmarks/2026-11-23-writeback/README.md).

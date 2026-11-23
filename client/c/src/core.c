@@ -246,10 +246,12 @@ static int frame_send(stqr_client *c, unsigned opcode, const void *data, size_t 
     else if (n <= 65535) { header[1] = 128|126; header[2] = (n>>8)&255; header[3] = n&255; h = 4; }
     else { header[1] = 128|127; for (i = 0; i < 8; i++) header[2+i] = (stqr_u64)n >> (56-i*8); h = 10; }
     memcpy(header+h, mask, 4); h += 4;
-    masked = sq_alloc(n); if (!masked) return -ENOMEM;
-    for (i = 0; i < n; i++) masked[i] = p[i] ^ mask[i%4];
-    err = sq_send(c->socket, header, h);
-    if (!err) err = sq_send(c->socket, masked, n);
+    /* Submit the whole frame in one send. Sending a tiny header first can
+     * leave its small payload behind Nagle/delayed ACK on TCP connections. */
+    masked = sq_alloc(h+n); if (!masked) return -ENOMEM;
+    memcpy(masked, header, h);
+    for (i = 0; i < n; i++) masked[h+i] = p[i] ^ mask[i%4];
+    err = sq_send(c->socket, masked, h+n);
     sq_free(masked); return err;
 }
 static int message_send(stqr_client *c, unsigned kind, unsigned op, stqr_id id, struct buf *body) {

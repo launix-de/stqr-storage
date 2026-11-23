@@ -127,3 +127,7 @@ home-directory compatibility qualification remain separate work.
 
 See [the kernel guide](../../docs/kstqr.md), [the C API](../../client/c/README.md)
 and [the subscription contract](../../docs/object-subscriptions.md).
+
+A subsequent change on this branch adds dirty-folio batching and complete-frame
+sends. Its [separate writeback report](../2026-11-23-writeback/README.md) records
+those measurements; the results above remain the original read-cache experiment.

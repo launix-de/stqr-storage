@@ -51,6 +51,9 @@ struct ks_fs {
 	stqr_id bucket;
 	bool readonly, failed, stopping;
 	atomic64_t cache_hits, cache_misses, rpc_gets, rpc_ranges, rpc_cas, read_windows;
+	atomic64_t writeback_batches, writeback_folios, writeback_bytes, writeback_errors,
+	    writeback_ns;
+	atomic64_t write_snapshot_ns, write_prepare_ns, write_publish_ns, write_retries;
 };
 struct ks_inode {
 	struct mutex metadata_lock;

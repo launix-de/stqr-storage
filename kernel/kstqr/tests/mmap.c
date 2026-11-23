@@ -14,6 +14,7 @@
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
+#include "subscription_wait.h"
 #define REQUIRE(x)                                                                                 \
     do {                                                                                           \
         if (!(x)) {                                                                                \
@@ -99,19 +100,21 @@ static void control(const char *endpoint, const char *action)
 }
 static void failed_writeback(const char *endpoint)
 {
+    const size_t length = (1U << 20) + 37;
     int fd, err, attempt;
     char *p;
     puts("mmap: failed writeback reports an error and retains dirty data");
     fd = open("/mnt/mmap-error", O_CREAT | O_TRUNC | O_RDWR, 0600);
     REQUIRE(fd >= 0);
-    REQUIRE(!ftruncate(fd, 4096));
-    p = mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    REQUIRE(!ftruncate(fd, length));
+    p = mmap(NULL, length, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
     REQUIRE(p != MAP_FAILED);
     memcpy(p, "initial", 7);
-    REQUIRE(!msync(p, 4096, MS_SYNC));
+    REQUIRE(!msync(p, length, MS_SYNC));
     control(endpoint, "lock");
+    memset(p, 'r', length);
     memcpy(p, "recovered", 9);
-    err = msync(p, 4096, MS_SYNC);
+    err = msync(p, length, MS_SYNC);
     REQUIRE(err < 0 && (errno == EACCES || errno == EIO || errno == EROFS));
     REQUIRE(!memcmp(p, "recovered", 9));
     control(endpoint, "unlock");
@@ -123,7 +126,8 @@ static void failed_writeback(const char *endpoint)
     }
     REQUIRE(!err);
     REQUIRE(!memcmp(p, "recovered", 9));
-    REQUIRE(!munmap(p, 4096));
+    for (size_t n=9;n<length;n++) REQUIRE(p[n]=='r');
+    REQUIRE(!munmap(p, length));
     REQUIRE(!close(fd));
 }
 int main(int argc, char **argv)
@@ -170,9 +174,9 @@ int main(int argc, char **argv)
     REQUIRE(!memcmp(b, "mapped", 6) && !memcmp(b + 4090, "cross-page", 10));
     REQUIRE(pread(fd, buf, 6, 0) == 6 && !memcmp(buf, "mapped", 6));
     REQUIRE(!msync(a, length, MS_SYNC));
-    other = open("/other/mmap-file", O_RDONLY);
+    other = test_open_eventually("/other/mmap-file", O_RDONLY);
     REQUIRE(other >= 0);
-    REQUIRE(pread(other, buf, 10, 4090) == 10 && !memcmp(buf, "cross-page", 10));
+    REQUIRE(test_pread_eventually(other,buf,10,4090,"cross-page")==10);
     REQUIRE(!close(other));
     memcpy(a + 100, "before-native", 13);
     REQUIRE(pwrite(fd, "native", 6, 0) == 6);

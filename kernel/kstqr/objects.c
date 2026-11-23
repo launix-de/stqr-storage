@@ -553,6 +553,13 @@ static int index_read(struct ks_fs *f, stqr_object_id id, u64 length, unsigned d
 			atomic64_inc(&f->rpc_ranges);
 			err = stqr_get_range(rpc->client, p->id, p->offset + offset, n, &data,
 					     &actual, &info);
+			if (err == -ENOTCONN || err == -ECONNRESET || err == -EPIPE ||
+			    err == -ETIMEDOUT || (err == -EAGAIN && !stqr_status(rpc->client))) {
+				err = stqr_reconnect(rpc->client);
+				if (!err)
+					err = stqr_get_range(rpc->client, p->id, p->offset + offset,
+							     n, &data, &actual, &info);
+			}
 			mutex_unlock(&rpc->lock);
 			if (!err && actual != n)
 				err = -EUCLEAN;
@@ -705,9 +712,11 @@ int ks_write(struct ks_fs *f, stqr_object_id id, u64 *position, const void *data
 		struct ks_snapshot old;
 		struct ks_node next;
 		struct segments before = {0}, after = {0};
-		u64 off, end;
+		u64 off, end, phase = ktime_get_ns();
 		u8 *small = NULL;
 		err = ks_snapshot(f, id, &old);
+		atomic64_add(ktime_get_ns() - phase, &f->write_snapshot_ns);
+		phase = ktime_get_ns();
 		if (err)
 			return err;
 		next = old.node;
@@ -748,8 +757,11 @@ int ks_write(struct ks_fs *f, stqr_object_id id, u64 *position, const void *data
 				err = build_segments(f, &next, &after);
 		}
 		next.mtime = next.ctime = ktime_get_real_ns();
+		atomic64_add(ktime_get_ns() - phase, &f->write_prepare_ns);
+		phase = ktime_get_ns();
 		if (!err)
 			err = node_cas(f, &old, &next);
+		atomic64_add(ktime_get_ns() - phase, &f->write_publish_ns);
 		ks_snapshot_free(&old);
 		sq_free(small);
 		sq_free(before.p);
@@ -759,6 +771,7 @@ int ks_write(struct ks_fs *f, stqr_object_id id, u64 *position, const void *data
 				*position = end;
 			return err;
 		}
+		atomic64_inc(&f->write_retries);
 		cond_resched();
 	}
 	return -EAGAIN;

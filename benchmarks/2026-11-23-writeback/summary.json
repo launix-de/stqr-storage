@@ -1,0 +1,170 @@
+[
+  {
+    "case": "baseline",
+    "test": "direct_write_fsync",
+    "unit": "MiB/s",
+    "samples": [
+      50.154,
+      45.65,
+      49.021
+    ],
+    "median": 49.021,
+    "min": 45.65,
+    "max": 50.154,
+    "median_cas": 24
+  },
+  {
+    "case": "batch-v1",
+    "test": "direct_write_fsync",
+    "unit": "MiB/s",
+    "samples": [
+      47.364,
+      49.083,
+      47.136
+    ],
+    "median": 47.364,
+    "min": 47.136,
+    "max": 49.083,
+    "median_cas": 24
+  },
+  {
+    "case": "improved",
+    "test": "direct_write_fsync",
+    "unit": "MiB/s",
+    "samples": [
+      97.023,
+      93.014,
+      96.283
+    ],
+    "median": 96.283,
+    "min": 93.014,
+    "max": 97.023,
+    "median_cas": 24
+  },
+  {
+    "case": "baseline",
+    "test": "mmap_4k_commit",
+    "unit": "commits/s",
+    "samples": [
+      261.283,
+      299.411,
+      336.394
+    ],
+    "median": 299.411,
+    "min": 261.283,
+    "max": 336.394,
+    "median_cas": 32
+  },
+  {
+    "case": "batch-v1",
+    "test": "mmap_4k_commit",
+    "unit": "commits/s",
+    "samples": [
+      254.053,
+      254.6,
+      256.475
+    ],
+    "median": 254.6,
+    "min": 254.053,
+    "max": 256.475,
+    "median_cas": 32
+  },
+  {
+    "case": "improved",
+    "test": "mmap_4k_commit",
+    "unit": "commits/s",
+    "samples": [
+      779.048,
+      731.172,
+      733.841
+    ],
+    "median": 733.841,
+    "min": 731.172,
+    "max": 779.048,
+    "median_cas": 32
+  },
+  {
+    "case": "baseline",
+    "test": "mmap_dense_msync",
+    "unit": "MiB/s",
+    "samples": [
+      0.318,
+      0.342,
+      0.329
+    ],
+    "median": 0.329,
+    "min": 0.318,
+    "max": 0.342,
+    "median_cas": 768
+  },
+  {
+    "case": "batch-v1",
+    "test": "mmap_dense_msync",
+    "unit": "MiB/s",
+    "samples": [
+      38.428,
+      39.84,
+      41.239
+    ],
+    "median": 39.84,
+    "min": 38.428,
+    "max": 41.239,
+    "median_cas": 3
+  },
+  {
+    "case": "improved",
+    "test": "mmap_dense_msync",
+    "unit": "MiB/s",
+    "samples": [
+      83.849,
+      82.678,
+      78.263
+    ],
+    "median": 82.678,
+    "min": 78.263,
+    "max": 83.849,
+    "median_cas": 3
+  },
+  {
+    "case": "baseline",
+    "test": "mmap_sparse_msync",
+    "unit": "MiB/s",
+    "samples": [
+      0.314,
+      0.312,
+      0.314
+    ],
+    "median": 0.314,
+    "min": 0.312,
+    "max": 0.314,
+    "median_cas": 96
+  },
+  {
+    "case": "batch-v1",
+    "test": "mmap_sparse_msync",
+    "unit": "MiB/s",
+    "samples": [
+      0.307,
+      0.296,
+      0.296
+    ],
+    "median": 0.296,
+    "min": 0.296,
+    "max": 0.307,
+    "median_cas": 96
+  },
+  {
+    "case": "improved",
+    "test": "mmap_sparse_msync",
+    "unit": "MiB/s",
+    "samples": [
+      1.282,
+      1.192,
+      1.211
+    ],
+    "median": 1.211,
+    "min": 1.192,
+    "max": 1.282,
+    "median_cas": 96
+  }
+]

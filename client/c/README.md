@@ -112,3 +112,6 @@ the connection, so no hidden server descriptor remains.
 The kernel adapter uses a dedicated subscription connection with an 8 MiB bounded
 LRU and explicitly unsubscribes evicted entries. The Go SDK's GC/AddCleanup lifetime
 strategy is unchanged; the C/kernel implementations use explicit ownership.
+
+The framing path sends a header and its masked payload together in one socket
+send, reducing small-RPC latency without changing framing, hashes or ACK semantics.

@@ -1,0 +1,17 @@
+{
+  "baseline_commit": "e400b8f",
+  "final_source_sha256": {
+    "client/c/src/core.c": "7c49e11086590010afe8f4d11fc0613fc1b24c06169531fe66a5475fbd697076",
+    "kernel/kstqr/vfs.c": "ce7f8c775c83f2e9117f328dbe9fb130f3ad7b403ea09f9cd363986a16593e99",
+    "kernel/kstqr/objects.c": "ade7de26706e5ab467d64a3861b73c9b9f6c221951763f51f5d1ac86d449a851",
+    "kernel/kstqr/kstqr.h": "b104d1ad8508efc669d9bdd95cc625be8645ff3f53fd5f0346dbbc70d009dac0",
+    "kernel/kstqr/tests/writeback.c": "fd93e8a5a88853a6b91765916a1fc3f56cbb879d01d74ae47647b9fc316c9eec",
+    "kernel/kstqr/tests/mmap.c": "f52399dbd952145691ecbed6f5b7700049cec33ca51cb023a534cdec7b3ad11e",
+    "kernel/kstqr/tests/smoke.c": "e9134e7afffe95690c90c1f4f3d6abfdc738758f9a5f8dcd98ffd6d48c3a08a5",
+    "kernel/kstqr/tests/subscription_wait.h": "11ae612547ff2d2b1929145f47a13b41a2907dc1b4378eb51c3979023a9bd8ea",
+    "server/kstqr_linux_test.go": "d4e8c32f1246d3aeecb3aedc2e1c4d41e336e84c48e1aa95013faf3e1d8a1eb2"
+  },
+  "baseline_module_sha256": "067b0d684a53d602cd6c00b534f22bc28659b882510ee077bcd173c927426a0b",
+  "final_module_sha256": "58d9cda8c432846e45cc3d697d7f2d043844701cffb89ac40a56393115b54da5",
+  "note": "Final source/module includes read-reconnect hardening added after timed writes; performance samples retain all three iterations."
+}

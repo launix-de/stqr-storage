@@ -5,6 +5,7 @@
 #include <linux/fs_context.h>
 #include <linux/fs_parser.h>
 #include <linux/hex.h>
+#include <linux/ktime.h>
 #include <linux/mm.h>
 #include <linux/module.h>
 #include <linux/namei.h>
@@ -672,50 +673,117 @@ static void ks_readahead(struct readahead_control *rac)
 		sq_free(buffer);
 	}
 }
-static int ks_writepages(struct address_space *mapping, struct writeback_control *wbc)
+#define KS_WRITEBACK_BYTES (1U << 20)
+#define KS_WRITEBACK_FOLIOS (KS_WRITEBACK_BYTES / PAGE_SIZE)
+struct ks_write_batch {
+	struct folio *folios[KS_WRITEBACK_FOLIOS];
+	void *data;
+	loff_t start;
+	size_t length, limit;
+	unsigned count;
+};
+/* Folios are unlocked before the RPC. Their writeback bits and our references
+ * remain held until ACK/error completion. In particular, completion must never
+ * take their locks: truncate and page_mkwrite may hold those locks waiting for
+ * writeback. The writeback bit prevents removal from the mapping until we finish.
+ */
+static int ks_flush_write_batch(struct address_space *mapping, struct writeback_control *wbc,
+				struct ks_write_batch *batch)
 {
 	struct inode *i = mapping->host;
 	struct ks_fs *f = i->i_sb->s_fs_info;
-	struct folio *folio = NULL;
-	int error = 0;
-	while ((folio = writeback_iter(mapping, wbc, folio, &error))) {
-		loff_t size = i_size_read(i), offset = folio_pos(folio);
-		size_t n = offset < size ? min_t(u64, folio_size(folio), size - offset) : 0,
-		       pos = 0;
-		void *buffer = NULL;
-		unsigned saved;
-		error = 0;
-		if (n)
-			buffer = sq_alloc(min_t(size_t, n, 65536));
-		if (n && !buffer) {
-			error = -ENOMEM;
+	u64 position = batch->start, started;
+	unsigned saved;
+	int err;
+	if (!batch->count)
+		return 0;
+	started = ktime_get_ns();
+	atomic64_inc(&f->writeback_batches);
+	atomic64_add(batch->count, &f->writeback_folios);
+	atomic64_add(batch->length, &f->writeback_bytes);
+	saved = enter_fs(f);
+	err = ks_write(f, KS_I(i)->id, &position, batch->data, batch->length, false);
+	leave_fs(f, saved);
+	atomic64_add(ktime_get_ns() - started, &f->writeback_ns);
+	if (err) {
+		atomic64_inc(&f->writeback_errors);
+		mapping_set_error(mapping, err);
+	}
+	for (unsigned n = 0; n < batch->count; n++) {
+		struct folio *folio = batch->folios[n];
+		if (err)
 			folio_redirty_for_writepage(wbc, folio);
+		folio_end_writeback(folio);
+		folio_put(folio);
+	}
+	batch->count = 0;
+	batch->length = 0;
+	return err;
+}
+static int ks_writepages(struct address_space *mapping, struct writeback_control *wbc)
+{
+	struct ks_write_batch *batch = kzalloc(sizeof(*batch), GFP_NOFS);
+	struct folio *folio = NULL;
+	int error = 0, first_error = 0;
+	if (!batch)
+		return -ENOMEM;
+	/* Keep small-file fsync inexpensive while bounding large writes at 1 MiB. */
+	batch->limit = min_t(u64, KS_WRITEBACK_BYTES,
+			     max_t(u64, PAGE_SIZE, (u64)READ_ONCE(mapping->nrpages) << PAGE_SHIFT));
+	batch->data = sq_alloc(batch->limit);
+	if (!batch->data) {
+		kfree(batch);
+		return -ENOMEM;
+	}
+	while ((folio = writeback_iter(mapping, wbc, folio, &error))) {
+		loff_t size = i_size_read(mapping->host), offset = folio_pos(folio);
+		size_t n = offset < size ? min_t(u64, folio_size(folio), size - offset) : 0;
+		error = 0;
+		if (batch->count &&
+		    (!n || offset != batch->start + batch->length ||
+		     n > batch->limit - batch->length || batch->count == KS_WRITEBACK_FOLIOS))
+			error = ks_flush_write_batch(mapping, wbc, batch);
+		if (error || n > batch->limit) {
+			if (!error)
+				error = -E2BIG;
+			if (!first_error)
+				first_error = error;
 			mapping_set_error(mapping, error);
+			folio_redirty_for_writepage(wbc, folio);
 			folio_unlock(folio);
 			continue;
 		}
-		folio_start_writeback(folio);
-		saved = enter_fs(f);
-		while (pos < n) {
-			size_t count = min_t(size_t, n - pos, 65536);
-			u64 position = offset + pos;
-			memcpy_from_folio(buffer, folio, pos, count);
-			error = ks_write(f, KS_I(i)->id, &position, buffer, count, false);
-			if (error)
-				break;
-			pos += count;
-		}
-		leave_fs(f, saved);
-		if (error) {
-			folio_redirty_for_writepage(wbc, folio);
-			mapping_set_error(mapping, error);
-		} else if (n < folio_size(folio))
+		/* writeback_iter has cleared dirty state and protected writable PTEs.
+		 * Copy while locked; later stores fault and wait for our writeback bit. */
+		if (n < folio_size(folio))
 			folio_zero_range(folio, n, folio_size(folio) - n);
-		sq_free(buffer);
-		folio_end_writeback(folio);
+		folio_start_writeback(folio);
+		if (!n) {
+			folio_end_writeback(folio);
+			folio_unlock(folio);
+			continue;
+		}
+		if (!batch->count)
+			batch->start = offset;
+		folio_get(folio);
+		memcpy_from_folio(batch->data + batch->length, folio, 0, n);
+		batch->folios[batch->count++] = folio;
+		batch->length += n;
 		folio_unlock(folio);
+		if (batch->length == batch->limit || batch->count == KS_WRITEBACK_FOLIOS) {
+			error = ks_flush_write_batch(mapping, wbc, batch);
+			if (error && !first_error)
+				first_error = error;
+		}
 	}
-	return error;
+	if (error && !first_error)
+		first_error = error;
+	error = ks_flush_write_batch(mapping, wbc, batch);
+	if (error && !first_error)
+		first_error = error;
+	sq_free(batch->data);
+	kfree(batch);
+	return first_error;
 }
 static vm_fault_t ks_page_mkwrite(struct vm_fault *vmf)
 {
@@ -1018,10 +1086,18 @@ static int ks_show_stats(struct seq_file *m, struct dentry *root)
 	struct ks_fs *f = root->d_sb->s_fs_info;
 	seq_printf(m,
 		   "\tstqr: cache_hits=%lld cache_misses=%lld rpc_get=%lld rpc_range=%lld "
-		   "rpc_cas=%lld read_windows=%lld\n",
+		   "rpc_cas=%lld read_windows=%lld writeback_batches=%lld writeback_folios=%lld "
+		   "writeback_bytes=%lld writeback_errors=%lld writeback_ns=%lld "
+		   "write_snapshot_ns=%lld write_prepare_ns=%lld write_publish_ns=%lld "
+		   "write_retries=%lld\n",
 		   atomic64_read(&f->cache_hits), atomic64_read(&f->cache_misses),
 		   atomic64_read(&f->rpc_gets), atomic64_read(&f->rpc_ranges),
-		   atomic64_read(&f->rpc_cas), atomic64_read(&f->read_windows));
+		   atomic64_read(&f->rpc_cas), atomic64_read(&f->read_windows),
+		   atomic64_read(&f->writeback_batches), atomic64_read(&f->writeback_folios),
+		   atomic64_read(&f->writeback_bytes), atomic64_read(&f->writeback_errors),
+		   atomic64_read(&f->writeback_ns), atomic64_read(&f->write_snapshot_ns),
+		   atomic64_read(&f->write_prepare_ns), atomic64_read(&f->write_publish_ns),
+		   atomic64_read(&f->write_retries));
 	return 0;
 }
 static int ks_statfs(struct dentry *d, struct kstatfs *s)

@@ -82,6 +82,7 @@ func TestKSTQRVirtualMachine(t *testing.T) {
 	run("cc", "-static", "-std=c11", "-Wall", "-Wextra", "-Werror", "-O2", "-o", filepath.Join(initrdRoot, "smoke"), filepath.Join(root, "tests/smoke.c"))
 	run("cc", "-static", "-std=c11", "-Wall", "-Wextra", "-Werror", "-O2", "-o", filepath.Join(initrdRoot, "coherence"), filepath.Join(root, "tests/coherence.c"))
 	run("cc", "-static", "-std=c11", "-Wall", "-Wextra", "-Werror", "-O2", "-o", filepath.Join(initrdRoot, "throughput"), filepath.Join(root, "tests/throughput.c"))
+	run("cc", "-static", "-std=c11", "-Wall", "-Wextra", "-Werror", "-O2", "-o", filepath.Join(initrdRoot, "writeback"), filepath.Join(root, "tests/writeback.c"))
 	run("cc", "-static", "-std=c11", "-Wall", "-Wextra", "-Werror", "-O2", "-o", filepath.Join(initrdRoot, "mmap-test"), filepath.Join(root, "tests/mmap.c"), "-lsqlite3", "-lm", "-ldl", "-lpthread")
 	s := testServer(t)
 	addTestVolume(t, s, "kernel-vm", "hdd", 192<<20)
@@ -210,8 +211,10 @@ func TestKSTQRVirtualMachine(t *testing.T) {
 		t.Fatal(err)
 	}
 	subscriptionFS = fs
-	benchmark := os.Getenv("STQR_KERNEL_BENCHMARK") == "1"
-	if benchmark {
+	readBenchmark := os.Getenv("STQR_KERNEL_BENCHMARK") == "1"
+	writeBenchmark := os.Getenv("STQR_KERNEL_WRITE_BENCHMARK") == "1"
+	benchmark := readBenchmark || writeBenchmark
+	if readBenchmark {
 		for i := 0; i < 32; i++ {
 			f, err := fs.Create(ctx, client.FilesystemRootID(), fmt.Sprintf("bench-%03d.php", i), 0644, 0, 0, false)
 			if err != nil {
@@ -335,6 +338,7 @@ umount /fresh
 if pidof mount.kstqr; then exit 1; fi
 /smoke
 /mmap-test @@URL@@
+/writeback
 /mount.kstqr --uri @@URL@@ --bucket @@EMPTY@@ --credentials /credentials --metadata-cache-bytes 2048 /fresh
 /coherence @@URL@@
 umount /fresh
@@ -363,12 +367,21 @@ poweroff -f
 	if benchmark {
 		begin := strings.Index(init, "for attempt in 1 2 3 4; do")
 		end := strings.Index(init, "if dmesg |")
-		init = init[:begin] + `/mount.kstqr --uri ` + endpoint + ` --bucket ` + client.ID(b.ID()).String() + ` --credentials /readonly-credentials --readonly /readonly
+		script := `/mount.kstqr --uri ` + endpoint + ` --bucket ` + client.ID(b.ID()).String() + ` --credentials /readonly-credentials --readonly /readonly
 /throughput
 cat /proc/self/mountstats
 umount /readonly
 rmmod kstqr
-` + init[end:]
+`
+		if writeBenchmark {
+			script = `/mount.kstqr --uri ` + endpoint + ` --bucket ` + client.ID(b.ID()).String() + ` --credentials /credentials /mnt
+/writeback benchmark
+cat /proc/self/mountstats
+umount /mnt
+rmmod kstqr
+`
+		}
+		init = init[:begin] + script + init[end:]
 	}
 
 	if err = os.WriteFile(filepath.Join(initrdRoot, "init"), []byte(init), 0755); err != nil {
@@ -403,8 +416,30 @@ rmmod kstqr
 	}
 	if benchmark {
 		for _, line := range strings.Split(string(output), "\n") {
-			if strings.Contains(line, "KSTQR_BENCH ") || strings.Contains(line, "stqr: cache_hits=") {
+			if strings.Contains(line, "KSTQR_BENCH ") || strings.Contains(line, "KSTQR_WRITE_BENCH ") || strings.Contains(line, "stqr: cache_hits=") {
 				t.Log(strings.TrimSpace(line))
+			}
+		}
+		if writeBenchmark {
+			for rep := 0; rep < 3; rep++ {
+				for _, test := range []struct {
+					name   string
+					length int
+					data   byte
+				}{{"direct", 8 << 20, 'D'}, {"dense", 1 << 20, 'M'}, {"commit4k", 4096, 'f'}} {
+					file, err := fs.Lookup(ctx, client.FilesystemRootID(), fmt.Sprintf("wb-%s-%d", test.name, rep))
+					if err != nil {
+						t.Fatal(err)
+					}
+					data := make([]byte, test.length)
+					n, err := fs.ReadAt(ctx, file.ID, data, 0)
+					if err != nil || n != len(data) || !bytes.Equal(data, bytes.Repeat([]byte{test.data}, len(data))) {
+						t.Fatalf("post-exit writeback validation %s: %d %v", test.name, n, err)
+					}
+				}
+			}
+			if _, err := conn.CheckFilesystem(ctx); err != nil {
+				t.Fatal(err)
 			}
 		}
 		return
@@ -427,6 +462,17 @@ rmmod kstqr
 	n, err := fs.ReadAt(ctx, kernel, data, 0)
 	if err != nil || n != 16 || string(data) != "written by kstqr" {
 		t.Fatalf("Go read: %q %d %v", data, n, err)
+	}
+	recovered, err := fs.Lookup(ctx, client.FilesystemRootID(), "mmap-error")
+	if err != nil {
+		t.Fatal(err)
+	}
+	recoveredData := make([]byte, (1<<20)+37)
+	n, err = fs.ReadAt(ctx, recovered.ID, recoveredData, 0)
+	expectedRecovery := bytes.Repeat([]byte("r"), len(recoveredData))
+	copy(expectedRecovery, []byte("recovered"))
+	if err != nil || n != len(recoveredData) || !bytes.Equal(recoveredData, expectedRecovery) {
+		t.Fatalf("multi-batch failed-writeback recovery did not persist every page: %d %v", n, err)
 	}
 	link, err := fs.Lookup(ctx, client.FilesystemRootID(), "kernel-link")
 	if err != nil || link.Kind != client.FSSymlink {

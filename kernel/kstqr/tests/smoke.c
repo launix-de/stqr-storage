@@ -13,6 +13,7 @@
 #include <sys/wait.h>
 #include <sys/xattr.h>
 #include <unistd.h>
+#include "subscription_wait.h"
 #define REQUIRE(x)                                                                                 \
     do {                                                                                           \
         if (!(x)) {                                                                                \
@@ -81,7 +82,7 @@ int main(void)
     REQUIRE(!close(fd));
     fd = open("/readonly/go.txt", O_RDONLY);
     REQUIRE(fd >= 0);
-    REQUIRE(read(fd, buf, 13) == 13 && buf[0] == 'H');
+    REQUIRE(test_pread_eventually(fd,buf,13,0,"Hello from Go") == 13);
     REQUIRE(!close(fd));
     REQUIRE(open("/readonly/must-not-exist", O_CREAT | O_WRONLY, 0600) < 0 && errno == EROFS);
     puts("kstqr: namespace, durable rename and open-unlink");
@@ -160,7 +161,7 @@ int main(void)
         pid_t child = fork();
         int j, status;
         REQUIRE(child >= 0);
-        fd = open(child ? "/mnt/append" : "/other/append", O_WRONLY | O_APPEND);
+        fd = child ? open("/mnt/append",O_WRONLY|O_APPEND) : test_open_eventually("/other/append",O_WRONLY|O_APPEND);
         REQUIRE(fd >= 0);
         memset(buf, child ? 'A' : 'B', 64);
         for (j = 0; j < 20; j++)
@@ -172,6 +173,9 @@ int main(void)
         fd = open("/mnt/append", O_RDONLY);
         REQUIRE(fd >= 0);
         {
+            double end=test_monotonic()+2;
+            do { REQUIRE(!fstat(fd,&st)); if(st.st_size==2560)break;usleep(1000); }while(test_monotonic()<end);
+            REQUIRE(st.st_size==2560);
             int a = 0, b = 0;
             for (j = 0; j < 40; j++) {
                 int k;
