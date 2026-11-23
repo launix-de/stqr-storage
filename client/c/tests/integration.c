@@ -8,6 +8,17 @@
 static stqr_options fresh(void) {
     stqr_options o = {0}; CHECK(!stqr_request_id(&o.request_id)); return o;
 }
+struct observer { unsigned changes, lost; stqr_update last; unsigned char data[64]; };
+static void observe(void *arg, const stqr_update *update) {
+    struct observer *o = arg;
+    if (!update) { o->lost++; return; }
+    o->changes++; o->last = *update;
+    if (update->size <= sizeof(o->data)) memcpy(o->data, update->data, update->size);
+}
+static void wait_change(stqr_client *c, struct observer *o, unsigned count) {
+    for (unsigned j = 0; j < 30 && o->changes < count; j++) CHECK(stqr_poll(c, 100) >= 0);
+    CHECK(o->changes == count);
+}
 int main(void) {
     stqr_client *c = NULL;
     stqr_id bucket = {{0}};
@@ -30,6 +41,12 @@ int main(void) {
         if (!strcmp(mode,"disconnect")) {
             o = fresh(); CHECK(stqr_append(c,id,"x",1,&o,&info,&offset) == -EINPROGRESS);
             CHECK(stqr_stat(c,id,&info) == -ENOTCONN);
+        } else if (!strcmp(mode,"subscription-digest")) {
+            struct observer events = {0}; stqr_set_update_handler(c,observe,&events);
+            CHECK(stqr_stat(c,id,&info) == -EBADMSG);
+            CHECK(events.lost == 1 && !events.changes);
+            CHECK(stqr_stat(c,id,&info) == -ENOTCONN);
+            stqr_set_update_handler(c,NULL,NULL);
         } else if (!strcmp(mode,"digest")) {
             CHECK(stqr_get(c,id,&data,&n,&info) == -EBADMSG); CHECK(data == NULL);
             CHECK(stqr_stat(c,id,&info) == -ENOTCONN);
@@ -43,6 +60,36 @@ int main(void) {
     o = fresh(); o.absent = 1;
     CHECK(!stqr_put(c,id,"hello",5,&o,&info)); CHECK(info.length == 5);
     CHECK(!stqr_get(c,id,&data,&n,&info)); CHECK(n == 5 && !memcmp(data,"hello",5)); stqr_free(data);
+    {
+        stqr_client *watch = NULL; stqr_id sid; stqr_u64 cursor;
+        struct observer events = {0};
+        CHECK(!stqr_dial(&watch,url,getenv("STQR_TEST_USER"),getenv("STQR_TEST_PASSWORD"),bucket,3000));
+        CHECK(stqr_capabilities(watch) & STQR_CAP_SUBSCRIPTIONS);
+        stqr_set_update_handler(watch,observe,&events);
+        CHECK(!stqr_request_id(&sid));
+        CHECK(!stqr_subscribe(watch,id,sid,1,1,3,NULL,&data,&n,&info,&cursor));
+        CHECK(n == 3 && !memcmp(data,"ell",3)); stqr_free(data);
+        o = fresh(); CHECK(!stqr_put(c,id,"HELLO",5,&o,&info));
+        wait_change(watch,&events,1);
+        CHECK(events.last.cursor == cursor+1 && events.last.version == info.version);
+        CHECK(events.last.change == STQR_UPDATE_REPLACE && events.last.size == 3 && !memcmp(events.data,"ELL",3));
+        CHECK(!stqr_unsubscribe(watch,sid));
+        o = fresh(); CHECK(!stqr_put(c,id,"hello",5,&o,&info));
+        CHECK(stqr_poll(watch,20) == 0);
+        CHECK(!stqr_request_id(&sid));
+        CHECK(!stqr_subscribe(watch,id,sid,0,0,0,NULL,&data,&n,&info,&cursor)); stqr_free(data);
+        o = fresh(); CHECK(!stqr_delete(c,id,&o)); wait_change(watch,&events,2);
+        CHECK(events.last.change == STQR_UPDATE_DELETE);
+        o = fresh(); CHECK(!stqr_put(c,id,"hello",5,&o,&info)); wait_change(watch,&events,3);
+        CHECK(events.last.change == STQR_UPDATE_REPLACE && events.last.size == 5);
+        cursor = events.last.cursor;
+        CHECK(!stqr_reconnect(watch)); CHECK(events.lost == 1);
+        CHECK(!stqr_subscribe(watch,id,sid,0,0,0,&cursor,&data,&n,&info,&offset));
+        CHECK(offset > cursor && n == 5 && !memcmp(data,"hello",5)); stqr_free(data);
+        CHECK(stqr_subscribe(watch,id,sid,0,0,0,NULL,&data,&n,&info,&offset) == -EBUSY);
+        CHECK(!stqr_unsubscribe(watch,sid));
+        stqr_close(watch); CHECK(events.lost == 2);
+    }
     o = fresh();
     CHECK(!stqr_append(c,id," world",6,&o,&info,&offset)); CHECK(offset == 5 && info.length == 11);
     previous = info;
@@ -65,6 +112,13 @@ int main(void) {
         for (j = 0; j < length; j++) big[j] = (unsigned char)(j*13);
         o = fresh(); CHECK(!stqr_put(c,id,big,length,&o,&info)); CHECK(info.length == length);
         CHECK(!stqr_get(c,id,&data,&n,&info)); CHECK(n == length && !memcmp(data,big,n)); stqr_free(data);
+        {
+            stqr_id sid; stqr_u64 cursor;
+            CHECK(!stqr_request_id(&sid));
+            CHECK(!stqr_subscribe(c,id,sid,0,0,0,NULL,&data,&n,&info,&cursor));
+            CHECK(n == length && !memcmp(data,big,n)); stqr_free(data);
+            CHECK(!stqr_unsubscribe(c,sid));
+        }
         o = fresh(); CHECK(!stqr_append(c,id,big,length,&o,&info,&offset)); CHECK(offset == length && info.length == 2*length);
         CHECK(!stqr_get_range(c,id,length,length,&data,&n,&info)); CHECK(n == length && !memcmp(data,big,n)); stqr_free(data);
         free(big);

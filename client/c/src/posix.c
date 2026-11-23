@@ -77,3 +77,11 @@ int sq_recv(struct stqr_socket *s, void *p, size_t n) {
     return 0;
 }
 void sq_disconnect(struct stqr_socket *s) { if (s) { close(s->fd); free(s); } }
+
+int sq_wait(struct stqr_socket *s, unsigned ms) {
+    struct pollfd p = {.fd = s->fd, .events = POLLIN};
+    int n;
+    if (ms > 3600000) return -EINVAL;
+    do { n = poll(&p, 1, (int)ms); } while (n < 0 && errno == EINTR);
+    return n < 0 ? -errno : n ? 1 : 0;
+}

@@ -17,6 +17,7 @@ static void usage(FILE *out)
     fputs("Usage: mount.kstqr --uri URI --bucket ID --credentials FILE [--init] [--readonly] "
           "MOUNTPOINT\n"
           "       mount -t kstqr URI MOUNTPOINT -o bucket=ID,credentials=FILE[,init][,ro]\n"
+          "Options: --timeout-ms N; --metadata-cache-bytes N (default 8388608, 0 disables).\n"
           "Credentials file: username=... and password=... on separate lines, mode 0600.\n"
           "This helper exits after mounting; the kernel maintains the connection.\n",
           out);
@@ -112,7 +113,7 @@ static int resolve(const char *url, char out[512])
 }
 int main(int argc, char **argv)
 {
-    const char *uri = NULL, *bucket = NULL, *path = NULL, *target = NULL, *timeout = "30000";
+    const char *uri = NULL, *bucket = NULL, *path = NULL, *target = NULL, *timeout = "30000", *cache_bytes = NULL;
     char *option_text = NULL, resolved[512];
     int create = 0, readonly = 0, opt, fsfd = -1, cred = -1, mountfd = -1, result = 1;
     unsigned attrs = 0;
@@ -122,6 +123,7 @@ int main(int argc, char **argv)
                                          {"init", no_argument, NULL, 'i'},
                                          {"readonly", no_argument, NULL, 'r'},
                                          {"timeout-ms", required_argument, NULL, 't'},
+                                         {"metadata-cache-bytes", required_argument, NULL, 'm'},
                                          {"help", no_argument, NULL, 'h'},
                                          {NULL, 0, NULL, 0}};
     while ((opt = getopt_long(argc, argv, "o:h", opts, NULL)) != -1) {
@@ -140,6 +142,9 @@ int main(int argc, char **argv)
             break;
         case 'r':
             readonly = 1;
+            break;
+        case 'm':
+            cache_bytes = optarg;
             break;
         case 't':
             timeout = optarg;
@@ -171,6 +176,8 @@ int main(int argc, char **argv)
                 path = token + 12;
             else if (!strncmp(token, "timeout_ms=", 11))
                 timeout = token + 11;
+            else if (!strncmp(token, "metadata_cache_bytes=", 21))
+                cache_bytes = token + 21;
             else if (!strcmp(token, "init"))
                 create = 1;
             else if (!strcmp(token, "ro"))
@@ -215,6 +222,8 @@ int main(int argc, char **argv)
     }
     fsfd = syscall(SYS_fsopen, "kstqr", FSOPEN_CLOEXEC);
     if (fsfd < 0)
+        goto fail;
+    if (cache_bytes && configure(fsfd, FSCONFIG_SET_STRING, "metadata_cache_bytes", cache_bytes, 0))
         goto fail;
     if (configure(fsfd, FSCONFIG_SET_STRING, "url", resolved, 0) ||
         configure(fsfd, FSCONFIG_SET_STRING, "bucket", bucket, 0) ||

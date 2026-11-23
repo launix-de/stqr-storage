@@ -1,0 +1,20 @@
+=== RUN   TestKSTQRVirtualMachine
+    kstqr_linux_test.go:374: KSTQR_BENCH {"test":"seq_read_mib_s","rep":0,"seconds":0.171653707,"rate":46.605}
+    kstqr_linux_test.go:374: KSTQR_BENCH {"test":"stat_ops_s","rep":0,"seconds":0.048755821,"rate":10501.310}
+    kstqr_linux_test.go:374: KSTQR_BENCH {"test":"missing_stat_ops_s","rep":0,"seconds":0.000269857,"rate":948650.582}
+    kstqr_linux_test.go:374: KSTQR_BENCH {"test":"small_read_files_s","rep":0,"seconds":0.000798398,"rate":160321.043}
+    kstqr_linux_test.go:374: KSTQR_BENCH {"test":"parallel_small_read_files_s","rep":0,"seconds":0.002165923,"rate":236388.828}
+    kstqr_linux_test.go:374: KSTQR_BENCH {"test":"seq_read_mib_s","rep":1,"seconds":0.000779062,"rate":10268.759}
+    kstqr_linux_test.go:374: KSTQR_BENCH {"test":"stat_ops_s","rep":1,"seconds":0.001121814,"rate":456403.646}
+    kstqr_linux_test.go:374: KSTQR_BENCH {"test":"missing_stat_ops_s","rep":1,"seconds":0.000248095,"rate":1031862.794}
+    kstqr_linux_test.go:374: KSTQR_BENCH {"test":"small_read_files_s","rep":1,"seconds":0.000552637,"rate":231616.776}
+    kstqr_linux_test.go:374: KSTQR_BENCH {"test":"parallel_small_read_files_s","rep":1,"seconds":0.001332079,"rate":384361.588}
+    kstqr_linux_test.go:374: KSTQR_BENCH {"test":"seq_read_mib_s","rep":2,"seconds":0.000626024,"rate":12779.063}
+    kstqr_linux_test.go:374: KSTQR_BENCH {"test":"stat_ops_s","rep":2,"seconds":0.001122806,"rate":456000.413}
+    kstqr_linux_test.go:374: KSTQR_BENCH {"test":"missing_stat_ops_s","rep":2,"seconds":0.000247404,"rate":1034744.790}
+    kstqr_linux_test.go:374: KSTQR_BENCH {"test":"small_read_files_s","rep":2,"seconds":0.000539622,"rate":237203.079}
+    kstqr_linux_test.go:374: KSTQR_BENCH {"test":"parallel_small_read_files_s","rep":2,"seconds":0.003927588,"rate":130359.905}
+    kstqr_linux_test.go:374: device none mounted on /readonly with fstype kstqr 	stqr: cache_hits=7389 cache_misses=34 rpc_get=22 rpc_range=29 rpc_cas=0 read_windows=86
+--- PASS: TestKSTQRVirtualMachine (3.09s)
+PASS
+ok  	github.com/launix-de/stqr-storage/server	3.099s

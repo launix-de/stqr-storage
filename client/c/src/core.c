@@ -10,6 +10,9 @@ struct stqr_client {
     unsigned port, timeout;
     stqr_id bucket, runtime;
     int status;
+    stqr_u64 capabilities;
+    stqr_update_handler update;
+    void *update_arg;
 };
 struct buf { stqr_u8 *p; size_t n, cap, pos; int err; };
 static int zero(const void *v, size_t n) {
@@ -255,7 +258,7 @@ static int message_send(stqr_client *c, unsigned kind, unsigned op, stqr_id id, 
     number(&m, 1, 1); number(&m, kind, 1); number(&m, op, 2); put(&m, id.bytes, 16); put(&m, body->p, body->n);
     err = m.err ? m.err : frame_send(c, 2, m.p, m.n); drop(&m); return err;
 }
-static int frame_recv(stqr_client *c, struct buf *m) {
+static int frame_recv(stqr_client *c, struct buf *m, int polling) {
     int fragmented = 0, err; unsigned controls = 0;
     for (;;) {
         stqr_u8 h[10], small[125];
@@ -275,6 +278,7 @@ static int frame_recv(stqr_client *c, struct buf *m) {
             if (op == 8) return -ECONNRESET;
             if (op == 9) { if ((err = frame_send(c, 10, small, (size_t)n))) return err; }
             else if (op != 10) return -EPROTO;
+            if (polling && !fragmented) return 1;
             continue;
         }
         if ((!fragmented && op != 2) || (fragmented && op != 0) || n > SQ_WIRE || m->n > SQ_WIRE - n) return -EPROTO;
@@ -337,17 +341,54 @@ static int stream_push(struct download *s, unsigned op, struct buf *d) {
     }
     return -EPROTO;
 }
+static int dispatch_update(stqr_client *c, unsigned opcode, struct buf *m) {
+    stqr_update u = {0};
+    const stqr_u8 *p, *digest; stqr_u8 hash[32];
+    unsigned mode; stqr_u64 total; int err;
+    p = take(m, 16); if (p) memcpy(u.subscription.bytes, p, 16);
+    if (opcode == 0x113) {
+        /* Routing is deliberately not guessed by this non-routing C client. */
+        if (m->err || zero(u.subscription.bytes, 16)) return -EPROTO;
+        u.change = STQR_UPDATE_RESYNC;
+        if (c->update) c->update(c->update_arg, &u);
+        return 0;
+    }
+    u.cursor = readnum(m, 8); u.previous_version = readnum(m, 8);
+    u.version = readnum(m, 8); u.part = (stqr_u32)readnum(m, 4);
+    u.parts = (stqr_u32)readnum(m, 4); u.change = (unsigned)readnum(m, 1);
+    u.offset = readnum(m, 8); u.length = readnum(m, 8);
+    mode = (unsigned)readnum(m, 1); total = readnum(m, 8);
+    digest = take(m, 32); u.data = readblob(m, &u.size);
+    if (done(m) || mode || total != u.size || !u.cursor || !u.parts ||
+        u.part >= u.parts || u.change > STQR_UPDATE_RESYNC ||
+        zero(u.subscription.bytes, 16) || u.size > ~(stqr_u64)0-u.offset) return -EPROTO;
+    err = sq_hash(256, u.data, u.size, hash);
+    if (err) return err;
+    if (memcmp(hash, digest, 32)) return -EBADMSG;
+    if (c->update) c->update(c->update_arg, &u);
+    {
+        struct buf ack = {0}; stqr_id rid = {{0}};
+        put(&ack, u.subscription.bytes, 16); number(&ack, u.cursor, 8);
+        err = message_send(c, 0, 0x114, rid, &ack); drop(&ack);
+    }
+    return err;
+}
 static int reply(stqr_client *c, unsigned op, stqr_id id, struct buf *result, struct download *stream) {
     unsigned skipped = 0;
     for (;;) {
         struct buf m = {0}, headers = {0};
         const stqr_u8 *p; size_t n; unsigned kind, opcode;
-        int err = frame_recv(c, &m);
+        int err = frame_recv(c, &m, 0);
         if (err) { drop(&m); return err; }
         if (readnum(&m, 1) != 1) m.err = -EPROTO;
         kind = (unsigned)readnum(&m, 1); opcode = (unsigned)readnum(&m, 2); p = take(&m, 16);
         if (m.err) { drop(&m); return -EPROTO; }
         if (kind == 3) {
+            if (opcode == 0x112 || opcode == 0x113) {
+                err = dispatch_update(c, opcode, &m); drop(&m);
+                if (err) return err;
+                continue;
+            }
             if (opcode == 5 || opcode == 6 || opcode == 13) {
                 p = take(&m, 16);
                 if (!p || memcmp(p, id.bytes, 16) || !stream) { drop(&m); return -EPROTO; }
@@ -374,7 +415,10 @@ static int reply(stqr_client *c, unsigned op, stqr_id id, struct buf *result, st
         put(result, m.p+m.pos, m.n-m.pos); drop(&m); return result->err;
     }
 }
-static void broken(stqr_client *c) { sq_disconnect(c->socket); c->socket = NULL; }
+static void broken(stqr_client *c) {
+    sq_disconnect(c->socket); c->socket = NULL;
+    if (c->update) c->update(c->update_arg, NULL);
+}
 static int request(stqr_client *c, unsigned op, struct buf *body, stqr_id id, int mutation, struct buf *result, struct download *s) {
     int err;
     if (!c || !c->socket) return -ENOTCONN;
@@ -399,7 +443,7 @@ int stqr_reconnect(stqr_client *c) {
     err = request(c, 1, &body, id, 0, &result, NULL);
     if (!err) {
         if (readnum(&result, 2) != 1) result.err = -EPROTO;
-        take(&result, 56); err = done(&result);
+        c->capabilities = readnum(&result, 8); take(&result, 48); err = done(&result);
     }
     drop(&body); drop(&result);
     if (err) broken(c);
@@ -549,5 +593,74 @@ int stqr_cas(stqr_client *c, stqr_object_id id, unsigned scope, stqr_u64 off, co
         err = request(c, 0x108, &b, o->request_id, 1, &r, NULL);
     }
     if (!err) { info_decode(&r, info); err = done(&r); if (!err) err = accept_info(c, info); }
+    drop(&b); drop(&r); return err;
+}
+
+void stqr_set_update_handler(stqr_client *c, stqr_update_handler handler, void *arg) {
+    if (c) { c->update = handler; c->update_arg = arg; }
+}
+stqr_u64 stqr_capabilities(const stqr_client *c) { return c ? c->capabilities : 0; }
+int stqr_poll(stqr_client *c, unsigned ms) {
+    struct buf m = {0}; unsigned opcode, kind; int err;
+    if (!c || !c->socket) return -ENOTCONN;
+    err = sq_wait(c->socket, ms);
+    if (err <= 0) return err;
+    err = frame_recv(c, &m, 1);
+    if (err == 1) { drop(&m); return 0; }
+    if (!err) {
+        if (readnum(&m, 1) != 1) m.err = -EPROTO;
+        kind = (unsigned)readnum(&m, 1); opcode = (unsigned)readnum(&m, 2);
+        take(&m, 16);
+        if (m.err || kind != 3 || (opcode != 0x112 && opcode != 0x113)) err = -EPROTO;
+        else err = dispatch_update(c, opcode, &m);
+    }
+    drop(&m);
+    if (err) { broken(c); return err; }
+    return 1;
+}
+int stqr_subscribe(stqr_client *c, stqr_object_id id, stqr_id sid,
+                   int ranged, stqr_u64 offset, stqr_u64 length,
+                   const stqr_u64 *resume, void **data, size_t *actual,
+                   stqr_info *info, stqr_u64 *cursor) {
+    struct buf b = {0}, r = {0}; struct download stream = {0}; stqr_id rid = {{0}};
+    const stqr_u8 *p, *digest, *payload; stqr_u8 hash[32]; size_t n;
+    stqr_u64 total, expected; unsigned mode; int err;
+    if (!data || !actual || !info || !cursor) return -EINVAL;
+    *data = NULL; *actual = 0; *cursor = 0;
+    if (!c || zero(sid.bytes, 16) || length > ~(stqr_u64)0-offset) return -EINVAL;
+    if (!(c->capabilities & STQR_CAP_SUBSCRIPTIONS)) return -EOPNOTSUPP;
+    reference(c, &b, id); put(&b, sid.bytes, 16); number(&b, !!ranged, 1);
+    number(&b, offset, 8); number(&b, length, 8); number(&b, !!resume, 1);
+    if (resume) number(&b, *resume, 8);
+    err = request(c, 0x110, &b, rid, 0, &r, &stream);
+    if (err) goto out;
+    p = take(&r, 16);
+    if (p && memcmp(p, sid.bytes, 16)) r.err = -EPROTO;
+    *cursor = readnum(&r, 8); info_decode(&r, info);
+    mode = (unsigned)readnum(&r, 1); total = readnum(&r, 8);
+    digest = take(&r, 32); payload = readblob(&r, &n);
+    expected = info->length;
+    if (ranged) expected = offset < expected ? (length < expected-offset ? length : expected-offset) : 0;
+    if (done(&r) || !*cursor || total != expected || mode > 1) { err = -EPROTO; goto out; }
+    if (total > STQR_BUFFER_LIMIT) { err = -E2BIG; goto out; }
+    if (!mode) {
+        if (stream.started || n != total) { err = -EPROTO; goto out; }
+        err = sq_hash(256, payload, n, hash);
+        if (err) goto out;
+        if (memcmp(hash, digest, 32)) { err = -EBADMSG; goto out; }
+        put(&stream.data, payload, n); err = stream.data.err;
+    } else if (n || !stream.ended || total != stream.length || memcmp(digest, stream.digest, 32)) err = -EPROTO;
+    if (!err) err = accept_info(c, info);
+    if (!err) { *data = stream.data.p; *actual = stream.data.n; stream.data.p = NULL; }
+out:
+    /* An incomplete snapshot must not leave an invisible descriptor behind. */
+    if (err && c->socket && (c->status < 300 || err == -EPROTO || err == -EBADMSG)) broken(c);
+    drop(&b); drop(&r); drop(&stream.data); return err;
+}
+int stqr_unsubscribe(stqr_client *c, stqr_id sid) {
+    struct buf b = {0}, r = {0}; stqr_id rid = {{0}}; int err;
+    if (!c || zero(sid.bytes, 16)) return -EINVAL;
+    put(&b, sid.bytes, 16); err = request(c, 0x111, &b, rid, 0, &r, NULL);
+    if (!err) err = done(&r);
     drop(&b); drop(&r); return err;
 }

@@ -3,7 +3,16 @@
 #define KSTQR_H
 #include "stqr.h"
 #include <linux/fs.h>
+#include <linux/list.h>
 #include <linux/mutex.h>
+#include <linux/spinlock.h>
+#include <linux/workqueue.h>
+#define KS_RPC_SLOTS 4
+struct ks_cache;
+struct ks_rpc {
+	struct mutex lock;
+	stqr_client *client;
+};
 #define KS_DIR_LIMIT (16U << 20)
 struct ks_node {
 	unsigned kind, mode, uid, gid, depth;
@@ -27,13 +36,26 @@ struct ks_entry {
 	char name[256];
 };
 struct ks_fs {
-	struct mutex mutex;
-	stqr_client *client;
+	struct ks_rpc rpc[KS_RPC_SLOTS];
+	struct ks_cache *cache;
+	size_t cache_budget;
+	struct super_block *sb;
+	spinlock_t inode_lock;
+	struct list_head inodes;
+	struct work_struct invalidation_work;
+	stqr_object_id invalidations[128];
+	unsigned invalidation_count;
+	bool invalidate_all;
+	u64 invalidation_generation;
 	char *url;
 	stqr_id bucket;
-	bool readonly, failed;
+	bool readonly, failed, stopping;
+	atomic64_t cache_hits, cache_misses, rpc_gets, rpc_ranges, rpc_cas, read_windows;
 };
 struct ks_inode {
+	struct mutex metadata_lock;
+	struct list_head mount_list;
+	u64 invalidated_generation;
 	u64 version;
 	bool invalidate;
 	stqr_object_id id;
@@ -43,6 +65,15 @@ static inline struct ks_inode *KS_I(struct inode *i)
 {
 	return container_of(i, struct ks_inode, inode);
 }
+struct ks_rpc *ks_rpc_lock(struct ks_fs *, stqr_object_id);
+int ks_cache_start(struct ks_fs *, const char *, const char *, unsigned);
+void ks_cache_stop(struct ks_fs *);
+int ks_cache_peek(struct ks_fs *, stqr_object_id, void **, size_t *, stqr_info *);
+int ks_snapshot_cached(struct ks_fs *, stqr_object_id, struct ks_snapshot *);
+int ks_cache_get(struct ks_fs *, stqr_object_id, void **, size_t *, stqr_info *);
+bool ks_cache_version(struct ks_fs *, stqr_object_id, u64 *);
+void ks_cache_forget(struct ks_fs *, stqr_object_id);
+void ks_queue_invalidation(struct ks_fs *, const stqr_object_id *);
 extern const stqr_object_id ks_root_id;
 void ks_snapshot_free(struct ks_snapshot *s);
 int ks_snapshot(struct ks_fs *, stqr_object_id, struct ks_snapshot *);

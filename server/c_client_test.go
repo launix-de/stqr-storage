@@ -50,7 +50,7 @@ func TestCClient(t *testing.T) {
 		admin := s.cfg.Auth.BootstrapAdmin
 		run(t, host.URL, admin.Username, admin.Password, client.ID(b.ID()).String(), "")
 	})
-	for _, mode := range []string{"disconnect", "digest", "malformed", "wrong-id", "varint", "text"} {
+	for _, mode := range []string{"disconnect", "digest", "malformed", "wrong-id", "varint", "text", "subscription-digest"} {
 		t.Run(mode, func(t *testing.T) {
 			upgrade := websocket.Upgrader{Subprotocols: []string{"stqr.v1"}}
 			host := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -81,6 +81,13 @@ func TestCClient(t *testing.T) {
 				}
 				m, err = client.DecodeMessage(raw)
 				if err != nil || mode == "disconnect" {
+					return
+				}
+				if mode == "subscription-digest" {
+					update := client.ObjectUpdate{Subscription: client.NewRequestID(), Cursor: 1, PreviousVersion: 1, NewVersion: 2, Parts: 1, Data: []byte("x"), NewLength: 1}
+					body, _ := update.MarshalBinary()
+					body[len(body)-1] ^= 1
+					c.WriteMessage(websocket.BinaryMessage, client.EncodeMessage(client.Message{Kind: client.Push, Opcode: client.ObjectUpdateMessage, Body: body}))
 					return
 				}
 				if mode == "wrong-id" {

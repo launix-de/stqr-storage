@@ -113,5 +113,13 @@ namespace edits and fsck work on copies. The retained decoded manifest is limite
 to a 1 MiB encoded body. Existing lower-content version checks remain in force.
 Subscriptions do not rebase an overlay after maintenance rewrites its lower.
 
-The kernel-module client is unchanged by this Go/FUSE implementation. It must
-negotiate and implement the same commands before using subscribed metadata.
+## C and kernel clients
+
+The C library now implements the same subscription/snapshot/update/ACK commands
+through an explicitly polled callback API; it creates no background userspace
+thread. The standalone kernel adapter uses that API on a dedicated connection,
+with a bounded metadata LRU, version-proved dentry reuse and asynchronous
+invalidation of clean page-cache/mmap data. See [the kernel guide](kstqr.md) for
+budgets, reconnect behavior, fallback boundaries and isolated VM tests. The C and
+kernel adapters still do not follow cluster redirects; subscriptions do not add
+multinode routing to those adapters.

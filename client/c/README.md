@@ -86,3 +86,29 @@ helper process.
 
 The standalone Linux adapter is now implemented in [kernel/kstqr](../../kernel/kstqr/README.md).
 See the [kernel client guide](../../docs/kstqr.md) for mounting and VM tests.
+
+## Object subscriptions
+
+`stqr_capabilities()` reports HELLO capabilities. On nodes advertising
+`STQR_CAP_SUBSCRIPTIONS`, `stqr_subscribe()` returns a consistent full or ranged
+snapshot, its version and cursor. Snapshots use the same validated chunk transfer
+as GET. `stqr_set_update_handler()` installs a callback receiving borrowed update
+bytes; `stqr_poll()` processes updates when ordinary RPCs are idle. RPC reply waits
+also dispatch incoming updates. The caller must serialize poll, RPCs and close on
+one connection, and callbacks must not reenter that connection. Different
+connections remain independent; the library starts no background thread.
+
+The codec checks lengths, enums, multipart fields and SHA-256 before dispatch,
+and cumulatively ACKs received updates. Consumers maintaining snapshots must check
+the subscription ID, cursor continuity, previous version and supported change
+shape before applying an event. A gap or RESYNC_REQUIRED requires a fresh snapshot.
+The callback receives NULL on connection loss/close, invalidating all snapshots
+covered by that connection. Reconnect does not retain live server registrations;
+subscribe again, optionally supplying the old cursor for a fresh resnapshot.
+`stqr_unsubscribe()` is a barrier, and closing a connection releases all remaining
+subscriptions. Subscribe failures which leave an indeterminate registration close
+the connection, so no hidden server descriptor remains.
+
+The kernel adapter uses a dedicated subscription connection with an 8 MiB bounded
+LRU and explicitly unsubscribes evicted entries. The Go SDK's GC/AddCleanup lifetime
+strategy is unchanged; the C/kernel implementations use explicit ownership.

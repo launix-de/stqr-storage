@@ -258,30 +258,28 @@ func (t *transaction) freeSpan(off, n uint64) error {
 	if e != nil {
 		return e
 	}
-	if hasPrevious {
-		p := keyOffset(previous.key)
-		if p+previous.value > off {
-			return ErrCorrupt
-		}
-		if p+previous.value == off {
-			if e = t.remove(&t.sb.FreeRoot, previous.key); e != nil {
-				return e
-			}
-			off = p
-			n += previous.value
-		}
+	p, q := keyOffset(previous.key), keyOffset(next.key)
+	if hasPrevious && p+previous.value > off || hasNext && off+n > q {
+		return ErrCorrupt
 	}
-	if hasNext {
-		q := keyOffset(next.key)
-		if off+n > q {
-			return ErrCorrupt
+	mergePrevious := hasPrevious && p+previous.value == off
+	mergeNext := hasNext && off+n == q
+	if mergePrevious {
+		length := previous.value + n
+		if mergeNext {
+			length += next.value
 		}
-		if off+n == q {
-			if e = t.remove(&t.sb.FreeRoot, next.key); e != nil {
-				return e
-			}
-			n += next.value
+		if e = t.set(&t.sb.FreeRoot, previous.key, length); e != nil {
+			return e
 		}
+		if mergeNext {
+			return t.remove(&t.sb.FreeRoot, next.key)
+		}
+		return nil
+	}
+	if mergeNext {
+		_, e = t.replaceKeyAt(t.sb.FreeRoot, next.key, spaceKey(off), n+next.value)
+		return e
 	}
 	return t.set(&t.sb.FreeRoot, spaceKey(off), n)
 }

@@ -125,23 +125,55 @@ A transport interruption during CAS is retried once with the same request ID
 after reconnect, preserving server
 retry deduplication. An unresolved outcome is returned as an I/O error.
 
-The module currently serializes RPCs within each mount. Multiple mounts use
-independent connections and CAS conflicts are retried against fresh snapshots.
-Large read/write syscalls are processed in 64-KiB chunks. Competing multi-chunk
-append syscalls may interleave at those boundaries; they do not reserve an entire
-large append as one operation. `MAP_SHARED` supports reads and writes;
+Each mount uses four authenticated RPC connections, selected by object ID and
+serialized independently. Operations on independent objects can proceed in
+parallel; CAS conflicts reload the inode and retry. A separate subscription
+connection and kernel thread receive changes even when applications are idle.
+No resident userspace process is introduced. Normal writes publish chunks of up
+to 1 MiB with synchronous acknowledgements. Competing larger append syscalls may
+interleave at chunk boundaries; they do not reserve an entire syscall as one
+operation. Mapped writeback still publishes individual folios; batching dirty
+folios is a remaining optimization. `MAP_SHARED` supports reads and writes;
 `MAP_PRIVATE` uses normal copy-on-write pages without modifying stored content.
 Mappings and ordinary I/O share the page cache within a mount. Truncation flushes
 dirty data before resizing; access to pages beyond the new EOF raises `SIGBUS`.
 `O_DIRECT` is unsupported. Locks are local kernel locks, not distributed locks.
 
-Ordinary reads of clean files fetch a fresh inode snapshot and invalidate cached
-pages when its version changes. Reads of locally dirty mappings preserve those
-changes. Dentries are revalidated through lookup. Normal reads do not persist
-atime. Long-lived mmap pages can remain cached after a change through another
-mount; cross-host/page-cache invalidation still needs subscriptions. Applications
-sharing writable mappings must use the same mount, or coordinate updates
-externally; this does not provide distributed shared memory.
+Ordinary reads validate their inode through a live object subscription. Inode
+snapshots are retained in a bounded LRU: 8 MiB of raw snapshots and at most 512
+entries per mount, plus bounded bookkeeping. Configure it with
+`--metadata-cache-bytes N` or `-o metadata_cache_bytes=N`; zero disables it and
+the maximum is 64 MiB. Warm positive and negative dentries reuse their lookup
+only while the subscribed parent version matches; positive dentries also require
+a current subscribed child. There is no metadata TTL. Pending namespace intents
+are resolved through the existing recovery path and cannot prove cached lookups.
+
+The protocol validates update hashes. Cursor/version gaps, multipart or unsupported
+changes and socket loss invalidate cached snapshots. Eviction unsubscribes; unmount
+stops the reader, drains invalidation work and closes all connections. The reader
+reconnects after loss, but old snapshots remain invalid and resubscribe on demand.
+Reconnection also invalidates pages refaulted through the uncached fallback
+while subscription coverage was unavailable.
+An initial notification racing snapshot receipt conservatively falls back to an
+uncached read. Unsupported servers or snapshots which do not fit the budget also
+fall back to native reads.
+
+Notification handling queues targeted inode invalidation on a separate worker;
+it never waits for page-cache locks while receiving a protocol message. Clean
+mmap pages are unmapped and invalidated after updates. Dirty local mapped pages
+are preserved for writeback. Notifications are asynchronous: a writer ACK on one
+connection does not imply another mount has already processed its update.
+Mappings without subscription coverage (cache disabled, unsupported server or
+an uncacheable inode) retain the previous limitation: a long-lived mapping may
+remain stale until another operation revalidates it. This is not distributed
+shared memory; coordinate writable mappings across mounts externally.
+
+Read-ahead fills contiguous windows up to 1 MiB from one inode snapshot instead
+of issuing a metadata/index read for every 4-KiB page. Already cached file pages
+are reused. Normal reads do not persist atime. `/proc/self/mountstats` includes
+per-mount cache hit/miss, native GET/range/CAS and read-ahead-window counters.
+The native counters count logical calls before reconnect retries; subscription
+traffic is represented by cache misses rather than added to the native counters.
 
 ## Current boundaries
 
@@ -210,6 +242,16 @@ through independent mounts, readonly/private/shared writable mmap, sparse
 open-unlink, rename flags, rmdir, remount and clean module unload.
 Mmap tests cover forked shared updates, SQLite WAL with concurrent processes,
 I/O buffers backed by mappings, truncation/EOF, writeback failure and recovery,
-explicit sync and unmount persistence.
+explicit sync and unmount persistence. Subscription tests also cover external
+Go-client updates to existing mmap pages, permissions, negative dentries,
+forced socket loss/reconnect, explicit resync and unlink; a 2-KiB cache exercises eviction and a disabled-cache mount checks fallback.
+
+An isolated VM microbenchmark is available with `STQR_KERNEL_BENCHMARK=1` using
+the same test command. It seeds disposable data and prints JSON timing lines for
+client-cold/warm sequential reads, existing/missing stat, and sequential/parallel
+small-file reads. `STQR_KERNEL_MODULE=/absolute/path/kstqr.ko` selects a separately
+built baseline module; its wire format must be compatible with the seeded data.
+See [the measurements](../benchmarks/2026-11-23-kernel-throughput/README.md) for
+method, raw samples and the distinction between VM/RAM and SSD throughput.
 After the VM exits, the Go client reads the kernel-written data and its fsck
 validates and cleans the published object graph.

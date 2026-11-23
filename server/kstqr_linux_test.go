@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/launix-de/stqr-storage/client"
+	"github.com/launix-de/stqr-storage/volume"
 )
 
 // The module is never loaded into the host. The VM uses only a disposable server.
@@ -72,9 +73,15 @@ func TestKSTQRVirtualMachine(t *testing.T) {
 	if err := os.Symlink("busybox", filepath.Join(initrdRoot, "bin/sh")); err != nil {
 		t.Fatal(err)
 	}
-	copyFile(filepath.Join(root, "kstqr.ko"), "kstqr.ko", 0600)
+	module := os.Getenv("STQR_KERNEL_MODULE")
+	if module == "" {
+		module = filepath.Join(root, "kstqr.ko")
+	}
+	copyFile(module, "kstqr.ko", 0600)
 	run("cc", "-static", "-std=c11", "-Wall", "-Wextra", "-Werror", "-O2", "-o", filepath.Join(initrdRoot, "mount.kstqr"), filepath.Join(root, "mount.c"))
 	run("cc", "-static", "-std=c11", "-Wall", "-Wextra", "-Werror", "-O2", "-o", filepath.Join(initrdRoot, "smoke"), filepath.Join(root, "tests/smoke.c"))
+	run("cc", "-static", "-std=c11", "-Wall", "-Wextra", "-Werror", "-O2", "-o", filepath.Join(initrdRoot, "coherence"), filepath.Join(root, "tests/coherence.c"))
+	run("cc", "-static", "-std=c11", "-Wall", "-Wextra", "-Werror", "-O2", "-o", filepath.Join(initrdRoot, "throughput"), filepath.Join(root, "tests/throughput.c"))
 	run("cc", "-static", "-std=c11", "-Wall", "-Wextra", "-Werror", "-O2", "-o", filepath.Join(initrdRoot, "mmap-test"), filepath.Join(root, "tests/mmap.c"), "-lsqlite3", "-lm", "-ldl", "-lpthread")
 	s := testServer(t)
 	addTestVolume(t, s, "kernel-vm", "hdd", 192<<20)
@@ -92,6 +99,7 @@ func TestKSTQRVirtualMachine(t *testing.T) {
 	}
 	admin := s.cfg.Auth.BootstrapAdmin
 	handler := s.Handler()
+	var subscriptionFS *client.Filesystem
 	host := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/__kstqr_test/lock" || r.URL.Path == "/__kstqr_test/unlock" {
 			body := client.Encoder{}
@@ -104,6 +112,59 @@ func TestKSTQRVirtualMachine(t *testing.T) {
 			response := httptest.NewRecorder()
 			handler.ServeHTTP(response, req)
 			w.WriteHeader(response.Code)
+			return
+		}
+		if r.URL.Path == "/__kstqr_test/subscription-reconnect" || r.URL.Path == "/__kstqr_test/subscription-resync" {
+			if strings.HasSuffix(r.URL.Path, "reconnect") {
+				s.objectSubscriptions.mu.Lock()
+				sockets := make([]*wsSession, 0, len(s.objectSubscriptions.sessions))
+				for ws := range s.objectSubscriptions.sessions {
+					sockets = append(sockets, ws)
+				}
+				s.objectSubscriptions.mu.Unlock()
+				for _, ws := range sockets {
+					ws.close()
+				}
+			} else {
+				s.objectSubscriptions.resyncWhere(func(volume.Key) bool { return true })
+			}
+			// Allow the guest to refault an old page before the new write. The
+			// reconnect path must discard those temporarily uncovered pages.
+			time.Sleep(50 * time.Millisecond)
+			text := "again!"
+			if strings.HasSuffix(r.URL.Path, "resync") {
+				text = "resync"
+			}
+			file, err := subscriptionFS.Lookup(r.Context(), client.FilesystemRootID(), "subscription.txt")
+			if err == nil {
+				_, err = subscriptionFS.WriteAt(r.Context(), file.ID, []byte(text), 0)
+			}
+			if err != nil {
+				http.Error(w, err.Error(), 500)
+			} else {
+				w.WriteHeader(200)
+			}
+			return
+		}
+		if r.URL.Path == "/__kstqr_test/subscription-update" || r.URL.Path == "/__kstqr_test/subscription-delete" {
+			file, err := subscriptionFS.Lookup(r.Context(), client.FilesystemRootID(), "subscription.txt")
+			if err == nil && r.URL.Path == "/__kstqr_test/subscription-update" {
+				_, err = subscriptionFS.WriteAt(r.Context(), file.ID, []byte("after!"), 0)
+				mode := uint32(0600)
+				if err == nil {
+					_, err = subscriptionFS.SetAttributes(r.Context(), file.ID, client.FSAttributes{Mode: &mode})
+				}
+				if err == nil {
+					_, err = subscriptionFS.Create(r.Context(), client.FilesystemRootID(), "subscription-created", 0644, 0, 0, false)
+				}
+			} else if err == nil {
+				err = subscriptionFS.Unlink(r.Context(), client.FilesystemRootID(), "subscription.txt")
+			}
+			if err != nil {
+				http.Error(w, err.Error(), 500)
+			} else {
+				w.WriteHeader(200)
+			}
 			return
 		}
 		handler.ServeHTTP(w, r)
@@ -148,6 +209,28 @@ func TestKSTQRVirtualMachine(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	subscriptionFS = fs
+	benchmark := os.Getenv("STQR_KERNEL_BENCHMARK") == "1"
+	if benchmark {
+		for i := 0; i < 32; i++ {
+			f, err := fs.Create(ctx, client.FilesystemRootID(), fmt.Sprintf("bench-%03d.php", i), 0644, 0, 0, false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err = fs.WriteAt(ctx, f.ID, bytes.Repeat([]byte("x"), 4096), 0); err != nil {
+				t.Fatal(err)
+			}
+		}
+		f, err := fs.Create(ctx, client.FilesystemRootID(), "bench-sequential", 0644, 0, 0, false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for off := int64(0); off < 8<<20; off += 1 << 20 {
+			if _, err = fs.WriteAt(ctx, f.ID, bytes.Repeat([]byte("s"), 1<<20), off); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
 	file, err := fs.Create(ctx, client.FilesystemRootID(), "go.txt", 0644, 0, 0, false)
 	if err != nil {
 		t.Fatal(err)
@@ -164,46 +247,48 @@ func TestKSTQRVirtualMachine(t *testing.T) {
 	if err = fs.SetXattr(ctx, file.ID, "user.from-go", []byte("Go metadata"), 0); err != nil {
 		t.Fatal(err)
 	}
-	// Leave a valid interrupted multi-inode operation for the kernel to read
-	// without writes on the RO mount, and then finish on the RW mount.
-	type participant struct {
-		id      client.ObjectID
-		raw     []byte
-		version uint64
-	}
-	members := []participant{{id: client.FilesystemRootID()}, {id: file.ID}}
-	sort.Slice(members, func(i, j int) bool { return bytes.Compare(members[i].id[:], members[j].id[:]) < 0 })
-	var transaction client.ObjectID
-	for i := 0; i < 2; i++ {
-		id := client.NewRequestID()
-		copy(transaction[i*16:], id[:])
-	}
-	descriptor := client.Encoder{B: []byte("STFT")}
-	descriptor.U16(1)
-	descriptor.U8(0)
-	descriptor.U32(uint32(len(members)))
-	var rootVersion uint64
-	for i := range members {
-		raw, info, e := conn.Get(ctx, members[i].id)
-		if e != nil {
-			t.Fatal(e)
+	if !benchmark {
+		// Leave a valid interrupted multi-inode operation for the kernel to read
+		// without writes on the RO mount, and then finish on the RW mount.
+		type participant struct {
+			id      client.ObjectID
+			raw     []byte
+			version uint64
 		}
-		members[i].raw = raw
-		members[i].version = info.Version
-		descriptor.B = append(descriptor.B, members[i].id[:]...)
-		descriptor.U64(info.Version)
-		descriptor.Blob(raw)
-		descriptor.Blob(raw)
-		if members[i].id == client.FilesystemRootID() {
-			rootVersion = info.Version
+		members := []participant{{id: client.FilesystemRootID()}, {id: file.ID}}
+		sort.Slice(members, func(i, j int) bool { return bytes.Compare(members[i].id[:], members[j].id[:]) < 0 })
+		var transaction client.ObjectID
+		for i := 0; i < 2; i++ {
+			id := client.NewRequestID()
+			copy(transaction[i*16:], id[:])
 		}
-	}
-	if _, err = conn.CAS(ctx, transaction, 0, nil, descriptor.B, client.CASOptions{Scope: client.CASObject, MutationOptions: client.MutationOptions{RequestID: client.NewRequestID(), Absent: true}}); err != nil {
-		t.Fatal(err)
-	}
-	marker := append([]byte("STFL\x01\x00"), transaction[:]...)
-	if _, err = conn.CAS(ctx, client.FilesystemRootID(), 0, nil, marker, client.CASOptions{Scope: client.CASObject, MutationOptions: client.MutationOptions{RequestID: client.NewRequestID(), ExpectedVersion: &rootVersion}}); err != nil {
-		t.Fatal(err)
+		descriptor := client.Encoder{B: []byte("STFT")}
+		descriptor.U16(1)
+		descriptor.U8(0)
+		descriptor.U32(uint32(len(members)))
+		var rootVersion uint64
+		for i := range members {
+			raw, info, e := conn.Get(ctx, members[i].id)
+			if e != nil {
+				t.Fatal(e)
+			}
+			members[i].raw = raw
+			members[i].version = info.Version
+			descriptor.B = append(descriptor.B, members[i].id[:]...)
+			descriptor.U64(info.Version)
+			descriptor.Blob(raw)
+			descriptor.Blob(raw)
+			if members[i].id == client.FilesystemRootID() {
+				rootVersion = info.Version
+			}
+		}
+		if _, err = conn.CAS(ctx, transaction, 0, nil, descriptor.B, client.CASOptions{Scope: client.CASObject, MutationOptions: client.MutationOptions{RequestID: client.NewRequestID(), Absent: true}}); err != nil {
+			t.Fatal(err)
+		}
+		marker := append([]byte("STFL\x01\x00"), transaction[:]...)
+		if _, err = conn.CAS(ctx, client.FilesystemRootID(), 0, nil, marker, client.CASOptions{Scope: client.CASObject, MutationOptions: client.MutationOptions{RequestID: client.NewRequestID(), ExpectedVersion: &rootVersion}}); err != nil {
+			t.Fatal(err)
+		}
 	}
 	if err = os.WriteFile(filepath.Join(initrdRoot, "readonly-credentials"), []byte("username="+user.Name+"\npassword=bucket-test-password\n"), 0600); err != nil {
 		t.Fatal(err)
@@ -250,6 +335,13 @@ umount /fresh
 if pidof mount.kstqr; then exit 1; fi
 /smoke
 /mmap-test @@URL@@
+/mount.kstqr --uri @@URL@@ --bucket @@EMPTY@@ --credentials /credentials --metadata-cache-bytes 2048 /fresh
+/coherence @@URL@@
+umount /fresh
+/mount.kstqr --uri @@URL@@ --bucket @@BUCKET@@ --credentials /readonly-credentials --readonly --metadata-cache-bytes 0 /fresh
+test "$(cat /fresh/go.txt)" = 'Hello from Go'
+umount /fresh
+cat /proc/self/mountstats
 ls -l /mnt
 if grep 'password=' /proc/mounts; then exit 1; fi
 umount /readonly
@@ -267,6 +359,17 @@ echo KSTQR_VM_PASS
 trap - EXIT
 poweroff -f
 `)
+
+	if benchmark {
+		begin := strings.Index(init, "for attempt in 1 2 3 4; do")
+		end := strings.Index(init, "if dmesg |")
+		init = init[:begin] + `/mount.kstqr --uri ` + endpoint + ` --bucket ` + client.ID(b.ID()).String() + ` --credentials /readonly-credentials --readonly /readonly
+/throughput
+cat /proc/self/mountstats
+umount /readonly
+rmmod kstqr
+` + init[end:]
+	}
 
 	if err = os.WriteFile(filepath.Join(initrdRoot, "init"), []byte(init), 0755); err != nil {
 		t.Fatal(err)
@@ -297,6 +400,14 @@ poweroff -f
 	}
 	if err != nil || !strings.Contains(string(output), "KSTQR_VM_PASS") || strings.Contains(string(output), "KSTQR_VM_FAIL") {
 		t.Fatalf("kernel VM: %v\n%s", err, output)
+	}
+	if benchmark {
+		for _, line := range strings.Split(string(output), "\n") {
+			if strings.Contains(line, "KSTQR_BENCH ") || strings.Contains(line, "stqr: cache_hits=") {
+				t.Log(strings.TrimSpace(line))
+			}
+		}
+		return
 	}
 	t.Log("Standalone kernel mount, Go interoperability, filesystem operations and clean unload passed")
 	entries, err := fs.ReadDir(ctx, client.FilesystemRootID())

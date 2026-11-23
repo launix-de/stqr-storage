@@ -23,5 +23,7 @@ int sq_hash(unsigned bits, const void *p, size_t n, stqr_u8 *out);
 int sq_connect(struct stqr_socket **out, const char *host, unsigned port, unsigned ms);
 int sq_send(struct stqr_socket *, const void *, size_t);
 int sq_recv(struct stqr_socket *, void *, size_t);
+/* Wait for readable bytes or disconnect: 0 timeout, 1 ready, negative errno. */
+int sq_wait(struct stqr_socket *, unsigned ms);
 void sq_disconnect(struct stqr_socket *);
 #endif

@@ -25,20 +25,32 @@ struct member {
 };
 static bool eqid(stqr_object_id a, stqr_object_id b) { return !memcmp(a.bytes, b.bytes, 32); }
 static bool nullid(stqr_object_id id) { return zero(id.bytes, 32); }
+struct ks_rpc *ks_rpc_lock(struct ks_fs *f, stqr_object_id id)
+{
+	unsigned slot = (id.bytes[0] ^ id.bytes[7] ^ id.bytes[19] ^ id.bytes[31]) % KS_RPC_SLOTS;
+	struct ks_rpc *rpc = &f->rpc[slot];
+	mutex_lock(&rpc->lock);
+	return rpc;
+}
 static int get_object(struct ks_fs *f, stqr_object_id id, void **p, size_t *n, stqr_info *info)
 {
-	int err = stqr_get(f->client, id, p, n, info);
+	struct ks_rpc *rpc = ks_rpc_lock(f, id);
+	int err;
+	atomic64_inc(&f->rpc_gets);
+	err = stqr_get(rpc->client, id, p, n, info);
 	if (err == -ENOTCONN || err == -ECONNRESET || err == -EPIPE || err == -ETIMEDOUT ||
-	    (err == -EAGAIN && !stqr_status(f->client))) {
-		err = stqr_reconnect(f->client);
+	    (err == -EAGAIN && !stqr_status(rpc->client))) {
+		err = stqr_reconnect(rpc->client);
 		if (!err)
-			err = stqr_get(f->client, id, p, n, info);
+			err = stqr_get(rpc->client, id, p, n, info);
 	}
+	mutex_unlock(&rpc->lock);
 	return err;
 }
 static int cas_object(struct ks_fs *f, stqr_object_id id, const void *p, size_t n, u64 version,
 		      bool absent)
 {
+	struct ks_rpc *rpc;
 	stqr_options o = {0};
 	stqr_info info;
 	int err;
@@ -50,15 +62,20 @@ static int cas_object(struct ks_fs *f, stqr_object_id id, const void *p, size_t 
 	err = stqr_request_id(&o.request_id);
 	if (err)
 		return err;
-	err = stqr_cas(f->client, id, 1, 0, NULL, 0, p, n, &o, &info);
+	rpc = ks_rpc_lock(f, id);
+	ks_cache_forget(f, id);
+	atomic64_inc(&f->rpc_cas);
+	err = stqr_cas(rpc->client, id, 1, 0, NULL, 0, p, n, &o, &info);
 	if (err == -EINPROGRESS || err == -EACCES) {
 		// A bucket unlock/grant change may leave this socket with its old
 		// read-only capability. Reauthenticate before one same-ID retry.
-		if (!stqr_reconnect(f->client))
-			err = stqr_cas(f->client, id, 1, 0, NULL, 0, p, n, &o, &info);
+		if (!stqr_reconnect(rpc->client))
+			err = stqr_cas(rpc->client, id, 1, 0, NULL, 0, p, n, &o, &info);
 		if (err == -EINPROGRESS)
 			err = -EIO;
 	}
+	ks_cache_forget(f, id);
+	mutex_unlock(&rpc->lock);
 	return err;
 }
 static int immutable(struct ks_fs *f, const void *p, size_t n, stqr_object_id *id)
@@ -344,6 +361,18 @@ static int help_tx(struct ks_fs *f, stqr_object_id first)
 	sq_free(stack);
 	return err ? err : first_result;
 }
+int ks_snapshot_cached(struct ks_fs *f, stqr_object_id id, struct ks_snapshot *s)
+{
+	int err;
+	memset(s, 0, sizeof(*s));
+	s->id = id;
+	err = ks_cache_peek(f, id, &s->raw, &s->raw_len, &s->info);
+	if (!err)
+		err = decode_node(s->raw, s->raw_len, &s->node);
+	if (err)
+		ks_snapshot_free(s);
+	return err;
+}
 int ks_snapshot(struct ks_fs *f, stqr_object_id id, struct ks_snapshot *s)
 {
 	unsigned attempt;
@@ -352,7 +381,9 @@ int ks_snapshot(struct ks_fs *f, stqr_object_id id, struct ks_snapshot *s)
 	s->id = id;
 	for (attempt = 0; attempt < 128; attempt++) {
 		stqr_object_id txid;
-		err = get_object(f, id, &s->raw, &s->raw_len, &s->info);
+		err = ks_cache_get(f, id, &s->raw, &s->raw_len, &s->info);
+		if (err == -ENODATA)
+			err = get_object(f, id, &s->raw, &s->raw_len, &s->info);
 		if (err)
 			return err;
 		if (!marker(s->raw, s->raw_len, &txid)) {
@@ -361,6 +392,7 @@ int ks_snapshot(struct ks_fs *f, stqr_object_id id, struct ks_snapshot *s)
 				ks_snapshot_free(s);
 			return err;
 		}
+		ks_cache_forget(f, id);
 		if (f->readonly) {
 			struct buf raw = {0};
 			stqr_info info;
@@ -517,8 +549,11 @@ static int index_read(struct ks_fs *f, stqr_object_id id, u64 length, unsigned d
 			void *data = NULL;
 			size_t actual;
 			stqr_info info;
-			err = stqr_get_range(f->client, p->id, p->offset + offset, n, &data,
+			struct ks_rpc *rpc = ks_rpc_lock(f, p->id);
+			atomic64_inc(&f->rpc_ranges);
+			err = stqr_get_range(rpc->client, p->id, p->offset + offset, n, &data,
 					     &actual, &info);
+			mutex_unlock(&rpc->lock);
 			if (!err && actual != n)
 				err = -EUCLEAN;
 			if (!err)

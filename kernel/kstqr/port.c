@@ -6,8 +6,10 @@
 #include <linux/inet.h>
 #include <linux/net.h>
 #include <linux/random.h>
+#include <linux/sched/signal.h>
 #include <linux/slab.h>
 #include <linux/vmalloc.h>
+#include <linux/wait.h>
 #include <net/net_namespace.h>
 #include <net/sock.h>
 struct stqr_socket {
@@ -128,4 +130,24 @@ void sq_disconnect(struct stqr_socket *s)
 		sock_release(s->sock);
 		kfree(s);
 	}
+}
+
+/* Wait without consuming a partial frame. The core applies the socket timeout
+ * once readable data starts a frame. No userspace poll helper is involved. */
+int sq_wait(struct stqr_socket *s, unsigned ms)
+{
+	long left = msecs_to_jiffies(ms);
+	DEFINE_WAIT_FUNC(wait, woken_wake_function);
+	int ready;
+	add_wait_queue(sk_sleep(s->sock->sk), &wait);
+	for (;;) {
+		ready = !skb_queue_empty_lockless(&s->sock->sk->sk_receive_queue) ||
+			READ_ONCE(s->sock->sk->sk_err) ||
+			(READ_ONCE(s->sock->sk->sk_shutdown) & RCV_SHUTDOWN);
+		if (ready || !left || signal_pending(current))
+			break;
+		left = wait_woken(&wait, TASK_INTERRUPTIBLE, left);
+	}
+	remove_wait_queue(sk_sleep(s->sock->sk), &wait);
+	return ready ? 1 : signal_pending(current) ? -EINTR : 0;
 }

@@ -306,6 +306,10 @@ func (o *OverlayFilesystem) child(ctx context.Context, s *overlayState, parent O
 		lower = dir.lower
 	}
 	info, err := o.lower.Lookup(ctx, lower, name)
+	// Match readDir's inherited-alias check on the direct lookup fast path.
+	if err == nil && overlayUpperReference(s, info.ID) {
+		return ObjectID{}, syscall.EOPNOTSUPP
+	}
 	return info.ID, err
 }
 func (o *OverlayFilesystem) directory(ctx context.Context, s *overlayState, id ObjectID) (*overlayDirectory, error) {

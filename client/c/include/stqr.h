@@ -72,6 +72,36 @@ int stqr_cas(stqr_client *, stqr_object_id, unsigned scope, stqr_u64 offset,
              const void *expected, size_t expected_len,
              const void *replacement, size_t replacement_len,
              const stqr_options *, stqr_info *);
+/* Subscriptions use the same wire protocol as the Go SDK. Calls, polling and
+ * callbacks are serialized by the caller. Callback data is borrowed until return;
+ * callbacks must not call this connection. NULL update means connection loss.
+ * There is no background userspace thread; poll from your event loop (or use a
+ * dedicated connection). Unsubscribe is a barrier. Resume returns a fresh snapshot.
+ */
+#define STQR_CAP_SUBSCRIPTIONS 512U
+#define STQR_UPDATE_REPLACE 0
+#define STQR_UPDATE_DELETE 4
+#define STQR_UPDATE_RESYNC 5
+typedef struct {
+    stqr_id subscription;
+    stqr_u64 cursor, previous_version, version, offset, length;
+    stqr_u32 part, parts;
+    unsigned change;
+    const void *data;
+    size_t size;
+} stqr_update;
+typedef void (*stqr_update_handler)(void *, const stqr_update *);
+void stqr_set_update_handler(stqr_client *, stqr_update_handler, void *);
+stqr_u64 stqr_capabilities(const stqr_client *);
+int stqr_subscribe(stqr_client *, stqr_object_id, stqr_id subscription,
+                   int ranged, stqr_u64 offset, stqr_u64 length,
+                   const stqr_u64 *resume, void **data, size_t *actual,
+                   stqr_info *, stqr_u64 *cursor);
+int stqr_unsubscribe(stqr_client *, stqr_id subscription);
+/* 0: no event before timeout, 1: one event processed, negative errno on loss.
+ * Once a frame starts, the normal socket timeout applies to its remainder.
+ */
+int stqr_poll(stqr_client *, unsigned timeout_ms);
 #ifdef __cplusplus
 }
 #endif
