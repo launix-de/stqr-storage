@@ -93,20 +93,22 @@ func (ws *wsSession) receivePeerReply(m client.Message) bool {
 	return true
 }
 
-func (p *peerConnection) requestLoop() {
+func (p *peerConnection) requestLoop()        { p.dispatchRequestQueue(p.incoming) }
+func (p *peerConnection) controlRequestLoop() { p.dispatchRequestQueue(p.controlIncoming) }
+func (p *peerConnection) dispatchRequestQueue(queue <-chan client.Message) {
 	defer p.close()
 	select {
 	case <-p.ready:
 	case <-p.ctx.Done():
 		return
 	}
-	identity := principal{User: account{ID: p.Node.String(), Name: "node-" + p.Node.String(), Role: "NODE"}, ClusterPeer: true, connection: &connectionAuthorization{clusterPeer: true}}
+	identity := principal{User: account{ID: p.Node.String(), Name: "node-" + p.Node.String(), Role: "NODE"}, ClusterPeer: true, connection: &connectionAuthorization{clusterPeer: true, peerBoot: p.Boot}}
 	identity.connection.peerVerified.Store(true)
 	for {
 		select {
 		case <-p.ctx.Done():
 			return
-		case m := <-p.incoming:
+		case m := <-queue:
 			body, _ := p.server.dispatchAs(m, nil, identity)
 			if m.Kind == client.Request {
 				select {

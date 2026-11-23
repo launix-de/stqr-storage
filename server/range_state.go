@@ -1,0 +1,718 @@
+// SPDX-License-Identifier: GPL-3.0-only
+package server
+
+import (
+	"bytes"
+	"encoding/json"
+	"path/filepath"
+	"reflect"
+	"sync"
+	"sync/atomic"
+
+	"github.com/launix-de/stqr-storage/client"
+	"github.com/launix-de/stqr-storage/volume"
+)
+
+const (
+	rangeGenesis uint16 = 1 + iota
+	rangeReserved
+	rangeFenced
+	rangeSourceReady
+	rangeTargetReady
+	rangeCommitted
+	rangeTargetDone
+	rangeSourceDone
+	rangeObserved
+	rangeObjectStored
+	rangeAborted
+	rangeTargetRestored
+	rangeRAMTargetLost
+	rangeRAMOfferLost
+	rangeRAMCommitLost
+	rangeForceCancelled
+	rangeForceRetired
+	rangeForcePromoted
+)
+
+type rangeCommit struct {
+	ID, Digest     [32]byte
+	LogicalUsed    uint64
+	Source, Target client.Proof
+}
+type rangeEvent struct {
+	Exclusion        *controlClaim
+	Boot, SourceBoot client.ID
+	LogicalUsed      uint64
+	PeerBoot         client.ID
+	Object           *rangeObjectMemo
+	ID, Digest       [32]byte
+	Plan             []byte
+	Commit           *rangeCommit
+	TargetDone       client.Proof
+}
+type rangeTxn struct {
+	sourceBoot, targetBoot                                        client.ID
+	logicalUsed, pendingUsed                                      uint64
+	aborted                                                       bool
+	forceRetired                                                  bool
+	forcePromotion                                                *controlClaim
+	forceCancellation                                             *controlClaim
+	cancellationProof                                             client.Proof
+	abortObjectCursor                                             *volume.ObjectID
+	abortRequestCursor                                            *volume.ID
+	abortObjectsDone, abortRequestsDone                           bool
+	snapshot                                                      *rangeSnapshot
+	plan                                                          rangePlan
+	lease                                                         sync.RWMutex
+	fenced                                                        bool
+	digest                                                        [32]byte
+	sourceReady, targetReady, commitProof, targetDone, sourceDone client.Proof
+	decision                                                      *rangeCommit
+	remaining                                                     uint64
+}
+type rangeManager struct {
+	activity    atomic.Pointer[rangeActivity]
+	lastError   error
+	pressures   []rangePressure
+	mu          sync.Mutex
+	server      *Server
+	journal     *controlJournal
+	node        client.ID
+	txns        map[[32]byte]*rangeTxn
+	order       [][32]byte
+	initialized bool
+	memoCursor  *volume.Key
+	work        sync.Mutex
+}
+
+func (s *Server) initRanges(dataDir string) error {
+	node, _ := parseID(s.cfg.Node.ID)
+	cluster, _ := parseID(s.cfg.ClusterID)
+	r := &rangeManager{server: s, node: client.ID(node), txns: make(map[[32]byte]*rangeTxn)}
+	if s.cfg.RangeVersion > 1 {
+		return volume.ErrUnsupported
+	}
+	j, err := openControlJournal(filepath.Join(dataDir, "ranges.stqr"), cluster, node, s.cfg.RangeVersion == 0, r.replay)
+	if err != nil {
+		return err
+	}
+	r.journal = j
+	s.scopes = r
+	if !r.initialized {
+		if _, err := r.persist(rangeGenesis, rangeEvent{}); err != nil {
+			return err
+		}
+	}
+	s.cfg.RangeVersion = 1
+	if err := saveConfig(s.configPath, s.cfg); err != nil {
+		return err
+	}
+	r.mu.Lock()
+	err = r.rebuildLocked()
+	r.mu.Unlock()
+	if err != nil {
+		return err
+	}
+	if err := r.retireLostRAMTargets(); err != nil {
+		return err
+	}
+	if err := r.restoreReservations(); err != nil {
+		return err
+	}
+	r.publishActivityLocked()
+	return nil
+}
+func (r *rangeManager) persist(kind uint16, event rangeEvent) (client.Proof, error) {
+	data, err := json.Marshal(event)
+	if err != nil {
+		return client.Proof{}, err
+	}
+	proof, err := r.journal.append(kind, data)
+	if err != nil {
+		return client.Proof{}, err
+	}
+	if err := r.replay(controlRecord{Kind: kind, Proof: proof, Data: data}); err != nil {
+		return client.Proof{}, err
+	}
+	r.publishActivityLocked()
+	return proof, nil
+}
+func (r *rangeManager) replay(record controlRecord) error {
+	var event rangeEvent
+	if err := decodeControlRecord(record.Data, &event); err != nil {
+		return err
+	}
+	if record.Kind == rangeGenesis {
+		if r.initialized || record.Proof.RecordSequence != 1 {
+			return volume.ErrCorrupt
+		}
+		r.initialized = true
+		return nil
+	}
+	if !r.initialized {
+		return volume.ErrCorrupt
+	}
+	if record.Kind == rangeReserved || record.Kind == rangeObserved || (record.Kind == rangeAborted || record.Kind == rangeRAMOfferLost || record.Kind == rangeForceCancelled) && r.txns[event.ID] == nil {
+		plan, err := decodeRangePlan(event.Plan)
+		if err != nil || plan.id() != event.ID || r.txns[event.ID] != nil {
+			return volume.ErrCorrupt
+		}
+		r.txns[event.ID] = &rangeTxn{plan: plan, remaining: plan.Physical, sourceBoot: event.SourceBoot}
+		r.order = append(r.order, event.ID)
+	}
+	t := r.txns[event.ID]
+	if t == nil {
+		return volume.ErrCorrupt
+	}
+	switch record.Kind {
+	case rangeForcePromoted:
+		if event.Exclusion == nil || !validExclusionClaim(*event.Exclusion) || !hasControlNode(event.Exclusion.Required, r.node) || !hasControlNode(event.Exclusion.Exclusion.Nodes, t.plan.Source) || t.plan.Target != r.node || t.targetReady.RecordSequence == 0 || t.decision != nil || t.aborted || t.forceRetired || t.plan.ram() && t.targetBoot != event.Boot {
+			return volume.ErrCorrupt
+		}
+		t.forcePromotion = event.Exclusion
+		t.forceRetired = true
+		t.remaining = 0
+	case rangeForceRetired:
+		if event.Exclusion == nil || !validExclusionClaim(*event.Exclusion) || !hasControlNode(event.Exclusion.Required, r.node) || t.decision == nil || t.forceRetired || !hasControlNode(event.Exclusion.Exclusion.Nodes, t.plan.Source) && !hasControlNode(event.Exclusion.Exclusion.Nodes, t.plan.Target) {
+			return volume.ErrCorrupt
+		}
+		t.forceRetired = true
+		t.remaining = 0
+	case rangeForceCancelled:
+		if event.Exclusion == nil || !validExclusionClaim(*event.Exclusion) || !hasControlNode(event.Exclusion.Required, r.node) || t.decision != nil || t.aborted {
+			return volume.ErrCorrupt
+		}
+		t.aborted = true
+		t.forceCancellation = event.Exclusion
+		t.cancellationProof = record.Proof
+		t.remaining = 0
+	case rangeRAMOfferLost:
+		if !t.plan.ram() || t.aborted || t.decision != nil || event.SourceBoot != t.sourceBoot || event.PeerBoot == (client.ID{}) || event.PeerBoot == t.sourceBoot {
+			return volume.ErrCorrupt
+		}
+		if t.plan.Target == r.node && t.targetReady.RecordSequence != 0 && t.targetBoot == event.Boot {
+			return volume.ErrCorrupt
+		}
+		t.aborted = true
+		t.remaining = 0
+	case rangeAborted:
+		if t.decision != nil || t.fenced || t.sourceReady.RecordSequence != 0 || t.targetReady.RecordSequence != 0 || t.aborted {
+			return volume.ErrCorrupt
+		}
+		t.aborted = true
+		t.remaining = 0
+	case rangeObjectStored:
+		if event.Object == nil || t.plan.Target != r.node || event.Object.Key.Bucket != volume.ID(t.plan.Before.Bucket) || !t.plan.contains(event.Object.Key.Object) || event.Object.Info.Version == 0 || event.Object.Digest == ([32]byte{}) {
+			return volume.ErrCorrupt
+		}
+		// Legacy progress records are validated but need not be retained in RAM.
+		// A missing advisory memo safely triggers retransmission.
+	case rangeReserved:
+	case rangeFenced:
+		if t.plan.Source != r.node || t.fenced {
+			return volume.ErrCorrupt
+		}
+		t.fenced = true
+	case rangeSourceReady:
+		if !t.fenced || t.plan.Source != r.node || t.sourceReady.RecordSequence != 0 {
+			return volume.ErrCorrupt
+		}
+		t.digest = event.Digest
+		t.logicalUsed = event.LogicalUsed
+		t.sourceReady = record.Proof
+	case rangeTargetRestored:
+		if t.plan.Target != r.node || t.targetReady.RecordSequence == 0 || t.decision != nil || !t.plan.ram() || event.Boot == (client.ID{}) || event.Boot == t.targetBoot || event.Digest != t.digest || t.aborted {
+			return volume.ErrCorrupt
+		}
+		t.targetBoot = event.Boot
+	case rangeRAMTargetLost:
+		if t.plan.Target != r.node || t.decision == nil || !t.plan.ram() || t.targetDone.RecordSequence != 0 || event.Boot == (client.ID{}) || event.Boot == t.targetBoot {
+			return volume.ErrCorrupt
+		}
+		t.targetDone = record.Proof
+		t.remaining = 0
+	case rangeTargetReady:
+		if t.plan.Target != r.node || t.targetReady.RecordSequence != 0 {
+			return volume.ErrCorrupt
+		}
+		if t.digest != ([32]byte{}) && t.digest != event.Digest {
+			return volume.ErrCorrupt
+		}
+		t.digest = event.Digest
+		t.logicalUsed = event.LogicalUsed
+		t.targetReady = record.Proof
+		t.targetBoot = event.Boot
+	case rangeCommitted, rangeObserved, rangeRAMCommitLost:
+		if record.Kind == rangeRAMCommitLost && (!t.plan.ram() || t.plan.Target != r.node || event.SourceBoot != t.sourceBoot || event.PeerBoot == (client.ID{}) || event.PeerBoot == t.sourceBoot || event.Boot == (client.ID{}) || t.targetBoot == event.Boot) {
+			return volume.ErrCorrupt
+		}
+		if event.Commit == nil || !r.validCommit(t, *event.Commit, record.Kind == rangeObserved) {
+			return volume.ErrCorrupt
+		}
+		copy := *event.Commit
+		t.decision = &copy
+		t.commitProof = record.Proof
+	case rangeTargetDone:
+		if t.plan.Target != r.node || t.decision == nil || t.targetDone.RecordSequence != 0 {
+			return volume.ErrCorrupt
+		}
+		t.targetDone = record.Proof
+		t.remaining = 0
+	case rangeSourceDone:
+		if t.plan.Source != r.node || t.decision == nil || event.TargetDone.Node != t.plan.Target || event.TargetDone.RecordSequence == 0 || t.sourceDone.RecordSequence != 0 {
+			return volume.ErrCorrupt
+		}
+		t.sourceDone = record.Proof
+	default:
+		return volume.ErrCorrupt
+	}
+	return nil
+}
+func (r *rangeManager) validCommit(t *rangeTxn, c rangeCommit, observed bool) bool {
+	if t.aborted || c.ID != t.plan.id() || c.Source.Node != t.plan.Source || c.Target.Node != t.plan.Target || c.Digest == ([32]byte{}) {
+		return false
+	}
+	if _, err := c.Source.MarshalBinary(); err != nil {
+		return false
+	}
+	if _, err := c.Target.MarshalBinary(); err != nil {
+		return false
+	}
+	if !observed {
+		if t.plan.Source == r.node && (t.sourceReady != c.Source || t.digest != c.Digest || t.logicalUsed != c.LogicalUsed) {
+			return false
+		}
+		if t.plan.Target == r.node && (t.targetReady != c.Target || t.digest != c.Digest || t.logicalUsed != c.LogicalUsed) {
+			return false
+		}
+	}
+	return true
+}
+func (r *rangeManager) active(t *rangeTxn) bool {
+	if t.aborted || t.forceRetired {
+		return false
+	}
+	if t.plan.Source == r.node {
+		return t.sourceDone.RecordSequence == 0
+	}
+	return t.plan.Target == r.node && t.targetDone.RecordSequence == 0
+}
+func (r *rangeManager) busyLocked() bool {
+	for _, t := range r.txns {
+		if r.active(t) {
+			return true
+		}
+	}
+	return false
+}
+
+func (r *rangeManager) reserve(p rangePlan, sourceBoot ...client.ID) error {
+	wire, err := p.marshal()
+	if len(p.Before.Entries) > 0 && p.Before.Entries[0].State == 4 {
+		return fail(503, "range awaits rescued storage")
+	}
+	if err != nil {
+		return err
+	}
+	r.server.opMu.Lock()
+	defer r.server.opMu.Unlock()
+	if r.server.clusterPaused() {
+		return fail(503, "cluster shutdown is pending")
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if err := r.server.scopedTransition(nil); err != nil {
+		return err
+	}
+	id := p.id()
+	boot := r.server.boot
+	if len(sourceBoot) > 0 {
+		boot = sourceBoot[0]
+	}
+	if p.ram() && boot == (client.ID{}) {
+		return fail(503, "source process identity is not yet available")
+	}
+	if prior, ok := r.txns[id]; ok {
+		if prior.aborted || prior.forceRetired {
+			return errControlConflict
+		}
+		return nil
+	}
+	l := r.server.control.ledger
+	l.mu.Lock()
+	busy := l.slot != nil
+	membership := l.current.Membership
+	l.mu.Unlock()
+	if busy || membership.Epoch != p.Before.Membership || !hasControlNode(membershipIDs(membership), p.Source) || !hasControlNode(membershipIDs(membership), p.Target) {
+		return errControlConflict
+	}
+	if p.Source != r.node && p.Target != r.node {
+		return errControlConflict
+	}
+	current, known := r.server.routingPatch(volume.ID(p.Before.Bucket), volume.ObjectID(p.Before.Begin))
+	if !known || !reflect.DeepEqual(current.Entries, p.Before.Entries) {
+		return errControlConflict
+	}
+	if p.ram() && p.movingRuntime() != p.Before.Entries[0].Runtime {
+		if p.movingRuntime() != boot {
+			return errControlConflict
+		}
+		if p.Source == r.node && r.ramAvailableLocked(volume.ID(p.Before.Bucket), volume.ObjectID(p.Before.Begin), p.Before.Entries[0]) {
+			return errControlConflict
+		}
+	}
+	for _, prior := range r.txns {
+		if r.active(prior) && rangePlansOverlap(prior.plan, p) {
+			return errControlConflict
+		}
+	}
+	if p.Target == r.node {
+		r.server.mu.RLock()
+		managed := r.server.volumes[p.Volume.String()]
+		active := managed != nil && managed.config.State == "active" && !managed.config.RecoveryOnly && (!r.server.cfg.Node.Draining || p.Source == p.Target)
+		r.server.mu.RUnlock()
+		if !active {
+			return volume.ErrFull
+		}
+		store, err := r.destination(p)
+		if err != nil {
+			return err
+		}
+		if p.ram() {
+			pin := volume.ID(p.Before.Entries[0].Locations[0].Volume)
+			if p.Source != p.Target || pin != (volume.ID{}) && pin != p.Volume || p.movingRuntime() != p.Before.Entries[0].Runtime {
+				if err := r.clearRAMStagingLocked(store, p); err != nil {
+					return err
+				}
+			}
+		}
+		stats := store.Stats()
+		if p.Physical > stats.AdmissionFreePhysical {
+			return volume.ErrFull
+		}
+		if err := store.SetInFlightReserve(addCapacity(stats.InFlightReservedPhysical, p.Physical)); err != nil {
+			return err
+		}
+		_, err = r.persist(rangeReserved, rangeEvent{ID: id, Plan: wire, SourceBoot: boot})
+		if err != nil {
+			_ = store.SetInFlightReserve(stats.InFlightReservedPhysical)
+		}
+		return err
+	}
+	_, err = r.persist(rangeReserved, rangeEvent{ID: id, Plan: wire, SourceBoot: boot})
+	return err
+}
+func mustRangeWire(p rangePlan) []byte { wire, _ := p.marshal(); return wire }
+func rangePlansOverlap(a, b rangePlan) bool {
+	if a.Before.Bucket != b.Before.Bucket {
+		return false
+	}
+	return (b.Before.ToEnd || bytes.Compare(a.Before.Begin[:], b.Before.End[:]) < 0) && (a.Before.ToEnd || bytes.Compare(b.Before.Begin[:], a.Before.End[:]) < 0)
+}
+func (r *rangeManager) destination(p rangePlan) (*volume.Volume, error) {
+	s := r.server
+	s.mu.RLock()
+	managed := s.volumes[p.Volume.String()]
+	node := s.cfg.Node.ID
+	var config VolumeConfig
+	if managed != nil {
+		config = managed.config
+	}
+	s.mu.RUnlock()
+	if managed == nil || len(config.PlacementGroupsPending) > 0 || config.System || config.State != "active" && config.State != "draining" {
+		return nil, volume.ErrFull
+	}
+	b, err := s.Bucket(volume.ID(p.Before.Bucket))
+	if err != nil {
+		return nil, err
+	}
+	d := b.Describe()
+	policy := d.Policy
+	if d.DesiredPolicy != nil && p.movingPolicyVersion() == d.DesiredPolicy.Version {
+		policy = *d.DesiredPolicy
+	}
+	if p.movingPolicyVersion() != policy.Version {
+		return nil, errControlConflict
+	}
+	for _, entry := range p.After.Entries {
+		if entry.Start == p.Moving.Start && entry.PrefixBits == p.Moving.PrefixBits && entry.Locations[0].Class != uint8(managed.store.Identity().Class) {
+			return nil, errControlConflict
+		}
+	}
+	if p.Compression != bucketCodec(policy) {
+		return nil, errControlConflict
+	}
+	if !bucketClass(policy).Allows(managed.store.Identity().Class) || !s.placementGroups.Load().allowsVersion(policy.PlacementGroup, policy.PlacementMaskVersion, node, p.Volume.String()) {
+		return nil, volume.ErrFull
+	}
+	return managed.store, nil
+}
+func (r *rangeManager) fence(id [32]byte) error {
+	r.server.opMu.Lock()
+	defer r.server.opMu.Unlock()
+	r.mu.Lock()
+	t := r.txns[id]
+	r.mu.Unlock()
+	if t == nil {
+		return errControlConflict
+	}
+	t.lease.Lock()
+	defer t.lease.Unlock()
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if err := r.server.scopedTransition(nil); err != nil {
+		return err
+	}
+	if t.aborted || t.forceRetired {
+		return errControlConflict
+	}
+	if t.fenced {
+		return nil
+	}
+	if t.plan.Source != r.node {
+		return errControlConflict
+	}
+	if err := r.server.invalidateVolumeAuthorityLocked(t.plan); err != nil {
+		return err
+	}
+	_, err := r.persist(rangeFenced, rangeEvent{ID: id})
+	if err == nil {
+		r.server.objectSubscriptions.resyncWhere(func(key volume.Key) bool {
+			return client.ID(key.Bucket) == t.plan.Before.Bucket && t.plan.contains(key.Object)
+		})
+	}
+	return err
+}
+func (r *rangeManager) ready(id, digest [32]byte, source bool, logicalUsed ...uint64) (client.Proof, error) {
+	return r.readyWithForce(id, digest, source, nil, logicalUsed...)
+}
+func (r *rangeManager) readyWithForce(id, digest [32]byte, source bool, force *controlClaim, logicalUsed ...uint64) (client.Proof, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if err := r.server.scopedTransition(force); err != nil {
+		return client.Proof{}, err
+	}
+	t := r.txns[id]
+	if t == nil {
+		return client.Proof{}, errControlConflict
+	}
+	if t.aborted || t.forceRetired || digest == ([32]byte{}) || source && (t.plan.Source != r.node || !t.fenced) || !source && t.plan.Target != r.node || t.digest != ([32]byte{}) && t.digest != digest {
+		return client.Proof{}, errControlConflict
+	}
+	used := t.pendingUsed
+	if len(logicalUsed) > 0 {
+		used = logicalUsed[0]
+	}
+	kind := rangeTargetReady
+	proof := t.targetReady
+	if source {
+		kind = rangeSourceReady
+		proof = t.sourceReady
+	}
+	if proof.RecordSequence != 0 {
+		if t.digest != digest || t.logicalUsed != used {
+			return client.Proof{}, errControlConflict
+		}
+		if !source && t.plan.ram() && t.targetBoot != r.server.boot {
+			if _, err := r.persist(rangeTargetRestored, rangeEvent{ID: id, Digest: digest, Boot: r.server.boot}); err != nil {
+				return client.Proof{}, err
+			}
+		}
+		return proof, nil
+	}
+	event := rangeEvent{ID: id, Digest: digest, LogicalUsed: used}
+	if !source && t.plan.ram() {
+		event.Boot = r.server.boot
+	}
+	return r.persist(kind, event)
+}
+func (r *rangeManager) commit(c rangeCommit) (client.Proof, error) {
+	return r.commitWithForce(c, nil)
+}
+func (r *rangeManager) commitWithForce(c rangeCommit, force *controlClaim) (proof client.Proof, err error) {
+	r.server.opMu.Lock()
+	defer r.server.opMu.Unlock()
+	r.mu.Lock()
+	defer func() {
+		txn := r.txns[c.ID]
+		var store *volume.Volume
+		var before, budget uint64
+		if txn != nil && txn.plan.Target == r.node {
+			store, _ = r.destination(txn.plan)
+			budget = txn.remaining
+			if store != nil {
+				before = store.Stats().InFlightReservedPhysical
+			}
+		}
+		r.mu.Unlock()
+		if err == nil {
+			if store != nil {
+				err = r.server.ensureVolumeAuthorityLocked(map[volume.ID]uint64{store.Identity().VolumeID: budget})
+				r.consumed(txn, store, before)
+			} else {
+				err = r.server.ensureVolumeAuthorityLocked()
+			}
+		}
+	}()
+	if err := r.server.scopedTransition(force); err != nil {
+		return client.Proof{}, err
+	}
+	t := r.txns[c.ID]
+	if t == nil || !r.validCommit(t, c, false) {
+		return client.Proof{}, errControlConflict
+	}
+	if t.decision != nil {
+		if *t.decision != c {
+			return client.Proof{}, errControlConflict
+		}
+		return t.commitProof, nil
+	}
+	if t.plan.Target == r.node && t.plan.ram() && t.targetBoot != r.server.boot {
+		return client.Proof{}, fail(503, "RAM READY belongs to a previous process")
+	}
+	proof, err = r.persist(rangeCommitted, rangeEvent{ID: c.ID, Commit: &c})
+	if err == nil {
+		err = r.rebuildLocked()
+	}
+	return proof, err
+}
+func (r *rangeManager) observe(p rangePlan, c rangeCommit) error {
+	if _, err := p.marshal(); err != nil {
+		return err
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if t := r.txns[c.ID]; t != nil {
+		if t.decision != nil && *t.decision == c {
+			return nil
+		}
+		return errControlConflict
+	}
+	if c.ID != p.id() {
+		return errControlConflict
+	}
+	if p.Source == r.node || p.Target == r.node || !r.validCommit(&rangeTxn{plan: p}, c, true) {
+		return errControlConflict
+	}
+	if _, err := r.persist(rangeObserved, rangeEvent{ID: c.ID, Plan: mustRangeWire(p), Commit: &c}); err != nil {
+		return err
+	}
+	return r.rebuildLocked()
+}
+func (r *rangeManager) done(id [32]byte, targetProof *client.Proof) (client.Proof, error) {
+	r.server.opMu.Lock()
+	defer r.server.opMu.Unlock()
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if err := r.server.scopedTransition(nil); err != nil {
+		return client.Proof{}, err
+	}
+	t := r.txns[id]
+	if t == nil || t.decision == nil || t.forceRetired {
+		return client.Proof{}, errControlConflict
+	}
+	if targetProof == nil {
+		if t.plan.Target != r.node {
+			return client.Proof{}, errControlConflict
+		}
+		if t.targetDone.RecordSequence != 0 {
+			return t.targetDone, r.releaseReserveLocked(t)
+		}
+		proof, err := r.persist(rangeTargetDone, rangeEvent{ID: id})
+		if err == nil {
+			err = r.releaseReserveLocked(t)
+		}
+		return proof, err
+	}
+	if t.plan.Source != r.node || targetProof.Node != t.plan.Target {
+		return client.Proof{}, errControlConflict
+	}
+	if _, err := targetProof.MarshalBinary(); err != nil {
+		return client.Proof{}, err
+	}
+	if t.sourceDone.RecordSequence != 0 {
+		return t.sourceDone, nil
+	}
+	return r.persist(rangeSourceDone, rangeEvent{ID: id, TargetDone: *targetProof})
+}
+
+func (r *rangeManager) guard(bucket volume.ID, object volume.ObjectID) (func(), error) {
+	r.mu.Lock()
+	var active []*rangeTxn
+	for _, t := range r.txns {
+		if r.active(t) && volume.ID(t.plan.Before.Bucket) == bucket && t.plan.contains(object) {
+			active = append(active, t)
+		}
+	}
+	r.mu.Unlock()
+	for _, t := range active {
+		t.lease.RLock()
+	}
+	release := func() {
+		for _, t := range active {
+			t.lease.RUnlock()
+		}
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, t := range active {
+		if t.plan.Source == r.node && t.fenced && !(t.plan.Target == r.node && t.decision != nil) {
+			release()
+			return nil, fail(503, "range is fenced for durable handoff")
+		}
+	}
+	return release, nil
+}
+func (r *rangeManager) incoming(bucket volume.ID, object volume.ObjectID) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, t := range r.txns {
+		if r.active(t) && t.plan.Target == r.node && t.plan.Source != r.node && t.decision == nil && volume.ID(t.plan.Before.Bucket) == bucket && t.plan.contains(object) {
+			return true
+		}
+	}
+	return false
+}
+
+// A global checkpoint may already contain older handoffs. Replay never rolls
+// their descendants back. Missing lineage is retained for later peer catchup.
+func (r *rangeManager) rebuildLocked() error {
+	view := r.server.currentSystem.Load()
+	if view == nil {
+		return nil
+	}
+	patches := append([]client.MapPatch{}, view.patches...)
+	for _, id := range r.order {
+		t := r.txns[id]
+		if t.decision == nil {
+			continue
+		}
+		for i, p := range patches {
+			if p.Bucket != t.plan.Before.Bucket {
+				continue
+			}
+			var next []client.RangeEntry
+			applied := false
+			for _, entry := range p.Entries {
+				old := t.plan.Before.Entries[0]
+				if entry.Start == old.Start && entry.PrefixBits == old.PrefixBits && entry.OwnerEpoch == old.OwnerEpoch && reflect.DeepEqual(entry, old) {
+					next = append(next, t.plan.After.Entries...)
+					applied = true
+				} else {
+					next = append(next, entry)
+				}
+			}
+			if applied {
+				patches[i].Entries = next
+			}
+		}
+	}
+	image, err := buildPlacement(patches)
+	if err != nil {
+		return err
+	}
+	r.server.resyncMovedSubscriptions(image)
+	r.server.placement.Store(image)
+	r.server.dirtyVolumeAuthority()
+	return nil
+}

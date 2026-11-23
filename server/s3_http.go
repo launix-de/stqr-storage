@@ -2,6 +2,7 @@
 package server
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/xml"
@@ -50,8 +51,16 @@ func s3Failure(w http.ResponseWriter, err error) {
 		s3Error(w, 400, "InvalidArgument", "Invalid key, metadata or request argument")
 	case errors.Is(err, volume.ErrFull), errors.Is(err, client.ErrFull):
 		s3Error(w, 507, "InsufficientStorage", err.Error())
+	case errors.Is(err, client.ErrUnauthorized):
+		s3Error(w, 403, "AccessDenied", "Access denied")
+	case errors.Is(err, client.ErrNotImplemented):
+		s3Error(w, 501, "NotImplemented", "Storage operation is not implemented")
 	default:
 		status := objectStatus(err)
+		var native *client.StatusError
+		if errors.As(err, &native) {
+			status = native.Status
+		}
 		if status == 501 {
 			s3Error(w, 501, "NotImplemented", err.Error())
 		} else if status == 507 {
@@ -60,7 +69,7 @@ func s3Failure(w http.ResponseWriter, err error) {
 			s3Error(w, 400, "InvalidArgument", err.Error())
 		} else if status == 403 {
 			s3Error(w, 403, "AccessDenied", "Access denied")
-		} else if status == 409 || status == 503 {
+		} else if status == 409 || status == 410 || status == 503 || status == 504 {
 			s3Error(w, 503, "ServiceUnavailable", "Bucket is unavailable")
 		} else {
 			s3Error(w, 500, "InternalError", "Storage operation failed")
@@ -68,6 +77,15 @@ func s3Failure(w http.ResponseWriter, err error) {
 	}
 }
 func (s *Server) serveS3(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithCancel(r.Context())
+	stop := context.AfterFunc(s.ctx, cancel)
+	defer stop()
+	defer cancel()
+	r = r.WithContext(ctx)
+	if s.drainClosing.Load() || s.shortStopping.Load() {
+		s3Error(w, 503, "ServiceUnavailable", "Node is finishing shutdown")
+		return
+	}
 	w.Header().Set("x-amz-request-id", client.NewRequestID().String())
 	if s.joinPending() {
 		s3Error(w, 503, "ServiceUnavailable", "Node admission is pending")
@@ -126,7 +144,12 @@ func (s *Server) serveS3(w http.ResponseWriter, r *http.Request) {
 		bodySHA = ""
 	}
 	p.frontendPermission = permission
-	api := client.NewS3(s3Store{b: b, p: p})
+	api, closeAPI, err := s.openS3(r.Context(), b, p)
+	if err != nil {
+		s3Failure(w, err)
+		return
+	}
+	defer closeAPI()
 	if s.serveS3Multipart(w, r, p, api, name, key) {
 		return
 	}

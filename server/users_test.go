@@ -116,7 +116,7 @@ func TestUserCommandsPersistAndDeduplicateWithoutSecrets(t *testing.T) {
 	}
 	path := s.configPath
 	s.Close()
-	next, e := Open(Options{ConfigPath: path})
+	next, e := openTransportTestNode(Options{ConfigPath: path})
 	if e != nil {
 		t.Fatal(e)
 	}

@@ -71,14 +71,15 @@ type BucketLimits struct {
 	Unlimited          bool   `json:"absolute_unlimited"`
 }
 type BucketPolicy struct {
-	Version          uint64                 `json:"version"`
-	StorageStrategy  string                 `json:"storage_strategy"` // hdd | ssd | ram; cache reserved
-	Compression      string                 `json:"compression"`      // raw | gzip | lz4 | xz
-	PlacementMode    string                 `json:"placement_mode"`   // count | everywhere
-	Redundancy       BucketRedundancy       `json:"redundancy"`
-	ReadAcceleration BucketReadAcceleration `json:"read_acceleration"`
-	Limits           BucketLimits           `json:"limits"`
-	PlacementGroup   string                 `json:"placement_group,omitempty"`
+	Version              uint64                 `json:"version"`
+	StorageStrategy      string                 `json:"storage_strategy"` // hdd | ssd | ram; cache reserved
+	Compression          string                 `json:"compression"`      // raw | gzip | lz4 | xz
+	PlacementMode        string                 `json:"placement_mode"`   // count | everywhere
+	Redundancy           BucketRedundancy       `json:"redundancy"`
+	ReadAcceleration     BucketReadAcceleration `json:"read_acceleration"`
+	Limits               BucketLimits           `json:"limits"`
+	PlacementGroup       string                 `json:"placement_group,omitempty"`
+	PlacementMaskVersion uint64                 `json:"placement_mask_version,omitempty"`
 }
 type BucketGrant struct {
 	UserID      string            `json:"user_id"` // canonical 128-bit hex ID, not a username
@@ -112,6 +113,7 @@ type BucketDescription struct {
 // policy and placement. Standalone catalog snapshots have no attached server.
 type Bucket struct {
 	mu          sync.RWMutex
+	usage       bucketUsage
 	description BucketDescription
 	server      *Server
 	maintenance *connectionAuthorization // exclusive, socket-scoped fsck owner
@@ -148,7 +150,7 @@ func cloneBucketDescription(d BucketDescription) BucketDescription {
 }
 func DefaultBucketPolicy() BucketPolicy {
 	overhead, _ := volume.EstimatePutOverheadPPM(1 << 20)
-	return BucketPolicy{Version: 1, StorageStrategy: "hdd", Compression: "raw", PlacementMode: "count", Redundancy: BucketRedundancy{Mode: "single", Replicas: 1, ACK: "all"}, Limits: BucketLimits{Accounting: "logical", MetadataReservePPM: overhead, Unlimited: true}}
+	return BucketPolicy{Version: 1, PlacementGroup: defaultPlacementGroup.String(), PlacementMaskVersion: 1, StorageStrategy: "hdd", Compression: "raw", PlacementMode: "count", Redundancy: BucketRedundancy{Mode: "single", Replicas: 1, ACK: "all"}, Limits: BucketLimits{Accounting: "logical", MetadataReservePPM: overhead, Unlimited: true}}
 }
 func NewBucket(id volume.ID, name string) (*Bucket, error) {
 	d := BucketDescription{Schema: 1, ID: id.String(), Name: name, State: BucketActive, Revision: 1, Policy: DefaultBucketPolicy()}
@@ -156,6 +158,7 @@ func NewBucket(id volume.ID, name string) (*Bucket, error) {
 		d.Policy.PlacementMode = "everywhere"
 		d.Policy.Redundancy = BucketRedundancy{Mode: "replication", ACK: "all"}
 		d.Policy.PlacementGroup = systemPlacementGroup.String()
+		d.Policy.PlacementMaskVersion = 0
 	}
 	d, err := normalizeBucketDescription(d)
 	if err != nil {
@@ -184,6 +187,9 @@ func bucketEnum(value string, values ...string) (uint8, bool) {
 	return 0, false
 }
 func validateBucketPolicy(p BucketPolicy) error {
+	if p.PlacementGroup == "" && p.PlacementMaskVersion != 0 {
+		return ErrBucketInvalid
+	}
 	if p.Version == 0 {
 		return ErrBucketInvalid
 	}
@@ -380,8 +386,9 @@ func (i BucketInfo) MarshalBinary() ([]byte, error) {
 // Metadata objects currently use the volume's bounded convenience reads and
 // must fit MaxBufferedRead. Payload object sizes are unrelated to this budget.
 type BucketCatalog struct {
-	admin  *volume.Volume
-	onSave func(BucketDescription)
+	admin     *volume.Volume
+	onSave    func(BucketDescription)
+	upgrading bool // startup-only enrichment of unchanged legacy storage contracts
 }
 
 func BucketCatalogKey() volume.Key {
@@ -557,7 +564,7 @@ func (c *BucketCatalog) Save(d BucketDescription, expectedRevision uint64) (*Buc
 				if current.Revision != expectedRevision {
 					return nil, ErrBucketConflict
 				}
-				if d.Policy.Version < current.Policy.Version || (d.Policy != current.Policy && d.Policy.Version == current.Policy.Version) {
+				if !c.upgrading && (d.Policy.Version < current.Policy.Version || (d.Policy != current.Policy && d.Policy.Version == current.Policy.Version)) {
 					return nil, ErrBucketInvalid
 				}
 			} else if current.Name == d.Name && !current.DeletionComplete && !d.DeletionComplete {

@@ -73,7 +73,7 @@ func TestManualGrowthAndBounds(t *testing.T) {
 	if e := s.Close(); e != nil {
 		t.Fatal(e)
 	}
-	reopened, e := Open(Options{ConfigPath: path})
+	reopened, e := openTransportTestNode(Options{ConfigPath: path})
 	if e != nil {
 		t.Fatal(e)
 	}

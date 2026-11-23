@@ -123,6 +123,26 @@ func (h *Handle) RecordInfo(k Key) (Info, error) {
 	})
 }
 
+// AllocatedPhysical reports this object's actual payload, descriptor, extension
+// lists and checksum allocations. Shared B-tree pages and retry receipts are
+// accounted separately; logical sparse gaps consume no payload allocation.
+func (h *Handle) AllocatedPhysical(k Key) (uint64, error) {
+	return withHandle(h, false, func(v *Volume) (uint64, error) {
+		o, err := v.loadObject(k)
+		if err != nil {
+			return 0, err
+		}
+		total := o.Size + uint64(len(o.ListBlocks))*listBytes
+		for _, span := range o.Spans {
+			total += span.Capacity
+			if !span.Direct {
+				total += checksumsSize(span)
+			}
+		}
+		return total, nil
+	})
+}
+
 // CopyTo streams a range to dst under the existing lock, clipping at EOF.
 // It never closes the handle. Both metadata and any further CopyTo calls remain
 // protected until Close. This writer API allows future direct-transfer paths;
@@ -248,7 +268,20 @@ func (h *Handle) ForgetRequest(id ID) error {
 
 // Recompress changes physical encoding, preserving logical versions and retries.
 func (h *Handle) Recompress(k Key, codec Compression) error {
-	return h.do(true, func(v *Volume) error { return v.recompressLocked(k, codec) })
+	return h.RecompressWithOptions(k, codec, Options{})
+}
+
+// RecompressWithOptions permits a trusted handoff to consume its own physical
+// import allowance. Logical versions and original retry results stay unchanged;
+// failed encodings leave the previous canonical object readable. Only reserve
+// fields are accepted; logical mutation/precondition options return ErrRange.
+func (h *Handle) RecompressWithOptions(k Key, codec Compression, opts Options) error {
+	return h.do(true, func(v *Volume) error {
+		if opts.RequestID != (ID{}) || opts.Compression != nil || opts.ExpectedVersion != nil || opts.ExpectedLength != nil || opts.CreateOnly || opts.WholeObject {
+			return ErrRange
+		}
+		return v.recompressLocked(k, codec, opts)
+	})
 }
 
 // Restore installs a trusted object snapshot while preserving version/tombstone.
@@ -276,7 +309,13 @@ func (h *Handle) ScanRequests(fn func(RequestRecord) error) error {
 
 // RestoreRequest imports original retry state before activating target ownership.
 func (h *Handle) RestoreRequest(x RequestRecord) error {
-	return h.do(true, func(v *Volume) error { return v.restoreRequestLocked(x) })
+	return h.RestoreRequestWithOptions(x, Options{})
+}
+
+// RestoreRequestWithOptions lets a trusted migration consume space reserved
+// for its own import. It does not change the original retry fingerprint/result.
+func (h *Handle) RestoreRequestWithOptions(x RequestRecord, opts Options) error {
+	return h.do(true, func(v *Volume) error { return v.restoreRequestLocked(x, opts) })
 }
 
 // SyncThrough flushes a known object version locally. It requires a write
@@ -307,7 +346,8 @@ func (h *Handle) ScanObjects(after *Key, limit int) ([]ObjectRecord, error) {
 		if after != nil {
 			cursor = objectKey(*after)
 		}
-		e := v.walkIndex(func(x indexEntry) error {
+		upper := indexKey{1}
+		e := v.walkIndexBounds(cursor, upper, func(x indexEntry) error {
 			if x.Key[0] != 0 || (after != nil && !lessKey(cursor, x.Key)) {
 				return nil
 			}

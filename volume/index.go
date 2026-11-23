@@ -68,6 +68,16 @@ func (c *objectCache) clear() {
 	c.used = 0
 }
 
+func (c *objectCache) remove(k Key) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if e := c.items[k]; e != nil {
+		c.used -= e.Value.(cachedObject).cost
+		c.lru.Remove(e)
+		delete(c.items, k)
+	}
+}
+
 // Index pages have an independent bounded LRU; no full directory is retained.
 // Decoded nodes cost more than their encoded 4-KiB page, budgeted at 8 KiB each.
 type cachedNode struct {

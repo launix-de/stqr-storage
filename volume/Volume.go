@@ -31,18 +31,19 @@ import (
 // Cluster placement, authentication, quotas across volumes, and UI are outside
 // this package. They may reserve physical capacity and manage the lifecycle.
 type Volume struct {
-	mu         sync.RWMutex
-	dev        VolumeIO
-	sb         Superblock
-	cache      *objectCache
-	nodes      *nodeCache
-	failed     error
-	closed     bool
-	name       string
-	state      State
-	guaranteed uint64
-	onClose    func()
-	limit      uint64
+	mu               sync.RWMutex
+	dev              VolumeIO
+	sb               Superblock
+	cache            *objectCache
+	nodes            *nodeCache
+	failed           error
+	closed           bool
+	name             string
+	state            State
+	guaranteed       uint64
+	inFlightReserved uint64
+	onClose          func()
+	limit            uint64
 }
 
 type State uint8
@@ -316,16 +317,37 @@ func (v *Volume) Close() error {
 	return e
 }
 
+// SetGuaranteedReserve protects aggregate physical capacity for bucket guarantees.
+// The counter is volatile and must be restored from committed allocation metadata
+// before accepting writes after reopen. Mutations consume only their explicitly
+// granted GuaranteedAllowance; the owner accounts that exact physical decrease.
 func (v *Volume) SetGuaranteedReserve(n uint64) error {
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	if e := v.check(false); e != nil {
 		return e
 	}
-	if n > v.sb.FreeBytes {
+	if n > v.sb.FreeBytes || v.inFlightReserved > v.sb.FreeBytes-n {
 		return ErrFull
 	}
 	v.guaranteed = n
+	return nil
+}
+
+// SetInFlightReserve protects physical bytes for trusted in-progress imports.
+// This counter is volatile: its owner must reconstruct it from its durable
+// plans before exposing the volume after reopening. It is separate from bucket
+// guarantees; an import may consume only its explicitly granted allowance.
+func (v *Volume) SetInFlightReserve(n uint64) error {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	if err := v.check(false); err != nil {
+		return err
+	}
+	if n > v.sb.FreeBytes || v.guaranteed > v.sb.FreeBytes-n {
+		return ErrFull
+	}
+	v.inFlightReserved = n
 	return nil
 }
 func (v *Volume) Stats() Stats {
@@ -333,10 +355,10 @@ func (v *Volume) Stats() Stats {
 	defer v.mu.RUnlock()
 	s := v.sb
 	admit := uint64(0)
-	if s.FreeBytes > v.guaranteed {
-		admit = s.FreeBytes - v.guaranteed
+	if s.FreeBytes > v.guaranteed && s.FreeBytes-v.guaranteed > v.inFlightReserved {
+		admit = s.FreeBytes - v.guaranteed - v.inFlightReserved
 	}
-	return Stats{IO: v.ioStatsLocked(), Identity: s.Identity, Generation: s.Generation, Objects: s.Objects, LogicalBytes: s.LogicalBytes, CapacityPhysical: s.Identity.Size, AllocatedPhysical: s.MetadataBytes + s.PayloadBytes, MetadataPhysical: s.MetadataBytes, DataPhysical: s.PayloadBytes, ArenaUnusedPhysical: s.ArenaUnused, OperatingReservePhysical: scratchPages * PageSize, GuaranteedRemainingPhysical: v.guaranteed, AdmissionFreePhysical: admit}
+	return Stats{IO: v.ioStatsLocked(), Identity: s.Identity, Generation: s.Generation, Objects: s.Objects, LogicalBytes: s.LogicalBytes, CapacityPhysical: s.Identity.Size, AllocatedPhysical: s.MetadataBytes + s.PayloadBytes, MetadataPhysical: s.MetadataBytes, DataPhysical: s.PayloadBytes, ArenaUnusedPhysical: s.ArenaUnused, OperatingReservePhysical: scratchPages * PageSize, GuaranteedRemainingPhysical: v.guaranteed, InFlightReservedPhysical: v.inFlightReserved, AdmissionFreePhysical: admit}
 }
 func (v *Volume) SetCacheLimits(entries int, bytes uint64) {
 	v.mu.Lock()

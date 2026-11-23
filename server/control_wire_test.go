@@ -112,3 +112,37 @@ func FuzzControlWireDecoders(f *testing.F) {
 		_, _ = decodeControlApply(b)
 	})
 }
+
+func TestControlWireBucketFenceIsCanonicalAndBindsDecision(t *testing.T) {
+	p := controlJoinProposal()
+	before, err := p.decision()
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.Claim.FrozenBuckets = []client.ID{{9}}
+	wire, err := marshalControlClaim(p.Claim)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := decodeControlClaim(wire)
+	if err != nil || !equalControlClaim(got, p.Claim) {
+		t.Fatal("fence lost in wire", err)
+	}
+	after, err := p.decision()
+	if err != nil || before == after {
+		t.Fatal("decision did not bind bucket fences", err)
+	}
+	for i := 0; i < len(wire); i++ {
+		if _, err := decodeControlClaim(wire[:i]); err == nil {
+			t.Fatal("accepted truncated fenced claim", i)
+		}
+	}
+	p.Claim.FrozenBuckets = []client.ID{{9}, {9}}
+	if _, err := marshalControlClaim(p.Claim); err == nil {
+		t.Fatal("accepted duplicate fence")
+	}
+	p.Claim.FrozenBuckets = []client.ID{{10}, {9}}
+	if _, err := marshalControlClaim(p.Claim); err == nil {
+		t.Fatal("accepted noncanonical fence")
+	}
+}

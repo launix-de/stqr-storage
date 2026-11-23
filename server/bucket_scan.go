@@ -49,6 +49,9 @@ func (s *Server) executeMaintenance(ctx context.Context, op *objectMutation, d *
 		return nil, 0, fail(409, "bucket lifecycle transition in progress")
 	}
 	if op.message.Opcode == client.BucketMaintenance {
+		if view := s.currentSystem.Load(); view != nil && len(view.manifest.Membership.Members) > 1 {
+			return nil, 0, fail(501, "cluster-wide exclusive maintenance is not yet available")
+		}
 		if d.Done() != nil {
 			return nil, 0, fail(400, "invalid maintenance request")
 		}
@@ -108,8 +111,49 @@ func (s *Server) executeMaintenance(ctx context.Context, op *objectMutation, d *
 // Merge copies before excluding tombstones: a newer tombstone must hide an old
 // live copy. Cursor progress includes tombstones and the zero object address.
 func (b *Bucket) scan(ctx context.Context, description BucketDescription, after *volume.ObjectID, limit int) ([]volume.ObjectRecord, volume.ObjectID, bool, error) {
+	return b.scanPlacement(ctx, description, after, limit, b.server.placement.Load(), nil)
+}
+
+func (b *Bucket) scanPlacement(ctx context.Context, description BucketDescription, after *volume.ObjectID, limit int, placement *placementImage, exclude func(client.RangeEntry) bool, views ...*systemView) ([]volume.ObjectRecord, volume.ObjectID, bool, error) {
 	merged := map[volume.ObjectID]volume.ObjectRecord{}
-	for _, v := range b.volumesFor(description) {
+	visited := map[volume.ObjectID]bool{}
+	view := b.server.currentSystem.Load()
+	if len(views) > 0 {
+		view = views[0]
+	}
+	stores := b.volumesFor(description)
+	if description.DesiredPolicy != nil {
+		desired := description
+		desired.Policy = *description.DesiredPolicy
+		seen := map[*volume.Volume]bool{}
+		for _, store := range stores {
+			seen[store] = true
+		}
+		for _, store := range b.volumesFor(desired) {
+			if !seen[store] {
+				stores = append(stores, store)
+				seen[store] = true
+			}
+		}
+	}
+	if len(views) > 0 && view != nil {
+		seen := map[volume.ID]bool{}
+		for _, store := range stores {
+			seen[store.Identity().VolumeID] = true
+		}
+		for _, origin := range view.manifest.VolumeRecoveries {
+			if origin.Complete && origin.Target == b.server.control.ledger.node && origin.Before.Bucket == client.ID(b.ID()) {
+				for _, id := range origin.Volumes {
+					staged := b.server.recoveryVolumes[volume.ID(id)]
+					if staged != nil && !seen[volume.ID(id)] {
+						stores = append(stores, staged.store)
+						seen[volume.ID(id)] = true
+					}
+				}
+			}
+		}
+	}
+	for _, v := range stores {
 		if err := ctx.Err(); err != nil {
 			return nil, volume.ObjectID{}, false, err
 		}
@@ -123,14 +167,27 @@ func (b *Bucket) scan(ctx context.Context, description BucketDescription, after 
 			return nil, volume.ObjectID{}, false, err
 		}
 		for _, r := range page {
+			visited[r.Key.Object] = true
+			if b.server.controller != nil {
+				entry, known := placement.lookup(client.ID(b.ID()), client.ObjectID(r.Key.Object))
+				owned := false
+				for _, loc := range entry.Locations {
+					if loc.Role == 0 && loc.Node == b.server.control.ledger.node && entry.State != 4 && b.server.volumeAllowedForEntry(client.ID(b.ID()), entry, v.Identity().VolumeID, view) {
+						owned = true
+					}
+				}
+				if !known || !owned || exclude != nil && exclude(entry) {
+					continue
+				}
+			}
 			old, exists := merged[r.Key.Object]
 			if !exists || r.Info.Version > old.Info.Version || r.Info.Version == old.Info.Version && r.Info.Deleted {
 				merged[r.Key.Object] = r
 			}
 		}
 	}
-	ids := make([]volume.ObjectID, 0, len(merged))
-	for id := range merged {
+	ids := make([]volume.ObjectID, 0, len(visited))
+	for id := range visited {
 		ids = append(ids, id)
 	}
 	sort.Slice(ids, func(i, j int) bool { return bytes.Compare(ids[i][:], ids[j][:]) < 0 })
@@ -142,8 +199,8 @@ func (b *Bucket) scan(ctx context.Context, description BucketDescription, after 
 	out := []volume.ObjectRecord{}
 	for _, id := range ids {
 		next = id
-		if !merged[id].Info.Deleted {
-			out = append(out, merged[id])
+		if record, exists := merged[id]; exists && !record.Info.Deleted {
+			out = append(out, record)
 		}
 	}
 	return out, next, more, nil
@@ -166,7 +223,7 @@ func (s *Server) executeObjectList(ctx context.Context, op *objectMutation, d *c
 	if d.Done() != nil || limit == 0 || limit > 1000 {
 		return nil, 0, fail(400, "invalid object scan")
 	}
-	records, next, more, err := op.bucket.scan(ctx, description, after, int(limit))
+	records, next, more, err := op.bucket.scanCluster(ctx, description, p, after, int(limit))
 	if err != nil {
 		return nil, 0, err
 	}
@@ -174,7 +231,13 @@ func (s *Server) executeObjectList(ctx context.Context, op *objectMutation, d *c
 	e.U32(uint32(len(records)))
 	for _, r := range records {
 		e.B = append(e.B, r.Key.Object[:]...)
-		encodeObjectInfo(&e, r.Info, runtime)
+		objectRuntime := runtime
+		if s.controller != nil {
+			if entry, known := s.placement.Load().lookup(client.ID(op.bucket.ID()), client.ObjectID(r.Key.Object)); known {
+				objectRuntime = entry.Runtime
+			}
+		}
+		encodeObjectInfo(&e, r.Info, objectRuntime)
 	}
 	e.Bool(more)
 	if more {

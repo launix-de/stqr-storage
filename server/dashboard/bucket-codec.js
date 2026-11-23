@@ -23,4 +23,4 @@ export function parseQuota(raw){
  const [whole,fraction='']=m[1].replace(',','.').split('.'),den=10n**BigInt(fraction.length),scale=m[2]?1024n**BigInt('kmgtp'.indexOf(m[2].toLowerCase())+1):1n;
  const n=(BigInt(whole)*den+BigInt(fraction||0))*scale/den;if(n>0xffffffffffffffffn)throw Error('Kontingent ist zu groß.');return n;
 }
-export function defaultBucketPolicy(){return {version:1,storage_strategy:'hdd',compression:'raw',placement_mode:'count',redundancy:{mode:'single',replicas:1,ack:'all'},read_acceleration:{enabled:false,max_copies_per_hot_range:0,cache_bytes_budget:0},limits:{quota_accounting:'logical',metadata_reserve_ppm:540,guaranteed_quota_bytes:0,absolute_quota_bytes:0,absolute_unlimited:true}}}
+export function defaultBucketPolicy(){return {version:1,placement_group:'ff5354515244454641554c5401000000',storage_strategy:'hdd',compression:'raw',placement_mode:'count',redundancy:{mode:'single',replicas:1,ack:'all'},read_acceleration:{enabled:false,max_copies_per_hot_range:0,cache_bytes_budget:0},limits:{quota_accounting:'logical',metadata_reserve_ppm:540,guaranteed_quota_bytes:0,absolute_quota_bytes:0,absolute_unlimited:true}}}

@@ -34,50 +34,65 @@ func (s *Server) maintainS3(ctx context.Context, now time.Time) error {
 		if d.State != BucketActive || d.ID == systemBucket.String() {
 			continue
 		}
-		id, e := bucketID(d.ID)
-		if e != nil {
+		if e := s.maintainS3Bucket(ctx, now, d, accounts, admin); e != nil {
 			return e
 		}
-		b, e := s.Bucket(id)
-		if e != nil {
+	}
+	return nil
+}
+func (s *Server) maintainS3Bucket(ctx context.Context, now time.Time, d BucketDescription, accounts accountsImage, admin account) error {
+	id, e := bucketID(d.ID)
+	if e != nil {
+		return e
+	}
+	b, e := s.Bucket(id)
+	if e != nil {
+		return e
+	}
+	api, closeAPI, e := s.openS3(ctx, b, principal{User: admin, frontendPermission: BucketWrite})
+	if e != nil {
+		return e
+	}
+	defer closeAPI()
+	uploads, e := api.MultipartUploads(ctx)
+	if e != nil {
+		return e
+	}
+	for _, upload := range uploads {
+		if upload.State != client.S3UploadPublishing {
 			continue
 		}
-		api := client.NewS3(s3Store{b: b, p: principal{User: admin}})
-		uploads, e := api.MultipartUploads(ctx)
+		var owner account
+		for _, user := range accounts.Users {
+			if user.ID == upload.Owner {
+				owner = user
+				break
+			}
+		}
+		revoked := owner.ID == "" || owner.Disabled || (owner.Role != "ADMIN" && owner.Role != "USER")
+		if !revoked {
+			id, _ := bucketID(owner.ID)
+			info, err := b.Info(id, owner.Role == "ADMIN")
+			revoked = err != nil || info.Permissions&BucketWrite == 0
+		}
+		if revoked {
+			if e = api.DiscardMultipart(ctx, upload); e != nil {
+				return e
+			}
+			continue
+		}
+		ownerAPI, closeOwner, e := s.openS3(ctx, b, principal{User: owner, frontendPermission: BucketWrite})
 		if e != nil {
 			return e
 		}
-		for _, upload := range uploads {
-			if upload.State != client.S3UploadPublishing {
-				continue
-			}
-			var owner account
-			for _, user := range accounts.Users {
-				if user.ID == upload.Owner {
-					owner = user
-					break
-				}
-			}
-			revoked := owner.ID == "" || owner.Disabled || (owner.Role != "ADMIN" && owner.Role != "USER")
-			if !revoked {
-				id, _ := bucketID(owner.ID)
-				info, err := b.Info(id, owner.Role == "ADMIN")
-				revoked = err != nil || info.Permissions&BucketWrite == 0
-			}
-			if revoked {
-				if e = api.DiscardMultipart(ctx, upload); e != nil {
-					return e
-				}
-				continue
-			}
-			ownerAPI := client.NewS3(s3Store{b: b, p: principal{User: owner, frontendPermission: BucketWrite}})
-			if _, e = ownerAPI.FinishMultipart(ctx, upload); e != nil && !errors.Is(e, client.ErrPrecondition) {
-				continue
-			}
+		_, e = ownerAPI.FinishMultipart(ctx, upload)
+		closeOwner()
+		if e != nil && !errors.Is(e, client.ErrPrecondition) {
+			continue
 		}
-		if e = api.ExpireMultipart(ctx, now, s3IdleUploadLifetime, s3CompletionReceiptLifetime); e != nil {
-			return e
-		}
+	}
+	if e = api.ExpireMultipart(ctx, now, s3IdleUploadLifetime, s3CompletionReceiptLifetime); e != nil {
+		return e
 	}
 	return nil
 }

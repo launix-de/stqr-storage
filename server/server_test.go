@@ -22,9 +22,16 @@ import (
 	"golang.org/x/crypto/bcrypt"
 )
 
+// These fixtures preserve isolated single-node/transport behavior. Production
+// daemon integration tests call Open directly with full control enabled.
+func openTransportTestNode(opts Options) (*Server, error) {
+	opts.transportOnly = true
+	return Open(opts)
+}
+
 func testServer(t *testing.T) *Server {
 	t.Helper()
-	s, e := Open(Options{ConfigPath: filepath.Join(t.TempDir(), "node.yaml"), values: map[string]string{"system-volume-bytes": "262144"}})
+	s, e := openTransportTestNode(Options{ConfigPath: filepath.Join(t.TempDir(), "node.yaml"), values: map[string]string{"system-volume-bytes": "262144"}})
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -63,7 +70,7 @@ func TestBootstrapConfigAccountsAndAutoGrowth(t *testing.T) {
 	}
 	path := s.configPath
 	s.Close()
-	s2, e := Open(Options{ConfigPath: path})
+	s2, e := openTransportTestNode(Options{ConfigPath: path})
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -74,7 +81,7 @@ func TestBootstrapConfigAccountsAndAutoGrowth(t *testing.T) {
 	if e = s2.readBlob("growth-test", &got); e != nil || got != want {
 		t.Fatal("growth lost on restart", e)
 	}
-	if _, e = Open(Options{ConfigPath: path}); e == nil {
+	if _, e = openTransportTestNode(Options{ConfigPath: path}); e == nil {
 		t.Fatal("configuration lock allowed a duplicate node")
 	}
 }
@@ -377,7 +384,7 @@ func TestConfiguredVolumeDamageNeverReformats(t *testing.T) {
 	if e := os.Remove(system); e != nil {
 		t.Fatal(e)
 	}
-	if _, e := Open(Options{ConfigPath: path}); e == nil {
+	if _, e := openTransportTestNode(Options{ConfigPath: path}); e == nil {
 		t.Fatal("missing configured system volume was recreated")
 	}
 	if _, e := os.Stat(system); !errors.Is(e, os.ErrNotExist) {
@@ -464,7 +471,7 @@ func TestIncompleteLocalOperationsRecoverWithoutLosingVolumes(t *testing.T) {
 	}
 	path := s.configPath
 	s.Close()
-	next, e := Open(Options{ConfigPath: path})
+	next, e := openTransportTestNode(Options{ConfigPath: path})
 	if e != nil {
 		t.Fatal(e)
 	}

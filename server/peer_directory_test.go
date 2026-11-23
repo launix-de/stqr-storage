@@ -12,7 +12,7 @@ import (
 
 func restartPeerAtAddress(t *testing.T, path string) (*Server, *httptest.Server) {
 	t.Helper()
-	s, err := Open(Options{ConfigPath: path})
+	s, err := openTransportTestNode(Options{ConfigPath: path})
 	if err != nil {
 		t.Fatal(err)
 	}

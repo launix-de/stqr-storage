@@ -1,10 +1,14 @@
 // SPDX-License-Identifier: GPL-3.0-only
 import {NodeConnection,newID} from './protocol.js';
+import {memberIDs,nodeMembership,currentSnapshots,seedMembers} from './membership.js';
+import {setupRecovery} from './recovery.js';
+import {setupForceDisconnect} from './force-disconnect.js';
 import {setupUserViews} from './users.js';
+import {setupPlacementGroups} from './placement-groups.js';
 import {setupBucketViews} from './buckets.js';
 import {MIN_VOLUME_SIZE,parseSize,sizeSteps,sizeLimit,formatSize,sizeLabel} from './size.js';
 const $=id=>document.getElementById(id),escape=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-let node,configView,snapshot,source=0,candidates=[],volumeNode,drainID,drainVolume,addRetry;
+let node,configView,snapshot,source=0,candidates=[],volumeNode,drainID,drainVolume,addRetry,addPending=false;
 const nodeStates=new Map,fetchingConfigs=new Set;
 const localNode=()=>configView?.config.node.id;
 const volumeConnection=()=>volumeNode&&volumeNode!==localNode()?node.forNode(volumeNode):node;
@@ -14,7 +18,7 @@ export function bytes(n){n=BigInt(n??0);const units=['B','KiB','MiB','GiB','TiB'
 function toast(message,error=false){const div=document.createElement('div');div.className='toast'+(error?' error-toast':'');div.textContent=message;while($('toasts').children.length>=3)$('toasts').firstElementChild.remove();$('toasts').append(div);setTimeout(()=>div.remove(),error?10000:5000)}
 function setConnected(connected){$('connection').classList.toggle('offline',!connected);$('connection').innerHTML=`<span class="dot"></span>${connected?'Live · alle 3 Sekunden':'Verbindung wird wiederhergestellt'}`;$('refresh').disabled=!connected}
 function beginSession(session){
- $('login').hidden=true;$('app').hidden=false;$('profile-name').textContent=session.username;userViews.clear();bucketViews.clear();node?.stop();nodeStates.clear();fetchingConfigs.clear();snapshot=null;configView=null;volumeNode=null;
+ $('login').hidden=true;$('app').hidden=false;$('profile-name').textContent=session.username;userViews.clear();bucketViews.clear();pgViews.clear();node?.stop();nodeStates.clear();fetchingConfigs.clear();snapshot=null;configView=null;volumeNode=null;
  const connection=node=new NodeConnection(session.csrf_token,connected=>{if(node===connection)setConnected(connected)},stats=>{if(node===connection)onStats(stats)});
  connection.onOpen=async()=>{try{const [cfg]=await Promise.all([connection.getConfig(),connection.subscribeStats(),userViews.load(),bucketViews.load()]);if(node===connection)applyConfig(cfg)}catch(e){if(node===connection)toast(e.message,true)}};
  connection.onProtocolError=e=>{if(node===connection)toast('Protokollfehler: '+e.message,true)};
@@ -33,20 +37,25 @@ $('login-form').addEventListener('submit',async e=>{e.preventDefault();const sub
 $('logout').addEventListener('click',async()=>{try{await sessionFetch('DELETE',{'X-CSRF-Token':node.csrf})}catch{}node?.stop();$('app').hidden=true;$('login').hidden=false;$('password').focus()});
 function showView(view){
  for(const b of document.querySelectorAll('[data-view]'))b.classList.toggle('selected',b.dataset.view===view);
- for(const name of ['volumes','buckets','users','settings'])$(name+'-view').hidden=view!==name;
- $('breadcrumb-current').textContent={volumes:'Volumes',buckets:'Buckets',users:'User',settings:'Einstellungen'}[view];
+ for(const name of ['volumes','buckets','users','groups','settings'])$(name+'-view').hidden=view!==name;
+ $('breadcrumb-current').textContent={volumes:'Volumes',buckets:'Buckets',users:'User',groups:'Placement Groups',settings:'Einstellungen'}[view];
+ if(view==='groups')pgViews.load();
  if(view==='settings')node.getConfig().then(applyConfig).catch(e=>toast(e.message,true));if(view==='users')userViews.load();if(view==='buckets')bucketViews.load();
 }
 for(const button of document.querySelectorAll('[data-view]'))button.addEventListener('click',()=>showView(button.dataset.view));
 function requireLogin(message){node?.stop();$('app').hidden=true;$('login').hidden=false;$('password').value='';$('login-error').textContent=message;$('password').focus()}
+const recoveryView=setupRecovery({connection:()=>node,config:()=>configView,states:nodeStates,toast,newID,refresh:target=>refreshConfig(target)});
+const forceView=setupForceDisconnect({connection:()=>node,config:()=>configView,states:nodeStates,toast,newID,refresh:()=>refreshConfig()});
+$('add-error').insertAdjacentHTML('beforebegin','<section id="volume-pg-selection" class="bucket-form-section"></section>');
+const pgViews=setupPlacementGroups({connection:()=>node,escape,toast,states:nodeStates});
 const bucketViews=setupBucketViews({connection:()=>node,escape,toast,showView});
 const userViews=setupUserViews({connection:()=>node,currentUsername:()=>$('profile-name').textContent,escape,toast,showView,requireLogin,openBucketCreate:options=>bucketViews.openCreate(options)});
 
 function applyConfig(view){
- configView=view;const id=view.config.node.id,entry=nodeStates.get(id)??{};entry.config=view;nodeStates.set(id,entry);
+ configView=view;const id=view.config.node.id,entry=nodeStates.get(id)??{};entry.config=view;nodeStates.set(id,entry);seedMembers(view,nodeStates);
  snapshot=entry.snapshot??snapshot;volumeNode??=id;
  $('config-location').textContent=view.config_path;$('restart-notice').hidden=!view.restart_required;
- if(!$('settings-fields').children.length)renderSettings();else syncSettingsValues();renderVolumes();updatePath();
+ if(!$('settings-fields').children.length)renderSettings();else syncSettingsValues();renderMetrics();renderVolumes();updatePath();
 }
 async function refreshConfig(target=localNode()){
  const connection=node;
@@ -59,17 +68,18 @@ let capacity=null,steps=[],selectedSizes={0:50n*1024n*1024n,2:50n*1024n*1024n};
 function onStats(s){
  const entry=nodeStates.get(s.node)??{};
  if(entry.snapshot&&s.boot===entry.snapshot.boot&&s.sequence<=entry.snapshot.sequence)return;
- entry.previous=entry.snapshot;entry.snapshot=s;entry.received=Date.now();nodeStates.set(s.node,entry);
+ entry.previous=entry.placeholder?null:entry.snapshot;entry.placeholder=false;entry.snapshot=s;entry.received=Date.now();nodeStates.set(s.node,entry);
  if(s.node===localNode()||!snapshot)snapshot=s;
  renderMetrics();renderVolumes();
- $('snapshot-info').textContent=`${nodeStates.size} NODE${nodeStates.size===1?'':'S'} · GEN ${nodeStates.get(localNode())?.snapshot?.generation??s.generation} · ${new Date(Number(s.captured/1000000n)).toLocaleTimeString('de-DE')}`;
+ const count=memberIDs(configView)?.size??nodeStates.size;
+ $('snapshot-info').textContent=`${count} NODE${count===1?'':'S'} · GEN ${nodeStates.get(localNode())?.snapshot?.generation??s.generation} · ${new Date(Number(s.captured/1000000n)).toLocaleTimeString('de-DE')}`;
  if(!configView||fetchingConfigs.has(s.node))return;
  const ids=new Set(entry.config?.config.volumes.map(v=>v.id)??[]);
- if(!entry.config||s.volumes.length!==ids.size||s.volumes.some(v=>!ids.has(v.id))){fetchingConfigs.add(s.node);refreshConfig(s.node).finally(()=>fetchingConfigs.delete(s.node))}
+ if(s.node===localNode()&&configView.membership_epoch!==undefined&&configView.membership_epoch!==String(s.membership)||!entry.config||s.volumes.length!==ids.size||s.volumes.some(v=>!ids.has(v.id))){fetchingConfigs.add(s.node);refreshConfig(s.node).finally(()=>fetchingConfigs.delete(s.node))}
 }
 function totals(volumes){return volumes.reduce((a,v)=>({capacity:a.capacity+v.capacity,allocated:a.allocated+v.allocated,admission:a.admission+v.admission,reserved:a.reserved+v.operating+v.guaranteed+v.inFlightReserved}),{capacity:0n,allocated:0n,admission:0n,reserved:0n})}
 function renderMetrics(){
- const entries=[...nodeStates.values()].filter(e=>e.snapshot);if(!entries.length)return;
+ const entries=currentSnapshots(configView,nodeStates);const memberCount=memberIDs(configView)?.size??entries.length;
  const volumes=entries.flatMap(e=>e.snapshot.volumes),t=totals(volumes);
  for(const prefix of ['', 'bucket-']){$(prefix+'metric-capacity').textContent=bytes(t.capacity);$(prefix+'metric-used').textContent=`${bytes(t.allocated)} belegt · ${bytes(t.admission)} nutzbar`;}
  $('metric-volumes').textContent=String(volumes.length);
@@ -81,7 +91,7 @@ function renderMetrics(){
    if(seconds>0&&s.io[key]>=p.io[key]&&Date.now()-received<10000){sum+=BigInt(Math.round(Number(s.io[key]-p.io[key])/seconds));count++}}
   for(const prefix of ['', 'bucket-'])$(prefix+'metric-'+key).textContent=count?bytes(sum)+'/s':'—';
  }
- const count=entries.length===1?'1 Node':`${entries.length} Nodes`;$('node-count').textContent=count;$('topbar-node-count').textContent=count.toUpperCase();
+ const count=memberCount===1?'1 Node':`${memberCount} Nodes`;$('node-count').textContent=count;$('topbar-node-count').textContent=count.toUpperCase();
  const mode=document.querySelector('.mode-card');mode.querySelector('strong').textContent=count;
  mode.querySelector('p').textContent='Speicher und Zustand im Überblick.';
 }
@@ -91,19 +101,25 @@ function renderVolumes(){
  if(!entries.length)return;
  const query=$('volume-search').value.trim().toLowerCase();let rows='',visibleCount=0;
  for(const [id,entry]of entries){
-  const s=entry.snapshot,view=entry.config,cfg=view?.config,byID=new Map((cfg?.volumes??[]).map(v=>[v.id,v])),t=totals(s.volumes),collapsed=entry.collapsed??false;
+  const s=entry.snapshot,view=entry.config,cfg=view?.config,membership=nodeMembership(configView,id,s),member=membership==='member',byID=new Map((cfg?.volumes??[]).map(v=>[v.id,v])),t=totals(s.volumes),collapsed=entry.collapsed??false;
   const visible=s.volumes.filter(v=>{const c=byID.get(v.id);return `${cfg?.node.name??id} ${c?.name??''} ${v.path} ${classes[v.class]}`.toLowerCase().includes(query)});
   visibleCount+=visible.length;
-  const stale=Date.now()-entry.received>=10000,label=stale?'Letzter Stand':(['Online','Wird geleert','Wartung','Wird beendet','Beitritt','Ausgeschlossen'][s.state]??'Unbekannt');
-  rows+=`<tr class="node-row" data-node="${id}"><td><div class="node-cell"><button class="node-toggle" data-toggle="${id}" aria-label="Volumes ${collapsed?'aufklappen':'einklappen'}" aria-expanded="${!collapsed}">${collapsed?'›':'⌄'}</button><span class="node-symbol">▤</span><div><div class="node-name">${escape(cfg?.node.name??id.slice(0,8))}${id===localNode()?'<span class="node-badge">DIESE NODE</span>':''}</div><div class="node-sub">${escape(id.slice(0,8))} · ${escape(view?.active_listen??'')}</div></div></div></td><td><span class="class-badge">${s.volumes.length} VOLUMES</span></td><td>${usage(t)}</td><td class="free-value">${escape(bytes(t.admission))}</td><td><span class="state-badge ${stale?'pending':''}"><i></i>${label}</span></td><td></td></tr>`;
-  if(!collapsed)for(const v of visible){const c=byID.get(v.id),state=states[v.state]??'failed';rows+=`<tr data-volume="${v.id}" data-node="${id}"><td><div class="volume-cell"><span class="volume-symbol">▤</span><div><div class="volume-name">${escape(c?.name??v.path.split('/').pop())}${c?.system?'<span class="system-label">SYSTEM</span>':''}</div><div class="volume-path" title="${escape(v.path)}">${escape(v.path)}</div></div></div></td><td><span class="class-badge ${classes[v.class]}">${classes[v.class].toUpperCase()}</span></td><td>${usage(v)}</td><td class="free-value">${escape(bytes(v.admission))}</td><td><span class="state-badge ${state}"><i></i>${stateNames[v.state]??'Unbekannt'}</span></td><td><div class="row-actions"><button class="row-action" data-detail="${v.id}" data-node="${id}" aria-label="Details für ${escape(c?.name??v.path)}">Details</button><button class="row-action" data-grow="${v.id}" data-node="${id}" ${!cfg||v.state!==1?'disabled':''}>Vergrößern</button><button class="row-action" data-drain="${v.id}" data-node="${id}" ${!cfg||c?.system||v.state!==1?'disabled':''} title="${c?.system?'Das Admin-Volume bleibt für Systemdaten eingebunden':'Kooperativ aushängen und entfernen'}">Aushängen ↗</button></div></td></tr>`}
-  rows+=`<tr class="add-row"><td colspan="6"><button class="add-volume-button" data-add-node="${id}" ${!cfg?'disabled':''}>＋ Volume hinzufügen</button><span class="add-row-note">Datei, ungemountetes Blockdevice oder RAM</span></td></tr>`;
+  const stale=Date.now()-entry.received>=10000,label=membership==='excluded'?'Ausgeschlossen':membership==='departed'?'Ausgeschieden':entry.placeholder?'Noch keine Statistiken':stale?'Letzter Stand':s.state===0&&s.needRebuild?(s.reason&512n?'Clusteränderung':'Rebuild'):(['Online','Wird geleert','Wartung','Wird beendet','Beitritt','Ausgeschlossen'][s.state]??'Unbekannt');
+  rows+=`<tr class="node-row" data-node="${id}"><td><div class="node-cell"><button class="node-toggle" data-toggle="${id}" aria-label="Volumes ${collapsed?'aufklappen':'einklappen'}" aria-expanded="${!collapsed}">${collapsed?'›':'⌄'}</button><span class="node-symbol">▤</span><div><div class="node-name">${escape(cfg?.node.name??id.slice(0,8))}${id===localNode()?'<span class="node-badge">DIESE NODE</span>':''}</div><div class="node-sub">${escape(id.slice(0,8))} · ${escape(view?.active_listen??'')}</div></div></div></td><td><span class="class-badge">${s.volumes.length} VOLUMES</span></td><td>${usage(t)}</td><td class="free-value">${escape(bytes(t.admission))}</td><td><span class="state-badge ${stale?'pending':''}"><i></i>${label}</span></td><td><div class="row-actions"><button class="secondary" data-node-short="${id}" ${!member||stale||s.state!==0?'disabled':''}>Wartung</button><button class="secondary" data-node-drain="${id}" ${!member||stale||s.state!==0?'disabled':''}>Leeren</button>${member?`<button class="row-action" data-node-replace="${id}" ${memberIDs(configView)?.size<2?'disabled':''}>Node ersetzen</button><button class="row-action" data-node-force="${id}" ${memberIDs(configView)?.size<2?'disabled':''}>Ausschließen</button>`:''}</div></td></tr>`;
+  if(!collapsed)for(const v of visible){const c=byID.get(v.id),state=states[v.state]??'failed';rows+=`<tr data-volume="${v.id}" data-node="${id}"><td><div class="volume-cell"><span class="volume-symbol">▤</span><div><div class="volume-name">${escape(c?.name??v.path.split('/').pop())}${c?.system?'<span class="system-label">SYSTEM</span>':c?.recovery_only?'<span class="system-label" title="Für die übernommenen Datenbereiche reserviert">GERETTET</span>':''}</div><div class="volume-path" title="${escape(v.path)}">${escape(v.path)}</div></div></div></td><td><span class="class-badge ${classes[v.class]}">${classes[v.class].toUpperCase()}</span></td><td>${usage(v)}</td><td class="free-value">${escape(bytes(v.admission))}</td><td><span class="state-badge ${state}"><i></i>${stateNames[v.state]??'Unbekannt'}</span></td><td><div class="row-actions">${c?.placement_groups_pending?.length?`<button class="row-action" data-finish-pg="${v.id}" data-node="${id}">PG-Listen fortsetzen</button>`:''}<button class="row-action" data-detail="${v.id}" data-node="${id}" aria-label="Details für ${escape(c?.name??v.path)}">Details</button><button class="row-action" data-grow="${v.id}" data-node="${id}" ${!member||!cfg||v.state!==1?'disabled':''}>Vergrößern</button><button class="row-action" data-drain="${v.id}" data-node="${id}" ${!member||!cfg||c?.system||v.state!==1?'disabled':''} title="${c?.system?'Das Admin-Volume bleibt für Systemdaten eingebunden':'Kooperativ aushängen und entfernen'}">Aushängen ↗</button></div></td></tr>`}
+  rows+=`<tr class="add-row"><td colspan="6"><button class="add-volume-button" data-add-node="${id}" ${!member||!cfg?'disabled':''}>＋ Volume hinzufügen</button><button class="row-action" data-recovery-volumes="${id}" ${!member||!cfg?'disabled':''}>Gerettete Volumes</button><span class="add-row-note">Datei, ungemountetes Blockdevice oder RAM</span></td></tr>`;
  }
  if($('volume-rows').dataset.rendered!==rows){$('volume-rows').innerHTML=rows;$('volume-rows').dataset.rendered=rows;}
  $('table-empty').hidden=visibleCount!==0||!query;
  for(const bar of document.querySelectorAll('[data-percent]'))bar.style.width=bar.dataset.percent+'%';
  for(const b of document.querySelectorAll('[data-toggle]'))b.onclick=()=>{const e=nodeStates.get(b.dataset.toggle);e.collapsed=!e.collapsed;renderVolumes()};
+ for(const b of document.querySelectorAll('[data-node-replace]'))b.onclick=()=>recoveryView.openNode(b.dataset.nodeReplace);
+ for(const b of document.querySelectorAll('[data-recovery-volumes]'))b.onclick=()=>recoveryView.openVolumes(b.dataset.recoveryVolumes);
+ for(const b of document.querySelectorAll('[data-node-force]'))b.onclick=()=>forceView.open(b.dataset.nodeForce);
+ for(const b of document.querySelectorAll('[data-node-short]'))b.onclick=()=>openNodeLifecycle(b.dataset.nodeShort,false);
+ for(const b of document.querySelectorAll('[data-node-drain]'))b.onclick=()=>openNodeLifecycle(b.dataset.nodeDrain,true);
  for(const b of document.querySelectorAll('[data-add-node]'))b.onclick=()=>openAdd(b.dataset.addNode);
+ for(const b of document.querySelectorAll('[data-finish-pg]'))b.onclick=async()=>{b.disabled=true;const target=b.dataset.node,id=b.dataset.finishPg,groups=nodeStates.get(target)?.config?.config.volumes.find(v=>v.id===id)?.placement_groups_pending??[];try{await pgViews.finishVolume(target,id,groups);await refreshConfig(target);toast('Volume für Placement freigegeben.')}catch(e){toast(e.message,true)}finally{b.disabled=false}};
  for(const [attr,fn]of [['detail',openDetail],['grow',openGrow],['drain',openDrain]])for(const b of document.querySelectorAll(`[data-${attr}]`))b.onclick=()=>fn(b.dataset[attr],b.dataset.node);
 }
 $('volume-search').addEventListener('input',renderVolumes);$('refresh').onclick=async()=>{try{onStats(await node.getStats());toast('Statistik aktualisiert.')}catch(e){toast(e.message,true)}};
@@ -158,10 +174,11 @@ async function loadCandidates(){
  }catch(e){$('add-error').textContent=e.message;$('add-submit').disabled=true}finally{$('refresh-devices').disabled=false}
 }
 function openAdd(target=localNode()){
+ if(addPending)return;
  volumeNode=target;$('add-node-name').textContent=volumeConfig()?.config.node.name??target;
  addRetry=null;capacity=null;steps=[];selectedSizes={0:50n*1024n*1024n,2:50n*1024n*1024n};
  $('add-error').textContent='';$('volume-name').value='';$('volume-name').readOnly=false;$('volume-class').value='hdd';$('existing-file').value='';$('device-path').value='';source=0;
- updateSource();$('add-dialog').showModal();loadCandidates();$('volume-name').focus();
+ updateSource();$('add-dialog').showModal();loadCandidates();pgViews.volumeSelection(target).catch(e=>{$('add-error').textContent=e.message;$('add-submit').disabled=true});$('volume-name').focus();
 }
 function updatePath(){$('volume-path-preview').textContent=source===0?`${volumeConfig()?.active_volumes_dir??'volumes'}/${$('volume-name').value||'<name>'}`:source===2?'Prozessgebunden · flüchtiger Speicher':$('device-path').value}
 function editableSize(){return source!==1&&!(source===0&&$('existing-file').value)}
@@ -212,8 +229,47 @@ $('volume-slider').addEventListener('input',()=>{
  const value=steps[Number($('volume-slider').value)];if(value===undefined)return;
  selectedSizes[source]=value;$('volume-size').value=formatSize(value);$('volume-size').setCustomValidity('');$('slider-value').textContent=formatSize(value);$('volume-slider').setAttribute('aria-valuetext',formatSize(value));
 });
-$('add-form').addEventListener('submit',async e=>{e.preventDefault();$('add-error').textContent='';e.submitter.disabled=true;try{const existing=source===0&&$('existing-file').value,q={name:$('volume-name').value,source,path:source===1?$('device-path').value:existing||'',class:$('volume-class').value,size:source===1||existing?0n:parseSize($('volume-size').value)};if(source===1&&!q.path)throw Error('Bitte ein verfügbares Device auswählen.');const signature=JSON.stringify(q,(_,v)=>typeof v==='bigint'?String(v):v);if(addRetry?.signature!==signature)addRetry={signature,id:newID()};await volumeConnection().addVolume(q,addRetry.id);$('add-dialog').close();toast(`Volume „${q.name}“ wurde hinzugefügt.`);await refreshConfig(volumeNode)}catch(e){$('add-error').textContent=e.message}finally{e.submitter.disabled=editableSize()&&(!capacity||currentLimit()<MIN_VOLUME_SIZE)}});
+$('add-dialog').addEventListener('cancel',e=>{if(addPending)e.preventDefault()});
+$('add-form').addEventListener('submit',async e=>{
+ e.preventDefault();$('add-error').textContent='';e.submitter.disabled=true;addPending=true;const target=volumeNode,requestConnection=volumeConnection();for(const b of document.querySelectorAll('[data-close="add-dialog"],[data-source]'))b.disabled=true;
+ try{
+  const existing=source===0&&$('existing-file').value,q={name:$('volume-name').value,source,path:source===1?$('device-path').value:existing||'',class:$('volume-class').value,size:source===1||existing?0n:parseSize($('volume-size').value),placementGroups:[...$('volume-pg-selection').querySelectorAll('[data-volume-pg]:checked')].map(e=>e.dataset.volumePg)};
+  if(source===1&&!q.path)throw Error('Bitte ein verfügbares Device auswählen.');
+  const signature=JSON.stringify(q,(_,v)=>typeof v==='bigint'?String(v):v);if(!addRetry?.created&&addRetry?.signature!==signature)addRetry={signature,id:newID(),request:q};
+  const request=addRetry.request??q;
+  if(!addRetry.created){const result=await requestConnection.addVolume(request,addRetry.id);addRetry.created=result.volume_id}
+  if(request.placementGroups.length)await pgViews.finishVolume(target,addRetry.created,request.placementGroups);
+  $('add-dialog').close();toast(`Volume „${request.name}“ wurde hinzugefügt.`);await refreshConfig(target);
+ }catch(err){$('add-error').textContent=addRetry?.created?'Volume ist angelegt und wartet auf die PG-Listen. Erneut speichern setzt den Vorgang fort: '+err.message:err.message;await refreshConfig(target)}
+ finally{addPending=false;for(const b of document.querySelectorAll('[data-close="add-dialog"],[data-source]'))b.disabled=false;e.submitter.disabled=editableSize()&&(!capacity||currentLimit()<MIN_VOLUME_SIZE)}
+});
 const settingSections=[{title:'Node',note:'Name und veröffentlichte Adresse gelten sofort. Bind-Adresse und Verzeichnisse werden beim nächsten Start aktiv.',fields:[['name','Anzeigename','Ein verständlicher Name für diese Node.','text'],['listen','HTTP-Bind-Adresse','HTTP und WebSocket auf derselben Adresse. Neustart erforderlich.','text'],['advertise','Veröffentlichte Adresse','Optionales http://host:port für zukünftige Peer-Kontakte.','text'],['data_dir','Datenverzeichnis','Relative Pfade beziehen sich auf den Config-Ordner. Neustart erforderlich.','text'],['volumes_dir','Volume-Verzeichnis','Neue Dateivolumes liegen direkt in diesem Ordner. Neustart erforderlich.','text']]},{title:'Kapazität & System-Volume',note:'Alle Werte sind Bytes. Das Admin-Dateivolume wächst automatisch; die Startgröße ist kein festes Limit.',fields:[['ram_bytes','RAM-Budget','Optionales RAM-Budget; 0 nutzt den freien System-RAM. Neustart erforderlich.','number'],['ramcache_bytes','Read-Cache-Budget','Für die spätere Cache-Implementierung reserviert. Neustart erforderlich.','number'],['system_volume_bytes','Admin-Volume Startgröße','Nur bei Neuanlage; vorhandene Admin-Volumes wachsen nach Bedarf.','number']]},{title:'Netzwerkzugriff',note:'Die echte IPv4-/IPv6-Adresse der Verbindung zählt. Forwarded-Header werden nicht vertraut.',fields:[['allow_subnets','Erlaubte Subnetze','Ein CIDR pro Zeile. Leer erlaubt alle Adressen. Änderungen gelten sofort, auch für diese Verbindung.','subnets']]},{title:'Identität & Bootstrap',note:'Die Identitäten sind unveränderlich. Das initiale Passwort steht in der geschützten YAML-Datei; Accounts mit Passwort-Hashes liegen im Admin-Volume.',fields:[]}];
 function renderSettings(){if(!configView)return;const c=configView.config,nodeConfig=c.node;let html='';for(const section of settingSections){html+=`<section class="settings-section"><h2>${section.title}</h2><p>${section.note}</p>`;for(const [key,label,note,type]of section.fields){const value=key in nodeConfig?nodeConfig[key]:c[key];html+=`<form class="setting-row" data-setting="${key}" data-type="${type}"><div class="setting-label"><label for="setting-${key}">${label}</label><p>${note}</p></div>${type==='subnets'?`<textarea id="setting-${key}" spellcheck="false">${escape(value.join('\n'))}</textarea>`:`<input id="setting-${key}" type="${type}" value="${escape(value??'')}" ${type==='number'?'min="0" step="1" required':''}>`}<button class="secondary" type="submit">Speichern</button></form>`}if(!section.fields.length){for(const [label,value]of [['Node-ID',nodeConfig.id],['Cluster-ID',c.cluster_id],['Bootstrap-Admin',c.auth.bootstrap_admin.username],['System-Bucket-Platzierung','EVERYWHERE · Multinode-Replikation folgt'],['Peers',c.peers?.length?c.peers.map(p=>p.url).join(', '):'Keine · Single-node']])html+=`<div class="setting-row"><div class="setting-label"><label>${escape(label)}</label></div><div class="setting-readonly">${escape(value)}</div></div>`}html+='</section>'}$('settings-fields').innerHTML=html;for(const form of document.querySelectorAll('[data-setting]')){form.addEventListener('input',()=>{form.dataset.dirty='true'});form.addEventListener('submit',async e=>{e.preventDefault();const key=form.dataset.setting,input=form.querySelector('input,textarea'),type=form.dataset.type;let value=input.value;if(type==='number'){value=Number(value);if(!Number.isSafeInteger(value)||value<0){toast('Bitte eine nichtnegative ganze Bytezahl eingeben.',true);return}}else if(type==='subnets')value=value.split(/[\n,]+/).map(v=>v.trim()).filter(Boolean);const b=form.querySelector('button');b.disabled=true;try{const view=await node.setConfig({[key]:value});form.dataset.dirty='false';b.disabled=false;applyConfig(view);toast('Einstellung gespeichert.' )}catch(e){toast(e.message,true);b.disabled=false}})}}
 function syncSettingsValues(){const c=configView.config;for(const form of document.querySelectorAll('[data-setting]')){if(form.dataset.dirty==='true')continue;const key=form.dataset.setting,value=key in c.node?c.node[key]:c[key];form.querySelector('input,textarea').value=form.dataset.type==='subnets'?value.join('\n'):value??''}}
 (async()=>{try{const response=await sessionFetch();if(response.ok)beginSession(await response.json())}catch{}})();
+
+let nodeLifecycle;
+function openNodeLifecycle(target,drain,cluster=false){
+ nodeLifecycle={target,drain,cluster,id:newID()};
+ const name=nodeStates.get(target)?.config?.config.node.name??target.slice(0,8);
+ $('node-action-title').textContent=drain?'Node leeren':'Node für Wartung herunterfahren';
+ $('node-action-description').textContent=drain?`„${name}“ übergibt seine Daten an andere Nodes und scheidet danach aus dem Cluster aus.`:`„${name}“ behält seine Daten und Zuständigkeiten. Betroffene Anfragen warten, bis die Node wieder gestartet wurde.`;
+ $('node-action-submit').textContent=drain?'Leeren & herunterfahren':'Herunterfahren';
+ $('node-action-error').textContent='';
+ if(cluster){
+  $('node-action-title').textContent='Cluster herunterfahren';
+  $('node-action-description').textContent='Alle Nodes gemeinsam beenden. Persistente Daten bleiben erhalten; RAM-Inhalte gehen bei einem vollständigen Neustart verloren.';
+  $('node-action-submit').textContent='Cluster herunterfahren';
+ }
+ $('node-action-dialog').showModal();
+}
+$('node-action-form').addEventListener('submit',async e=>{
+ e.preventDefault();e.submitter.disabled=true;
+ const action=nodeLifecycle;
+ try{
+  const connection=action.target===localNode()?node:node.forNode(action.target);
+  if(action.cluster)await connection.clusterShutdown(action.id);else if(action.drain)await connection.drainNode(action.target,action.id);else await connection.shortShutdown(action.target,action.id);
+  $('node-action-dialog').close();toast(action.cluster?'Cluster-Shutdown wurde angefordert.':action.drain?'Node wird kooperativ geleert.':'Wartungs-Shutdown wurde angefordert.');
+ }catch(error){$('node-action-error').textContent=error.message}finally{e.submitter.disabled=false}
+});
+$('cluster-shutdown').addEventListener('click',()=>{if(localNode())openNodeLifecycle(localNode(),false,true)});

@@ -17,7 +17,8 @@ type NodeAdmin struct {
 // object commands and recursive proxy calls cannot bypass their own protocols.
 func NodeLocalAdminOpcode(op uint16) bool {
 	switch op {
-	case VolumeAdd, VolumeRemove, VolumeRescan, VolumeGrow, VolumeGrowInfo,
+	case VolumeAddWithGroups, VolumePlacementRelease, NodeDrain, NodeShutdown, VolumeAdd, VolumeRemove, VolumeRescan, VolumeGrow, VolumeGrowInfo,
+		VolumeRecoveryStage, VolumeRecoveryCommit, VolumeRecoveryRelease,
 		VolumeCandidates, VolumeCapacityGet, NodeConfigGet, NodeConfigSet,
 		AdminOperationStatus:
 		return true
@@ -25,8 +26,12 @@ func NodeLocalAdminOpcode(op uint16) bool {
 	return false
 }
 
+func nodeLocalAdminBody(op uint16, body []byte) bool {
+	return op != NodeShutdown || len(body) == 17 && body[16] <= 1
+}
+
 func (m NodeAdmin) MarshalBinary() ([]byte, error) {
-	if m.Target == (ID{}) || !NodeLocalAdminOpcode(m.Opcode) || len(m.Body) > MaxMessage-256 {
+	if m.Target == (ID{}) || !NodeLocalAdminOpcode(m.Opcode) || !nodeLocalAdminBody(m.Opcode, m.Body) || len(m.Body) > MaxMessage-256 {
 		return nil, ErrProtocol
 	}
 	e := Encoder{}
@@ -39,7 +44,7 @@ func (m NodeAdmin) MarshalBinary() ([]byte, error) {
 func DecodeNodeAdmin(body []byte) (NodeAdmin, error) {
 	d := Decoder{B: body}
 	m := NodeAdmin{Target: d.ID(), Opcode: d.U16(), Body: d.Blob()}
-	if d.Done() != nil || m.Target == (ID{}) || !NodeLocalAdminOpcode(m.Opcode) || len(m.Body) > MaxMessage-256 {
+	if d.Done() != nil || m.Target == (ID{}) || !NodeLocalAdminOpcode(m.Opcode) || !nodeLocalAdminBody(m.Opcode, m.Body) || len(m.Body) > MaxMessage-256 {
 		return NodeAdmin{}, ErrProtocol
 	}
 	return m, nil
@@ -53,7 +58,7 @@ type PeerAdmin struct {
 }
 
 func (m PeerAdmin) MarshalBinary() ([]byte, error) {
-	if m.Actor == (ID{}) || m.Operation == (ID{}) || len(m.Username) == 0 || len(m.Username) > 128 || !NodeLocalAdminOpcode(m.Opcode) || len(m.Body) > MaxMessage-256 {
+	if m.Actor == (ID{}) || m.Operation == (ID{}) || len(m.Username) == 0 || len(m.Username) > 128 || !NodeLocalAdminOpcode(m.Opcode) || !nodeLocalAdminBody(m.Opcode, m.Body) || len(m.Body) > MaxMessage-256 {
 		return nil, ErrProtocol
 	}
 	e := Encoder{}
@@ -68,7 +73,7 @@ func (m PeerAdmin) MarshalBinary() ([]byte, error) {
 func DecodePeerAdmin(body []byte) (PeerAdmin, error) {
 	d := Decoder{B: body}
 	m := PeerAdmin{Actor: d.ID(), Username: d.Text(), Operation: d.ID(), Opcode: d.U16(), Body: d.Blob()}
-	if d.Done() != nil || m.Actor == (ID{}) || m.Operation == (ID{}) || len(m.Username) == 0 || len(m.Username) > 128 || !NodeLocalAdminOpcode(m.Opcode) || len(m.Body) > MaxMessage-256 {
+	if d.Done() != nil || m.Actor == (ID{}) || m.Operation == (ID{}) || len(m.Username) == 0 || len(m.Username) > 128 || !NodeLocalAdminOpcode(m.Opcode) || !nodeLocalAdminBody(m.Opcode, m.Body) || len(m.Body) > MaxMessage-256 {
 		return PeerAdmin{}, ErrProtocol
 	}
 	return m, nil

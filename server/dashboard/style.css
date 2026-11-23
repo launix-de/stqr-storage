@@ -15,3 +15,5 @@
 .bucket-permissions{width:100%;border-collapse:collapse;font-size:11px}.bucket-permissions th{padding:10px 6px;color:var(--muted);font-size:10px;font-weight:500;border-bottom:1px solid var(--border);text-align:center}.bucket-permissions td{padding:10px 6px;border-bottom:1px solid #eef1f5;text-align:center}.bucket-permissions th:first-child,.bucket-permissions td:first-child{text-align:left;min-width:125px}.bucket-permissions input[type=checkbox]{width:17px;height:17px;margin:0;vertical-align:middle;accent-color:#536f91}.bucket-permissions select{min-width:115px;padding:7px;font-size:11px}.bucket-permissions strong{font-weight:500;overflow-wrap:anywhere}.bucket-permissions tfoot td{padding:5px 0;border:0;text-align:left}.bucket-permissions .add-volume-button{padding:10px 6px}.bucket-permissions td.field-note{text-align:left}
 
 .bucket-usage{min-width:140px;max-width:230px}.bucket-usage .usage-label{margin-bottom:8px}.bucket-usage .usage-track{width:100%}
+
+.endless-status{overflow-anchor:none;padding:18px 24px;color:var(--muted,#667085);font-size:13px;min-height:28px;text-align:center}.endless-status button{margin-left:8px}

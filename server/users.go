@@ -16,8 +16,8 @@ import (
 
 // Account mutations and their retry receipts share one atomic system object.
 // No plaintext password or unkeyed password digest is persisted. opMu serializes
-// read/modify/write with other local administrative commits. TODO(multinode):
-// publish account changes through CONTROL_CHANGE / EVERYWHERE before ACK.
+// read/modify/write with other local administrative commits. The cluster path
+// prepares this mutation on a private draft and publishes it through ALL.
 type accountReceipt struct {
 	ID     string `json:"id"`
 	Actor  string `json:"actor"`
@@ -26,7 +26,7 @@ type accountReceipt struct {
 }
 
 func userOpcode(op uint16) bool {
-	return op == client.UserS3KeyList || op == client.UserS3KeySet || op == client.UserS3KeyDelete || op == client.UserList || op == client.UserCreate || op == client.UserUpdate || op == client.UserSetPassword || op == client.UserDelete
+	return op == client.UserListPage || op == client.UserS3KeyList || op == client.UserS3KeySet || op == client.UserS3KeyDelete || op == client.UserList || op == client.UserCreate || op == client.UserUpdate || op == client.UserSetPassword || op == client.UserDelete
 }
 func encodeUser(e *client.Encoder, u account) {
 	id, _ := parseID(u.ID)
@@ -67,6 +67,9 @@ func (s *Server) executeUsers(m client.Message, p principal) ([]byte, int, error
 	}
 	if !authorized {
 		return nil, 0, fail(403, "administrator required")
+	}
+	if m.Opcode == client.UserListPage {
+		return userListPage(m.Body, image)
 	}
 	d := client.Decoder{B: m.Body}
 	if m.Opcode == client.UserList {

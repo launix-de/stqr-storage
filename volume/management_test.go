@@ -249,3 +249,166 @@ func TestPhysicalIOCounters(t *testing.T) {
 		t.Fatalf("physical counters %+v => %+v", before, after)
 	}
 }
+
+func TestInFlightAllowanceCannotConsumeOtherImportsOrGuarantees(t *testing.T) {
+	v, _ := memoryVolume(t, 1<<20)
+	defer v.Close()
+	initial := v.Stats().AdmissionFreePhysical
+	guarantee := uint64(64 << 10)
+	if err := v.SetGuaranteedReserve(guarantee); err != nil {
+		t.Fatal(err)
+	}
+	reserved := initial - guarantee - PageSize
+	if err := v.SetInFlightReserve(reserved); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := testPut(v, testKey(1), bytes.Repeat([]byte{1}, 64<<10), Options{}); !errors.Is(err, ErrFull) {
+		t.Fatal("ordinary write consumed imports", err)
+	}
+	if _, err := testPut(v, testKey(1), bytes.Repeat([]byte{1}, 64<<10), Options{InFlightAllowance: PageSize}); !errors.Is(err, ErrFull) {
+		t.Fatal("import consumed another import", err)
+	}
+	if _, err := testPut(v, testKey(1), bytes.Repeat([]byte{1}, 64<<10), Options{InFlightAllowance: 128 << 10}); err != nil {
+		t.Fatal("own import allowance", err)
+	}
+	stats := v.Stats()
+	if stats.GuaranteedRemainingPhysical != guarantee || stats.InFlightReservedPhysical >= reserved {
+		t.Fatal("wrong reserve accounting", stats)
+	}
+	if stats.AdmissionFreePhysical+stats.GuaranteedRemainingPhysical+stats.InFlightReservedPhysical+stats.MetadataPhysical+stats.DataPhysical+stats.OperatingReservePhysical != stats.CapacityPhysical {
+		t.Fatal("physical accounting does not sum to capacity")
+	}
+	if err := v.SetInFlightReserve(initial); !errors.Is(err, ErrFull) {
+		t.Fatal("accepted over-reservation", err)
+	}
+	if err := v.SetInFlightReserve(0); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestGuaranteedAllowanceProtectsOtherBucketsAndImports(t *testing.T) {
+	v, _ := memoryVolume(t, 1<<20)
+	defer v.Close()
+	initial := v.Stats().AdmissionFreePhysical
+	guarantee := uint64(192 << 10)
+	if err := v.SetGuaranteedReserve(guarantee); err != nil {
+		t.Fatal(err)
+	}
+	importReserve := initial - guarantee - PageSize
+	if err := v.SetInFlightReserve(importReserve); err != nil {
+		t.Fatal(err)
+	}
+	payload := bytes.Repeat([]byte{0x71}, 64<<10)
+	for _, allowance := range []uint64{0, PageSize} {
+		if _, err := testPut(v, testKey(1), payload, Options{GuaranteedAllowance: allowance}); !errors.Is(err, ErrFull) {
+			t.Fatal("write consumed someone else's guarantee", allowance, err)
+		}
+		if _, err := v.Stat(testKey(1)); !errors.Is(err, ErrNotFound) {
+			t.Fatal("rejected write became visible", err)
+		}
+		if stats := v.Stats(); stats.GuaranteedRemainingPhysical != guarantee || stats.InFlightReservedPhysical != importReserve {
+			t.Fatal("rejected write consumed reservations", stats)
+		}
+	}
+	before := v.Stats()
+	id := ID{0xf1}
+	if _, err := testPut(v, testKey(1), payload, Options{RequestID: id, GuaranteedAllowance: 128 << 10}); err != nil {
+		t.Fatal("own guaranteed budget", err)
+	}
+	after := v.Stats()
+	growth := after.AllocatedPhysical - before.AllocatedPhysical
+	if growth == 0 || guarantee-after.GuaranteedRemainingPhysical != growth || after.GuaranteedRemainingPhysical < 64<<10 || after.InFlightReservedPhysical != importReserve {
+		t.Fatal("incorrect guarantee debit", before, after)
+	}
+	if after.AdmissionFreePhysical+after.GuaranteedRemainingPhysical+after.InFlightReservedPhysical+after.AllocatedPhysical+after.OperatingReservePhysical != after.CapacityPhysical {
+		t.Fatal("physical capacity no longer balances", after)
+	}
+	// A durable request replay returns its original outcome without consuming
+	// the guarantee a second time, even with no remaining caller allowance.
+	if _, err := testPut(v, testKey(1), payload, Options{RequestID: id}); err != nil {
+		t.Fatal("guaranteed retry", err)
+	}
+	if v.Stats().GuaranteedRemainingPhysical != after.GuaranteedRemainingPhysical {
+		t.Fatal("retry debited the guarantee twice")
+	}
+}
+
+func TestCombinedImportAndGuaranteeAllowanceChargesOnce(t *testing.T) {
+	v, _ := memoryVolume(t, 1<<20)
+	defer v.Close()
+	initial := v.Stats().AdmissionFreePhysical
+	guarantee := uint64(128 << 10)
+	if err := v.SetGuaranteedReserve(guarantee); err != nil {
+		t.Fatal(err)
+	}
+	reserved := initial - guarantee - PageSize
+	if err := v.SetInFlightReserve(reserved); err != nil {
+		t.Fatal(err)
+	}
+	before := v.Stats()
+	if _, err := testPut(v, testKey(1), bytes.Repeat([]byte{2}, 64<<10), Options{InFlightAllowance: 32 << 10, GuaranteedAllowance: 64 << 10}); err != nil {
+		t.Fatal(err)
+	}
+	after := v.Stats()
+	growth := after.AllocatedPhysical - before.AllocatedPhysical
+	importDebit := before.InFlightReservedPhysical - after.InFlightReservedPhysical
+	guaranteeDebit := before.GuaranteedRemainingPhysical - after.GuaranteedRemainingPhysical
+	if importDebit != 32<<10 || guaranteeDebit == 0 || importDebit+guaranteeDebit != growth {
+		t.Fatal("combined allowance counted bytes twice", growth, importDebit, guaranteeDebit)
+	}
+}
+
+func TestRecompressConsumesOnlyItsOwnImportAllowance(t *testing.T) {
+	v, _ := memoryVolume(t, 4<<20)
+	defer v.Close()
+	h, err := v.Open(true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := testKey(5)
+	request := testID(80)
+	payload := bytes.Repeat([]byte{0x11}, 1<<20)
+	first, err := h.Put(key, payload, Options{RequestID: request})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := h.Recompress(key, Gzip); err != nil {
+		t.Fatal(err)
+	}
+	h.Close()
+	free := v.Stats().AdmissionFreePhysical
+	reserve := free - (64 << 10)
+	if err := v.SetInFlightReserve(reserve); err != nil {
+		t.Fatal(err)
+	}
+	h, err = v.Open(true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer h.Close()
+	if err := h.RecompressWithOptions(key, Raw, Options{}); !errors.Is(err, ErrFull) {
+		t.Fatal("recompression stole pending import space", err)
+	}
+	if got, info, err := h.Get(key); err != nil || !bytes.Equal(got, payload) || info.Version != first.Version || info.Compression != Gzip {
+		t.Fatal("failed rewrite damaged source", info, err)
+	}
+	if err := h.RecompressWithOptions(key, Raw, Options{InFlightAllowance: 2 << 20}); err != nil {
+		t.Fatal("own reserve did not fund rewrite", err)
+	}
+	if got, info, err := h.Get(key); err != nil || !bytes.Equal(got, payload) || info.Version != first.Version || info.Compression != Raw {
+		t.Fatal("rewrite changed logical state", info, err)
+	}
+	original, found, err := h.OperationStatus(request)
+	if err != nil || !found || original.Info != first {
+		t.Fatal("physical rewrite changed retry result", original, err)
+	}
+	version := first.Version
+	if err := h.RecompressWithOptions(key, Gzip, Options{ExpectedVersion: &version}); !errors.Is(err, ErrRange) {
+		t.Fatal("logical precondition silently ignored", err)
+	}
+	h.Close()
+	after := v.Stats().InFlightReservedPhysical
+	if after >= reserve || reserve-after > 2<<20 {
+		t.Fatal("rewrite consumed another import's allowance", reserve, after)
+	}
+}

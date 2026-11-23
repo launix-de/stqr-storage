@@ -15,7 +15,7 @@ const (
 	PageSize        = 4096
 	BlockSize       = 1 << 20
 	MinVolumeSize   = 256 << 10
-	FormatVersion   = 2
+	FormatVersion   = 3
 	pageHeaderSize  = 64
 	pagePayload     = PageSize - pageHeaderSize
 	superblockBytes = 2 * PageSize
@@ -137,7 +137,9 @@ type Options struct {
 	ExpectedVersion, ExpectedLength *uint64
 	CreateOnly                      bool
 	WholeObject                     bool
-	UseGuaranteed                   bool
+	UseGuaranteed                   bool   // trusted owner of the entire volume reserve; shared buckets use GuaranteedAllowance
+	GuaranteedAllowance             uint64 // trusted physical budget from this caller's guarantee; never consumes another bucket's reserve
+	InFlightAllowance               uint64 // trusted physical allowance; never consumes bucket guarantees
 	restoreSameVersion              bool
 	restoreSegmented                bool
 }

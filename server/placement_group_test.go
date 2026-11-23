@@ -49,6 +49,16 @@ func TestPlacementGroupFilterModesAndDesiredMask(t *testing.T) {
 
 func installTestPlacementGroup(t *testing.T, s *Server, g PlacementGroup) {
 	t.Helper()
+	if g.Effective.Storage == nil {
+		p := storagePolicy(DefaultBucketPolicy())
+		g.Effective.Storage = &p
+	}
+	if g.Desired != nil && g.Desired.Storage == nil {
+		p := *g.Effective.Storage
+		desired := *g.Desired
+		desired.Storage = &p
+		g.Desired = &desired
+	}
 	object := s.placementGroups.Load().object
 	object.Groups = append(append([]PlacementGroup{}, object.Groups...), g)
 	image, err := compilePlacementGroups(object)
@@ -112,7 +122,7 @@ func TestPlacementGroupConstrainsWritesAndSurvivesRestart(t *testing.T) {
 	if err := s.Close(); err != nil {
 		t.Fatal(err)
 	}
-	reopened, err := Open(Options{ConfigPath: path})
+	reopened, err := openTransportTestNode(Options{ConfigPath: path})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -164,7 +174,7 @@ func TestEstablishedMetadataPGDoesNotFallBackOrReinitialize(t *testing.T) {
 	if err := s.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if reopened, err := Open(Options{ConfigPath: path}); err == nil {
+	if reopened, err := openTransportTestNode(Options{ConfigPath: path}); err == nil {
 		reopened.Close()
 		t.Fatal("invalid metadata PG silently fell back to the bootstrap volume")
 	}

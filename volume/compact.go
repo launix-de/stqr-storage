@@ -83,7 +83,7 @@ func (v *Volume) scanObjectPage(after *Key, limit int) ([]ObjectRecord, error) {
 	if after != nil {
 		cursor = objectKey(*after)
 	}
-	e := v.walkIndex(func(x indexEntry) error {
+	e := v.walkIndexBounds(cursor, indexKey{1}, func(x indexEntry) error {
 		if x.Key[0] != 0 || after != nil && !lessKey(cursor, x.Key) {
 			return nil
 		}
@@ -103,7 +103,7 @@ func (v *Volume) scanObjectPage(after *Key, limit int) ([]ObjectRecord, error) {
 	}
 	return out, e
 }
-func (v *Volume) rewriteObject(k Key, old *object, codec Compression) error {
+func (v *Volume) rewriteObject(k Key, old *object, codec Compression, opts Options) error {
 	t := v.transaction()
 	pieces := oldPieces(v, old, old.Info.Length, 0, 0)
 	spans, e := t.storePacked(pieces, codec)
@@ -121,13 +121,13 @@ func (v *Volume) rewriteObject(k Key, old *object, codec Compression) error {
 	if e = t.saveObject(k, o); e != nil {
 		return e
 	}
-	if e = t.commit(false); e != nil {
+	if e = t.commitReserved(opts.UseGuaranteed, opts.InFlightAllowance, opts.GuaranteedAllowance); e != nil {
 		return e
 	}
 	v.cache.put(k, o)
 	return nil
 }
-func (v *Volume) recompressLocked(k Key, codec Compression) error {
+func (v *Volume) recompressLocked(k Key, codec Compression, opts Options) error {
 	if !codec.valid() {
 		return ErrRange
 	}
@@ -138,10 +138,20 @@ func (v *Volume) recompressLocked(k Key, codec Compression) error {
 	if o.Info.Deleted {
 		return ErrNotFound
 	}
-	return v.rewriteObject(k, o, codec)
+	return v.rewriteObject(k, o, codec, opts)
 }
 func (v *Volume) scanLocked(bucket ID, start, end ObjectID, fn func(Key, Info) error) error {
-	return v.walkIndex(func(x indexEntry) error {
+	lower := objectKey(Key{Bucket: bucket, Object: start})
+	upper := objectKey(Key{Bucket: bucket, Object: end})
+	if end == (ObjectID{}) {
+		for i := 16; i >= 0; i-- {
+			upper[i]++
+			if upper[i] != 0 {
+				break
+			}
+		}
+	}
+	return v.walkIndexBounds(lower, upper, func(x indexEntry) error {
 		if x.Key[0] != 0 {
 			return nil
 		}
@@ -170,6 +180,9 @@ func (v *Volume) Scrub() error {
 	return v.scrubLocked()
 }
 func (v *Volume) scrubLocked() error {
+	if _, _, err := v.localMetadataLocked(); err != nil {
+		return err
+	}
 	buf := make([]byte, BlockSize)
 	return v.walkIndex(func(x indexEntry) error {
 		if x.Key[0] == 1 {
@@ -216,6 +229,15 @@ func (v *Volume) Export(dst io.Writer) error {
 	enc := json.NewEncoder(dst)
 	if e := enc.Encode(snapshotFrame{Kind: "STQR-SNAPSHOT-2"}); e != nil {
 		return e
+	}
+	metadata, _, err := v.localMetadataLocked()
+	if err != nil {
+		return err
+	}
+	if len(metadata) > 0 {
+		if err := enc.Encode(snapshotFrame{Kind: "local-metadata", Data: metadata}); err != nil {
+			return err
+		}
 	}
 	e := v.walkIndex(func(x indexEntry) error {
 		if x.Key[0] != 0 {
@@ -311,6 +333,12 @@ func (v *Volume) Import(src io.Reader, codec *Compression) error {
 			return e
 		}
 		switch f.Kind {
+		case "local-metadata":
+			if temp.sb.LocalMetadataRoot != 0 || len(f.Data) == 0 {
+				e = ErrCorrupt
+			} else {
+				e = h.SetLocalMetadata(f.Data)
+			}
 		case "object":
 			key, info := f.Key, f.Info
 			if codec != nil {

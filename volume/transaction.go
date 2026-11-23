@@ -21,6 +21,12 @@ type transaction struct {
 	spool                  *encodedSpool
 	busy, pending, retired []allocation
 	reusable               allocation
+	// Split free-tree siblings remain searchable until their parent is published.
+	freeSiblings []uint64
+	// A claim removes its old extent before reinserting its free remainders.
+	// Those bytes must remain available for free-tree metadata allocation.
+	freeClaims []allocation
+	inClaim    bool
 }
 
 func (v *Volume) transaction() *transaction {
@@ -135,11 +141,26 @@ func (t *transaction) findSpace(n, a uint64, tail bool) (uint64, uint64, uint64,
 		return nil
 	}
 	e := visit(t.sb.FreeRoot)
+	if e == nil {
+		for _, off := range t.freeSiblings {
+			if e = visit(off); e != nil {
+				break
+			}
+		}
+	}
 	if e == stopTree {
 		return start, length, chosen, nil
 	}
 	if e != nil {
 		return 0, 0, 0, e
+	}
+	for _, x := range t.freeClaims {
+		if tail && x.off%PageSize == 0 && x.n >= PageSize {
+			continue
+		}
+		if off, ok := t.candidate(x.off, x.n, n, a); ok {
+			return x.off, x.n, off, nil
+		}
 	}
 	return 0, 0, 0, ErrFull
 }
@@ -156,6 +177,8 @@ func (t *transaction) metaPage() (uint64, error) {
 	return off, nil
 }
 func (t *transaction) claim(off, n uint64) error {
+	t.inClaim = true
+	defer func() { t.inClaim = false }()
 	x, found, e := treeNeighbor(t.node, t.sb.FreeRoot, spaceKey(off), false)
 	if e != nil {
 		return e
@@ -167,13 +190,21 @@ func (t *transaction) claim(off, n uint64) error {
 	if e = t.remove(&t.sb.FreeRoot, x.key); e != nil {
 		return e
 	}
-	if off > s {
-		if e = t.set(&t.sb.FreeRoot, spaceKey(s), off-s); e != nil {
-			return e
-		}
+	// Publish the larger remainder first: inserting the smaller fragment may
+	// split the free tree and need a metadata page from the larger remainder.
+	left, right := allocation{s, off - s, false}, allocation{off + n, s + l - off - n, false}
+	if right.n > left.n {
+		left, right = right, left
 	}
-	if off+n < s+l {
-		return t.set(&t.sb.FreeRoot, spaceKey(off+n), s+l-off-n)
+	count := len(t.freeClaims)
+	t.freeClaims = append(t.freeClaims, left, right)
+	defer func() { t.freeClaims = t.freeClaims[:count] }()
+	for _, remainder := range []allocation{left, right} {
+		if remainder.n > 0 {
+			if e = t.set(&t.sb.FreeRoot, spaceKey(remainder.off), remainder.n); e != nil {
+				return e
+			}
+		}
 	}
 	return nil
 }
@@ -264,7 +295,9 @@ func (t *transaction) finalize() error {
 				return e
 			}
 		}
-		for r < len(t.retired) {
+		// Coalescing can allocate and retire metadata pages. Claim any newly
+		// allocated pages before processing the next retired extent.
+		if r < len(t.retired) {
 			x := t.retired[r]
 			r++
 			if e := t.freeSpan(x.off, x.n); e != nil {
@@ -360,12 +393,31 @@ func (t *transaction) patch(off uint64, b []byte) error {
 	return t.spillPages()
 }
 func (t *transaction) commit(useGuaranteed bool) error {
+	return t.commitReserved(useGuaranteed, 0, 0)
+}
+func (t *transaction) commitReserved(useGuaranteed bool, allowance, guaranteedAllowance uint64) error {
 	defer t.close()
 	if e := t.finalize(); e != nil {
 		return e
 	}
-	if !useGuaranteed && t.sb.FreeBytes < t.v.guaranteed {
+	allowance = min(allowance, t.v.inFlightReserved)
+	guaranteedAllowance = min(guaranteedAllowance, t.v.guaranteed)
+	if useGuaranteed {
+		guaranteedAllowance = t.v.guaranteed
+	}
+	protected := t.v.inFlightReserved - allowance
+	if t.v.guaranteed-guaranteedAllowance > ^uint64(0)-protected {
 		return ErrFull
+	}
+	protected += t.v.guaranteed - guaranteedAllowance
+	if t.sb.FreeBytes < protected {
+		return ErrFull
+	}
+	consumed, guaranteedConsumed := uint64(0), uint64(0)
+	if t.sb.FreeBytes < t.v.sb.FreeBytes {
+		growth := t.v.sb.FreeBytes - t.sb.FreeBytes
+		consumed = min(allowance, growth)
+		guaranteedConsumed = min(guaranteedAllowance, growth-consumed)
 	}
 	t.sb.Generation++
 	t.sb.Sequence++
@@ -508,6 +560,8 @@ func (t *transaction) commit(useGuaranteed bool) error {
 		return e
 	}
 	t.v.sb = t.sb
+	t.v.inFlightReserved -= consumed
+	t.v.guaranteed -= guaranteedConsumed
 	for off := range all {
 		b, err := t.page(off)
 		if err != nil {

@@ -19,6 +19,19 @@ type s3Store struct {
 	p principal
 }
 
+// All S3 operations, including copy and background multipart recovery, use
+// bucket-object routing. The cleanup bounds private credentials to this caller.
+func (s *Server) openS3(ctx context.Context, b *Bucket, p principal) (*client.S3, func(), error) {
+	if view := s.currentSystem.Load(); s.controller != nil && view != nil && len(view.manifest.Membership.Members) > 1 {
+		connection, err := s.openFrontend(ctx, b.ID(), p)
+		if err != nil {
+			return nil, nil, err
+		}
+		return client.NewS3(connection), func() { _ = connection.Close() }, nil
+	}
+	return client.NewS3(s3Store{b: b, p: p}), func() {}, nil
+}
+
 func s3NativeError(err error) error {
 	switch {
 	case errors.Is(err, volume.ErrNotFound):
@@ -91,7 +104,7 @@ func (s s3Store) ScanObjects(ctx context.Context, after *client.ObjectID, limit 
 		id := volume.ObjectID(*after)
 		cursor = &id
 	}
-	records, next, more, e := s.b.scan(ctx, d, cursor, int(limit))
+	records, next, more, e := s.b.scanCluster(ctx, d, s.p, cursor, int(limit))
 	if e != nil {
 		return nil, nil, e
 	}

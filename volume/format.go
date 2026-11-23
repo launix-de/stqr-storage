@@ -21,6 +21,7 @@ const dataStart = treeStart + 2*PageSize
 type Superblock struct {
 	Identity                                                                                                               Identity
 	Generation, Sequence, ObjectRoot, FreeRoot, Objects, LogicalBytes, FreeBytes, MetadataBytes, PayloadBytes, ArenaUnused uint64
+	LocalMetadataRoot, LocalMetadataSize                                                                                   uint64
 	Moving                                                                                                                 bool
 	MoveKey                                                                                                                Key
 	MoveFrom, MoveTo, MoveLength, MoveDone, MoveSpan                                                                       uint64
@@ -38,6 +39,11 @@ func (s Superblock) MarshalBinary() ([]byte, error) {
 		return nil, ErrCorrupt
 	}
 	b := make([]byte, PageSize)
+	if (s.LocalMetadataRoot == 0) != (s.LocalMetadataSize == 0) || s.LocalMetadataRoot != 0 && (s.LocalMetadataRoot < treeStart || s.LocalMetadataRoot%PageSize != 0 || s.LocalMetadataRoot > s.Identity.Size-PageSize || s.LocalMetadataSize > s.Identity.Size) {
+		return nil, ErrCorrupt
+	}
+	// Keep the family magic: v2 readers see the newer version and refuse the
+	// entire volume, including when the other redundant superblock is still v2.
 	copy(b, "STQRVOL2")
 	diskOrder.PutUint16(b[8:], FormatVersion)
 	b[10] = byte(s.Identity.Class)
@@ -47,6 +53,8 @@ func (s Superblock) MarshalBinary() ([]byte, error) {
 	for i, x := range []uint64{s.Identity.Size, s.Generation, s.Sequence, s.ObjectRoot, s.FreeRoot, s.Objects, s.LogicalBytes, s.FreeBytes, s.MetadataBytes, s.PayloadBytes, s.ArenaUnused} {
 		diskOrder.PutUint64(b[64+i*8:], x)
 	}
+	diskOrder.PutUint64(b[160:], s.LocalMetadataRoot)
+	diskOrder.PutUint64(b[168:], s.LocalMetadataSize)
 	if s.Moving {
 		b[256] = 1
 	}
@@ -63,7 +71,7 @@ func DecodeSuperblock(b []byte) (Superblock, error) {
 	if len(b) != PageSize {
 		return s, ErrUnformatted
 	}
-	if string(b[:8]) != "STQRVOL2" {
+	if string(b[:8]) != "STQRVOL2" && string(b[:8]) != "STQRVOL3" {
 		if string(b[:8]) == "STQRVOL1" {
 			return s, ErrVersion
 		}
@@ -75,7 +83,8 @@ func DecodeSuperblock(b []byte) (Superblock, error) {
 	if checksum(b[:PageSize-4]) != diskOrder.Uint32(b[PageSize-4:]) {
 		return s, ErrCorrupt
 	}
-	if diskOrder.Uint16(b[8:]) != FormatVersion {
+	version := diskOrder.Uint16(b[8:])
+	if version != FormatVersion && version != 2 || version == 2 && string(b[:8]) != "STQRVOL2" {
 		return s, ErrVersion
 	}
 	s.Identity.Class = Class(b[10])
@@ -85,6 +94,10 @@ func DecodeSuperblock(b []byte) (Superblock, error) {
 	fields := []*uint64{&s.Identity.Size, &s.Generation, &s.Sequence, &s.ObjectRoot, &s.FreeRoot, &s.Objects, &s.LogicalBytes, &s.FreeBytes, &s.MetadataBytes, &s.PayloadBytes, &s.ArenaUnused}
 	for i, p := range fields {
 		*p = diskOrder.Uint64(b[64+i*8:])
+	}
+	if version >= 3 {
+		s.LocalMetadataRoot = diskOrder.Uint64(b[160:])
+		s.LocalMetadataSize = diskOrder.Uint64(b[168:])
 	}
 	s.Moving = b[256] != 0
 	copy(s.MoveKey.Bucket[:], b[264:280])

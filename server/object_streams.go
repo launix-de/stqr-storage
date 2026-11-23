@@ -4,6 +4,7 @@ package server
 import (
 	"context"
 	"crypto/sha256"
+	"errors"
 	"hash"
 	"io"
 	"os"
@@ -72,6 +73,10 @@ func (ws *wsSession) sendMessageContext(ctx context.Context, m client.Message) e
 	}
 }
 func (ws *wsSession) finishUpload(u *serverObjectUpload, result []byte, status int, err error) error {
+	var redirect *objectRedirect
+	if errors.As(err, &redirect) && u.op.message.Kind == client.Request {
+		return ws.sendMessage(client.Message{Kind: client.Response, Opcode: u.op.message.Opcode, ID: u.op.message.ID, Body: redirectResponse(redirect.patch)})
+	}
 	if err != nil {
 		status = objectStatus(err)
 		result = nil
@@ -127,6 +132,11 @@ func (ws *wsSession) objectTransfer(m client.Message, p principal) error {
 				runtime := client.ID{}
 				if u.op.bucket.Describe().Policy.StorageStrategy == "ram" {
 					runtime = ws.server.boot
+					if ws.server.controller != nil {
+						if patch, known := ws.server.routingPatch(u.op.bucket.ID(), u.op.object); known {
+							runtime = patch.Entries[0].Runtime
+						}
+					}
 				}
 				result, status, commitErr := u.op.commit(ws.objectContext(id), p, u.file, runtime)
 				sendErr := ws.finishUpload(u, result, status, commitErr)

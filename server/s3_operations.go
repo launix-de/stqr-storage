@@ -147,38 +147,43 @@ func (s *Server) s3DeleteObjects(w http.ResponseWriter, r *http.Request, api *cl
 	}
 	s3XML(w, result)
 }
-func (s *Server) s3CopySource(w http.ResponseWriter, r *http.Request, p principal) (*client.S3, string, bool) {
+func (s *Server) s3CopySource(w http.ResponseWriter, r *http.Request, p principal) (*client.S3, string, func(), bool) {
 	raw := r.Header.Get("X-Amz-Copy-Source")
 	path, query, _ := strings.Cut(raw, "?")
 	if query != "" {
 		q, e := url.ParseQuery(query)
 		if e != nil || q.Get("versionId") != "" && q.Get("versionId") != "null" {
 			s3Error(w, 501, "NotImplemented", "Versioned copy is not supported")
-			return nil, "", false
+			return nil, "", nil, false
 		}
 	}
 	path, e := url.PathUnescape(strings.TrimPrefix(path, "/"))
 	if e != nil {
 		s3Error(w, 400, "InvalidArgument", "Invalid copy source")
-		return nil, "", false
+		return nil, "", nil, false
 	}
 	name, key, ok := strings.Cut(path, "/")
 	if !ok || key == "" {
 		s3Error(w, 400, "InvalidArgument", "Copy source requires bucket/key")
-		return nil, "", false
+		return nil, "", nil, false
 	}
 	b, e := s.BucketByName(name)
 	if e != nil {
 		s3Error(w, 404, "NoSuchBucket", "Source bucket does not exist")
-		return nil, "", false
+		return nil, "", nil, false
 	}
 	p.frontendPermission = 0
 	if _, e = b.authorize(p, BucketRead); e != nil {
 		s3Failure(w, e)
-		return nil, "", false
+		return nil, "", nil, false
 	}
 	p.frontendPermission = BucketRead
-	return client.NewS3(s3Store{b: b, p: p}), key, true
+	api, closeAPI, e := s.openS3(r.Context(), b, p)
+	if e != nil {
+		s3Failure(w, e)
+		return nil, "", nil, false
+	}
+	return api, key, closeAPI, true
 }
 func s3CopyConditions(r *http.Request, o client.S3Object) error {
 	etag := "\"" + o.ETag + "\""
@@ -201,10 +206,11 @@ func s3CopyConditions(r *http.Request, o client.S3Object) error {
 	return nil
 }
 func (s *Server) s3Copy(w http.ResponseWriter, r *http.Request, p principal, dest *client.S3, key, upload string, part uint32) {
-	source, sourceKey, ok := s.s3CopySource(w, r, p)
+	source, sourceKey, closeSource, ok := s.s3CopySource(w, r, p)
 	if !ok {
 		return
 	}
+	defer closeSource()
 	for attempt := 0; attempt < 128; attempt++ {
 		o, e := source.Head(r.Context(), sourceKey)
 		if e != nil {

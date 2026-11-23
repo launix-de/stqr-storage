@@ -70,12 +70,179 @@ func (s *Server) dispatchAs(m client.Message, ws *wsSession, p principal) ([]byt
 		if p.connection == nil || !p.connection.peerVerified.Load() {
 			return client.ResponseBody(403, nil, "NODE_HELLO identity binding required"), 403
 		}
+		if view := s.currentSystem.Load(); view != nil {
+			node, _ := parseID(p.User.ID)
+			if hasControlNode(view.manifest.Membership.Excluded, client.ID(node)) {
+				return client.ResponseBody(403, nil, "peer is excluded from committed membership"), 403
+			}
+		}
+		if m.Opcode == peerRecoveryReady {
+			actor, _ := parseID(p.User.ID)
+			result, err := s.recoveryReady(m.Body, client.ID(actor))
+			if err != nil {
+				status := statusOf(err)
+				return client.ResponseBody(status, nil, err.Error()), status
+			}
+			return client.ResponseBody(200, result, ""), 200
+		}
+		if m.Opcode == peerForceAdoptCommit {
+			actor, _ := parseID(p.User.ID)
+			result, err := s.receiveForceAdoptCommit(m.Body, client.ID(actor))
+			if err != nil {
+				status := statusOf(err)
+				return client.ResponseBody(status, nil, err.Error()), status
+			}
+			return client.ResponseBody(200, result, ""), 200
+		}
+		if m.Opcode == peerForceConstruction {
+			actor, _ := parseID(p.User.ID)
+			err := s.receiveForceConstruction(m.Body, client.ID(actor))
+			if err != nil {
+				status := statusOf(err)
+				return client.ResponseBody(status, nil, err.Error()), status
+			}
+			return client.ResponseBody(200, nil, ""), 200
+		}
+		if m.Opcode == peerForceControlState {
+			actor, _ := parseID(p.User.ID)
+			result, err := s.receiveForceControlState(m.Body, client.ID(actor))
+			if err != nil {
+				status := statusOf(err)
+				return client.ResponseBody(status, nil, err.Error()), status
+			}
+			return client.ResponseBody(200, result, ""), 200
+		}
+		if m.Opcode == peerForceScopes {
+			actor, _ := parseID(p.User.ID)
+			result, err := s.receiveForceScopes(m.Body, client.ID(actor))
+			if err != nil {
+				status := statusOf(err)
+				return client.ResponseBody(status, nil, err.Error()), status
+			}
+			return client.ResponseBody(200, result, ""), 200
+		}
+		if m.Opcode == peerForceScopeEnvelope {
+			actor, _ := parseID(p.User.ID)
+			result, err := s.receiveForceScopeEnvelope(m.Body, client.ID(actor), p.connection.peerBoot)
+			if err != nil {
+				status := statusOf(err)
+				return client.ResponseBody(status, nil, err.Error()), status
+			}
+			return client.ResponseBody(200, result, ""), 200
+		}
+		if m.Opcode == peerForceAdmin {
+			actor, _ := parseID(p.User.ID)
+			result, err := s.receiveForceAdmin(s.ctx, m.Body, client.ID(actor))
+			if err != nil {
+				status := statusOf(err)
+				return client.ResponseBody(status, nil, err.Error()), status
+			}
+			return client.ResponseBody(200, result, ""), 200
+		}
+		if m.Opcode == peerBucketUsage {
+			actor, _ := parseID(p.User.ID)
+			result, err := s.receiveBucketUsage(s.ctx, m.Body, client.ID(actor))
+			if err != nil {
+				status := statusOf(err)
+				return client.ResponseBody(status, nil, err.Error()), status
+			}
+			return client.ResponseBody(200, result, ""), 200
+		}
+		if quotaPeerOpcode(m.Opcode) {
+			actor, _ := parseID(p.User.ID)
+			result, err := s.quotaPeerMessage(m, client.ID(actor))
+			if err != nil {
+				status := statusOf(err)
+				return client.ResponseBody(status, nil, err.Error()), status
+			}
+			return client.ResponseBody(200, result, ""), 200
+		}
 		if controlPeerOpcode(m.Opcode) {
 			actor, err := parseID(p.User.ID)
 			if err != nil {
 				return client.ResponseBody(403, nil, "invalid peer identity"), 403
 			}
 			result, err := s.executePeerControl(m, client.ID(actor))
+			if err != nil {
+				status := statusOf(err)
+				return client.ResponseBody(status, nil, err.Error()), status
+			}
+			return client.ResponseBody(200, result, ""), 200
+		}
+		if m.Opcode == peerClusterStop {
+			actor, _ := parseID(p.User.ID)
+			result, err := s.receiveClusterStop(m.Body, client.ID(actor))
+			if err != nil {
+				status := statusOf(err)
+				return client.ResponseBody(status, nil, err.Error()), status
+			}
+			return client.ResponseBody(200, result, ""), 200
+		}
+		if m.Opcode == peerBucketInventory {
+			actor, _ := parseID(p.User.ID)
+			result, err := s.receiveBucketInventory(s.ctx, m.Body, client.ID(actor))
+			if err != nil {
+				status := statusOf(err)
+				return client.ResponseBody(status, nil, err.Error()), status
+			}
+			return client.ResponseBody(200, result, ""), 200
+		}
+		if m.Opcode == peerVerifyFrontend {
+			actor, _ := parseID(p.User.ID)
+			result, err := s.verifyFrontend(m.Body, client.ID(actor))
+			if err != nil {
+				status := statusOf(err)
+				return client.ResponseBody(status, nil, err.Error()), status
+			}
+			return client.ResponseBody(200, result, ""), 200
+		}
+		if m.Opcode == peerBucketCodec {
+			actor, _ := parseID(p.User.ID)
+			result, err := s.applyBucketCodec(m.Body, client.ID(actor))
+			if err != nil {
+				status := statusOf(err)
+				return client.ResponseBody(status, nil, err.Error()), status
+			}
+			return client.ResponseBody(200, result, ""), 200
+		}
+		if m.Opcode == peerBucketPurge {
+			actor, _ := parseID(p.User.ID)
+			result, err := s.purgeDeletedBucket(m.Body, client.ID(actor))
+			if err != nil {
+				status := statusOf(err)
+				return client.ResponseBody(status, nil, err.Error()), status
+			}
+			return client.ResponseBody(200, result, ""), 200
+		}
+		if m.Opcode == peerFrozenBucketUsage {
+			actor, _ := parseID(p.User.ID)
+			result, err := s.frozenBucketUsage(m.Body, client.ID(actor))
+			if err != nil {
+				status := statusOf(err)
+				return client.ResponseBody(status, nil, err.Error()), status
+			}
+			return client.ResponseBody(200, result, ""), 200
+		}
+		if m.Opcode == peerNodeLeave {
+			actor, _ := parseID(p.User.ID)
+			result, err := s.receiveNodeLeave(m, client.ID(actor))
+			if err != nil {
+				status := statusOf(err)
+				return client.ResponseBody(status, nil, err.Error()), status
+			}
+			return client.ResponseBody(200, result, ""), 200
+		}
+		if m.Opcode == peerControlInfo || m.Opcode == peerSystemChunk {
+			result, err := s.systemPeerMessage(m)
+			if err != nil {
+				status := statusOf(err)
+				return client.ResponseBody(status, nil, err.Error()), status
+			}
+			return client.ResponseBody(200, result, ""), 200
+		}
+		if m.Opcode >= peerRangeReserve && m.Opcode <= peerRangeRAMLostCommit {
+			actor, _ := parseID(p.User.ID)
+			result, err := s.rangePeerMessage(m, client.ID(actor), p.connection.peerBoot)
 			if err != nil {
 				status := statusOf(err)
 				return client.ResponseBody(status, nil, err.Error()), status
@@ -121,14 +288,83 @@ func (s *Server) dispatchAs(m client.Message, ws *wsSession, p principal) ([]byt
 	if !p.isAdmin() && m.Opcode != client.Hello && m.Opcode != client.Ping && !(m.Opcode >= 0x0100 && m.Opcode <= client.BucketObjectList) {
 		return client.ResponseBody(403, nil, "administrator required"), 403
 	}
+	if s.clusterPaused() || s.forceFrozen() {
+		switch m.Opcode {
+		case client.VolumeAddWithGroups, client.VolumePlacementRelease, client.VolumeAdd, client.VolumeRemove, client.VolumeRescan, client.VolumeGrow, client.NodeConfigSet, client.NodeDrain:
+			return client.ResponseBody(503, nil, "cluster shutdown is pending"), 503
+		}
+	}
+	if m.Opcode == client.VolumeRecoveryStage || m.Opcode == client.VolumeRecoveryCommit || m.Opcode == client.VolumeRecoveryRelease {
+		result, status, err := s.executeVolumeRecovery(m, p)
+		if err != nil {
+			status = statusOf(err)
+			return client.ResponseBody(status, nil, err.Error()), status
+		}
+		return client.ResponseBody(status, result, ""), status
+	}
+	if m.Opcode == client.ForceDisconnect || m.Opcode == client.NodeRecoveryBegin {
+		result, status, err := s.forceDisconnect(m, p)
+		if err != nil {
+			status = statusOf(err)
+			return client.ResponseBody(status, nil, err.Error()), status
+		}
+		return client.ResponseBody(status, result, ""), status
+	}
+	if m.Opcode == client.NodeShutdown {
+		result, err := s.nodeShutdownAdmin(m, p)
+		if err != nil {
+			status := statusOf(err)
+			return client.ResponseBody(status, nil, err.Error()), status
+		}
+		return client.ResponseBody(202, result, ""), 202
+	}
+	if m.Opcode == client.NodeDrain {
+		result, err := s.nodeDrainAdmin(m, p)
+		if err != nil {
+			status := statusOf(err)
+			return client.ResponseBody(status, nil, err.Error()), status
+		}
+		return client.ResponseBody(202, result, ""), 202
+	}
 	if m.Opcode == client.NodeAdminRequest {
 		return s.nodeAdmin(m, ws, p)
+	}
+	if m.Opcode == client.ClusterShutdown {
+		d := client.Decoder{B: m.Body}
+		if d.U8() != 2 || d.Done() != nil || s.controller == nil || m.Kind != client.Request || m.ID == (client.ID{}) {
+			return client.ResponseBody(400, nil, "invalid cluster shutdown request"), 400
+		}
+		result, err := s.beginClusterShutdown(m.ID, p)
+		if err != nil {
+			status := statusOf(err)
+			return client.ResponseBody(status, nil, err.Error()), status
+		}
+		return client.ResponseBody(202, result, ""), 202
 	}
 	if s.joinPending() && (m.Opcode >= 0x0100 && m.Opcode <= 0x01ff || bucketAdminOpcode(m.Opcode) || userOpcode(m.Opcode)) {
 		return client.ResponseBody(503, nil, "node is waiting for committed cluster admission"), 503
 	}
 	// Metadata uses the authenticated connection capability, never role/rights
 	// claimed in message contents. Changes revoke cached socket grants.
+	if s.controller != nil && globalAdminMutation(m.Opcode) {
+		if s.shortStopping.Load() || s.clusterPaused() || s.forceFrozen() {
+			return client.ResponseBody(503, nil, "node is pausing for maintenance"), 503
+		}
+		result, status, err := s.executeGlobalAdmin(m, p)
+		if err != nil {
+			status = statusOf(err)
+			return client.ResponseBody(status, nil, err.Error()), status
+		}
+		return client.ResponseBody(status, result, ""), status
+	}
+	if m.Opcode == client.MapGetMessage {
+		result, err := s.getObjectMap(m, p)
+		if err != nil {
+			status := statusOf(err)
+			return client.ResponseBody(status, nil, err.Error()), status
+		}
+		return client.ResponseBody(200, result, ""), 200
+	}
 	if m.Opcode == client.BucketInfoGet {
 		result, err := s.bucketInfo(m, p)
 		if err != nil {
@@ -145,6 +381,26 @@ func (s *Server) dispatchAs(m client.Message, ws *wsSession, p principal) ([]byt
 		}
 		return client.ResponseBody(status, result, ""), status
 	}
+	if placementAdminOpcode(m.Opcode) {
+		result, status, err := s.executePlacementAdmin(m, p)
+		if err != nil {
+			status = statusOf(err)
+			return client.ResponseBody(status, nil, err.Error()), status
+		}
+		return client.ResponseBody(status, result, ""), status
+	}
+	if m.Opcode == client.ObjectSubscribe || m.Opcode == client.ObjectUnsubscribe || m.Opcode == client.SubscriptionAck {
+		result, status, err := s.executeObjectSubscription(m, ws, p)
+		if err != nil {
+			var redirect *objectRedirect
+			if errors.As(err, &redirect) {
+				return redirectResponse(redirect.patch), 301
+			}
+			status = objectStatus(err)
+			return client.ResponseBody(status, nil, err.Error()), status
+		}
+		return client.ResponseBody(status, result, ""), status
+	}
 	if m.Opcode >= 0x0100 && m.Opcode <= 0x0108 || m.Opcode == client.BucketMaintenance || m.Opcode == client.BucketScan || m.Opcode == client.BucketObjectList {
 		result, status, err := s.executeObjects(m, ws, p)
 		if errors.Is(err, errObjectStaged) {
@@ -152,6 +408,10 @@ func (s *Server) dispatchAs(m client.Message, ws *wsSession, p principal) ([]byt
 		}
 		if err != nil {
 			status = objectStatus(err)
+			var redirect *objectRedirect
+			if errors.As(err, &redirect) {
+				return redirectResponse(redirect.patch), 301
+			}
 			return client.ResponseBody(status, nil, err.Error()), status
 		}
 		return client.ResponseBody(status, result, ""), status
@@ -209,7 +469,20 @@ func (s *Server) execute(m client.Message, ws *wsSession) ([]byte, int, error) {
 		s.mu.RUnlock()
 		e := client.Encoder{}
 		e.U16(1)
-		caps, membership, revision := client.CapabilityPeerTransport|client.CapabilityNodeAdmin, uint64(1), c.Generation
+		caps, membership, revision := client.CapabilityPeerTransport|client.CapabilityNodeAdmin|client.CapabilityObjectSubscriptions, uint64(1), c.Generation
+		if s.control != nil {
+			caps |= client.CapabilityClusterControl
+			s.control.ledger.mu.Lock()
+			membership = s.control.ledger.current.Membership.Epoch
+			revision = s.control.ledger.current.MapRevision
+			s.control.ledger.mu.Unlock()
+		}
+		if s.scopes != nil {
+			caps |= client.CapabilityRangeHandoff | client.CapabilityExclusion | client.CapabilityControlRecovery | client.CapabilityVolumeRecovery | client.CapabilityRecoveryFenceClearance
+		}
+		if s.retiring() {
+			caps |= client.CapabilityRetiringNode
+		}
 		if c.JoinPending {
 			caps |= client.CapabilityPendingNode
 			membership, revision = 0, 0
@@ -265,24 +538,43 @@ func (s *Server) execute(m client.Message, ws *wsSession) ([]byte, int, error) {
 			ws.unsubscribe(sub)
 		}
 		return nil, 200, nil
-	case client.VolumeAdd:
+	case client.VolumeAdd, client.VolumeAddWithGroups:
 		name := d.Text()
 		source := d.U8()
 		path := d.Text()
 		class := d.U8()
 		size := d.U64()
+		var groups []string
+		if m.Opcode == client.VolumeAddWithGroups {
+			if d.U16() != 1 {
+				return nil, 0, client.ErrProtocol
+			}
+			for i, n := 0, d.Count(10000); i < n; i++ {
+				groups = append(groups, d.ID().String())
+			}
+		}
 		if e := guard(); e != nil {
 			return nil, 0, e
 		}
 		if size > math.MaxInt64 || class > 2 {
 			return nil, 0, fail(400, "invalid volume size/class")
 		}
-		op, e := s.AddVolume(m.ID.String(), AddVolumeRequest{Name: name, Source: source, Path: path, Class: []string{"hdd", "ssd", "ram"}[class], SizeBytes: int64(size)})
+		op, e := s.AddVolume(m.ID.String(), AddVolumeRequest{PlacementGroups: groups, Name: name, Source: source, Path: path, Class: []string{"hdd", "ssd", "ram"}[class], SizeBytes: int64(size)})
 		if e != nil {
 			return nil, 0, e
 		}
 		if op.State == "failed" {
 			return nil, 0, fail(op.Status, op.Detail)
+		}
+		return encodeAck(op), op.Status, nil
+	case client.VolumePlacementRelease:
+		id := d.ID()
+		if err := guard(); err != nil {
+			return nil, 0, err
+		}
+		op, err := s.releaseVolumePlacement(m.ID.String(), id.String())
+		if err != nil {
+			return nil, 0, err
 		}
 		return encodeAck(op), op.Status, nil
 	case client.VolumeRescan:

@@ -38,7 +38,7 @@ func openPendingPeer(t *testing.T, seed *Server, seedURL string) (*Server, *http
 		host.Close()
 		t.Fatal(err)
 	}
-	s, err := Open(Options{ConfigPath: path})
+	s, err := openTransportTestNode(Options{ConfigPath: path})
 	if err != nil {
 		host.Close()
 		t.Fatal(err)
@@ -113,7 +113,7 @@ func TestAutomaticPeerDiscoveryPendingAdministrationAndRestart(t *testing.T) {
 	}
 	awaitPeerObservation(t, seed, client.ID(id), func(o *peerObservation) bool { return !o.online && o.snapshot != nil })
 	// The same configured endpoint returns, without test-side dial/observer calls.
-	restarted, err := Open(Options{ConfigPath: path})
+	restarted, err := openTransportTestNode(Options{ConfigPath: path})
 	if err != nil {
 		t.Fatal(err)
 	}

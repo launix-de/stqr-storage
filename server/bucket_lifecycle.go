@@ -12,7 +12,7 @@ import (
 // desired policy. Resumable workers retain those intents until local copies and
 // metadata are committed. Reads remain possible during a policy transition.
 func (s *Server) startBucketCleanup(id volume.ID) {
-	if s.metadataPreview {
+	if s.metadataPreview || s.controller != nil {
 		return
 	}
 	s.mu.Lock()
@@ -116,7 +116,7 @@ func (s *Server) bucketLifecycleOnce(id volume.ID) error {
 	} else if d.DesiredPolicy != nil {
 		desired := *d.DesiredPolicy
 		var target *volume.Volume
-		for _, v := range b.allVolumes() {
+		for _, v := range s.placementVolumesAt(desired.PlacementGroup, desired.PlacementMaskVersion) {
 			if v.State() == volume.Active && bucketClass(desired).Allows(v.Identity().Class) {
 				if target == nil || v.Stats().AdmissionFreePhysical > target.Stats().AdmissionFreePhysical {
 					target = v
@@ -190,6 +190,7 @@ func (s *Server) bucketLifecycleOnce(id volume.ID) error {
 	_, err = s.buckets.Save(d, d.Revision)
 	if err == nil {
 		s.updateAdminCapacity()
+		err = s.finishLocalPlacementGroups()
 	}
 	return err
 }

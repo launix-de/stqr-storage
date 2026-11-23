@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"syscall"
 	"testing"
@@ -82,7 +83,7 @@ func TestProcessSignalsPreserveVolumes(t *testing.T) {
 					t.Fatal("signal changed identity, generation or configured volumes")
 				}
 				for j, v := range after.Volumes {
-					if v != before.Volumes[j] || v.State != "active" {
+					if !reflect.DeepEqual(v, before.Volumes[j]) || v.State != "active" {
 						t.Fatal("signal changed volume configuration or initiated drain")
 					}
 				}

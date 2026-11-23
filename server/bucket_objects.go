@@ -8,13 +8,14 @@ import (
 	"io"
 	"math"
 
+	"github.com/launix-de/stqr-storage/client"
 	"github.com/launix-de/stqr-storage/volume"
 )
 
 // Bucket object operations own authorization, lifecycle, codec and admission.
-// The transport only decodes/encodes. Current placement is single-node: existing
-// version/tombstone/retry records select the volume; new objects choose a stable
-// eligible local target. No remote replicas or automatic failover are simulated.
+// The transport only decodes/encodes. Committed ranges select the authoritative
+// node and optional pinned volume; local versions/tombstones/receipts resolve
+// unrestricted local placement. No automatic failover or data replicas exist.
 func (b *Bucket) authorize(p principal, permission BucketPermissions) (BucketDescription, error) {
 	b.mu.RLock()
 	maintenance := b.maintenance
@@ -25,7 +26,11 @@ func (b *Bucket) authorize(p principal, permission BucketPermissions) (BucketDes
 	d := b.storageDescription()
 	if p.connection != nil {
 		auth := p.connection
-		if auth.invalid.Load() || auth.bucket != b || auth.permissions&permission == 0 {
+		required := permission
+		if auth.frontendPermission != 0 {
+			required = auth.frontendPermission
+		}
+		if auth.invalid.Load() || auth.bucket != b || auth.permissions&required == 0 {
 			return d, ErrBucketForbidden
 		}
 		if d.DeletionComplete || d.State == BucketDeleting {
@@ -63,11 +68,12 @@ func (b *Bucket) authorize(p principal, permission BucketPermissions) (BucketDes
 	return d, nil
 }
 func (b *Bucket) allVolumes() []*volume.Volume {
-	return b.server.placementVolumes(b.storageDescription().Policy.PlacementGroup)
+	p := b.storageDescription().Policy
+	return b.server.placementVolumesAt(p.PlacementGroup, p.PlacementMaskVersion)
 }
 func (b *Bucket) localVolumes() []*volume.Volume { return b.volumesFor(b.Describe()) }
 func (b *Bucket) volumesFor(d BucketDescription) []*volume.Volume {
-	all := b.server.placementVolumes(d.Policy.PlacementGroup)
+	all := b.server.placementVolumesAt(d.Policy.PlacementGroup, d.Policy.PlacementMaskVersion)
 	if len(d.LocalVolumes) == 0 {
 		return all
 	}
@@ -116,11 +122,26 @@ func bucketLocalPolicy(p BucketPolicy) error {
 	return nil
 }
 func (b *Bucket) selectVolume(d BucketDescription, key volume.Key, request volume.ID, create bool) (*volume.Volume, volume.Info, bool, error) {
+	if b.server.controller != nil && d.DesiredPolicy != nil {
+		if entry, known := b.server.placement.Load().lookup(client.ID(key.Bucket), client.ObjectID(key.Object)); known && entry.PolicyVersion == d.DesiredPolicy.Version {
+			d.Policy = *d.DesiredPolicy
+		}
+	}
 	var selected, target *volume.Volume
 	var latest volume.Info
 	found := false
 	class := bucketClass(d.Policy)
 	for _, v := range b.volumesFor(d) {
+		if !class.Allows(v.Identity().Class) {
+			continue
+		}
+		if b.server.controller != nil {
+			if patch, ok := b.server.routingPatch(key.Bucket, key.Object); ok {
+				if !b.server.volumeAllowedForEntry(client.ID(b.ID()), patch.Entries[0], v.Identity().VolumeID, b.server.currentSystem.Load()) {
+					continue
+				}
+			}
+		}
 		h, err := v.Open(false)
 		if err != nil {
 			return nil, latest, false, err
@@ -147,7 +168,14 @@ func (b *Bucket) selectVolume(d BucketDescription, key volume.Key, request volum
 		} else if !errors.Is(err, volume.ErrNotFound) {
 			return nil, latest, false, err
 		}
-		if v.State() == volume.Active && class.Allows(v.Identity().Class) && (target == nil || v.Stats().AdmissionFreePhysical > target.Stats().AdmissionFreePhysical) {
+		allocatable := true
+		if b.server.controller != nil {
+			b.server.mu.RLock()
+			managed := b.server.volumes[v.Identity().VolumeID.String()]
+			allocatable = managed != nil && managed.config.State == "active"
+			b.server.mu.RUnlock()
+		}
+		if allocatable && v.State() == volume.Active && class.Allows(v.Identity().Class) && (target == nil || v.Stats().AdmissionFreePhysical > target.Stats().AdmissionFreePhysical) {
 			target = v
 		}
 	}
@@ -166,29 +194,30 @@ func (b *Bucket) selectVolume(d BucketDescription, key volume.Key, request volum
 	return target, latest, false, nil
 }
 
-// logicalUsage runs under the local mutation/admin lock. Counting duplicate
-// copies after interrupted evacuation is conservative; it never grants excess
-// growth credits. A distributed/physical-accounting planner is future work.
-func (b *Bucket) logicalUsage() (uint64, error) {
+// logicalUsage counts each locally authoritative live object once, regardless
+// of interrupted copies or staged incoming handoffs. Pagination bounds memory
+// even when the index cache cannot hold the bucket's complete object set.
+// Callers serialize quota decisions with the local mutation/admin lock.
+func (b *Bucket) scanLogicalUsage() (uint64, error) {
 	var total uint64
-	for _, v := range b.localVolumes() {
-		h, err := v.Open(false)
+	description := b.Describe()
+	var after *volume.ObjectID
+	for {
+		records, next, more, err := b.scan(context.Background(), description, after, 128)
 		if err != nil {
 			return 0, err
 		}
-		err = h.Scan(b.ID(), volume.ObjectID{}, volume.ObjectID{}, func(_ volume.Key, info volume.Info) error {
-			if math.MaxUint64-total < info.Length {
-				return volume.ErrRange
+		for _, record := range records {
+			if math.MaxUint64-total < record.Info.Length {
+				return 0, volume.ErrRange
 			}
-			total += info.Length
-			return nil
-		})
-		h.Close()
-		if err != nil {
-			return 0, err
+			total += record.Info.Length
 		}
+		if !more {
+			return total, nil
+		}
+		after = &next
 	}
-	return total, nil
 }
 func (b *Bucket) Get(ctx context.Context, p principal, id volume.ObjectID) ([]byte, volume.Info, error) {
 	return b.GetRange(ctx, p, id, 0, math.MaxUint64)
@@ -201,15 +230,24 @@ func (b *Bucket) GetRange(ctx context.Context, p principal, id volume.ObjectID, 
 	if err != nil {
 		return nil, volume.Info{}, err
 	}
-	v, _, _, err := b.selectVolume(d, volume.Key{Bucket: b.ID(), Object: id}, volume.ID{}, false)
-	if err != nil {
+	if err := b.server.checkObjectOwner(b.ID(), id); err != nil {
 		return nil, volume.Info{}, err
+	}
+	v, prior, _, err := b.selectVolume(d, volume.Key{Bucket: b.ID(), Object: id}, volume.ID{}, false)
+	if err != nil {
+		if bindingErr := b.server.checkObjectBinding(ctx, b.ID(), id); bindingErr != nil {
+			return nil, volume.Info{}, bindingErr
+		}
+		return nil, volume.Info{}, b.absenceError(id, prior, err)
 	}
 	h, err := v.Open(false)
 	if err != nil {
 		return nil, volume.Info{}, err
 	}
 	defer h.Close()
+	if err := b.server.checkObjectBinding(ctx, b.ID(), id); err != nil {
+		return nil, volume.Info{}, err
+	}
 	return h.GetRange(volume.Key{Bucket: b.ID(), Object: id}, offset, length)
 }
 
@@ -228,16 +266,25 @@ func (b *Bucket) copyToVersion(ctx context.Context, p principal, id volume.Objec
 	if err != nil {
 		return volume.Info{}, 0, err
 	}
-	key := volume.Key{Bucket: b.ID(), Object: id}
-	v, _, _, err := b.selectVolume(d, key, volume.ID{}, false)
-	if err != nil {
+	if err := b.server.checkObjectOwner(b.ID(), id); err != nil {
 		return volume.Info{}, 0, err
+	}
+	key := volume.Key{Bucket: b.ID(), Object: id}
+	v, prior, _, err := b.selectVolume(d, key, volume.ID{}, false)
+	if err != nil {
+		if bindingErr := b.server.checkObjectBinding(ctx, b.ID(), id); bindingErr != nil {
+			return volume.Info{}, 0, bindingErr
+		}
+		return volume.Info{}, 0, b.absenceError(id, prior, err)
 	}
 	h, err := v.Open(false)
 	if err != nil {
 		return volume.Info{}, 0, err
 	}
 	defer h.Close()
+	if err := b.server.checkObjectBinding(ctx, b.ID(), id); err != nil {
+		return volume.Info{}, 0, err
+	}
 	info, err := h.Stat(key)
 	if err != nil {
 		return info, 0, err
@@ -280,11 +327,17 @@ func (b *Bucket) Stat(ctx context.Context, p principal, id volume.ObjectID) (vol
 	if err != nil {
 		return volume.Info{}, err
 	}
+	if err := b.server.checkObjectOwner(b.ID(), id); err != nil {
+		return volume.Info{}, err
+	}
 	_, info, _, err := b.selectVolume(d, volume.Key{Bucket: b.ID(), Object: id}, volume.ID{}, false)
+	if bindingErr := b.server.checkObjectBinding(ctx, b.ID(), id); bindingErr != nil {
+		err = bindingErr
+	}
 	if info.Deleted && err == nil {
 		err = volume.ErrNotFound
 	}
-	return info, err
+	return info, b.absenceError(id, info, err)
 }
 func (b *Bucket) mutate(ctx context.Context, p principal, id volume.ObjectID, opcode uint16, offset, length uint64, src io.Reader, expected []byte, opt volume.Options) (volume.Result, error) {
 	if b.server == nil {
@@ -302,7 +355,7 @@ func (b *Bucket) mutate(ctx context.Context, p principal, id volume.ObjectID, op
 	s.mu.RLock()
 	closed := s.closed
 	s.mu.RUnlock()
-	if closed {
+	if closed || s.shortStopping.Load() {
 		return volume.Result{}, fail(503, "server is stopping")
 	}
 	if err := ctx.Err(); err != nil {
@@ -319,6 +372,22 @@ func (b *Bucket) mutate(ctx context.Context, p principal, id volume.ObjectID, op
 	if err != nil {
 		return volume.Result{}, err
 	}
+	if err := s.checkObjectOwner(b.ID(), id); err != nil {
+		return volume.Result{}, err
+	}
+	if err := s.checkObjectBinding(ctx, b.ID(), id); err != nil {
+		return volume.Result{}, err
+	}
+	if s.bucketFrozen(b.ID()) {
+		return volume.Result{}, fail(503, "bucket quota/policy change is in progress")
+	}
+	if s.scopes != nil {
+		release, err := s.scopes.guard(b.ID(), id)
+		if err != nil {
+			return volume.Result{}, err
+		}
+		defer release()
+	}
 	if d.DesiredPolicy != nil {
 		return volume.Result{}, fail(503, "bucket policy transition in progress")
 	}
@@ -331,16 +400,25 @@ func (b *Bucket) mutate(ctx context.Context, p principal, id volume.ObjectID, op
 	key := volume.Key{Bucket: b.ID(), Object: id}
 	v, old, _, err := b.selectVolume(d, key, opt.RequestID, true)
 	if err != nil {
+		if errors.Is(err, volume.ErrFull) && s.scopes != nil && s.scopes.requestSpace(b.ID(), id, addCapacity(length, 64<<10)) {
+			return volume.Result{}, fail(503, "waiting for range capacity handoff")
+		}
 		return volume.Result{}, err
 	}
+	if old.Version == 0 && opcode != 0x0102 && opcode != 0x0106 && b.lostRange(id) {
+		return volume.Result{}, fail(410, "partial mutation cannot recreate a lost object")
+	}
 	// Persist the first local placement before acknowledging any object bytes.
-	if len(d.LocalVolumes) == 0 {
+	if len(d.LocalVolumes) == 0 && s.controller == nil {
 		d.LocalVolumes = []string{v.Identity().VolumeID.String()}
 		saved, e := s.buckets.Save(d, d.Revision)
 		if e != nil {
 			return volume.Result{}, e
 		}
 		d = saved.Describe()
+	}
+	if err := s.ensureVolumeAuthorityLocked(); err != nil {
+		return volume.Result{}, err
 	}
 	// Inspect retry presence before applying current admission. The volume still
 	// validates the complete original fingerprint; status alone is not a success.
@@ -390,10 +468,27 @@ func (b *Bucket) mutate(ctx context.Context, p principal, id volume.ObjectID, op
 		if e != nil {
 			return volume.Result{}, e
 		}
-		if next > oldLength && (usage > d.Policy.Limits.Absolute || next-oldLength > d.Policy.Limits.Absolute-usage) {
+		limit := d.Policy.Limits.Absolute
+		if s.controller != nil {
+			limit, e = s.quotaAllowance(client.ID(b.ID()))
+			if e != nil {
+				return volume.Result{}, e
+			}
+		}
+		if next > oldLength && (usage > limit || next-oldLength > limit-usage) {
+			if s.quotas != nil && next-oldLength <= d.Policy.Limits.Absolute && s.quotas.request(b.ID(), id, next-oldLength) {
+				return volume.Result{}, fail(503, "waiting for bucket growth credits")
+			}
 			return volume.Result{}, volume.ErrFull
 		}
 	}
+	b.usage.mu.Lock()
+	usageLocked := true
+	defer func() {
+		if usageLocked {
+			b.usage.mu.Unlock()
+		}
+	}()
 	h, err = v.Open(true)
 	if err != nil {
 		return volume.Result{}, err
@@ -407,6 +502,11 @@ func (b *Bucket) mutate(ctx context.Context, p principal, id volume.ObjectID, op
 		}
 	}
 	var result volume.Result
+	defer func() {
+		if err == nil && s.quotas != nil {
+			s.quotas.fulfilled(b.ID(), id)
+		}
+	}()
 	switch opcode {
 	case 0x0102:
 		result.Info, err = h.PutReader(key, src, length, opt)
@@ -429,6 +529,36 @@ func (b *Bucket) mutate(ctx context.Context, p principal, id volume.ObjectID, op
 		}
 	default:
 		err = volume.ErrUnsupported
+	}
+	if err == nil && !repeated && s.objectSubscriptions.watched(key) {
+		published, readErr := h.RecordInfo(key)
+		if readErr == nil {
+			s.objectSubscriptions.publish(key, old.Version, published, h)
+		} else {
+			s.objectSubscriptions.resyncWhere(func(k volume.Key) bool { return k == key })
+		}
+	}
+	// Release the write handle before consulting capacity/index statistics.
+	// An unchanged logical request ID safely retries after ownership cutover.
+	h.Close()
+	oldLength, newLength := old.Length, result.Info.Length
+	if old.Deleted {
+		oldLength = 0
+	}
+	if opcode == 0x0106 || result.Info.Deleted {
+		newLength = 0
+	}
+	b.updateUsage(oldLength, newLength, repeated, err)
+	b.usage.mu.Unlock()
+	usageLocked = false
+	if errors.Is(err, volume.ErrFull) && !errors.Is(err, volume.ErrRecovery) && !repeated && s.scopes != nil {
+		needed := addCapacity(length, 64<<10)
+		if opcode == 0x0105 || opcode == 0x0106 {
+			needed = 64 << 10
+		}
+		if s.scopes.requestSpace(b.ID(), id, needed) {
+			return result, fail(503, "waiting for range capacity handoff")
+		}
 	}
 	return result, err
 }

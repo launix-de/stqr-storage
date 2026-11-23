@@ -10,7 +10,9 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 
+	"github.com/launix-de/stqr-storage/client"
 	"github.com/launix-de/stqr-storage/volume"
 )
 
@@ -58,11 +60,12 @@ func statusOf(e error) int {
 }
 
 type AddVolumeRequest struct {
-	Name      string `json:"name"`
-	Source    uint8  `json:"source"`
-	Path      string `json:"path"`
-	Class     string `json:"class"`
-	SizeBytes int64  `json:"size_bytes"`
+	PlacementGroups []string `json:"placement_groups,omitempty"`
+	Name            string   `json:"name"`
+	Source          uint8    `json:"source"`
+	Path            string   `json:"path"`
+	Class           string   `json:"class"`
+	SizeBytes       int64    `json:"size_bytes"`
 }
 type Operation struct {
 	ID        string `json:"operation_id"`
@@ -77,6 +80,7 @@ type Operation struct {
 }
 
 func copyConfig(c Config) Config {
+	c.RecoveryVolumes = append([]VolumeConfig(nil), c.RecoveryVolumes...)
 	c.Volumes = append([]VolumeConfig(nil), c.Volumes...)
 	c.Peers = append([]PeerConfig(nil), c.Peers...)
 	c.AllowSubnets = append([]string{}, c.AllowSubnets...)
@@ -120,6 +124,13 @@ func (s *Server) operation(id string) (Operation, error) {
 	}
 	e := s.readBlob("admin-op/"+id, &op)
 	if errors.Is(e, volume.ErrNotFound) {
+		parsed, _ := parseID(id)
+		if s.completedExclusionProposal(client.ID(parsed)) != nil {
+			return Operation{ID: id, Kind: "force-disconnect", State: "fulfilled", Status: 200}, nil
+		}
+		if s.pendingExclusionClaim(client.ID(parsed)) != nil {
+			return Operation{ID: id, Kind: "force-disconnect", State: "running", Status: 202}, nil
+		}
 		for _, d := range s.bucketSnapshots() {
 			for _, r := range d.Receipts {
 				if r.ID == id {
@@ -163,12 +174,19 @@ var validName = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
 
 func (s *Server) AddVolume(id string, r AddVolumeRequest) (op Operation, err error) {
 	s.opMu.Lock()
+	s.dirtyVolumeAuthority()
 	defer s.opMu.Unlock()
+	if s.forceFrozen() {
+		return op, fail(503, "administration is frozen for exclusion")
+	}
 	s.mu.RLock()
 	closed := s.closed
 	s.mu.RUnlock()
 	if closed {
 		return op, fail(503, "server is stopping")
+	}
+	if err := s.validateVolumeGroupSelection(r.PlacementGroups); err != nil {
+		return op, err
 	}
 	op, exists, e := s.beginOperation(id, "add", r)
 	if e != nil || exists {
@@ -290,7 +308,7 @@ func (s *Server) AddVolume(id string, r AddVolumeRequest) (op Operation, err err
 		return op, fail(409, "volume is already attached")
 	}
 	actual := v.Identity().Class.String()
-	vc := VolumeConfig{ID: vid, Name: r.Name, Path: path, Class: actual, SizeBytes: int64(v.Size()), State: "pending", OperationID: id}
+	vc := VolumeConfig{PlacementGroupsPending: append([]string(nil), r.PlacementGroups...), ID: vid, Name: r.Name, Path: path, Class: actual, SizeBytes: int64(v.Size()), State: "pending", OperationID: id}
 	if e = v.SetState(volume.Pending); e != nil {
 		return op, e
 	}
@@ -321,7 +339,11 @@ func (s *Server) AddVolume(id string, r AddVolumeRequest) (op Operation, err err
 }
 func (s *Server) RemoveVolume(id, vid string) (Operation, error) {
 	s.opMu.Lock()
+	s.dirtyVolumeAuthority()
 	defer s.opMu.Unlock()
+	if s.forceFrozen() {
+		return Operation{}, fail(503, "administration is frozen for exclusion")
+	}
 	s.mu.RLock()
 	closed := s.closed
 	s.mu.RUnlock()
@@ -355,8 +377,10 @@ func (s *Server) RemoveVolume(id, vid string) (Operation, error) {
 	if e = saveConfig(s.configPath, c); e != nil {
 		return s.finishOperation(op, e)
 	}
-	if e = m.store.SetState(volume.Draining); e != nil {
-		return s.finishOperation(op, e)
+	if s.controller == nil {
+		if e = m.store.SetState(volume.Draining); e != nil {
+			return s.finishOperation(op, e)
+		}
 	}
 	s.mu.Lock()
 	s.cfg = c
@@ -387,11 +411,41 @@ func (s *Server) configView() map[string]any {
 	} else if len(c.Peers) > 0 {
 		mode = "cluster-preparation"
 	}
-	return map[string]any{"config": c, "config_path": s.configPath, "active_listen": s.running.Node.Listen, "active_volumes_dir": s.volumesDir, "restart_required": restart, "mode": mode, "system_bucket_placement": "everywhere"}
+	view := map[string]any{"config": c, "config_path": s.configPath, "active_listen": s.running.Node.Listen, "active_volumes_dir": s.volumesDir, "restart_required": restart, "mode": mode, "system_bucket_placement": "everywhere"}
+	if image := s.currentSystem.Load(); image != nil {
+		members, excluded := []string{}, []string{}
+		for _, member := range image.manifest.Membership.Members {
+			members = append(members, member.ID.String())
+		}
+		for _, node := range image.manifest.Membership.Excluded {
+			excluded = append(excluded, node.String())
+		}
+		view["member_nodes"], view["excluded_nodes"] = members, excluded
+		view["membership_epoch"] = strconv.FormatUint(image.manifest.Membership.Epoch, 10)
+		recoveries := []map[string]any{}
+		for _, origin := range image.manifest.VolumeRecoveries {
+			volumes := []string{}
+			for _, id := range origin.Volumes {
+				volumes = append(volumes, id.String())
+			}
+			recoveries = append(recoveries, map[string]any{"bucket": origin.Before.Bucket.String(), "source": origin.Before.Entries[0].Locations[0].Node.String(), "complete": origin.Complete, "target": origin.Target.String(), "volumes": volumes})
+		}
+		view["volume_recoveries"] = recoveries
+		if len(members) > 1 {
+			view["mode"] = "cluster"
+		} else {
+			view["mode"] = "single-node"
+		}
+	}
+	return view
 }
 func (s *Server) updateConfig(patch map[string]json.RawMessage) error {
 	s.opMu.Lock()
+	s.dirtyVolumeAuthority()
 	defer s.opMu.Unlock()
+	if s.forceFrozen() {
+		return fail(503, "administration is frozen for exclusion")
+	}
 	s.mu.RLock()
 	c := copyConfig(s.cfg)
 	closed := s.closed
@@ -452,7 +506,11 @@ func (s *Server) updateConfig(patch map[string]json.RawMessage) error {
 // resize an LV, reread partition tables or format an already attached device.
 func (s *Server) RescanVolume(id, vid string) (op Operation, err error) {
 	s.opMu.Lock()
+	s.dirtyVolumeAuthority()
 	defer s.opMu.Unlock()
+	if s.forceFrozen() {
+		return op, fail(503, "administration is frozen for exclusion")
+	}
 	s.mu.RLock()
 	closed := s.closed
 	s.mu.RUnlock()

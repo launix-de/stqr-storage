@@ -15,7 +15,7 @@ import (
 )
 
 // nodeHello binds a token-authenticated socket to its claimed identities. The
-// response describes the CURRENT single-member membership, not an admitted join.
+// response describes the current committed membership; connecting alone is not admission.
 func (s *Server) nodeHello(m client.Message, ws *wsSession, p principal) ([]byte, error) {
 	if ws == nil || p.connection == nil || m.Kind != client.Request {
 		return nil, fail(400, "NODE_HELLO requires a peer WebSocket request")
@@ -39,20 +39,34 @@ func (s *Server) nodeHello(m client.Message, ws *wsSession, p principal) ([]byte
 	if hello.Node == client.ID(node) {
 		return nil, fail(409, "duplicate local node identity")
 	}
-	if hello.Membership != 0 && hello.Membership != 1 {
-		return nil, fail(409, "membership epoch does not match current state")
-	}
 	addresses := []string{}
 	if advertise != "" {
 		addresses = append(addresses, advertise)
 	}
 	ack := client.NodeHelloAck{Membership: client.Membership{Epoch: 1, Cluster: client.ID(cluster), Members: []client.Member{{ID: client.ID(node), Addresses: addresses}}}, Generation: generation, MapRevision: generation}
+	if s.control != nil {
+		s.control.ledger.mu.Lock()
+		base := cloneControlBase(s.control.ledger.current)
+		s.control.ledger.mu.Unlock()
+		if hasControlNode(base.Membership.Excluded, hello.Node) {
+			return nil, fail(403, "node is excluded from committed membership")
+		}
+		ack = client.NodeHelloAck{Membership: base.Membership, ControlSequence: base.Sequence, Generation: base.Generation, MapRevision: base.MapRevision}
+	}
 	if s.joinPending() {
 		ack = client.NodeHelloAck{Membership: client.Membership{Cluster: client.ID(cluster)}}
 	}
+	ack.Boot = s.boot
 	body, err := ack.MarshalBinary()
 	if err != nil {
 		return nil, err
+	}
+	if p.connection.peerVerified.Load() {
+		if p.connection.peerBoot != hello.Boot {
+			return nil, fail(409, "peer process identity changed on a live socket")
+		}
+	} else {
+		p.connection.peerBoot = hello.Boot
 	}
 	p.connection.peerVerified.Store(true)
 	if len(hello.Addresses) > 0 && !s.joinPending() {
@@ -76,20 +90,22 @@ type peerPending struct {
 // peerConnection is transport infrastructure. Losing it does not change
 // membership, ownership, generation, coordinator or required replica counts.
 type peerConnection struct {
-	server       *Server
-	conn         *websocket.Conn
-	ctx          context.Context
-	cancel       context.CancelFunc
-	once         sync.Once
-	mu           sync.Mutex
-	pending      map[client.ID]peerPending
-	outgoing     chan client.Message
-	pushes       chan client.Message
-	Node         client.ID
-	Membership   client.Membership
-	Capabilities uint64
-	incoming     chan client.Message
-	ready        chan struct{}
+	server          *Server
+	conn            *websocket.Conn
+	ctx             context.Context
+	cancel          context.CancelFunc
+	once            sync.Once
+	mu              sync.Mutex
+	pending         map[client.ID]peerPending
+	outgoing        chan client.Message
+	pushes          chan client.Message
+	Node            client.ID
+	Boot            client.ID
+	Membership      client.Membership
+	Capabilities    uint64
+	incoming        chan client.Message
+	controlIncoming chan client.Message
+	ready           chan struct{}
 }
 
 func (s *Server) dialPeer(ctx context.Context, address string, expected client.ID) (*peerConnection, error) {
@@ -124,17 +140,19 @@ func (s *Server) dialPeer(ctx context.Context, address string, expected client.I
 	conn.SetReadLimit(client.MaxMessage)
 	lifetime, cancel := context.WithCancel(s.ctx)
 	p := &peerConnection{server: s, conn: conn, ctx: lifetime, cancel: cancel, pending: map[client.ID]peerPending{}, outgoing: make(chan client.Message, sendQueueCapacity), pushes: make(chan client.Message, 64), incoming: make(chan client.Message, receiveQueueCapacity), ready: make(chan struct{})}
+	p.controlIncoming = make(chan client.Message, receiveQueueCapacity)
 	s.mu.Lock()
 	if s.closed {
 		s.mu.Unlock()
 		p.close()
 		return nil, errors.New("server is stopping")
 	}
-	s.workers.Add(3)
+	s.workers.Add(4)
 	s.mu.Unlock()
 	go func() { defer s.workers.Done(); p.writeLoop() }()
 	go func() { defer s.workers.Done(); p.readLoop() }()
 	go func() { defer s.workers.Done(); p.requestLoop() }()
+	go func() { defer s.workers.Done(); p.controlRequestLoop() }()
 	success := false
 	defer func() {
 		if !success {
@@ -163,6 +181,11 @@ func (s *Server) dialPeer(ctx context.Context, address string, expected client.I
 		addresses = append(addresses, advertise)
 	}
 	localMembership := uint64(1)
+	if s.control != nil {
+		s.control.ledger.mu.Lock()
+		localMembership = s.control.ledger.current.Membership.Epoch
+		s.control.ledger.mu.Unlock()
+	}
 	if s.joinPending() {
 		localMembership = 0
 	}
@@ -178,6 +201,9 @@ func (s *Server) dialPeer(ctx context.Context, address string, expected client.I
 	if err != nil || ack.Membership.Cluster != remoteCluster || ack.Membership.Epoch != membership {
 		return nil, fail(409, "peer membership response mismatch")
 	}
+	if capabilities&client.CapabilityExclusion != 0 && ack.Boot == (client.ID{}) {
+		return nil, fail(409, "exclusion-capable peer omitted its process identity")
+	}
 	present := false
 	for _, member := range ack.Membership.Members {
 		if member.ID == remoteNode {
@@ -188,10 +214,11 @@ func (s *Server) dialPeer(ctx context.Context, address string, expected client.I
 		if ack.Membership.Epoch != 0 || len(ack.Membership.Members) != 0 || ack.Generation != 0 {
 			return nil, fail(409, "pending peer claimed committed membership")
 		}
-	} else if !present {
+	} else if !present && capabilities&client.CapabilityRetiringNode == 0 {
 		return nil, fail(409, "peer is absent from its own current membership")
 	}
 	p.Node = remoteNode
+	p.Boot = ack.Boot
 	p.Membership = ack.Membership
 	p.Capabilities = capabilities
 	close(p.ready)
@@ -283,8 +310,12 @@ func (p *peerConnection) readLoop() {
 			}
 			pending.result <- decodePeerReply(m, pending.opcode)
 		case client.Request, client.FireAndForget:
+			queue := p.incoming
+			if isControlPeerRequest(m) {
+				queue = p.controlIncoming
+			}
 			select {
-			case p.incoming <- m:
+			case queue <- m:
 			case <-p.ctx.Done():
 				return
 			default:

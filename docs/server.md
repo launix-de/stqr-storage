@@ -1,4 +1,4 @@
-# Single-node daemon and volume administration
+# Daemon, volumes and cluster development
 
 Build the daemon in the repository root with Go 1.24 or later:
 
@@ -27,8 +27,9 @@ descriptions. Its fixed list object contains sorted 32-byte hashes of those
 descriptions. New nodes and existing accounts-only nodes initialize the catalog
 with the system bucket; `bucket_catalog_version: 1` records activation in the
 local YAML. Subsequent startup validates the catalog and fails on missing or
-corrupt data instead of resetting it. Future EVERYWHERE replication and join
-remain explicit TODOs; a known peer or `--connect` never bootstraps a second cluster.
+corrupt data instead of resetting it. Cluster admission publishes this system
+graph through ALL/EVERYWHERE and the common system placement group. A known peer
+or `--connect` never bootstraps a second cluster.
 
 ## Startup parameters
 
@@ -49,7 +50,7 @@ created volume records store absolute file/device paths.
 | `--ram-bytes 0` | Optional RAM-volume budget in bytes; 0 uses available system RAM |
 | `--ramcache-bytes 0` | Reserved for the later read-cache implementation |
 | `--allow-subnet CIDR,CIDR` | Allowed IPv4/IPv6 source networks; empty allows all |
-| `--connect http://host:7419` | Parsed join intent; currently fails explicitly because multinode is not implemented |
+| `--connect http://host:7419` | First-contact helper; durable discovered peers remain authoritative after restart |
 
 By default only `127.0.0.0/8` and `::1/128` may connect, even if the listener binds
 to all interfaces. Access checks use the actual peer address, never forwarded
@@ -96,10 +97,10 @@ and config publication is the original device claim released. Files/devices are
 not unlinked or wiped; they become discoverable again. The currently required
 admin volume cannot be detached in this first stage.
 
-Single-node placement generation changes are trivial local commits. TODOs identify
-the later generation builder, peer stats, authority fencing, replica completion,
-subscription handoff and shutdown coordination. There is no simulated quorum,
-multinode ACK or failure-based eviction.
+Production Open uses the durable controller even for a single member. Cluster
+range handoffs, telemetry and shutdown coordination are described below. Data
+replica completion and subscription handoff remain separate work; no transport
+heartbeat is treated as a quorum or timeout-based eviction.
 
 ## Original WebSocket protocol and queues
 
@@ -299,8 +300,9 @@ filesystem formats or determine reachability; the client performs mark-and-sweep
 
 `client/rebuild.go` implements the specified REBUILD_OFFER (0x1004) and
 STATS_FRAGMENT (0x1007) payload codecs with round/identity checks, bounded fragment
-sizes and counts, and strict decoding. These are wire primitives only: the live
-single-node dispatcher still returns 501 for the unimplemented peer operations.
+sizes and counts, and strict decoding. These offer/fragment primitives remain
+separate from the implemented single-primary scoped handoff path (0x1050–0x105f).
+The general race-election algorithm is deferred pending stress measurements.
 
 `server/rebuild_race_test.go` is a deterministic event-scheduler baseline. It
 uses those codecs and real serialized collector snapshot layouts, models 2/3/5/9/32
@@ -344,9 +346,10 @@ object itself, rather than an unconditional bucket-ID/physical-volume override.
 Existing system descriptions are migrated once without replacing user accounts
 or payloads. Missing/corrupt established PG metadata is an error, never a reset.
 
-PG editing in the dashboard and cross-node desired/effective PG commits still
-need the durable control/rebuild implementation. These filters do not claim
-that global PG replication, migration or membership is complete.
+Cross-node desired/effective PG changes use the durable global control path;
+range handoffs evacuate placements before the desired mask becomes effective.
+Native PG list/set/delete and bucket-PG messages are available. A dedicated
+PG editor in the dashboard remains pending.
 
 ## Multinode acceptance gate
 
@@ -433,62 +436,459 @@ rebuild. Model scheduler results are not real cluster availability measurements.
 The user's existing local volumes and accounts must survive upgrades; use
 separate fixtures for destructive/failure tests.
 
-## Durable global participant path (not default daemon admission yet)
+## Durable daemon control and range handoff
 
-`control_journal.go` stores hash-chained atomic records in a private node-local
-volume. Existing unformatted, foreign, truncated or modified state is rejected;
-it is never reformatted or silently replaced. The requester is persisted before
-the first remote reservation, separately from the local participant slot.
-READY, COMMIT, APPLIED, abort and release proofs survive file reopen. An
-unprepared requester cancels every bound participant; a prepared requester
-finishes the original decision after reconnect. Completed proofs remain
-available for delayed retries, including after a coordinator leaves membership.
+Production `Open` activates the global controller, immutable system checkpoints
+and separate node-local `control.stqr`/`ranges.stqr` journals. Bootstrap commits
+its own system state; discovered candidates join through the ALL participant
+barrier. User/bucket admin changes from any member prepare an isolated metadata
+draft and publish only after commit. Local volume configuration remains local.
+The explicit transport-only test helper does not describe production admission.
 
-`system_image.go` copies immutable, content-addressed system objects and validates
-the complete accounts/PG/bucket/map graph before READY. The local head is
-published only after ALL-COMMIT. Passwords remain bcrypt verifiers; local volume
-configuration and discovery caches are not installed as another node's config.
+The complete accounts/PG/bucket/map graph is validated before READY. The system
+head precedes APPLIED; replay reinstalls that head into fresh runtime memory.
+A requester is durable before its first remote reservation. Unprepared recovery
+cancels all bound participants; prepared recovery finishes the same decision.
+Proofs remain available after release and voluntary membership departure.
 
-`control_coordinator.go` and `control_peer.go` run the global participant barriers
-through native authenticated Q messages 0x1040–0x1045. A runtime installer must
-succeed before APPLIED is recorded. The ordinary daemon does not activate these
-handlers yet: bootstrap/recovery, runtime installation, global admin mutations
-and automatic candidate admission must be connected together first. Unactivated
-control RPCs return 503; this work does not advertise data authority.
+Single-primary ranges have independent durable source/target transitions.
+Disjoint scopes may proceed without an unrelated offline member. A plan claims
+its complete old parent, splits only the selected path, bulk copies data, fences
+source mutations, catches up canonical versions and retry receipts, then commits
+ownership. Old physical records are purged only after target commit. Cleanup
+never invents a higher-version tombstone. Global admin checkpoints collect
+committed scoped archives under ALL reservations before capturing the map.
 
-`admin_draft.go` prepares native user/bucket mutations on a private metadata
-volume before they become proposed system objects. Native validation, password
-hashing and retry receipts are reused, with current-account authorization rather
-than a stale socket role. The draft preserves source description revisions and
-maintenance exclusion, can grow privately, and never saves the node config.
-Borrowed data volumes are read only: object mutation and cleanup are prohibited;
-deletion/policy intents do not start workers. Closing the draft closes only its
-private metadata root. Routing live global administration through this helper
-and the ALL controller is still pending daemon integration.
+The automatic planner uses class, PG masks, active physical capacity and local
+node/volume drain intent. It prefers cheaper, including empty, halves and reacts
+to physical admission pressure for concentrated object hashes. Physical import
+reservations prevent ordinary writes from consuming another handoff's capacity;
+reopening reconstructs them from durable plans and canonical target indexes.
+Transfer chunks are at most 1 MiB. Temporary payload files and paginated index
+walks bound memory. Per-object copy memos live in a private indexed volume,
+not an unbounded RAM map or permanently appended per-object journal records;
+completed memos are reclaimed in batches.
 
-Validation separates journal/coordinator recovery from actual transport:
+Declined offers are durably cancelled on both participants before releasing
+source intent; delayed RESERVE cannot revive them. A fresh attempt ID permits
+replanning the same unchanged parent. Aborted staged copies/receipts and transfer
+memos are reclaimed in bounded pages while protecting newer owners/active scopes.
+Bucket quota/policy claims bind durable per-bucket mutation fences. Global quota
+shrinks sum fresh authoritative usage from every reserved participant; abort and
+release clear the fence without blocking unrelated buckets or reads.
+Desired class/PG changes advance the current primaries' own ranges through
+scoped handoffs; reads resolve each range against its effective/desired policy
+version. The global policy is activated only after all ranges reach the desired
+version. Suitable existing local targets are preferred, and their canonical
+objects use atomic codec rewrites rather than purge/reimport. Pure codec changes
+run under the global metadata barrier without unnecessary ownership movement.
 
-- `TestControlCoordinatorRecoversLostAcknowledgements` reopens real journals
-  after lost PREPARE/COMMIT/APPLIED/RELEASE replies, using modeled publication.
-- `TestControlCoordinatorCrashBeforeOwnReservation` covers the first remote
-  grant followed by restart, cancellation and delayed RESERVE rejection.
-- `TestPeerControlSystemCommit` uses real authenticated WebSockets and real
-  system-head publication, with explicit test runtime installers. Missing
-  referenced children prevent READY; completing the transfer lets the same
-  request finish. This is not automatic daemon admission or user-object I/O.
-- `TestControlRuntimeRestoresPublishedAndAppliedImages` reopens the journal
-  after head publication before APPLIED, finishes the same durable decision,
-  and reinstalls an already applied image into fresh runtime memory. Missing
-  heads/children and a head contradicting the journal are rejected.
-- `TestAdminDraftUserMutationDoesNotPublish` and
-  `TestAdminDraftBucketDeletionCannotTouchData` cover private hashing/receipts,
-  private root growth, stale-admin rejection, maintenance exclusion and the
-  absence of live metadata/data/config changes or cleanup workers.
+A committed bucket DELETE intent also drives idempotent cleanup on every member;
+the follow-up global checkpoint marks deletion complete only after all local
+object and retry indexes are empty. Tombstoned catalog identity survives restart.
 
-The client `PartialMap` merges overlapping portions by OwnerEpoch and then
-compatible policy advancement. Disjoint updates do not compete through a global
-map revision. Tests cover reordered independent updates, partial snapshots and
-old full snapshots without rollback of newer ownership. Server-side scoped
-transition proofs and the scope scheduler remain separate pending work.
-`FuzzPartialMapMerge` compares the segment cache against independent per-hash
-learning with overlapping patches and reordered ownership/revision updates.
+The SDK learns validated partial maps, authenticates destinations in the same
+cluster, and maintains independent routed connections. A paused owner does not
+block known independent ranges. RAM requests bind a range runtime before their
+first mutation; a sole RAM copy lost on restart commits an empty new runtime
+before serving again, and old-runtime retries are rejected.
+
+SIGTERM/SIGINT and native NODE_SHUTDOWN mode SHORT persist PAUSED, stop new local
+mutations, flush and send GOAWAY. Placement and membership remain. An explicit
+NODE_DRAIN evacuates ordinary ranges and requests membership removal through a
+persisted surviving coordinator. The leaver retains its bound metadata anchor
+only for barrier recovery after its active system PG placement is removed.
+It stops after ALL release/request completion; `drain_complete` prevents an
+unattended restart from silently creating/rejoining a cluster. An explicit volume
+drain releases its device claim only when no map/active handoff references it
+and both object and retry indexes are empty. Files are never unlinked by detach.
+The dashboard offers native delegated volume management, node maintenance and
+node drain; no separate administration CLI is introduced.
+
+Integration evidence uses disposable local daemons and real HTTP/WebSocket
+connections, separate from deployment or performance claims:
+
+- `TestDaemonControlBootstrapAndAutomaticJoin`: admission, administration from
+  both members, reverse restart, waiting SHORT reads, exact persisted requester
+  recovery, bulk-copy writes, final catch-up, APPEND retry identity and cutover.
+- `TestDaemonAutomaticExtension`: 6 MiB through one client on two 4 MiB data
+  volumes, automatic distribution, volume evacuation/detach, node departure and
+  restart after APPLIED while ALL release is deliberately withheld.
+- `TestDaemonExtensionWithConcentratedObjectHashes`: capacity handoff despite all
+  new hashes sharing the same initial half; authoritative usage excludes copies.
+- `TestDaemonCodecPolicyConvertsEveryOwner` and
+  `TestDaemonStorageClassPolicyMovesToEligibleOwner`: distributed physical codec
+  changes, combined HDD->SSD/raw->lz4 handoff, unchanged versions and restart.
+- `TestDaemonBucketDeletionReclaimsEveryNode`: replicated DELETE intent, physical
+  object/receipt cleanup on both members, map removal and restart persistence.
+- `TestDaemonNativeShortShutdownCommand` and the process signal tests: native
+  command/operation status, GOAWAY, unchanged ownership and persistent data.
+- `TestDaemonRAMRuntimeResetFencesOldRetries`: lost single RAM copy, durable
+  runtime advancement, fresh access and rejected old retries.
+- `TestDaemonRAMNodeDrainPreservesLiveRuntime`: live RAM evacuation, unchanged
+  content/version/runtime through the existing client, and loss of the last RAM
+  copy after its new owner restarts.
+- `TestDaemonRAMHandoffCrashRecovery`: process loss before sealing, after target
+  READY, after source COMMIT and after target COMMIT; sealed copies survive a
+  source restart, unsealed shadows never become replicas, and lost committed
+  RAM is never restored from an obsolete source.
+- `TestDaemonClusterShutdownAndReverseRestart`,
+  `TestDaemonClusterShutdownWaitsForEveryReadyAfterCrash` and
+  `TestDaemonClusterShutdownMissedStopWaitsForReconnect`: ALL-READY before STOP,
+  persistent mutation fences, reverse restart, missed STOP redelivery and
+  idempotent old certificates. The dashboard uses NODE_SHUTDOWN mode 2.
+
+Native clients process GOAWAY before retrying pending requests. A departed
+primary invalidates only its old routing segments; independent/newer segments
+remain. SHORT retains placement. A broken cached connection refreshes routing
+through another known member without declaring the original owner failed.
+
+Native object inventory and the S3 adapter's inventory merge bounded pages from
+the bucket's current owners. Per-owner map stamps reject a half-applied handoff;
+tombstones advance cursors without leaking deleted entries or skipping remote
+objects. A required offline owner prevents a successful partial list, while
+unrelated object reads remain available. Delegation revalidates the current user
+and ACL on the target and cannot access the system namespace. The merge retains
+at most one result page plus one candidate page, independently of node count.
+`TestDaemonInventoryMergesTombstonesAndWaitsOnlyForOwners` covers paginated live
+objects on both nodes, deletions, SHORT waiting and reconnection.
+
+Multi-node S3 requests use the native bucket SDK, including adaptive maps,
+streaming, retry identities and distributed inventory. A private node frontend
+connection binds the bucket, original HTTP grant, current account revision and
+a random live-operation ID. The target verifies that operation with its admitted
+issuer over the authenticated peer channel. A cluster token and catalog IDs
+alone cannot invent an ordinary user session. These connections cannot log into
+the dashboard or HTTP administration API. They are closed with the HTTP request;
+source shutdown cancels them, and DRAIN waits for active frontend operations
+before withdrawing their issuer. A departed issuer invalidates its sessions.
+`TestDaemonS3ExtendsAndReadsThroughEitherNode` stores six MiB on two four-MiB data
+volumes, reads through the other endpoint, lists both owners, checks HTTP 507 on
+physical exhaustion and exercises write-only/delete-only HTTP grants.
+`TestFrontendCredentialsStayPrivateAndBucketBound` covers forged operation IDs,
+wrong credentials/bucket, administrative HTTP denial and account revocation.
+
+Streaming mutation completion returns the same adaptive redirect headers as an
+inline mutation. Epoch/runtime bindings are checked again at the final storage
+access; a staged upload cannot silently enter a new RAM era. Streaming writes
+into an inherited RAM range report that range's runtime, not the target's boot.
+`TestStreamingPutFinishesWithMapRedirectAfterHandoff` pauses a two-MiB upload,
+commits handoff, then verifies the 301 patch and identical-ID retry at the target.
+
+Finite logical quotas now use durable per-node growth credits. Credit transfers
+flush the donor debit before transmission, then flush the recipient credit before
+acknowledgement. They have no timeout-based refund. Range handoffs carry their
+sealed live-byte total into both READY records and transfer that used budget at
+COMMIT. ALL checkpoints exclude unfinished grants/handoffs and retain per-node
+quota/range journal watermarks; changing limits creates a fresh quota epoch.
+Existing local credits can be spent while another node is SHORT-offline.
+The quota peer operations are 0x1060–0x1063; object-client Map/Policy bytes retain
+their existing schema. Physical exhaustion still independently returns 507.
+`TestQuotaTransferCrashWindowsConserveCredits` reopens both journals at DEBIT,
+RECEIVE and ACK boundaries. `TestDaemonFiniteQuotaAcrossOwnersAndRestart` covers
+parallel writers, hard exhaustion, a global checkpoint, reverse restart, remote
+credit reuse and an unrelated offline owner. `TestDaemonQuotaMovesLiveBytesAndChangesLimits`
+covers populated-range handoff, global shrink validation and quota-epoch ABA.
+
+PG administration and desired-mask activation have native operations 0x2030–0x2033
+and matching JavaScript wrappers. `TestDaemonPlacementMaskTransitionsKeepOldAndNewReadable`
+covers HDD and RAM, restart during transition, retirement of old storage, safe
+unassignment/deletion and create-request retries without resurrection. A PG
+editor in the dashboard has not been built yet.
+
+The complete cluster milestone is still pending. Guaranteed physical capacity,
+finite physical bucket quotas and recovery of a pending global control decision during forceful loss remain. The broader
+acceptance gate is not closed by the focused two-host test alone.
+Data replication is optional for the requested milestone and is not advertised
+as implemented. A transport-only heartbeat or two dashboard rows is insufficient
+evidence for a working storage cluster. No race-election algorithm is inferred
+from these tests; that remains subject to the requested stress measurements.
+
+
+## Opt-in two-host acceptance
+
+`TestSSHClusterAcceptance` runs a temporary local node and a temporary daemon on
+an explicitly supplied SSH host. It copies the candidate into a unique `/tmp`
+directory, uses new identities and volumes, and never restarts or reformats the
+existing PM2 deployment. All admin mutations use native binary messages.
+
+```sh
+go build -race -o /tmp/stqr-cluster-candidate .
+STQR_TEST_SSH=stqr \
+STQR_TEST_LOCAL_IP=192.168.178.108 \
+STQR_TEST_REMOTE_IP=192.168.178.34 \
+STQR_TEST_BINARY=/tmp/stqr-cluster-candidate \
+go test -race ./server -run '^TestSSHClusterAcceptance$' -v -timeout 180s
+```
+
+The test has passed over these two real hosts: six MiB in two four-MiB data
+volumes, remote volume creation, cross-host reads with unchanged versions,
+finite quota measured from both owners, production SIGTERM/SHORT, full CLUSTER
+STOP with the former joiner starting first, remote volume evacuation/detachment,
+node departure and continued use of the original client connection. All test
+processes and temporary remote data are cleaned up. This is correctness evidence,
+not a throughput measurement or a claim of implemented data replication.
+
+Local logical usage is counted once per committed placement image, then adjusted
+under the same storage-commit boundary as mutations. Repeated operations do not
+charge twice. This uses one scalar per bucket, not an object-sized RAM index.
+Warm administrative usage reads use 0x1064 with current owner-map stamps; they do
+not stream every object record on each dashboard refresh. Physical reservation
+promises continue to use separate admission proofs, never these measurements.
+
+The volume engine accepts a bounded `GuaranteedAllowance` independently of
+`InFlightAllowance`. Both are charged exactly once against actual physical net
+growth; another bucket's reserve remains protected. `UseGuaranteed` is a trusted
+whole-reserve option and must not be used to share guarantees between buckets.
+`TestGuaranteedAllowanceProtectsOtherBucketsAndImports` and
+`TestCombinedImportAndGuaranteeAllowanceChargesOnce` verify isolation, physical
+counter sums, failed writes and request replay. Full bucket guarantee allocation
+is still unsupported; this engine primitive alone does not promise capacity.
+
+
+## Explicit exclusion recovery
+
+Native FORCE_DISCONNECT (0x2013) binds a canonical victim list, the expected
+membership epoch and explicit data-loss/external-fencing confirmations. Every
+survivor must participate; transport loss alone never removes a member. The
+lowest surviving ID coordinates and 0x1065 delegates from other admins. Capability
+64 identifies range recovery; capability 128 gates the extended global recovery path. Existing complete operation receipts remain valid
+after the epoch advances and after restart.
+
+An ALL-survivor promise pauses ordinary scoped transitions. 0x1067 collects
+bounded participant pages and durably resolves interrupted offers. A surviving
+source retains uncommitted data; a sealed orphan target can be promoted through
+the new immutable system graph. A known COMMIT is retained, never rolled back to
+an obsolete source. If both participants survive, the exact target COMMIT is
+completed through 0x1066 before quota checkpointing. An unfinishable committed
+participant claim is retired without erasing its historical proof. Cleanup
+rechecks authority immediately before each physical deletion. Unsealed fragments
+are not recovered as acknowledged data.
+
+Finite quotas are reinitialized from the planned ownership image, including
+promoted sealed bytes and excluding newly LOST stale copies. Old-epoch stranded
+grants cannot spend against the new allocation or block later administration.
+LOST absence returns 410; full PUT or explicit DELETE can establish a new known
+state. Partial operations cannot invent missing prior bytes. Historical PREPARE
+returns its saved READY without sweeping later repairs.
+
+Tests cover bulk interruption, READY, source/target COMMIT, delayed old requests,
+restart, stale object and retry-record removal, lost quota acknowledgements,
+three-node delegation and a source-only COMMIT between surviving participants.
+The last case also checks a separate bounded admin queue: otherwise a delegated
+coordinator and its caller could wait for callbacks on the same dispatch worker.
+The optional NODE_HELLO_ACK boot identity binds reverse peer traffic to the
+actual process while leaving canonical membership digest bytes unchanged.
+
+A retained, restarted RAM source can finish its exact offer from a sealed live
+remote target under the exclusion fence, retaining the original runtime and
+counting the recovered bytes in its fresh quota allocation. The corresponding
+three-node restart test passes repeatedly.
+
+Global control recovery inspects durable COMMIT witnesses (0x1068) before a new
+exclusion is constructed. 0x1070 replays that exact proposal and ALL-READY
+certificate, including administration, shutdown, joins, cooperative departures
+and a previously committed exclusion. Bound joining candidates are inspected;
+a COMMIT visible only there is retained. Admin demotion by the parent takes
+effect before the new exclusion. Extended claims retain the original observed
+epoch and operation ID through membership recovery. Applied parent slots are
+archived durably when a later FORCE supersedes their unfinished release, so old
+operation receipts remain answerable after restart.
+
+Every survivor durably records the construction barrier (0x1069) before range
+recovery can mutate private staging. Cancellation before that barrier restores
+the suspended control slot and requester. Pending retries after local APPLY
+resume the original exclusion instead of creating another membership change.
+Tests cover these transitions and both living/lost earlier coordinators.
+Still pending: superseding an uncommitted earlier FORCE construction or a bound
+uncommitted join; these paths reject or wait without discarding sealed state.
+No real deployment has been force-disconnected for these tests.
+
+The dashboard seeds offline member rows from the committed system image. It
+retains departed/excluded reports for inspection but excludes their capacity
+from current cluster totals. `NODE_CONFIG_GET` adds `member_nodes`,
+`excluded_nodes` and decimal-string `membership_epoch`; no browser u64 rounding
+is allowed. Statistics bit 9 (`GLOBAL_CONTROL`) exposes a pending control round
+through a small immutable activity snapshot, without taking the ledger lock
+under the node configuration lock.
+
+The dashboard's explicit exclusion dialog uses native 0x2013, requires both
+loss and external-fencing confirmations, retains its operation ID/observed epoch
+on ambiguous outcomes, and polls the original operation while it is running.
+
+
+## Integrated multipart and copy routing
+
+The merged S3 implementation uses `openS3` for ordinary HTTP operations,
+CopyObject/UploadPartCopy sources and background multipart recovery/expiration.
+Every path routes through bucket objects when there are multiple members;
+private frontend credentials keep the original account/permission and are
+released at the end of the operation. A temporarily unreachable credential
+issuer returns 503 instead of a false 401 during SHORT/reconnect.
+
+`TestDaemonS3MultipartCopyAndExpiryAfterMigration` moves an open multipart upload
+to the other node, completes it through the former owner, copies its content,
+recovers an interrupted publication after frontend restart, and expires staged
+parts on the remote owner. Payloads, successful completion and reclaimed remote
+physical bytes are checked. `TestFrontendIssuerOfflineRemainsRetryable` checks
+that a missing issuer preserves 503 while invalid credentials remain rejected.
+
+`TestDaemonUpgradeFromDiscoveryOnlyCluster` opens a prior discovery-only setup
+with existing acknowledged data, restarts the join-pending node first, and checks
+shared committed membership, unchanged object bytes/versions and local volume
+ownership. The existing deployment was backed up before its matching upgrade.
+
+## PM2 shutdown behavior
+
+A supervisor must preserve a successful administrative shutdown. For PM2 use
+`stop_exit_codes: [0]` and a suitable graceful `kill_timeout` (the test uses
+30000 ms). Otherwise PM2 immediately resurrects a drained node or a cluster STOP.
+An explicit `pm2 restart stqr` still starts the process again; the terminating
+SIGINT/SIGTERM takes SHORT and retains placement/data. Nonzero failures retain
+PM2's ordinary restart policy. Save the configured entry with `pm2 save`.
+
+`TestSSHPM2ClusterAcceptance` runs the same two-host correctness checks using a
+unique temporary PM2 entry, including full STOP/restart and final node DRAIN.
+Enable it with `STQR_TEST_PM2=1` alongside the SSH test variables. Cleanup deletes
+only the test entry; the test never saves PM2's list or changes the existing
+service. This additional acceptance test passed on the supplied SSH host.
+
+## Rescuing data volumes from failed hardware
+
+The replacement has a fresh node ID. Permanently stop or isolate the old process
+before choosing **Node ersetzen** in the dashboard. This executes
+`NODE_RECOVERY_BEGIN` (0x2014): survivors remove the old member, preserve its disk
+range provenance and hold unavailable ranges with 503. This path does not accept
+loss. Other ranges remain available and a new replacement can join normally.
+The remaining cluster must retain its committed system state.
+
+Attach the old disks to a surviving/new node and choose **Gerettete Volumes**.
+Vormerken sends `VOLUME_RECOVERY_STAGE` (0x2015) with a name and existing absolute
+path. No creation or formatting occurs. Select the full set and take it over
+with `VOLUME_RECOVERY_COMMIT` (0x2016). Unpinned ranges can span multiple drives;
+all cohort members need matching durable ownership witnesses. Missing media,
+missing provenance or an unresolved source-migration fence are rejected with
+409. Policy or quota violations prevent activation. `VOLUME_RECOVERY_RELEASE`
+(0x2017) releases an unactivated staged drive without rebinding it.
+
+All current nodes approve the new range owner; only afterwards are the header
+owner and local provenance changed atomically and the volume activated. Payload
+is not copied. Versions, tombstones and retry receipts survive. A committed
+interrupted takeover resumes on restart. Admin operations use stable request IDs;
+ambiguous outcomes can be checked with OPERATION_STATUS. Staging and release
+receipts remain local, while recovery decisions are in the replicated system
+manifest. NODE_ADMIN can target another node for all three volume operations.
+
+Imported drives remain restricted to their imported scopes, including after
+restart. Unrelated stale objects cannot override live data or become migration
+input. Pending ranges stay unavailable until their complete media cohort is
+recovered. Old LOST semantics remain LOST after recovery. A later cooperative
+drain migrates valid scopes before discarding proven obsolete copies.
+
+This requires format-3 provenance to have been written before failure. Existing
+format-2 volumes are upgraded in place when the new daemon writes; a previously
+failed format-2 node with no provenance still needs its original recovery state.
+Upgrading is one-way: older binaries reject format 3. Back up volumes and node
+configuration before upgrading.
+
+A source fence can now be resolved when the surviving migration target never
+published READY and durably cancelled that exact attempt under
+NODE_RECOVERY_BEGIN. After all survivors reserve the exclusion, the coordinator
+collects target cancellation proofs and seals the canonical plans and proofs
+into their recovery origins. Each target validates its own journal before
+voting READY. The original source's data file can then be adopted, including
+writes acknowledged after the interrupted bulk copy. A sealed or committed
+handoff is handled by the existing commit/promotion path; it is never reclassified
+as an unsealed cancellation. Unknown fences still return 409.
+
+Cancellation proofs survive a coordinator crash before recovery READY and remain
+immutable after publication. They do not become promises for later attempts.
+Cancelled import cleanup checks the exact volume/cohort, rather than treating
+every copy on the current owner's node as authoritative. This also releases
+obsolete high-version shadows without changing recovered data or retry receipts.
+
+HELLO capability bit 1024 (`CapabilityRecoveryFenceClearance`) covers these
+extended recovery origins. Recovery operations require capable survivors before
+starting; an older candidate is not bound into a new join once the parent graph
+contains such origins. Ordinary FORCE scope reports retain their existing shape.
+
+`TestRecoveryRebuildsCancellationEvidenceAfterCoordinatorRestart` interrupts the
+coordinator after target cancellation and before recovery READY.
+`TestSSHRecoveryFenceClearance` uses two real hosts, stops the source after its
+fence, moves only its data volume over SSH and checks content, versions and
+APPEND retry identity before and after restarting the surviving daemon. The
+temporary test nodes never modify the existing deployed PM2 process.
+
+## Central placement-group storage policies
+
+Buckets select a placement group (PG); the PG owns storage class, compression,
+replication/ACK settings, optional failure-domain constraints, read-cache settings
+and the node/volume mask. Bucket limits, grants and names remain independent.
+`BucketPolicy` storage fields and the existing object-client Policy frames are
+materialized projections of an immutable PG version, not separate overrides.
+The system-image validator verifies these projections before activation.
+
+The dashboard's **Placement Groups** page edits the shared policy and its node
+list. Each node offers **Alle / Blacklist / Whitelist**; the volume add/remove
+list appears only for the latter two modes. Bucket dialogs select a PG and show
+its storage settings as read-only values. A change fans out to every referring
+bucket and remains desired until each bucket/range completes its existing
+migration path. Offline work stays pending; the old effective PG version remains
+available. New buckets can select the committed desired version during a change.
+The system PG stays reserved for membership-managed metadata placement.
+
+PG SET schema 2 sends a `PlacementMask` JSON object containing `node_selection`,
+`nodes`, `failure_domains` and a `storage` object. Schema 1 remains a mask-only
+compatibility operation. The new bucket-create opcode takes a PG ID and binary
+limits, without independently editable storage fields. Legacy flat create/set
+requests select a centrally stored compatibility PG for their storage contract.
+Startup upgrades old catalogs to schema 2, preserves existing masks, effective and
+desired contracts, and shares equal legacy contracts. It persists PGs before
+publishing bucket references and can resume an interrupted upgrade.
+
+When adding a volume, checkboxes optionally add its ID to existing node-specific
+PG blacklists/whitelists. The volume is mounted with a persistent placement hold
+and reported as PENDING until the list commits permit release. Whitelist additions
+can receive migrations after their desired version commits; blacklist exclusions
+must already be effective before release. Failed/interrupted additions retain the
+volume and show **PG-Listen fortsetzen**; retries do not create another volume.
+These operations can also target another node through the existing node wrapper.
+
+Current implementation limits still apply: multiple synchronous data replicas,
+EC, active read caches, guaranteed reservations and nonempty disk/RAM conversion
+are not implemented. Moving these settings into a PG does not enable them;
+unsupported replica/conversion requests fail explicitly.
+
+Validation covers shared policy changes with individual quotas and payloads,
+legacy migration/restart, persistent offline intents, two-node convergence,
+volume holds across restart, binary dashboard commands and exact uint64 values.
+The optional browser test `TestDashboardCentralPGBrowser` creates a PG and two
+buckets, checks volume-filter visibility and applies a shared compression change.
+
+## Dashboard cursor pages and endless scrolling
+
+The user and bucket screens fetch 50 entries initially and append another cursor
+page near the end of the visible list. Hidden screens do not drain remaining
+pages. Existing rows are retained when appending; there are no page-number or
+next/previous controls. Search is performed by the API, including entries which
+have not yet been loaded. Sidebar totals represent all records, rather than the
+number of rendered rows. Add buttons remain in the page heading.
+
+`USER_LIST_PAGE` (0x2038) and `BUCKET_LIST_PAGE` (0x2039) use
+`schema:u16=1,after_name:Text,limit:u32,query:Text,ids:Vec(ID)`.
+The limit is 1..1000; `ids` contains at most 1000 distinct nonzero IDs and an empty
+vector means no ID restriction. The response is a Text JSON object with
+`users`/`buckets`, `next`, matching `total` and unfiltered `all_total`. Bucket pages
+also report matching `active` and `locked` counts. An empty next cursor ends the
+list. Pages sort by unique name and use an exclusive name cursor; this is a live
+administrative listing, not a snapshot across concurrent renames.
+
+User entries contain only ID, name, numeric role and disabled state. Bucket
+receipts and account verifiers are excluded. Both endpoints require current
+administrator authorization and do not acquire a global mutation round.
+Legacy list opcodes retain their existing byte layouts for older clients.
+
+The PG list supplies derived `bucket_count` and `pending_buckets`, avoiding a
+complete bucket download for its overview. User selectors search bounded API
+pages and resolve existing grants by explicit IDs. Periodic bucket usage refresh
+is restricted to visible rows instead of reloading every visited page.

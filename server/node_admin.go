@@ -3,6 +3,19 @@ package server
 
 import "github.com/launix-de/stqr-storage/client"
 
+// Delegated control operations must leave the ordinary duplex worker free for
+// PREPARE and READY callbacks. Both queues are bounded by the peer transport.
+func isControlPeerRequest(m client.Message) bool {
+	if m.Opcode == peerForceAdmin {
+		return true
+	}
+	if m.Opcode == client.PeerAdminRequest {
+		request, err := client.DecodePeerAdmin(m.Body)
+		return err == nil && request.Opcode == client.VolumeRecoveryCommit
+	}
+	return false
+}
+
 func (s *Server) nodeAdmin(m client.Message, ws *wsSession, p principal) ([]byte, int) {
 	failure := func(status int, detail string) ([]byte, int) {
 		return client.ResponseBody(status, nil, detail), status

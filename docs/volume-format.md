@@ -1,4 +1,4 @@
-# Volume library and on-volume format 2
+# Volume library and on-volume format 3
 
 The implementation is the Go package `github.com/launix-de/stqr-storage/volume`.
 There are no UI handlers, CLI commands, or networking code. Runtime files live in
@@ -103,10 +103,12 @@ An explicit codec change uses `Recompress`, preserving the logical version.
 can replace a corrupted physical representation at the same logical version.
 These are trusted server primitives, not authority to perform a cluster cutover.
 
-## Packed format 2
+## Packed format 3
 
-The pre-release format was replaced, not kept as a runtime compatibility mode.
-Existing local data was exported with the old binary and rebuilt separately.
+The packed object layout from format 2 is retained. Format 3 adds a private
+management-root pointer and length at superblock offsets 160 and 168. Format-2
+volumes open without copying data and are upgraded on the next transaction.
+Older binaries reject version 3; a downgrade after writing is unsupported.
 
 The physical layout starts with two alternating 4096-byte superblocks, two
 commit-anchor pages and eight redo scratch pages (32 KiB). The initial object
@@ -246,3 +248,27 @@ tail reuse, sparse ranges, codecs, bounded caches, B+-tree splits/merges, exact
 free-space accounting, growth/shrink, overlapping defrag and crashes at individual
 writes/syncs. Hardware power-loss behavior and benchmarks still need separate
 measurement. There is intentionally no README or performance claim yet.
+
+## Private recovery provenance
+
+`Handle.LocalMetadata` / `SetLocalMetadata` read and atomically replace a private
+management record, limited to 64 MiB. The record is not a client object and does
+not alter object counts, logical bytes, payload addresses, versions or retry
+records. Its pages count as physical metadata. A page is 4096 bytes: magic
+`STQRMET1` at 0, volume ID at 8, next-page offset at 24, payload length at 32,
+payload at 40, and CRC32C at 4092. Each page holds at most 4048 payload bytes;
+unused bytes are zero. Existing pages are updated through redo, allowing changes
+without allocating a duplicate chain on a full volume. Clearing/shrinking the
+record releases surplus pages. Scrub checks it and Export/Import preserve it.
+
+`ReassignIdentityWithMetadata(expected, newNode, record)` atomically publishes
+the new owner and provenance through the same redo transaction, with exact
+identity comparison and an unchanged cluster/volume identity. The server calls
+this only after its durable ALL-approved takeover. `ReassignIdentity` is a
+lower-level identity-only primitive and cannot establish cluster authority.
+
+The server records authoritative ranges and their entire physical volume cohort
+before admitting further writes. It invalidates source claims before a migration
+FENCE. A disk without this provenance, an incomplete cohort or an unresolved
+source fence cannot be adopted merely because it contains an object index.
+See specification §8.2.3 for the administrative recovery protocol.

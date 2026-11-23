@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-only
+import {EndlessList} from './endless.js';
 import {newID,Writer} from './protocol.js';
 import {writeBucketPolicy,parseQuota,defaultBucketPolicy} from './bucket-codec.js';
 import {formatSize,sizeLabel,sizeSteps} from './size.js';
@@ -15,50 +16,70 @@ function bucketUsage(b,escape){
 }
 const permissions=[[1,'Lesen'],[2,'Schreiben'],[4,'Anhängen'],[8,'Löschen']];
 export function setupBucketViews({connection,escape,toast,showView}){
- let buckets=[],users=[],epoch=0,poll,editor,createProgress,access,grantRetry,action,actionRetry,editorPending=false;
+ let groups=[],buckets=[],users=[],epoch=0,poll,editor,createProgress,access,grantRetry,action,actionRetry,editorPending=false;
+ let pageMeta={},searchTimer,userChoices=[],userSearchTimer,userSearchEpoch=0;
  let quotaInfo=null,quotaSteps=[],quotaEpoch=0,quotaPoll,grantRows=[],lockRetry;
- async function fetchBuckets(){
-  const out=[],seen=new Set();let after='';
-  for(;;){const page=await connection().listBuckets(after);out.push(...page.buckets);if(!page.next)return out;if(seen.has(page.next))throw Error('Ungültige Bucket-Folgeseite.');seen.add(page.next);after=page.next}
+ async function fetchGroups(){const out=[];let after='';const seen=new Set;for(;;){const page=await connection().listPlacementGroups(after);out.push(...page.groups);if(!page.next)return out;if(seen.has(page.next))throw Error('Ungültige PG-Folgeseite.');seen.add(page.next);after=page.next}}
+ function applyGroup(){const g=groups.find(g=>g.id===$('bucket-pg').value);if(!g)return;const p=(g.desired??g.effective).storage;$('bucket-storage').value=p.storage_strategy;$('bucket-compression').value=p.compression;$('bucket-placement').value=p.placement_mode;$('bucket-replicas').value=p.redundancy.replicas||1;updateFields()}
+ $('bucket-pg').onchange=()=>{applyGroup();refreshQuota()};
+ const pager=new EndlessList({container:$('bucket-rows').closest('.storage-panel'),visible:()=>!$('buckets-view').hidden,fetchPage:(after,limit,query)=>connection().listBucketsPage(after,limit,query),entries:page=>page.buckets,onUpdate:(items,state)=>{buckets=items;pageMeta=state.meta;render(state);schedulePoll()},onError:e=>{$('buckets-error').textContent=e.message},onLoading:busy=>{$('refresh-buckets').disabled=busy}});
+ async function load(){const seq=++epoch;clearTimeout(poll);$('buckets-error').textContent='';try{groups=await fetchGroups();if(seq!==epoch)return;await pager.reset($('bucket-search').value.trim())}catch(e){if(seq===epoch)$('buckets-error').textContent=e.message}}
+ function schedulePoll(){clearTimeout(poll);if(!$('buckets-view').hidden&&buckets.some(b=>!b.policy.limits.absolute_unlimited||b.desired_policy||b.state==='deleting'))poll=setTimeout(refreshVisible,3000)}
+ async function refreshVisible(){
+  if($('buckets-view').hidden)return;const seq=epoch;
+  const ids=[...$('bucket-rows').querySelectorAll('[data-bucket]')].filter(row=>{const r=row.getBoundingClientRect();return r.bottom>=0&&r.top<=innerHeight}).map(row=>row.dataset.bucket);
+  if(!ids.length){schedulePoll();return}
+  try{const page=await connection().listBucketsPage('',Math.max(1,Math.min(1000,ids.length)),$('bucket-search').value.trim(),ids);if(seq!==epoch)return;
+   const updates=new Map(page.buckets.map(b=>[b.id,b])),removed=new Set(ids.filter(id=>!updates.has(id)));pager.items=pager.items.filter(b=>!removed.has(b.id)).map(b=>updates.get(b.id)??b);buckets=pager.items;pageMeta.all_total=page.all_total;if(removed.size)pageMeta.total=Math.max(0,(pageMeta.total??buckets.length)-removed.size);
+   for(const row of $('bucket-rows').querySelectorAll('[data-bucket]')){const b=updates.get(row.dataset.bucket);if(removed.has(row.dataset.bucket)){row.remove();continue}if(b){const wrapper=document.createElement('tbody');wrapper.innerHTML=rowHTML(b);row.replaceWith(wrapper.firstElementChild)}}if(!buckets.length)$('bucket-rows').innerHTML='<tr><td colspan="7" class="empty">Keine passenden Buckets.</td></tr>';bindRows();pager.status();$('bucket-count').textContent=String(pageMeta.total??buckets.length);$('nav-buckets-count').textContent=String(page.all_total);$('bucket-metric-count').textContent=String(page.all_total);
+  }catch(e){if(seq===epoch)$('buckets-error').textContent=e.message}finally{if(seq===epoch)schedulePoll()}
  }
- async function load({quiet=false}={}){
-  const seq=++epoch;clearTimeout(poll);if(!quiet)$('buckets-error').textContent='';$('refresh-buckets').disabled=true;
-  try{const list=await fetchBuckets();if(seq!==epoch)return;buckets=list;render();if(list.some(b=>!b.policy.limits.absolute_unlimited||b.desired_policy||b.state==='deleting'))poll=setTimeout(()=>{if(!$('buckets-view').hidden)load({quiet:true})},3000)}
-  catch(e){if(seq===epoch)$('buckets-error').textContent=e.message}
-  finally{if(seq===epoch)$('refresh-buckets').disabled=false}
- }
- function render(){
-  const query=$('bucket-search').value.toLowerCase().trim();$('bucket-count').textContent=String(buckets.length);$('nav-buckets-count').textContent=String(buckets.length);
-  const active=buckets.filter(b=>b.state==='active').length,locked=buckets.filter(b=>b.state==='locked').length;
+ function render({append=false,added=buckets}={}){
+  $('bucket-count').textContent=String(pageMeta.total??buckets.length);$('nav-buckets-count').textContent=String(pageMeta.all_total??buckets.length);
+  const active=pageMeta.active??0,locked=pageMeta.locked??0;
   $('bucket-summary').textContent=`${active} aktiv${locked?' · '+locked+' gesperrt':''}`;
-  $('bucket-metric-count').textContent=String(buckets.length);$('bucket-metric-state').textContent=$('bucket-summary').textContent;
-  $('bucket-rows').innerHTML=buckets.filter(b=>`${b.name} ${b.policy.storage_strategy}`.toLowerCase().includes(query)).map(b=>{
+  $('bucket-metric-count').textContent=String(pageMeta.all_total??buckets.length);$('bucket-metric-state').textContent=$('bucket-summary').textContent;
+  const html=(append?added:buckets).map(rowHTML).join('');if(append)$('bucket-rows').insertAdjacentHTML('beforeend',html);else $('bucket-rows').innerHTML=html||'<tr><td colspan="7" class="empty">Keine passenden Buckets.</td></tr>';bindRows();
+ }
+ function rowHTML(b){
    const p=b.policy,system=b.id===SYSTEM,busy=b.state==='deleting',locked=b.state==='locked';
    const disabled=system||busy?'disabled':'',changing=!!b.desired_policy;
-   return `<tr data-bucket="${b.id}"><td><div class="user-cell"><span class="bucket-avatar">▱</span><div><div class="volume-name"><button type="button" class="bucket-open" data-bucket-edit="${b.id}" ${disabled||changing?'disabled':''}>${escape(b.name)}</button>${system?'<span class="system-label">SYSTEM</span>':''}</div><div class="volume-path">${escape(b.id)}</div></div></div></td><td><span class="class-badge ${p.storage_strategy}">${p.storage_strategy.toUpperCase()}</span><div class="bucket-sub">${p.placement_mode==='everywhere'?'Jede Node':p.redundancy.replicas+' Kopie'+(p.redundancy.replicas===1?'':'n')}</div></td><td><span class="class-badge">${escape(p.compression.toUpperCase())}</span></td><td>${bucketUsage(b,escape)}</td><td>${system?'Alle Admins':(b.grants??[]).length+' User'}</td><td><span class="state-badge ${busy?'draining':locked?'detached':''}"><i></i>${busy?'Wird gelöscht':changing?'Wird umgestellt':locked?'Gesperrt':'Aktiv'}</span></td><td><div class="row-actions bucket-actions"><button class="row-action" data-bucket-action="rename" data-id="${b.id}" ${disabled}>Umbenennen</button><button class="row-action danger-action" data-bucket-action="delete" data-id="${b.id}" ${disabled}>Löschen</button></div></td></tr>`;
-  }).join('')||'<tr><td colspan="7" class="empty">Keine passenden Buckets.</td></tr>';
+   return `<tr data-bucket="${b.id}"><td><div class="user-cell"><span class="bucket-avatar">▱</span><div><div class="volume-name"><button type="button" class="bucket-open" data-bucket-edit="${b.id}" ${disabled||changing?'disabled':''}>${escape(b.name)}</button>${system?'<span class="system-label">SYSTEM</span>':''}</div><div class="volume-path">${escape(b.id)}</div></div></div></td><td><span class="class-badge ${p.storage_strategy}">${p.storage_strategy.toUpperCase()}</span><div class="bucket-sub">${escape(groups.find(g=>g.id===p.placement_group)?.name??'PG')} · v${p.placement_mask_version??'—'}</div><div class="bucket-sub">${p.placement_mode==='everywhere'?'Jede Node':p.redundancy.replicas+' Kopie'+(p.redundancy.replicas===1?'':'n')}</div></td><td><span class="class-badge">${escape(p.compression.toUpperCase())}</span></td><td>${bucketUsage(b,escape)}</td><td>${system?'Alle Admins':(b.grants??[]).length+' User'}</td><td><span class="state-badge ${busy?'draining':locked?'detached':''}"><i></i>${busy?'Wird gelöscht':changing?'Wird umgestellt · PG v'+(b.desired_policy.placement_mask_version??'—'):locked?'Gesperrt':'Aktiv'}</span></td><td><div class="row-actions bucket-actions"><button class="row-action" data-bucket-action="rename" data-id="${b.id}" ${disabled}>Umbenennen</button><button class="row-action danger-action" data-bucket-action="delete" data-id="${b.id}" ${disabled}>Löschen</button></div></td></tr>`;
+ }
+ function bindRows(){
   for(const bar of $('bucket-rows').querySelectorAll('[data-percent]'))bar.style.width=bar.dataset.percent+'%';
   for(const b of document.querySelectorAll('[data-bucket-edit]'))b.onclick=()=>openEditor(b.dataset.bucketEdit);
   for(const row of document.querySelectorAll('[data-bucket]'))row.onclick=e=>{if(!e.target.closest('button,a,input,select'))openEditor(row.dataset.bucket)};
   for(const b of document.querySelectorAll('[data-bucket-action]'))b.onclick=()=>openAction(b.dataset.id,b.dataset.bucketAction);
  }
- $('refresh-buckets').onclick=()=>load();$('bucket-search').oninput=render;$('add-bucket').onclick=()=>openCreate();
+ $('refresh-buckets').onclick=()=>load();$('bucket-search').oninput=()=>{clearTimeout(searchTimer);searchTimer=setTimeout(()=>load(),250)};$('add-bucket').onclick=()=>openCreate();
  function fillEditor(b,create){
   const p=b.policy,l=p.limits;editor={bucket:b,create};createProgress=null;
-  quotaInfo=null;quotaEpoch++;clearTimeout(quotaPoll);$('bucket-create-form').reset();$('bucket-policy-fields').disabled=false;$('bucket-create-error').textContent='';$('bucket-editor-note').textContent='';
+ $('bucket-pg').innerHTML=groups.filter(g=>g.id!=='53545152535953504701000000000000').map(g=>`<option value="${g.id}">${escape(g.name)}</option>`).join('');$('bucket-pg').value=p.placement_group??groups.find(g=>g.name==='Standard')?.id??groups[0]?.id??'';
+  quotaInfo=null;quotaEpoch++;clearTimeout(quotaPoll);$('bucket-create-form').reset();userChoices=[];userSearchEpoch++;$('bucket-policy-fields').disabled=false;$('bucket-create-error').textContent='';$('bucket-editor-note').textContent='';
   $('bucket-editor-title').textContent=create?'Bucket anlegen':`Einstellungen · ${b.name}`;$('bucket-create-submit').textContent=create?'Bucket anlegen':'Änderungen speichern';$('bucket-create-submit').disabled=true;
   $('bucket-name').value=b.name;$('bucket-name').readOnly=!create;$('bucket-storage').value=p.storage_strategy;$('bucket-compression').value=p.compression;$('bucket-placement').value=p.placement_mode;
   $('bucket-replicas').value=String(p.redundancy.replicas||1);$('bucket-unlimited').checked=l.absolute_unlimited;$('bucket-quota').value=l.absolute_unlimited&&BigInt(l.absolute_quota_bytes)===0n?'1G':quotaText(l.absolute_quota_bytes);$('bucket-quota').setCustomValidity('');
   $('bucket-accounting').value=l.quota_accounting;$('bucket-guaranteed').value=quotaText(l.guaranteed_quota_bytes);$('bucket-object-size').innerHTML=(create||l.metadata_reserve_ppm===150000)?'<option value="5">1M (Blockdevices)</option>':'<option value="255">Bestehende Einstellung</option>';$('bucket-owner-section').hidden=!create;
   $('bucket-owner').innerHTML='<option value="">Keine zusätzliche Freigabe</option>';
   $('bucket-access-section').hidden=create;$('bucket-state-section').hidden=create;access=null;grantRetry=null;
-  updateFields();
+  applyGroup();updateFields();
  }
+ async function userCandidates(query,ids=[]){
+  const page=await connection().listUsersPage('',50,query),known=[];
+  for(let i=0;i<ids.length;i+=1000){const selected=await connection().listUsersPage('',1000,'',ids.slice(i,i+1000));known.push(...selected.users)}
+  return {choices:page.users,known};
+ }
+ function rememberUsers(result){const known=new Map(users.map(u=>[u.id,u]));for(const user of [...result.choices,...result.known])known.set(user.id,user);users=[...known.values()];userChoices=result.choices}
+ function renderOwnerOptions(selected=''){
+  const choices=[...userChoices],current=users.find(u=>u.id===selected);if(current&&!choices.some(u=>u.id===current.id))choices.unshift(current);
+  $('bucket-owner').innerHTML='<option value="">Keine zusätzliche Freigabe</option>'+choices.map(u=>`<option value="${u.id}">${escape(u.name)}${u.disabled?' (deaktiviert)':''}</option>`).join('');$('bucket-owner').value=selected;
+ }
+ for(const id of ['bucket-owner-search','bucket-grant-search'])$(id).oninput=()=>{clearTimeout(userSearchTimer);const seq=++userSearchEpoch,owner=editor;userSearchTimer=setTimeout(async()=>{try{const selected=$('bucket-owner').value,result=await userCandidates($(id).value.trim());if(seq!==userSearchEpoch||editor!==owner)return;rememberUsers(result);if(id==='bucket-owner-search')renderOwnerOptions(selected);else renderAccess()}catch(e){if(seq===userSearchEpoch)$(id==='bucket-owner-search'?'bucket-create-error':'bucket-access-error').textContent=e.message}},250)};
  async function openCreate({name='',userID=''}={}){
-  showView('buckets');const draft={id:newID(),name,state:'active',policy:defaultBucketPolicy()};fillEditor(draft,true);$('bucket-create-dialog').showModal();$('bucket-name').focus();
+  showView('buckets');groups=await fetchGroups();const draft={id:newID(),name,state:'active',policy:defaultBucketPolicy()};fillEditor(draft,true);$('bucket-create-dialog').showModal();$('bucket-name').focus();
   $('bucket-create-submit').disabled=true;let ready=false;const capacityReady=refreshQuota();
-  try{users=await connection().listUsers();if(editor?.bucket!==draft||!$('bucket-create-dialog').open)return;
-   $('bucket-owner').innerHTML='<option value="">Keine zusätzliche Freigabe</option>'+users.map(u=>`<option value="${u.id}">${escape(u.name)}${u.disabled?' (deaktiviert)':''}</option>`).join('');
+  try{const result=await userCandidates('',userID?[userID]:[]);if(editor?.bucket!==draft||!$('bucket-create-dialog').open)return;rememberUsers(result);renderOwnerOptions(userID);
    if(userID){if(!users.some(u=>u.id===userID))throw Error('Der neue Benutzer ist nicht mehr vorhanden.');$('bucket-owner').value=userID}
    await capacityReady;ready=!!quotaInfo;
   }catch(e){$('bucket-create-error').textContent=e.message;return}finally{if(editor?.bucket===draft)$('bucket-create-submit').disabled=!ready}
@@ -82,7 +103,7 @@ export function setupBucketViews({connection,escape,toast,showView}){
  async function refreshQuota(){
   clearTimeout(quotaPoll);const seq=++quotaEpoch,owner=editor,strategy=$('bucket-storage').value,profile=Number($('bucket-object-size').value);
   quotaInfo=null;syncQuota();$('bucket-create-submit').disabled=true;
-  try{const info=await connection().bucketQuotaCapacity(owner.create?'0'.repeat(32):owner.bucket.id,strategy,profile,owner.bucket.policy.limits.metadata_reserve_ppm);
+  try{const info=await connection().bucketQuotaCapacity(owner.create?'0'.repeat(32):owner.bucket.id,strategy,profile,owner.bucket.policy.limits.metadata_reserve_ppm,$('bucket-pg').value);
    if(seq!==quotaEpoch||editor!==owner||!$('bucket-create-dialog').open)return;
    quotaInfo=info;const match=info.profiles.find(p=>p.overhead===info.overhead),selected=profile===255&&match?match.key:profile;
    $('bucket-object-size').innerHTML=(selected===255?'<option value="255">Bestehende Einstellung</option>':'')+info.profiles.map(p=>`<option value="${p.key}">${escape(p.label)}</option>`).join('');$('bucket-object-size').value=String(selected);
@@ -109,8 +130,7 @@ export function setupBucketViews({connection,escape,toast,showView}){
 
  function readEditor(){
   if(!quotaInfo)throw Error('Kapazität wird noch ermittelt.');const base=editor.bucket,p=structuredClone(base.policy),unlimited=$('bucket-unlimited').checked;
-  p.storage_strategy=$('bucket-storage').value;p.compression=$('bucket-compression').value;p.placement_mode=$('bucket-placement').value;
-  p.redundancy={...p.redundancy,mode:p.placement_mode==='everywhere'?'replication':p.redundancy.mode,replicas:p.placement_mode==='everywhere'?0:1};
+  const group=groups.find(g=>g.id===$('bucket-pg').value);if(!group)throw Error('Bitte eine Placement Group auswählen.');Object.assign(p,structuredClone((group.desired??group.effective).storage));p.placement_group=group.id;
   p.limits={...p.limits,quota_accounting:$('bucket-accounting').value,absolute_unlimited:unlimited,absolute_quota_bytes:unlimited?base.policy.limits.absolute_quota_bytes:parseQuota($('bucket-quota').value).toString(),metadata_reserve_ppm:quotaInfo.overhead};
   const name=$('bucket-name').value;if(!name||new TextEncoder().encode(name).length>255||name.includes('\0'))throw Error('Der Name muss 1 bis 255 UTF-8-Bytes lang sein.');
   return {...base,name,policy:p};
@@ -121,18 +141,19 @@ export function setupBucketViews({connection,escape,toast,showView}){
   try{
    if(!createProgress?.created){await refreshQuota();if(!$('bucket-unlimited').checked&&!$('bucket-quota').reportValidity())return}
    const b=createProgress?.created?createProgress.bucket:readEditor(),owner=createProgress?.created?createProgress.owner:$('bucket-owner').value;
-   const signature=policyBytes(b)+':'+owner;if(createProgress?.signature!==signature)createProgress={signature,id:newID(),grantID:newID(),bucket:b,owner,created:false};
+   const signature=policyBytes(b)+':'+b.policy.placement_group+':'+owner;if(createProgress?.signature!==signature)createProgress={signature,id:newID(),grantID:newID(),bucket:b,owner,created:false};
    let result;
    if(editor.create){
     if(!createProgress.created){await connection().createBucket(b,createProgress.id);createProgress.created=true;$('bucket-policy-fields').disabled=true}
     if(owner)await connection().grantBucket(b.id,owner,15,createProgress.grantID);
    }else{
     const base=editor.bucket;
-    if(policyBytes(b)===policyBytes(base)){$('bucket-create-dialog').close();return}
+    if(policyBytes(b)===policyBytes(base)&&b.policy.placement_group===base.policy.placement_group){$('bucket-create-dialog').close();return}
     // A quota-only edit does not need a data/policy migration.
     const withoutQuota={...b,policy:{...b.policy,limits:base.policy.limits}};
-    if(policyBytes(withoutQuota)===policyBytes(base))result=await connection().setBucketQuota(b,base.policy.version,createProgress.id);
-    else{b.policy.version=(BigInt(base.policy.version)+1n).toString();result=await connection().setBucketPolicy(b,base.policy.version,createProgress.id)}
+    if(b.policy.placement_group!==base.policy.placement_group)result=await connection().setBucketPlacementGroup(b.id,base.policy.version,b.policy.placement_group,createProgress.id,b.policy.limits);
+    else if(policyBytes(withoutQuota)===policyBytes(base))result=await connection().setBucketQuota(b,base.policy.version,createProgress.id);
+    else result=await connection().setBucketPlacementGroup(b.id,base.policy.version,b.policy.placement_group,createProgress.id,b.policy.limits)
    }
    $('bucket-create-dialog').close();toast(editor.create?'Bucket wurde angelegt.':result?.state==='running'?'Bucket wird umgestellt.':'Bucket-Einstellungen gespeichert.');await load();
   }catch(err){$('bucket-create-error').textContent=createProgress?.created?'Bucket ist angelegt. Die Benutzerfreigabe fehlt noch: '+err.message:err.message;if(createProgress?.created)submit.textContent='Freigabe erneut versuchen';if(err.status===409&&!editor.create){$('bucket-editor-note').textContent='Die Konfiguration wurde zwischenzeitlich geändert. Bitte schließen und erneut öffnen.';await load()}}
@@ -141,9 +162,9 @@ export function setupBucketViews({connection,escape,toast,showView}){
  async function openAccess(id){
   const b=buckets.find(b=>b.id===id);if(!b||b.id===SYSTEM||b.state==='deleting')return;
   access=b;grantRows=[];grantRetry=new Map();$('bucket-access-error').textContent='';$('bucket-grant-add').disabled=true;$('bucket-grants').innerHTML='<tr><td colspan="6" class="field-note">Benutzer werden geladen …</td></tr>';
-  try{const list=await connection().listUsers();if(access?.id!==id||!$('bucket-create-dialog').open)return;users=list;grantRows=(b.grants??[]).map(g=>({user:g.user_id,mask:g.permissions}));renderAccess()}catch(e){$('bucket-access-error').textContent=e.message}
+  try{const result=await userCandidates('',(b.grants??[]).map(g=>g.user_id));if(access?.id!==id||!$('bucket-create-dialog').open)return;rememberUsers(result);grantRows=(b.grants??[]).map(g=>({user:g.user_id,mask:g.permissions}));renderAccess()}catch(e){$('bucket-access-error').textContent=e.message}
  }
- function availableUsers(row){return users.filter(u=>!grantRows.some(other=>other!==row&&other.user===u.id))}
+ function availableUsers(row){const choices=userChoices.filter(u=>!grantRows.some(other=>other!==row&&other.user===u.id));if(row?.user&&!choices.some(u=>u.id===row.user)){const current=users.find(u=>u.id===row.user);if(current)choices.unshift(current)}return choices}
  function renderAccess(){
   $('bucket-grants').innerHTML=grantRows.length?grantRows.map((row,i)=>{
    const u=users.find(u=>u.id===row.user),name=u?.name??'Gelöschter User';
@@ -182,5 +203,5 @@ export function setupBucketViews({connection,escape,toast,showView}){
    $('bucket-action-dialog').close();toast(kind==='delete'?'Bucket wird gelöscht.':kind==='rename'?'Bucket wurde umbenannt.':b.state==='locked'?'Bucket wurde entsperrt.':'Bucket wurde gesperrt.');await load();
   }catch(err){$('bucket-action-error').textContent=err.message}finally{e.submitter.disabled=false}
  });
- return {load,openCreate,clear(){epoch++;clearTimeout(poll);buckets=[];users=[];render()}};
+ return {load,openCreate,clear(){epoch++;clearTimeout(poll);clearTimeout(searchTimer);pager.clear();pageMeta={};userSearchEpoch++;clearTimeout(userSearchTimer);userChoices=[];buckets=[];users=[];render()}};
 }

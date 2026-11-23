@@ -52,6 +52,9 @@ func (c *Client) objectRef(e *Encoder, id ObjectID) {
 	e.U64(0)
 	c.mu.Lock()
 	runtime := c.runtime
+	if c.clusterRouting {
+		runtime = ID{}
+	}
 	c.mu.Unlock()
 	e.ID(runtime) // TODO(multinode): map revision/epoch and per-range runtime.
 }

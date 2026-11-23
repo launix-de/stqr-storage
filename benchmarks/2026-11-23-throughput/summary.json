@@ -1,0 +1,866 @@
+[
+  {
+    "case": "baseline_overlay",
+    "test": "create_close",
+    "n": 3,
+    "unit": "files/s",
+    "median": 4.1667043985682914,
+    "min": 3.901543295523825,
+    "max": 5.165611743672823
+  },
+  {
+    "case": "baseline_overlay",
+    "test": "create_fsync",
+    "n": 3,
+    "unit": "files/s",
+    "median": 3.491616576552424,
+    "min": 3.2869621973638523,
+    "max": 4.499598276938556
+  },
+  {
+    "case": "baseline_overlay",
+    "test": "open_read_close",
+    "n": 3,
+    "unit": "files/s",
+    "median": 67.7821053429048,
+    "min": 48.43422756307137,
+    "max": 111.48749863754998
+  },
+  {
+    "case": "baseline_overlay",
+    "test": "php_freq0_first",
+    "n": 3,
+    "unit": "includes/s",
+    "median": 27.43476872922809,
+    "min": 27.426721656837902,
+    "max": 28.347706152241123
+  },
+  {
+    "case": "baseline_overlay",
+    "test": "php_freq0_warm",
+    "n": 3,
+    "unit": "includes/s",
+    "median": 80.74496887860859,
+    "min": 78.59090606881524,
+    "max": 80.94521040927293
+  },
+  {
+    "case": "baseline_overlay",
+    "test": "php_freq2_first",
+    "n": 3,
+    "unit": "includes/s",
+    "median": 27.516242071324367,
+    "min": 27.28901660810041,
+    "max": 27.888081263902695
+  },
+  {
+    "case": "baseline_overlay",
+    "test": "php_freq2_warm",
+    "n": 3,
+    "unit": "includes/s",
+    "median": 7731803.08064029,
+    "min": 6925657.3963856725,
+    "max": 7792998.477929985
+  },
+  {
+    "case": "baseline_overlay",
+    "test": "seq_read",
+    "n": 3,
+    "unit": "MiB/s",
+    "median": 52.95564266816544,
+    "min": 42.50438228095191,
+    "max": 56.00416485738708
+  },
+  {
+    "case": "baseline_overlay",
+    "test": "seq_write_fsync",
+    "n": 3,
+    "unit": "MiB/s",
+    "median": 3.7265263524458283,
+    "min": 3.587526895381536,
+    "max": 3.727418443406905
+  },
+  {
+    "case": "baseline_overlay",
+    "test": "stat",
+    "n": 3,
+    "unit": "ops/s",
+    "median": 144.96644582020986,
+    "min": 87.17380296701327,
+    "max": 249.6542363484707
+  },
+  {
+    "case": "baseline_overlay",
+    "test": "stat_missing",
+    "n": 3,
+    "unit": "ops/s",
+    "median": 184.86687558387808,
+    "min": 114.25466419756279,
+    "max": 283.9876018104706
+  },
+  {
+    "case": "baseline_overlay",
+    "test": "unlink",
+    "n": 3,
+    "unit": "files/s",
+    "median": 26.092991714892108,
+    "min": 26.004970248884757,
+    "max": 75.2308129580438
+  },
+  {
+    "case": "baseline_ro",
+    "test": "open_read_close",
+    "n": 3,
+    "unit": "files/s",
+    "median": 161.75143198786347,
+    "min": 122.83434484389655,
+    "max": 180.94826247176107
+  },
+  {
+    "case": "baseline_ro",
+    "test": "php_freq0_first",
+    "n": 3,
+    "unit": "includes/s",
+    "median": 83.31764206105153,
+    "min": 77.53769634130299,
+    "max": 85.38344823751957
+  },
+  {
+    "case": "baseline_ro",
+    "test": "php_freq0_warm",
+    "n": 3,
+    "unit": "includes/s",
+    "median": 210.91632389294537,
+    "min": 201.93234668266726,
+    "max": 213.38429104314324
+  },
+  {
+    "case": "baseline_ro",
+    "test": "php_freq2_first",
+    "n": 3,
+    "unit": "includes/s",
+    "median": 90.96234367616682,
+    "min": 81.81076976825123,
+    "max": 90.96385334537514
+  },
+  {
+    "case": "baseline_ro",
+    "test": "php_freq2_warm",
+    "n": 3,
+    "unit": "includes/s",
+    "median": 4485771.692911546,
+    "min": 3941898.064979726,
+    "max": 7329643.061652987
+  },
+  {
+    "case": "baseline_ro",
+    "test": "seq_read",
+    "n": 3,
+    "unit": "MiB/s",
+    "median": 55.32562440136245,
+    "min": 45.290156971738696,
+    "max": 55.99973290727274
+  },
+  {
+    "case": "baseline_ro",
+    "test": "stat",
+    "n": 3,
+    "unit": "ops/s",
+    "median": 253.78651295936726,
+    "min": 221.11208389442453,
+    "max": 311.1460280199415
+  },
+  {
+    "case": "baseline_ro",
+    "test": "stat_missing",
+    "n": 3,
+    "unit": "ops/s",
+    "median": 359.3318749713914,
+    "min": 294.3811200161177,
+    "max": 418.36749227170117
+  },
+  {
+    "case": "baseline_rw",
+    "test": "create_close",
+    "n": 3,
+    "unit": "files/s",
+    "median": 23.40958088817535,
+    "min": 22.548487145222794,
+    "max": 31.722277199586582
+  },
+  {
+    "case": "baseline_rw",
+    "test": "create_fsync",
+    "n": 3,
+    "unit": "files/s",
+    "median": 24.859924387479474,
+    "min": 24.494414822236465,
+    "max": 32.680742399716024
+  },
+  {
+    "case": "baseline_rw",
+    "test": "open_read_close",
+    "n": 3,
+    "unit": "files/s",
+    "median": 146.7091359744197,
+    "min": 115.04963016701285,
+    "max": 210.31121919043707
+  },
+  {
+    "case": "baseline_rw",
+    "test": "php_freq0_first",
+    "n": 3,
+    "unit": "includes/s",
+    "median": 104.40889232296986,
+    "min": 91.09437797375061,
+    "max": 130.74002606378002
+  },
+  {
+    "case": "baseline_rw",
+    "test": "php_freq0_warm",
+    "n": 3,
+    "unit": "includes/s",
+    "median": 311.7852951363176,
+    "min": 293.3159796193058,
+    "max": 336.1343046042608
+  },
+  {
+    "case": "baseline_rw",
+    "test": "php_freq2_first",
+    "n": 3,
+    "unit": "includes/s",
+    "median": 114.55252122214773,
+    "min": 105.65168658530844,
+    "max": 127.22978472638918
+  },
+  {
+    "case": "baseline_rw",
+    "test": "php_freq2_warm",
+    "n": 3,
+    "unit": "includes/s",
+    "median": 5490184.864818495,
+    "min": 5397351.924212184,
+    "max": 7315679.176986093
+  },
+  {
+    "case": "baseline_rw",
+    "test": "seq_read",
+    "n": 3,
+    "unit": "MiB/s",
+    "median": 44.722378195596235,
+    "min": 43.66979497548747,
+    "max": 61.32803409629056
+  },
+  {
+    "case": "baseline_rw",
+    "test": "seq_write_fsync",
+    "n": 3,
+    "unit": "MiB/s",
+    "median": 2.825964360231578,
+    "min": 2.6326440773128965,
+    "max": 2.946619641982123
+  },
+  {
+    "case": "baseline_rw",
+    "test": "stat",
+    "n": 3,
+    "unit": "ops/s",
+    "median": 226.58068311090818,
+    "min": 219.6923380383176,
+    "max": 324.62316237528313
+  },
+  {
+    "case": "baseline_rw",
+    "test": "stat_missing",
+    "n": 3,
+    "unit": "ops/s",
+    "median": 288.59798615725197,
+    "min": 283.40779326546453,
+    "max": 468.407224217254
+  },
+  {
+    "case": "baseline_rw",
+    "test": "unlink",
+    "n": 3,
+    "unit": "files/s",
+    "median": 60.536776119285285,
+    "min": 56.49843485331783,
+    "max": 74.85716965823875
+  },
+  {
+    "case": "final_overlay",
+    "test": "create_close",
+    "n": 3,
+    "unit": "files/s",
+    "median": 17.294785608419375,
+    "min": 17.230352993991865,
+    "max": 24.84966761830264
+  },
+  {
+    "case": "final_overlay",
+    "test": "create_fsync",
+    "n": 3,
+    "unit": "files/s",
+    "median": 17.151355111868423,
+    "min": 15.811956155209252,
+    "max": 25.31945431080346
+  },
+  {
+    "case": "final_overlay",
+    "test": "open_read_close",
+    "n": 3,
+    "unit": "files/s",
+    "median": 6606.638134239266,
+    "min": 5099.680836063122,
+    "max": 7265.092717170123
+  },
+  {
+    "case": "final_overlay",
+    "test": "php_freq0_first",
+    "n": 3,
+    "unit": "includes/s",
+    "median": 4020.2468425279676,
+    "min": 2665.5579611522,
+    "max": 4077.867907154084
+  },
+  {
+    "case": "final_overlay",
+    "test": "php_freq0_warm",
+    "n": 3,
+    "unit": "includes/s",
+    "median": 11469.022945572437,
+    "min": 11185.055460980991,
+    "max": 11649.636455498601
+  },
+  {
+    "case": "final_overlay",
+    "test": "php_freq2_first",
+    "n": 3,
+    "unit": "includes/s",
+    "median": 3777.6086379743515,
+    "min": 3761.8513010715396,
+    "max": 3903.5583221347465
+  },
+  {
+    "case": "final_overlay",
+    "test": "php_freq2_warm",
+    "n": 3,
+    "unit": "includes/s",
+    "median": 7981376.787495842,
+    "min": 5395001.194205994,
+    "max": 8346374.543557643
+  },
+  {
+    "case": "final_overlay",
+    "test": "seq_read",
+    "n": 3,
+    "unit": "MiB/s",
+    "median": 107.97525550943183,
+    "min": 107.35554212302675,
+    "max": 132.84785488981726
+  },
+  {
+    "case": "final_overlay",
+    "test": "seq_write_fsync",
+    "n": 3,
+    "unit": "MiB/s",
+    "median": 15.68554491434055,
+    "min": 15.12940427632416,
+    "max": 16.522416132412605
+  },
+  {
+    "case": "final_overlay",
+    "test": "stat",
+    "n": 3,
+    "unit": "ops/s",
+    "median": 9606.582982922471,
+    "min": 3775.314603994786,
+    "max": 10836.099016988468
+  },
+  {
+    "case": "final_overlay",
+    "test": "stat_missing",
+    "n": 3,
+    "unit": "ops/s",
+    "median": 19680.267460078834,
+    "min": 15121.509676171654,
+    "max": 20296.21205760194
+  },
+  {
+    "case": "final_overlay",
+    "test": "unlink",
+    "n": 3,
+    "unit": "files/s",
+    "median": 38.281791096868304,
+    "min": 36.41864763167135,
+    "max": 101.88470597369148
+  },
+  {
+    "case": "final_ro",
+    "test": "open_read_close",
+    "n": 3,
+    "unit": "files/s",
+    "median": 6841.511839877935,
+    "min": 6032.551599228702,
+    "max": 7327.0468565388865
+  },
+  {
+    "case": "final_ro",
+    "test": "php_freq0_first",
+    "n": 3,
+    "unit": "includes/s",
+    "median": 4923.141870679294,
+    "min": 4181.7047411972335,
+    "max": 5132.7474863471925
+  },
+  {
+    "case": "final_ro",
+    "test": "php_freq0_warm",
+    "n": 3,
+    "unit": "includes/s",
+    "median": 14813.175192915567,
+    "min": 14189.800629975414,
+    "max": 15000.655106734741
+  },
+  {
+    "case": "final_ro",
+    "test": "php_freq2_first",
+    "n": 3,
+    "unit": "includes/s",
+    "median": 4713.536651245791,
+    "min": 4615.549931956697,
+    "max": 4737.544126707394
+  },
+  {
+    "case": "final_ro",
+    "test": "php_freq2_warm",
+    "n": 3,
+    "unit": "includes/s",
+    "median": 8371849.655533269,
+    "min": 8159969.40011475,
+    "max": 9309542.280837858
+  },
+  {
+    "case": "final_ro",
+    "test": "seq_read",
+    "n": 3,
+    "unit": "MiB/s",
+    "median": 5055.043660844593,
+    "min": 137.68309506373035,
+    "max": 5219.317571765404
+  },
+  {
+    "case": "final_ro",
+    "test": "stat",
+    "n": 3,
+    "unit": "ops/s",
+    "median": 13346.20334482786,
+    "min": 4819.820796775942,
+    "max": 13821.65007632814
+  },
+  {
+    "case": "final_ro",
+    "test": "stat_missing",
+    "n": 3,
+    "unit": "ops/s",
+    "median": 16786.941954987044,
+    "min": 16271.526473190224,
+    "max": 18724.654974862566
+  },
+  {
+    "case": "final_rw",
+    "test": "create_close",
+    "n": 3,
+    "unit": "files/s",
+    "median": 37.4091183228042,
+    "min": 33.18101473150423,
+    "max": 38.69417808841877
+  },
+  {
+    "case": "final_rw",
+    "test": "create_fsync",
+    "n": 3,
+    "unit": "files/s",
+    "median": 37.92148892129999,
+    "min": 36.76140057185993,
+    "max": 38.26303429219156
+  },
+  {
+    "case": "final_rw",
+    "test": "open_read_close",
+    "n": 3,
+    "unit": "files/s",
+    "median": 6073.03720064082,
+    "min": 5927.320656947409,
+    "max": 6848.626729859482
+  },
+  {
+    "case": "final_rw",
+    "test": "php_freq0_first",
+    "n": 3,
+    "unit": "includes/s",
+    "median": 4340.296321524269,
+    "min": 3428.020894537232,
+    "max": 4487.4208478560995
+  },
+  {
+    "case": "final_rw",
+    "test": "php_freq0_warm",
+    "n": 3,
+    "unit": "includes/s",
+    "median": 14235.283358319839,
+    "min": 11521.399965309784,
+    "max": 15299.543547680472
+  },
+  {
+    "case": "final_rw",
+    "test": "php_freq2_first",
+    "n": 3,
+    "unit": "includes/s",
+    "median": 5299.457434923491,
+    "min": 5103.692070652802,
+    "max": 5369.349137565074
+  },
+  {
+    "case": "final_rw",
+    "test": "php_freq2_warm",
+    "n": 3,
+    "unit": "includes/s",
+    "median": 7868207.5239734445,
+    "min": 5507508.2827761285,
+    "max": 8608900.347494677
+  },
+  {
+    "case": "final_rw",
+    "test": "seq_read",
+    "n": 3,
+    "unit": "MiB/s",
+    "median": 111.2209506609667,
+    "min": 104.57064679076396,
+    "max": 115.56668152020389
+  },
+  {
+    "case": "final_rw",
+    "test": "seq_write_fsync",
+    "n": 3,
+    "unit": "MiB/s",
+    "median": 15.851954242599975,
+    "min": 14.856282021325358,
+    "max": 16.134968495172856
+  },
+  {
+    "case": "final_rw",
+    "test": "stat",
+    "n": 3,
+    "unit": "ops/s",
+    "median": 13665.895370313323,
+    "min": 5573.6274522383455,
+    "max": 14320.639595017898
+  },
+  {
+    "case": "final_rw",
+    "test": "stat_missing",
+    "n": 3,
+    "unit": "ops/s",
+    "median": 17379.40676952585,
+    "min": 15480.669969503191,
+    "max": 19969.50841376689
+  },
+  {
+    "case": "final_rw",
+    "test": "unlink",
+    "n": 3,
+    "unit": "files/s",
+    "median": 106.44542362553565,
+    "min": 104.29707863692018,
+    "max": 110.66393733479936
+  },
+  {
+    "case": "improved_overlay",
+    "test": "create_close",
+    "n": 3,
+    "unit": "files/s",
+    "median": 16.113262985704683,
+    "min": 15.926224776559788,
+    "max": 22.670281674920023
+  },
+  {
+    "case": "improved_overlay",
+    "test": "create_fsync",
+    "n": 3,
+    "unit": "files/s",
+    "median": 16.36799159421965,
+    "min": 16.220600984517816,
+    "max": 23.66653567835098
+  },
+  {
+    "case": "improved_overlay",
+    "test": "open_read_close",
+    "n": 3,
+    "unit": "files/s",
+    "median": 748.4259185256219,
+    "min": 666.3714928390738,
+    "max": 893.2930365152233
+  },
+  {
+    "case": "improved_overlay",
+    "test": "php_freq0_first",
+    "n": 3,
+    "unit": "includes/s",
+    "median": 448.6087328909654,
+    "min": 442.3577477186626,
+    "max": 561.3617464125323
+  },
+  {
+    "case": "improved_overlay",
+    "test": "php_freq0_warm",
+    "n": 3,
+    "unit": "includes/s",
+    "median": 1267.3658746199826,
+    "min": 922.6641151672039,
+    "max": 1316.6080046941463
+  },
+  {
+    "case": "improved_overlay",
+    "test": "php_freq2_first",
+    "n": 3,
+    "unit": "includes/s",
+    "median": 464.799028398636,
+    "min": 445.97288332959846,
+    "max": 522.401221458946
+  },
+  {
+    "case": "improved_overlay",
+    "test": "php_freq2_warm",
+    "n": 3,
+    "unit": "includes/s",
+    "median": 6924533.405463889,
+    "min": 6493945.748494892,
+    "max": 7809163.5653712405
+  },
+  {
+    "case": "improved_overlay",
+    "test": "seq_read",
+    "n": 3,
+    "unit": "MiB/s",
+    "median": 74.53291978571063,
+    "min": 68.35884629279887,
+    "max": 96.76203564778272
+  },
+  {
+    "case": "improved_overlay",
+    "test": "seq_write_fsync",
+    "n": 3,
+    "unit": "MiB/s",
+    "median": 15.764513707764722,
+    "min": 15.733016753565078,
+    "max": 16.319675156881303
+  },
+  {
+    "case": "improved_overlay",
+    "test": "stat",
+    "n": 3,
+    "unit": "ops/s",
+    "median": 1147.2403925833678,
+    "min": 794.8212667025459,
+    "max": 1187.0713149308147
+  },
+  {
+    "case": "improved_overlay",
+    "test": "stat_missing",
+    "n": 3,
+    "unit": "ops/s",
+    "median": 1399.7822656632582,
+    "min": 1210.480320674303,
+    "max": 1543.2687837675342
+  },
+  {
+    "case": "improved_overlay",
+    "test": "unlink",
+    "n": 3,
+    "unit": "files/s",
+    "median": 36.45123158735696,
+    "min": 33.90192552824628,
+    "max": 109.98407540951449
+  },
+  {
+    "case": "improved_ro",
+    "test": "open_read_close",
+    "n": 3,
+    "unit": "files/s",
+    "median": 1676.4235586630127,
+    "min": 1600.4411013219333,
+    "max": 1710.837659296596
+  },
+  {
+    "case": "improved_ro",
+    "test": "php_freq0_first",
+    "n": 3,
+    "unit": "includes/s",
+    "median": 749.9495527098733,
+    "min": 632.3275430984944,
+    "max": 882.1913898781992
+  },
+  {
+    "case": "improved_ro",
+    "test": "php_freq0_warm",
+    "n": 3,
+    "unit": "includes/s",
+    "median": 1846.970988741673,
+    "min": 1819.574205988992,
+    "max": 2095.091328686515
+  },
+  {
+    "case": "improved_ro",
+    "test": "php_freq2_first",
+    "n": 3,
+    "unit": "includes/s",
+    "median": 933.736042989616,
+    "min": 782.5747551936506,
+    "max": 951.640520826612
+  },
+  {
+    "case": "improved_ro",
+    "test": "php_freq2_warm",
+    "n": 3,
+    "unit": "includes/s",
+    "median": 7708521.529659742,
+    "min": 7306075.077531916,
+    "max": 7886143.798903333
+  },
+  {
+    "case": "improved_ro",
+    "test": "seq_read",
+    "n": 3,
+    "unit": "MiB/s",
+    "median": 5257.627767830816,
+    "min": 72.79321068316253,
+    "max": 5449.4745908382465
+  },
+  {
+    "case": "improved_ro",
+    "test": "stat",
+    "n": 3,
+    "unit": "ops/s",
+    "median": 1728.0886007227234,
+    "min": 1252.7246732996393,
+    "max": 2093.2905750448663
+  },
+  {
+    "case": "improved_ro",
+    "test": "stat_missing",
+    "n": 3,
+    "unit": "ops/s",
+    "median": 1794.76304223656,
+    "min": 1629.1462682784982,
+    "max": 2050.847685052516
+  },
+  {
+    "case": "improved_rw",
+    "test": "create_close",
+    "n": 3,
+    "unit": "files/s",
+    "median": 38.14011102749117,
+    "min": 36.305946935827706,
+    "max": 38.988644204534225
+  },
+  {
+    "case": "improved_rw",
+    "test": "create_fsync",
+    "n": 3,
+    "unit": "files/s",
+    "median": 38.76625751558264,
+    "min": 38.5360314070868,
+    "max": 39.14210836906263
+  },
+  {
+    "case": "improved_rw",
+    "test": "open_read_close",
+    "n": 3,
+    "unit": "files/s",
+    "median": 1477.9617622120463,
+    "min": 1400.4281005170628,
+    "max": 2029.7386215643812
+  },
+  {
+    "case": "improved_rw",
+    "test": "php_freq0_first",
+    "n": 3,
+    "unit": "includes/s",
+    "median": 1016.3228597292627,
+    "min": 969.3750931035551,
+    "max": 1522.1599011376172
+  },
+  {
+    "case": "improved_rw",
+    "test": "php_freq0_warm",
+    "n": 3,
+    "unit": "includes/s",
+    "median": 3213.9187859127173,
+    "min": 2207.526381837356,
+    "max": 3327.5914471956903
+  },
+  {
+    "case": "improved_rw",
+    "test": "php_freq2_first",
+    "n": 3,
+    "unit": "includes/s",
+    "median": 1391.336242697129,
+    "min": 1389.9628221865953,
+    "max": 1474.189498675602
+  },
+  {
+    "case": "improved_rw",
+    "test": "php_freq2_warm",
+    "n": 3,
+    "unit": "includes/s",
+    "median": 8004669.390477778,
+    "min": 7484212.988227957,
+    "max": 8612568.967837438
+  },
+  {
+    "case": "improved_rw",
+    "test": "seq_read",
+    "n": 3,
+    "unit": "MiB/s",
+    "median": 121.22751865516872,
+    "min": 110.19958137406798,
+    "max": 146.62992290830428
+  },
+  {
+    "case": "improved_rw",
+    "test": "seq_write_fsync",
+    "n": 3,
+    "unit": "MiB/s",
+    "median": 16.01732530633601,
+    "min": 16.002088152414185,
+    "max": 16.548731773347036
+  },
+  {
+    "case": "improved_rw",
+    "test": "stat",
+    "n": 3,
+    "unit": "ops/s",
+    "median": 2172.1336485258544,
+    "min": 1420.8390985808267,
+    "max": 2487.276651877175
+  },
+  {
+    "case": "improved_rw",
+    "test": "stat_missing",
+    "n": 3,
+    "unit": "ops/s",
+    "median": 1859.2114116462494,
+    "min": 1724.0595707321468,
+    "max": 2836.334195912041
+  },
+  {
+    "case": "improved_rw",
+    "test": "unlink",
+    "n": 3,
+    "unit": "files/s",
+    "median": 112.68302152528888,
+    "min": 110.68405069630553,
+    "max": 113.93497684013003
+  }
+]

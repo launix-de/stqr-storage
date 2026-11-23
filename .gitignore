@@ -13,3 +13,8 @@ coverage/
 /mnt/
 /stqr.yaml
 /stqr.yaml.lock
+
+# Private node control, quota and migration journals.
+/control.stqr
+/quota.stqr
+/ranges.stqr

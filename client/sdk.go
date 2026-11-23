@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"weak"
 
 	"github.com/gorilla/websocket"
 )
@@ -22,6 +23,9 @@ import (
 // cluster statistics. IDs are native 256-bit object addresses, never rehashed.
 // It is safe to call methods concurrently; Close is idempotent.
 type Client struct {
+	subMu                        sync.Mutex
+	subscriptions                map[ID]weak.Pointer[Subscription]
+	subscriptionSources          map[ID]*objectTransport
 	endpoint, username, password string
 	bucket                       BucketID
 	runtime                      ID
@@ -34,6 +38,15 @@ type Client struct {
 	life                         context.Context
 	cancel                       context.CancelFunc
 	done                         chan struct{}
+	routes                       PartialMap
+	cluster                      ID
+	routed                       map[string]*objectTransport
+	routeGates                   map[string]chan struct{}
+	clusterRouting               bool
+	routers                      map[string]ID
+	seedRoute                    string // first advertised address represented by the caller's seed URL
+	departed                     map[ID]uint64
+	paused                       map[ID]bool
 }
 
 // Dial establishes the bucket connection. All four connection parameters are
@@ -63,6 +76,9 @@ func Dial(ctx context.Context, rawURL, username, password string, bucket BucketI
 	return c, nil
 }
 func (c *Client) connect(ctx context.Context) (*objectTransport, error) {
+	return c.connectEndpoint(ctx, c.endpoint)
+}
+func (c *Client) connectEndpoint(ctx context.Context, endpoint string) (*objectTransport, error) {
 	merged, cancel := context.WithCancel(ctx)
 	stop := context.AfterFunc(c.life, cancel)
 	defer stop()
@@ -87,7 +103,7 @@ func (c *Client) connect(ctx context.Context) (*objectTransport, error) {
 		}
 		return conn, e
 	}
-	conn, response, e := dialer.DialContext(ctx, c.endpoint, headers)
+	conn, response, e := dialer.DialContext(ctx, endpoint, headers)
 	if e != nil {
 		if response != nil {
 			response.Body.Close()
@@ -99,7 +115,7 @@ func (c *Client) connect(ctx context.Context) (*objectTransport, error) {
 		conn.Close()
 		return nil, ErrProtocol
 	}
-	t := newObjectTransport(conn)
+	t := newObjectTransport(conn, c, func(m Message) error { return c.learnGoAway(endpoint, m) })
 	hello := Encoder{}
 	hello.U16(1)
 	hello.U16(1)
@@ -109,14 +125,34 @@ func (c *Client) connect(ctx context.Context) (*objectTransport, error) {
 	if e == nil {
 		d := Decoder{B: r.result}
 		version := d.U16()
-		d.U64()
-		d.ID()
-		d.ID()
-		d.U64()
+		capabilities := d.U64()
+		t.node = d.ID()
+		cluster := d.ID()
+		membership := d.U64()
 		d.U64()
 		if d.Done() != nil || version != 1 {
 			e = ErrProtocol
 		}
+		c.mu.Lock()
+		if capabilities&CapabilityClusterControl != 0 {
+			c.clusterRouting = true
+		}
+		if c.cluster != (ID{}) && c.cluster != cluster {
+			e = ErrProtocol
+		} else {
+			c.cluster = cluster
+		}
+		if e == nil {
+			if c.routers == nil {
+				c.routers = make(map[string]ID)
+			}
+			c.routers[endpoint] = t.node
+			delete(c.paused, t.node)
+			if membership > c.departed[t.node] {
+				delete(c.departed, t.node)
+			}
+		}
+		c.mu.Unlock()
 	}
 	r.close()
 	if e == nil {
@@ -143,10 +179,18 @@ func (c *Client) Close() error {
 		c.mu.Lock()
 		c.closed = true
 		t := c.transport
+		var routed []*objectTransport
+		for _, transport := range c.routed {
+			routed = append(routed, transport)
+		}
 		c.mu.Unlock()
 		if t != nil {
 			t.fail(ErrClosed)
 			t.workers.Wait()
+		}
+		for _, transport := range routed {
+			transport.fail(ErrClosed)
+			transport.workers.Wait()
 		}
 	})
 	return nil
@@ -251,15 +295,39 @@ func (c *Client) do(ctx context.Context, opcode uint16, body []byte, id RequestI
 	}
 	backoff := 100 * time.Millisecond
 	for {
-		t, e := c.connection(ctx)
+		var t *objectTransport
+		var e error
+		var routeNode ID
+		if objectMessage(m) {
+			e = c.ensureRoute(ctx, m)
+		}
 		if e == nil {
+			endpoint, node, routeErr := c.routeMessage(&m)
+			routeNode = node
+			if routeErr != nil {
+				return wireReply{}, routeErr
+			}
+			t, e = c.connectionFor(ctx, endpoint, node)
+		}
+		if e == nil {
+			if m.Opcode == ObjectSubscribe && len(m.Body) >= 96 {
+				var subscription ID
+				copy(subscription[:], m.Body[80:96])
+				c.bindSubscriptionTransport(subscription, t)
+			}
 			r, er := t.roundTrip(ctx, m, mutation, upload)
 			if er == nil {
 				return r, nil
 			}
 			e = er
 			var status *StatusError
-			if errors.As(e, &status) || errors.Is(e, ErrWouldBlock) || errors.Is(e, ErrProtocol) {
+			if errors.As(e, &status) && (status.Status == 301 || status.Status == 302) {
+				if err := c.learnRedirect(m, status); err != nil {
+					return wireReply{}, err
+				}
+				continue
+			}
+			if errors.As(e, &status) && status.Status != 503 || errors.Is(e, ErrWouldBlock) || errors.Is(e, ErrProtocol) {
 				return wireReply{}, e
 			}
 		}
@@ -284,13 +352,24 @@ func (c *Client) do(ctx context.Context, opcode uint16, body []byte, id RequestI
 			return wireReply{}, local.Cause
 		}
 		var status *StatusError
-		if errors.As(e, &status) {
+		if errors.As(e, &status) && status.Status != 503 {
 			return wireReply{}, e
 		}
 		var network net.Error
 		var closed *websocket.CloseError
-		if !errors.As(e, &network) && !errors.As(e, &closed) && !errors.Is(e, io.EOF) && !errors.Is(e, ErrClosed) && !errors.Is(e, websocket.ErrCloseSent) {
+		if !(status != nil && status.Status == 503) && !errors.As(e, &network) && !errors.As(e, &closed) && !errors.Is(e, io.EOF) && !errors.Is(e, ErrClosed) && !errors.Is(e, websocket.ErrCloseSent) {
 			return wireReply{}, e
+		}
+		if objectMessage(m) {
+			c.mu.Lock()
+			if c.paused == nil {
+				c.paused = make(map[ID]bool)
+			}
+			c.paused[routeNode] = true
+			var object ObjectID
+			copy(object[:], m.Body[16:48])
+			c.routes.ForgetObject(c.bucket, object)
+			c.mu.Unlock()
 		}
 		// A broken transport is not a failed node or a failed mutation. Reconnect
 		// and resend identical logical input under the same persistent request ID.
@@ -312,8 +391,8 @@ func (c *Client) do(ctx context.Context, opcode uint16, body []byte, id RequestI
 }
 
 // StatusError retains the original protocol status and optional follow headers.
-// A 301 is not followed blindly. TODO(multinode): validate/apply bucket-specific
-// map segments and select authenticated destinations before routing there.
+// Redirects carry validated bucket-specific map segments; authenticated
+// destinations are selected independently for each learned range.
 type StatusError struct {
 	Status    int
 	Message   string
@@ -362,6 +441,9 @@ func (e *UnknownOutcomeError) Unwrap() error { return e.Cause }
 func (c *Client) acceptObjectInfo(info ObjectInfo) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.clusterRouting {
+		return nil
+	} // each request is bound to its range runtime
 	if c.runtime != (ID{}) && c.runtime != info.RuntimeID {
 		return ErrGone
 	}

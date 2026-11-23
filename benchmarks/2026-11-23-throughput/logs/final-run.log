@@ -1,0 +1,85 @@
+BEGIN final_ro
+final_ro             seq_read             0: 137.68 MiB/s (0.232s)
+final_ro             stat                 0: 4819.82 ops/s (0.106s)
+final_ro             stat_missing         0: 18724.65 ops/s (0.027s)
+final_ro             open_read_close      0: 6032.55 files/s (0.021s)
+final_ro             seq_read             1: 5055.04 MiB/s (0.006s)
+final_ro             stat                 1: 13821.65 ops/s (0.037s)
+final_ro             stat_missing         1: 16271.53 ops/s (0.031s)
+final_ro             open_read_close      1: 6841.51 files/s (0.019s)
+final_ro             seq_read             2: 5219.32 MiB/s (0.006s)
+final_ro             stat                 2: 13346.20 ops/s (0.038s)
+final_ro             stat_missing         2: 16786.94 ops/s (0.030s)
+final_ro             open_read_close      2: 7327.05 files/s (0.017s)
+final_ro PHP freq=0: first=26.00ms warm=9.05ms
+final_ro PHP freq=0: first=30.61ms warm=8.66ms
+final_ro PHP freq=0: first=24.94ms warm=8.72ms
+final_ro PHP freq=2: first=27.02ms warm=0.01ms
+final_ro PHP freq=2: first=27.16ms warm=0.01ms
+final_ro PHP freq=2: first=27.73ms warm=0.01ms
+END final_ro
+BEGIN final_rw
+final_rw             seq_read             0: 104.57 MiB/s (0.306s)
+final_rw             stat                 0: 5573.63 ops/s (0.092s)
+final_rw             stat_missing         0: 19969.51 ops/s (0.026s)
+final_rw             open_read_close      0: 6848.63 files/s (0.019s)
+final_rw             seq_write_fsync      0: 16.13 MiB/s (1.983s)
+final_rw             create_close         0: 38.69 files/s (1.654s)
+final_rw             create_fsync         0: 38.26 files/s (0.836s)
+final_rw             unlink               0: 110.66 files/s (0.867s)
+final_rw             seq_read             1: 115.57 MiB/s (0.277s)
+final_rw             stat                 1: 14320.64 ops/s (0.036s)
+final_rw             stat_missing         1: 17379.41 ops/s (0.029s)
+final_rw             open_read_close      1: 5927.32 files/s (0.022s)
+final_rw             seq_write_fsync      1: 15.85 MiB/s (2.019s)
+final_rw             create_close         1: 37.41 files/s (1.711s)
+final_rw             create_fsync         1: 37.92 files/s (0.844s)
+final_rw             unlink               1: 106.45 files/s (0.902s)
+final_rw             seq_read             2: 111.22 MiB/s (0.288s)
+final_rw             stat                 2: 13665.90 ops/s (0.037s)
+final_rw             stat_missing         2: 15480.67 ops/s (0.033s)
+final_rw             open_read_close      2: 6073.04 files/s (0.021s)
+final_rw             seq_write_fsync      2: 14.86 MiB/s (2.154s)
+final_rw             create_close         2: 33.18 files/s (1.929s)
+final_rw             create_fsync         2: 36.76 files/s (0.870s)
+final_rw             unlink               2: 104.30 files/s (0.920s)
+final_rw PHP freq=0: first=37.34ms warm=10.94ms
+final_rw PHP freq=0: first=29.49ms warm=9.08ms
+final_rw PHP freq=0: first=28.52ms warm=8.07ms
+final_rw PHP freq=2: first=25.08ms warm=0.01ms
+final_rw PHP freq=2: first=24.15ms warm=0.01ms
+final_rw PHP freq=2: first=23.84ms warm=0.02ms
+END final_rw
+BEGIN final_overlay
+final_overlay        seq_read             0: 107.36 MiB/s (0.298s)
+final_overlay        stat                 0: 3775.31 ops/s (0.136s)
+final_overlay        stat_missing         0: 19680.27 ops/s (0.026s)
+final_overlay        open_read_close      0: 7265.09 files/s (0.018s)
+final_overlay        seq_write_fsync      0: 15.69 MiB/s (2.040s)
+final_overlay        create_close         0: 24.85 files/s (2.575s)
+final_overlay        create_fsync         0: 25.32 files/s (1.264s)
+final_overlay        unlink               0: 101.88 files/s (0.942s)
+final_overlay        seq_read             1: 107.98 MiB/s (0.296s)
+final_overlay        stat                 1: 9606.58 ops/s (0.053s)
+final_overlay        stat_missing         1: 15121.51 ops/s (0.034s)
+final_overlay        open_read_close      1: 5099.68 files/s (0.025s)
+final_overlay        seq_write_fsync      1: 16.52 MiB/s (1.937s)
+final_overlay        create_close         1: 17.29 files/s (3.701s)
+final_overlay        create_fsync         1: 17.15 files/s (1.866s)
+final_overlay        unlink               1: 38.28 files/s (2.508s)
+final_overlay        seq_read             2: 132.85 MiB/s (0.241s)
+final_overlay        stat                 2: 10836.10 ops/s (0.047s)
+final_overlay        stat_missing         2: 20296.21 ops/s (0.025s)
+final_overlay        open_read_close      2: 6606.64 files/s (0.019s)
+final_overlay        seq_write_fsync      2: 15.13 MiB/s (2.115s)
+final_overlay        create_close         2: 17.23 files/s (3.714s)
+final_overlay        create_fsync         2: 15.81 files/s (2.024s)
+final_overlay        unlink               2: 36.42 files/s (2.636s)
+final_overlay PHP freq=0: first=48.02ms warm=11.10ms
+final_overlay PHP freq=0: first=31.39ms warm=11.13ms
+final_overlay PHP freq=0: first=31.84ms warm=11.20ms
+final_overlay PHP freq=2: first=32.79ms warm=0.01ms
+final_overlay PHP freq=2: first=33.88ms warm=0.01ms
+final_overlay PHP freq=2: first=34.03ms warm=0.02ms
+END final_overlay
+FINAL DONE

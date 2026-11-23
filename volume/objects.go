@@ -448,7 +448,7 @@ func (v *Volume) mutateWithRetryLocked(op uint8, k Key, offset, length uint64, s
 	if e = t.saveReceipt(opts.RequestID, dedupe{k, fp, result}); e != nil {
 		return Result{}, e
 	}
-	if e = t.commit(opts.UseGuaranteed); e != nil {
+	if e = t.commitReserved(opts.UseGuaranteed, opts.InFlightAllowance, opts.GuaranteedAllowance); e != nil {
 		return Result{}, e
 	}
 	v.cache.put(k, o)

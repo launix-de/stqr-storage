@@ -16,33 +16,40 @@ import (
 // Each node transport session has independent bounded receive and send queues.
 // The socket read loop only validates/enqueues; dispatch never blocks framing.
 // Requests retain replies, F messages get no reply, telemetry keeps the latest
-// complete snapshot. TODO(multinode): reuse these queues for authenticated peers;
-// introduce reliable ordered streams when object APPEND dispatch is implemented.
+// complete snapshot. Authenticated peers and object APPEND use the same bounded
+// native transport; separate transport delivery classes remain future work.
 const receiveQueueCapacity = 16
 const sendQueueCapacity = 32
 
+type terminalFrame struct {
+	wire []byte
+	done chan struct{}
+}
+
 type wsSession struct {
-	server         *Server
-	ctx            context.Context
-	cancel         context.CancelFunc
-	uploads        map[client.ID]*serverObjectUpload
-	stagedBytes    uint64
-	objectMu       sync.Mutex
-	objectContexts map[client.ID]objectRequestContext
-	conn           *websocket.Conn
-	request        *http.Request
-	principal      principal
-	authorization  *connectionAuthorization
-	done           chan struct{}
-	once           sync.Once
-	responses      chan []byte
-	telemetry      *statsSendQueue
-	requests       chan client.Message
-	subMu          sync.Mutex
-	subscription   client.ID
-	filter         client.StatsFilter
-	peerMu         sync.Mutex
-	peerPending    map[client.ID]peerPending
+	terminal        chan terminalFrame
+	server          *Server
+	ctx             context.Context
+	cancel          context.CancelFunc
+	uploads         map[client.ID]*serverObjectUpload
+	stagedBytes     uint64
+	objectMu        sync.Mutex
+	objectContexts  map[client.ID]objectRequestContext
+	conn            *websocket.Conn
+	request         *http.Request
+	principal       principal
+	authorization   *connectionAuthorization
+	done            chan struct{}
+	once            sync.Once
+	responses       chan []byte
+	telemetry       *statsSendQueue
+	requests        chan client.Message
+	controlRequests chan client.Message
+	subMu           sync.Mutex
+	subscription    client.ID
+	filter          client.StatsFilter
+	peerMu          sync.Mutex
+	peerPending     map[client.ID]peerPending
 }
 
 func (ws *wsSession) close() {
@@ -93,6 +100,11 @@ func (s *Server) serveWebSocket(w http.ResponseWriter, r *http.Request, p princi
 		httpError(w, statusOf(authErr), authErr)
 		return
 	}
+	if (s.shortStopping.Load() || s.drainClosing.Load()) && !p.isPeer() {
+		s.opMu.Unlock()
+		httpError(w, 503, errors.New("node is shutting down"))
+		return
+	}
 	up := websocket.Upgrader{Subprotocols: []string{"stqr.v1"}, CheckOrigin: sameOrigin, EnableCompression: false, ReadBufferSize: 4096, WriteBufferSize: 4096}
 	conn, e := up.Upgrade(w, r, nil)
 	if e != nil {
@@ -104,27 +116,36 @@ func (s *Server) serveWebSocket(w http.ResponseWriter, r *http.Request, p princi
 	p.User.PasswordHash = ""
 	conn.SetReadLimit(client.MaxMessage)
 	sessionCtx, sessionCancel := context.WithCancel(s.ctx)
-	ws := &wsSession{authorization: authorization, ctx: sessionCtx, cancel: sessionCancel, server: s, conn: conn, request: r, principal: p, done: make(chan struct{}), responses: make(chan []byte, sendQueueCapacity), telemetry: newStatsSendQueue(), requests: make(chan client.Message, receiveQueueCapacity)}
+	ws := &wsSession{authorization: authorization, ctx: sessionCtx, cancel: sessionCancel, server: s, conn: conn, request: r, principal: p, done: make(chan struct{}), terminal: make(chan terminalFrame, 1), responses: make(chan []byte, sendQueueCapacity), telemetry: newStatsSendQueue(), requests: make(chan client.Message, receiveQueueCapacity)}
+	if p.isPeer() {
+		ws.controlRequests = make(chan client.Message, receiveQueueCapacity)
+	}
 	s.mu.Lock()
-	if s.closed {
+	if s.closed || (s.shortStopping.Load() || s.drainClosing.Load()) && !p.isPeer() {
 		s.mu.Unlock()
 		s.opMu.Unlock()
 		ws.close()
 		return
 	}
 	s.workers.Add(2)
+	if ws.controlRequests != nil {
+		s.workers.Add(1)
+	}
 	s.wsMu.Lock()
 	s.sockets[ws] = struct{}{}
 	s.wsMu.Unlock()
 	s.mu.Unlock()
 	s.opMu.Unlock()
 	if !authorization.expires.IsZero() {
-		expiry := time.AfterFunc(time.Until(authorization.expires), func() { authorization.invalid.Store(true) })
+		expiry := time.AfterFunc(time.Until(authorization.expires), func() { authorization.invalid.Store(true); s.endRevokedSubscriptions(ws) })
 		defer expiry.Stop()
 	}
 	defer func() { ws.close(); s.wsMu.Lock(); delete(s.sockets, ws); s.wsMu.Unlock() }()
 	go func() { defer s.workers.Done(); ws.writeLoop() }()
 	go func() { defer s.workers.Done(); ws.requestLoop() }()
+	if ws.controlRequests != nil {
+		go func() { defer s.workers.Done(); ws.controlRequestLoop() }()
+	}
 	for {
 		kind, b, e := conn.ReadMessage()
 		if e != nil {
@@ -143,7 +164,17 @@ func (s *Server) serveWebSocket(w http.ResponseWriter, r *http.Request, p princi
 		if m.Kind != client.Request && m.Kind != client.FireAndForget {
 			return
 		}
-		if m.Opcode >= 0x0100 && m.Opcode <= 0x0108 || m.Opcode == client.BucketMaintenance || m.Opcode == client.BucketScan {
+		if isControlPeerRequest(m) && ws.controlRequests != nil && authorization.peerVerified.Load() {
+			select {
+			case ws.controlRequests <- m:
+			case <-ws.done:
+				return
+			default:
+				return
+			}
+			continue
+		}
+		if m.Opcode >= 0x0100 && m.Opcode <= 0x0108 || m.Opcode == client.ObjectSubscribe || m.Opcode == client.BucketMaintenance || m.Opcode == client.BucketScan {
 			if !ws.registerObjectContext(m.ID) {
 				return
 			}
@@ -182,6 +213,11 @@ func (ws *wsSession) writeLoop() {
 		select {
 		case <-ws.done:
 			return
+		case terminal := <-ws.terminal:
+			ws.conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
+			_ = ws.conn.WriteMessage(websocket.BinaryMessage, terminal.wire)
+			close(terminal.done)
+			return
 		case b := <-ws.responses:
 			batch = [][]byte{b}
 		case <-ws.telemetry.wake:
@@ -198,6 +234,7 @@ func (ws *wsSession) writeLoop() {
 func (ws *wsSession) requestLoop() {
 	defer ws.close()
 	defer ws.releaseMaintenance()
+	defer ws.server.objectSubscriptions.closeSession(ws)
 	defer func() {
 		ws.objectMu.Lock()
 		for id, r := range ws.objectContexts {
@@ -230,7 +267,7 @@ func (ws *wsSession) requestLoop() {
 			if status == 0 {
 				continue
 			}
-			if m.Opcode >= 0x0100 && m.Opcode <= 0x0108 || m.Opcode == client.BucketMaintenance || m.Opcode == client.BucketScan {
+			if m.Opcode >= 0x0100 && m.Opcode <= 0x0108 || m.Opcode == client.ObjectSubscribe || m.Opcode == client.BucketMaintenance || m.Opcode == client.BucketScan {
 				ws.releaseObjectContext(m.ID)
 			}
 			if m.Kind == client.Request {
@@ -314,5 +351,32 @@ func (ws *wsSession) pushStats(snapshot client.StatsSnapshot) {
 		// The consumer must reconnect/resubscribe rather than receiving silently
 		// incomplete cluster telemetry when its bounded budget is exhausted.
 		ws.close()
+	}
+}
+
+// Delegated administration may synchronously coordinate its caller. Keep one
+// bounded, separate worker so the ordinary peer queue can process those control
+// callbacks. Object operations retain their original ordered session worker.
+func (ws *wsSession) controlRequestLoop() {
+	defer ws.close()
+	for {
+		select {
+		case <-ws.done:
+			return
+		case m := <-ws.controlRequests:
+			p, ok := ws.principalNow()
+			if !ok {
+				return
+			}
+			body, status := ws.server.dispatchAs(m, ws, p)
+			if status != 0 && m.Kind == client.Request {
+				wire := client.EncodeMessage(client.Message{Kind: client.Response, Opcode: m.Opcode, ID: m.ID, Body: body})
+				select {
+				case ws.responses <- wire:
+				case <-ws.done:
+					return
+				}
+			}
+		}
 	}
 }

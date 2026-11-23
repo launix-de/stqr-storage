@@ -179,7 +179,10 @@ func TestConnectionCachesAdminAndPeerRoles(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// The client receives the upgrade before the server has necessarily
+	// published its session. A protocol response is the registration barrier.
 	defer peer.Close()
+	bucketReplyResult(t, requestMessage(t, peer, client.Message{Kind: client.Request, Opcode: client.Ping, ID: client.NewRequestID(), Body: make([]byte, 8)}), 200)
 	s.wsMu.Lock()
 	var capability *connectionAuthorization
 	for ws := range s.sockets {
