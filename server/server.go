@@ -72,6 +72,8 @@ type Server struct {
 	peerStatsMu            sync.RWMutex
 	peerStats              map[client.ID]*peerObservation
 	peerManagers           map[string]bool
+	compatibility          atomic.Pointer[protocolProfile]
+	versions               versionObservations
 	directory              atomic.Pointer[peerDirectoryImage]
 	placementGroups        atomic.Pointer[placementGroupImage]
 	control                *controlRuntime // initialized before accepting control RPCs

@@ -201,6 +201,9 @@ func (s *Server) broadcastPeerDirectory() {
 }
 
 func (p *peerConnection) sendDirectory(body []byte) {
+	if checkPeerOperation(p.server.protocolVersion(), p.Profile, client.PeerDirectoryMessage) != nil {
+		return
+	}
 	select {
 	case p.outgoing <- client.Message{Kind: client.FireAndForget, Opcode: client.PeerDirectoryMessage, ID: client.NewRequestID(), Body: body}:
 	case <-p.ctx.Done():

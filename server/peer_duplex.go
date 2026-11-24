@@ -46,6 +46,9 @@ func (ws *wsSession) requestPeer(ctx context.Context, opcode uint16, body []byte
 	if ws.authorization == nil || !ws.authorization.peerVerified.Load() || len(body) > client.MaxMessage-20 {
 		return nil, client.ErrProtocol
 	}
+	if err := checkPeerMessage(ws.server.protocolVersion(), ws.authorization.peerProfile, client.Message{Opcode: opcode, Body: body}); err != nil {
+		return nil, err
+	}
 	id := client.NewRequestID()
 	pending := peerPending{opcode: opcode, result: make(chan peerReply, 1)}
 	ws.peerMu.Lock()
@@ -102,7 +105,7 @@ func (p *peerConnection) dispatchRequestQueue(queue <-chan client.Message) {
 	case <-p.ctx.Done():
 		return
 	}
-	identity := principal{User: account{ID: p.Node.String(), Name: "node-" + p.Node.String(), Role: "NODE"}, ClusterPeer: true, connection: &connectionAuthorization{clusterPeer: true, peerBoot: p.Boot}}
+	identity := principal{User: account{ID: p.Node.String(), Name: "node-" + p.Node.String(), Role: "NODE"}, ClusterPeer: true, connection: &connectionAuthorization{clusterPeer: true, peerBoot: p.Boot, peerProfile: p.Profile}}
 	identity.connection.peerVerified.Store(true)
 	for {
 		select {

@@ -13,6 +13,8 @@ try{
  await page.locator('#login-form button[type=submit]').click();
  await page.waitForFunction(()=>document.querySelectorAll('.node-row').length===2);
  const row=page.locator(`tr.node-row[data-node="${config.target}"]`);
+ await page.locator('tr.node-row.version-warning').filter({hasText:'Veraltete Version'}).waitFor();
+ if(await row.evaluate(e=>e.classList.contains('version-warning')))throw Error('Newer compatible node was incorrectly marked as outdated.');
  if(await row.locator('.row-actions button').count()!==1)throw Error('Node row must offer only the maintenance button.');
  for(const [kind,dialog]of [['short','node-action-dialog'],['drain','node-action-dialog'],['replace','recovery-node-dialog'],['force','force-dialog']]){
   await page.locator('tr.node-row').first().locator('[data-node-maintenance]').click();

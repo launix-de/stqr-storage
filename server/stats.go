@@ -160,6 +160,7 @@ func filterSnapshot(snap client.StatsSnapshot, f client.StatsFilter) client.Stat
 	return out
 }
 func (s *Server) publishStats() {
+	s.publishVersions()
 	snap := s.CollectStats(client.StatsFilter{})
 	s.latest.Store(&snap)
 	s.broadcastStats(snap)

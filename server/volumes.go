@@ -415,7 +415,7 @@ func (s *Server) configView() map[string]any {
 	} else if len(c.Peers) > 0 {
 		mode = "cluster-preparation"
 	}
-	view := map[string]any{"config": c, "config_path": s.configPath, "active_listen": s.running.Node.Listen, "active_volumes_dir": s.volumesDir, "restart_required": restart, "mode": mode, "system_bucket_placement": "everywhere"}
+	view := map[string]any{"config": c, "config_path": s.configPath, "active_listen": s.running.Node.Listen, "active_volumes_dir": s.volumesDir, "restart_required": restart, "mode": mode, "system_bucket_placement": "everywhere", "node_versions": s.versionsView()}
 	if image := s.currentSystem.Load(); image != nil {
 		members, excluded := []string{}, []string{}
 		for _, member := range image.manifest.Membership.Members {

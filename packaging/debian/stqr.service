@@ -1,0 +1,22 @@
+# SPDX-License-Identifier: GPL-3.0-only
+[Unit]
+Description=STQR storage node
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=stqr
+Group=stqr
+WorkingDirectory=/var/lib/stqr
+ExecStart=/usr/bin/stqr --config /etc/stqr/stqr.yaml
+KillSignal=SIGTERM
+# Storage flush and SHORT announcement must finish before the binary is replaced.
+TimeoutStopSec=infinity
+Restart=on-failure
+RestartSec=3
+UMask=0077
+LimitNOFILE=1048576
+
+[Install]
+WantedBy=multi-user.target

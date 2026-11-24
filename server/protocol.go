@@ -51,9 +51,32 @@ func (s *Server) dispatchAs(m client.Message, ws *wsSession, p principal) ([]byt
 		if p.connection.invalid.Load() {
 			return client.ResponseBody(403, nil, "connection authorization revoked"), 403
 		}
+		if p.connection.frontendPermission != 0 {
+			if err := checkPeerMessage(s.protocolVersion(), p.connection.peerProfile, m); err != nil {
+				return client.ResponseBody(426, nil, err.Error()), 426
+			}
+		}
 		if p.connection.bucket != nil && m.Opcode != client.Hello && m.Opcode != client.Ping && !(m.Opcode >= 0x0100 && m.Opcode <= client.BucketObjectList || m.Opcode == client.ObjectAccepted || m.Opcode == client.BucketBlockMaintenance || m.Opcode == client.BucketMaintenanceEnd || m.Opcode == client.BucketStatFS || m.Opcode == client.BucketSync) {
 			return client.ResponseBody(403, nil, "bucket connection has no administrative privileges"), 403
 		}
+	}
+	if m.Opcode == nodeVersionsMessage {
+		if !p.isAdmin() {
+			return client.ResponseBody(403, nil, "administrator required"), 403
+		}
+		if ws == nil || m.Kind != client.Request {
+			return client.ResponseBody(400, nil, "version subscription requires a WebSocket request"), 400
+		}
+		d := client.Decoder{B: m.Body}
+		enabled := d.Bool()
+		if d.Done() != nil {
+			return client.ResponseBody(400, nil, "invalid version subscription"), 400
+		}
+		ws.subMu.Lock()
+		ws.versionsSubscribed = enabled
+		ws.versionSent = ""
+		ws.subMu.Unlock()
+		return client.ResponseBody(200, jsonText(s.versionsView()), ""), 200
 	}
 	if m.Opcode == client.NodeHelloMessage {
 		if !p.isPeer() {
@@ -72,6 +95,9 @@ func (s *Server) dispatchAs(m client.Message, ws *wsSession, p principal) ([]byt
 		}
 		if p.connection == nil || !p.connection.peerVerified.Load() {
 			return client.ResponseBody(403, nil, "NODE_HELLO identity binding required"), 403
+		}
+		if err := checkPeerMessage(s.protocolVersion(), p.connection.peerProfile, m); err != nil {
+			return client.ResponseBody(426, nil, err.Error()), 426
 		}
 		if view := s.currentSystem.Load(); view != nil {
 			node, _ := parseID(p.User.ID)

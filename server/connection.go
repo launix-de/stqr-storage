@@ -28,6 +28,7 @@ type connectionAuthorization struct {
 	frontendPermission         BucketPermissions // private node frontend retains the original HTTP grant
 	frontendIssuer             client.ID
 	invalid                    atomic.Bool
+	peerProfile                protocolProfile // immutable authenticated upgrade offer; trusted after NODE_HELLO
 	peerVerified               atomic.Bool
 	peerBoot                   client.ID // fixed by NODE_HELLO before peerVerified publication
 	expires                    time.Time
@@ -144,6 +145,7 @@ func (s *Server) authorizeConnection(r *http.Request, p principal) (*connectionA
 			}
 			auth.frontendPermission = p.frontendPermission
 			auth.frontendIssuer = p.frontendIssuer
+			auth.peerProfile = s.issuerProfile(p.frontendIssuer)
 		}
 	} else if !auth.admin && !auth.clusterPeer {
 		return nil, p, fail(400, "a bucket ID is required for client connections")

@@ -28,7 +28,9 @@ type terminalFrame struct {
 }
 
 type wsSession struct {
-	durabilityCap atomic.Bool
+	durabilityCap      atomic.Bool
+	versionsSubscribed bool   // guarded by subMu
+	versionSent        string // guarded by subMu
 
 	terminal        chan terminalFrame
 	server          *Server
@@ -110,7 +112,18 @@ func (s *Server) serveWebSocket(w http.ResponseWriter, r *http.Request, p princi
 		return
 	}
 	up := websocket.Upgrader{Subprotocols: []string{"stqr.v1"}, CheckOrigin: sameOrigin, EnableCompression: false, ReadBufferSize: 4096, WriteBufferSize: 4096}
-	conn, e := up.Upgrade(w, r, nil)
+	responseHeaders := http.Header{}
+	if p.isPeer() {
+		profile, err := decodeProfile(r.Header)
+		if err != nil {
+			s.opMu.Unlock()
+			httpError(w, 400, err)
+			return
+		}
+		authorization.peerProfile = profile
+		responseHeaders.Set(compatibilityHeader, profileHeader(s.protocolVersion()))
+	}
+	conn, e := up.Upgrade(w, r, responseHeaders)
 	if e != nil {
 		s.opMu.Unlock()
 		return
@@ -316,6 +329,9 @@ func (ws *wsSession) unsubscribe(id client.ID) {
 	ws.subMu.Unlock()
 }
 func (ws *wsSession) pushStats(snapshot client.StatsSnapshot) {
+	if ws.authorization != nil && ws.authorization.clusterPeer && checkPeerOperation(ws.server.protocolVersion(), ws.authorization.peerProfile, client.StatsSnapshotMessage) != nil {
+		return
+	}
 	ws.subMu.Lock()
 	id, f := ws.subscription, ws.filter
 	ws.subMu.Unlock()

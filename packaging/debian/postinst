@@ -1,0 +1,42 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-3.0-only
+set -e
+case "$1" in
+    configure)
+        if ! getent group stqr >/dev/null; then
+            addgroup --system stqr
+        fi
+        if ! getent passwd stqr >/dev/null; then
+            adduser --system --ingroup stqr --home /var/lib/stqr --no-create-home stqr
+        fi
+        # Config is generated once by the daemon, not shipped as package content.
+        # Atomic config writes require directory ownership. Never chown user data
+        # recursively or remove volumes during install, removal or purge.
+        install -d -m 0750 -o stqr -g stqr /etc/stqr /var/lib/stqr
+        if [ ! -e /etc/stqr/stqr.yaml ] && [ ! -L /etc/stqr/stqr.yaml ]; then
+            # Relative paths resolve beside the config, not WorkingDirectory.
+            # Seed ONLY the data path; the daemon supplies IDs and credentials.
+            (umask 077; set -C; printf 'node:\n  data_dir: /var/lib/stqr\n' > /etc/stqr/stqr.yaml)
+            chown -h stqr:stqr /etc/stqr/stqr.yaml
+        fi
+        if deb-systemd-helper debian-installed stqr.service; then
+            deb-systemd-helper unmask stqr.service >/dev/null || true
+            if deb-systemd-helper --quiet was-enabled stqr.service; then
+                deb-systemd-helper enable stqr.service >/dev/null
+            fi
+        else
+            deb-systemd-helper enable stqr.service >/dev/null
+        fi
+        deb-systemd-helper update-state stqr.service >/dev/null
+        if [ -d /run/systemd/system ]; then
+            systemctl --system daemon-reload
+            deb-systemd-invoke start stqr.service
+        fi
+        ;;
+    abort-upgrade|abort-remove|abort-deconfigure)
+        if [ -d /run/systemd/system ]; then
+            systemctl --system daemon-reload
+            deb-systemd-invoke start stqr.service
+        fi
+        ;;
+esac

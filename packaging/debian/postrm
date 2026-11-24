@@ -1,0 +1,15 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-3.0-only
+set -e
+case "$1" in
+    remove)
+        if [ -d /run/systemd/system ]; then systemctl --system daemon-reload; fi
+        deb-systemd-helper mask stqr.service >/dev/null
+        ;;
+    purge)
+        deb-systemd-helper purge stqr.service >/dev/null
+        deb-systemd-helper unmask stqr.service >/dev/null
+        # Deliberately retain /etc/stqr and /var/lib/stqr: they contain user data,
+        # identity and credentials needed to rejoin the same cluster safely.
+        ;;
+esac

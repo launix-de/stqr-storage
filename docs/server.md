@@ -7,6 +7,8 @@ go build -o stqr .
 ./stqr
 ```
 
+For native Debian deployment, see [package builds and rolling upgrades](debian.md).
+
 There are no administrative CLI subcommands. `stqr` is the daemon; it serves the
 embedded dashboard and the administrative protocol on HTTP/WebSocket, default
 port 7419. The integrated [S3 endpoint](s3.md) uses `/s3/` on the same HTTP

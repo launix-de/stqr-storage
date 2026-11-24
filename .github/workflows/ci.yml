@@ -76,6 +76,20 @@ jobs:
       - name: Disjoint server tests, examples and fuzz seeds with race detector
         run: python3 tools/ci/server-tests.py --shard ${{ matrix.shard }} --shards 4
 
+  debian:
+    name: Debian / package and upgrade hooks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+      - run: python3 tools/test-deb.py
+
   dashboard:
     name: Dashboard / Chromium
     runs-on: ubuntu-24.04

@@ -1,0 +1,12 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-3.0-only
+set -e
+case "$1" in
+    upgrade)
+        if [ -d /run/systemd/system ]; then
+            # Stop the OLD executable before dpkg replaces it. SIGTERM is SHORT,
+            # never DRAIN. Propagate stop failures: do not overwrite a live daemon.
+            deb-systemd-invoke stop stqr.service
+        fi
+        ;;
+esac

@@ -69,6 +69,7 @@ func (s *Server) nodeHello(m client.Message, ws *wsSession, p principal) ([]byte
 		p.connection.peerBoot = hello.Boot
 	}
 	p.connection.peerVerified.Store(true)
+	s.rememberVersion(hello.Node, p.connection.peerProfile)
 	if len(hello.Addresses) > 0 && !s.joinPending() {
 		if err := s.rememberPeer(hello.Node, hello.Addresses[0]); err != nil {
 			p.connection.peerVerified.Store(false)
@@ -103,6 +104,7 @@ type peerConnection struct {
 	Boot            client.ID
 	Membership      client.Membership
 	Capabilities    uint64
+	Profile         protocolProfile
 	incoming        chan client.Message
 	controlIncoming chan client.Message
 	leaseIncoming   chan client.Message
@@ -129,6 +131,7 @@ func (s *Server) dialPeer(ctx context.Context, address string, expected client.I
 	advertise := s.cfg.Node.Advertise
 	s.mu.RUnlock()
 	headers := http.Header{"Authorization": []string{"Basic " + base64.StdEncoding.EncodeToString([]byte("node-"+node.String()+":"+token))}}
+	headers.Set(compatibilityHeader, profileHeader(s.protocolVersion()))
 	dialer := websocket.Dialer{Subprotocols: []string{"stqr.v1"}, HandshakeTimeout: 10 * time.Second, EnableCompression: false}
 	conn, response, err := dialer.DialContext(ctx, u.String(), headers)
 	if err != nil {
@@ -136,6 +139,11 @@ func (s *Server) dialPeer(ctx context.Context, address string, expected client.I
 			response.Body.Close()
 			return nil, fail(response.StatusCode, "peer WebSocket upgrade rejected")
 		}
+		return nil, err
+	}
+	profile, err := decodeProfile(response.Header)
+	if err != nil {
+		conn.Close()
 		return nil, err
 	}
 	conn.SetReadLimit(client.MaxMessage)
@@ -220,6 +228,11 @@ func (s *Server) dialPeer(ctx context.Context, address string, expected client.I
 	} else if !present && capabilities&client.CapabilityRetiringNode == 0 {
 		return nil, fail(409, "peer is absent from its own current membership")
 	}
+	s.rememberVersion(remoteNode, profile)
+	if !wireCompatible(s.protocolVersion(), profile) {
+		return nil, fail(426, "peer wire protocol incompatible; ownership and membership retained")
+	}
+	p.Profile = profile
 	p.Node = remoteNode
 	p.Boot = ack.Boot
 	p.Membership = ack.Membership
@@ -241,6 +254,11 @@ func (p *peerConnection) close() {
 	})
 }
 func (p *peerConnection) request(ctx context.Context, opcode uint16, body []byte) ([]byte, error) {
+	if p.Node != (client.ID{}) {
+		if err := checkPeerMessage(p.server.protocolVersion(), p.Profile, client.Message{Opcode: opcode, Body: body}); err != nil {
+			return nil, err
+		}
+	}
 	if len(body) > client.MaxMessage-20 {
 		return nil, client.ErrProtocol
 	}
