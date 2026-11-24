@@ -311,6 +311,11 @@ func Serve(ctx context.Context, path string, catalog *Catalog, opt Options) erro
 	if err = os.Chmod(path, 0600); err != nil {
 		return err
 	}
+	closeControl, err := serveResizeControl(path+".control", catalog, opt.ReadOnly)
+	if err != nil {
+		return err
+	}
+	defer closeControl()
 	ctx, stop := signal.NotifyContext(ctx, syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
 	go func() { <-ctx.Done(); l.Close() }()

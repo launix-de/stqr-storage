@@ -317,6 +317,10 @@ func (t *objectTransport) readLoop() {
 			}
 			continue
 		}
+		if m.Kind == Request && m.Opcode == BucketBlockControl && t.subscriptionClient != nil {
+			t.subscriptionClient.receiveBlockControl(t, m)
+			continue
+		}
 		if m.Kind != Response {
 			t.fail(ErrProtocol)
 			return

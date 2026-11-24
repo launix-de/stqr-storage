@@ -88,6 +88,13 @@ const (
 	UserDelete        uint16 = 0x200e
 )
 
+const (
+	BucketBlockControlRegister uint16 = 0x011e
+	BucketBlockControl         uint16 = 0x011f
+	BlockDeviceList            uint16 = 0x203e
+	BlockDeviceResize          uint16 = 0x203f
+)
+
 type ID [16]byte
 
 func (id ID) String() string { return hex.EncodeToString(id[:]) }

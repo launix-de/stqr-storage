@@ -39,12 +39,60 @@ Credentials stay in the private exporter process; QEMU receives only the socket.
 Manufacturer/model/serial are metadata and NBD descriptions. Configure QEMU's
 guest-facing hardware properties separately when a guest needs a specific vendor.
 
+## Growing devices
+
+In the dashboard, open **Buckets → Disks** on the desired bucket. The device
+list shows each disk's virtual capacity and identity, supports search and loads
+additional pages while scrolling. **Vergrößern** opens the same size controls as
+the rest of the dashboard: unit input, a discrete slider, quick increments and a
+before/after preview. Readonly exporters have the action disabled.
+
+The dashboard also works when the exporter runs on another machine. An updated
+exporter registers a bounded native control handler on its original STQR lease
+socket; the cluster forwards the administrator's request to that owner. It does
+not open the private Unix socket remotely, release the lease or permit a second
+writer. Without an exporter, the dashboard acquires its own ordinary exclusive
+block lease for the operation. An old/unreachable lease owner remains fenced and
+produces an explicit error rather than being bypassed.
+
+Grow a device while its exporter is stopped, using the usual bucket credentials:
+
+```sh
+stqr-nbd --config /private/credentials.json --bucket vm-disks \
+  --size 68719476736 resize system
+```
+
+With an exporter running, send the request to that process instead. It keeps its
+existing exclusive cluster lease and uses no additional STQR connection:
+
+```sh
+stqr-nbd --socket /private/vm-disks.sock --size 68719476736 resize system
+```
+
+The exporter creates `/private/vm-disks.sock.control`, a Unix control socket with
+mode 0600. Keep both sockets in a private directory. Readonly exporters reject
+resize requests. A stale socket is an error; the command never falls back to a
+second connection or removes another process's socket.
+
+Sizes are absolute bytes, positive multiples of 512, at most `2^63-1`. Only
+growth is supported. Resize atomically compares/replaces the existing descriptor
+and flushes it before success. Device generation, serial, existing stripe IDs and
+data remain unchanged; the extension stays sparse and reads as zeros. No disk
+format change or stripe rewrite is involved. After a lost response or flush
+error, inspect the size or retry the same size; the retry flushes again.
+
+An established NBD connection retains its negotiated size. Reconnect the NBD
+client to discover the extension; this does not restart the exporter or affect
+other disks. This does not resize an attached guest's partition/filesystem or
+provide automatic live capacity notifications to QEMU/the Linux NBD client.
+
 ## Storage format
 
 Each device has exactly one binary metadata object: `STNBD001`, version u16=1,
 stripe size u32=1048576, virtual byte size u64, generation ID (16 bytes), followed
 by native Text fields for name, manufacturer, model and serial. Integers are
-big endian. Device sizes must be positive multiples of 512 bytes.
+little endian, as in the shared native codec. Device sizes must be positive
+multiples of 512 bytes.
 
 Metadata addresses have eight zero bytes followed by the first 24 bytes of
 SHA-256(`"STQR NBD metadata v1\0" + name`). A sorted object scan lists descriptors
@@ -107,15 +155,16 @@ DELETE always requires DELETE permission; the WRITE-only fallback belongs to the
 NBD client, and the server never recognizes disk/stripe metadata. TRIM
 releases space inside STQR volumes; it does not shrink the configured volume file
 or promise a physical SSD discard through the host storage stack. WRITE_ZEROES,
-online resize and structured allocation-status replies remain unimplemented.
+automatic live NBD capacity notifications and structured allocation-status replies
+remain unimplemented.
 
 Clean close sends `BUCKET_MAINTENANCE_END` (`0x011d`) before disconnecting.
 Journal epochs, monotonically increasing sequences and fresh server-generated
 bearer tokens reject delayed prepares/releases and stale auxiliary connections.
 Handoffs of this bucket and ordinary membership changes are blocked while leased;
 unrelated bucket operations remain available. All nodes and the exporter must
-use the upgraded protocol. Device resize, discard/trim, write-zeroes and snapshots
-remain unimplemented.
+use the upgraded protocol. Device shrinking, write-zeroes and snapshots remain
+unimplemented.
 
 The older filesystem-backed disk format is rejected rather than reformatted.
 Export old disks with the previous version and copy into a fresh striped bucket.

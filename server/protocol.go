@@ -56,10 +56,14 @@ func (s *Server) dispatchAs(m client.Message, ws *wsSession, p principal) ([]byt
 				return client.ResponseBody(426, nil, err.Error()), 426
 			}
 		}
-		if p.connection.bucket != nil && m.Opcode != client.Hello && m.Opcode != client.Ping && !(m.Opcode >= 0x0100 && m.Opcode <= client.BucketObjectList || m.Opcode == client.ObjectAccepted || m.Opcode == client.BucketObjectLease || m.Opcode == client.BucketMaintenanceEnd || m.Opcode == client.BucketStatFS || m.Opcode == client.BucketSync) {
+		if p.connection.bucket != nil && m.Opcode != client.Hello && m.Opcode != client.Ping && !(m.Opcode >= 0x0100 && m.Opcode <= client.BucketObjectList || m.Opcode == client.ObjectAccepted || m.Opcode == client.BucketObjectLease || m.Opcode == client.BucketBlockControlRegister || m.Opcode == client.BucketMaintenanceEnd || m.Opcode == client.BucketStatFS || m.Opcode == client.BucketSync) {
 			return client.ResponseBody(403, nil, "bucket connection has no administrative privileges"), 403
 		}
 	}
+	if m.Opcode == client.BucketBlockControlRegister {
+		return s.registerBlockControl(m, ws)
+	}
+
 	if m.Opcode >= clusterJoinStatus && m.Opcode <= clusterJoinPrepare {
 		if ws != nil && m.Opcode == clusterJoinPrepare {
 			return client.ResponseBody(400, nil, "use the native HTTP message endpoint for join"), 400
@@ -373,9 +377,13 @@ func (s *Server) dispatchAs(m client.Message, ws *wsSession, p principal) ([]byt
 		return client.ResponseBody(403, nil, "cluster peer operation required"), 403
 	}
 
-	if !p.isAdmin() && m.Opcode != client.Hello && m.Opcode != client.Ping && !(m.Opcode >= 0x0100 && m.Opcode <= client.BucketObjectList || m.Opcode == client.ObjectAccepted || m.Opcode == client.BucketObjectLease || m.Opcode == client.BucketMaintenanceEnd || m.Opcode == client.BucketStatFS || m.Opcode == client.BucketSync) {
+	if !p.isAdmin() && m.Opcode != client.Hello && m.Opcode != client.Ping && !(m.Opcode >= 0x0100 && m.Opcode <= client.BucketObjectList || m.Opcode == client.ObjectAccepted || m.Opcode == client.BucketObjectLease || m.Opcode == client.BucketBlockControlRegister || m.Opcode == client.BucketMaintenanceEnd || m.Opcode == client.BucketStatFS || m.Opcode == client.BucketSync) {
 		return client.ResponseBody(403, nil, "administrator required"), 403
 	}
+	if m.Opcode == client.BlockDeviceList || m.Opcode == client.BlockDeviceResize {
+		return s.blockDeviceAdmin(m, ws, p)
+	}
+
 	if s.clusterPaused() || s.forceFrozen() {
 		switch m.Opcode {
 		case client.VolumeAddWithGroups, client.VolumePlacementRelease, client.VolumeAdd, client.VolumeRemove, client.VolumeRescan, client.VolumeGrow, client.NodeConfigSet, client.NodeDrain:
@@ -551,7 +559,7 @@ func (s *Server) dispatchAs(m client.Message, ws *wsSession, p principal) ([]byt
 		}
 		return client.ResponseBody(status, result, ""), status
 	}
-	if m.Opcode >= 0x0100 && m.Opcode <= 0x0108 || m.Opcode == client.ObjectAccepted || m.Opcode == client.BucketObjectLease || m.Opcode == client.BucketMaintenanceEnd || m.Opcode == client.BucketMaintenance || m.Opcode == client.BucketScan || m.Opcode == client.BucketObjectList {
+	if m.Opcode >= 0x0100 && m.Opcode <= 0x0108 || m.Opcode == client.ObjectAccepted || m.Opcode == client.BucketObjectLease || m.Opcode == client.BucketBlockControlRegister || m.Opcode == client.BucketMaintenanceEnd || m.Opcode == client.BucketMaintenance || m.Opcode == client.BucketScan || m.Opcode == client.BucketObjectList {
 		result, status, err := s.executeObjects(m, ws, p)
 		if errors.Is(err, errObjectStaged) {
 			return nil, 0
@@ -630,7 +638,7 @@ func (s *Server) execute(m client.Message, ws *wsSession) ([]byte, int, error) {
 		} else {
 			e.U16(1)
 		}
-		caps, membership, revision := client.CapabilityPeerTransport|client.CapabilityNodeAdmin|client.CapabilityObjectSubscriptions|client.CapabilityDurability, uint64(1), c.Generation
+		caps, membership, revision := client.CapabilityBlockControl|client.CapabilityPeerTransport|client.CapabilityNodeAdmin|client.CapabilityObjectSubscriptions|client.CapabilityDurability, uint64(1), c.Generation
 		if s.control != nil {
 			caps |= client.CapabilityClusterControl
 			s.control.ledger.mu.Lock()
