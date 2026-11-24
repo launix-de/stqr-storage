@@ -585,8 +585,11 @@ func TestDaemonRAMNodeDrainPreservesLiveRuntime(t *testing.T) {
 
 func TestDaemonExtensionWithConcentratedObjectHashes(t *testing.T) {
 	source, target := startAutomaticDaemonPair(t)
-	addTestVolume(t, source.node, "data", "hdd", 4<<20)
-	addTestVolume(t, target.node, "data", "hdd", 4<<20)
+	// Six MiB still exceeds either node's capacity. Leave room for the
+	// transaction's temporary redo image as well as committed payloads: two
+	// four-MiB volumes cannot admit the sixth one-MiB PUT with that workspace.
+	addTestVolume(t, source.node, "data", "hdd", 5<<20)
+	addTestVolume(t, target.node, "data", "hdd", 5<<20)
 	bucket, _ := createProtocolBucket(t, source.node, "concentrated-hashes")
 	admin := source.node.cfg.Auth.BootstrapAdmin
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)

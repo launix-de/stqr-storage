@@ -128,9 +128,10 @@ func TestFilesystemPOSIXKernelMount(t *testing.T) {
 		}
 		run := func(args ...string) {
 			t.Helper()
-			base := []string{"-c", "init.defaultBranch=main", "-c", "commit.gpgsign=false", "-c", "core.hooksPath=/dev/null"}
+			// Enter the self-served FUSE filesystem after exec, in git itself.
+			// Fork/exec must not chdir there while waiting on this Go process.
+			base := []string{"-C", mountpoint, "-c", "init.defaultBranch=main", "-c", "commit.gpgsign=false", "-c", "core.hooksPath=/dev/null"}
 			cmd := exec.Command(git, append(base, args...)...)
-			cmd.Dir = mountpoint
 			for _, env := range os.Environ() {
 				if !strings.HasPrefix(env, "GIT_") {
 					cmd.Env = append(cmd.Env, env)
