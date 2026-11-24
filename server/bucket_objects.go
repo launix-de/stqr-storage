@@ -311,6 +311,8 @@ func (b *Bucket) getRange(ctx context.Context, p principal, id volume.ObjectID, 
 		}
 		return nil, volume.Info{}, b.absenceError(id, prior, err)
 	}
+	b.server.ioPriority.users.Add(1)
+	defer b.server.ioPriority.users.Add(-1)
 	h, err := v.Open(false)
 	if err != nil {
 		return nil, volume.Info{}, err
@@ -351,6 +353,8 @@ func (b *Bucket) copyToCheckedUnmetered(ctx context.Context, p principal, id vol
 		}
 		return volume.Info{}, 0, b.absenceError(id, prior, err)
 	}
+	b.server.ioPriority.users.Add(1)
+	defer b.server.ioPriority.users.Add(-1)
 	h, err := v.Open(false)
 	if err != nil {
 		return volume.Info{}, 0, err
@@ -454,11 +458,11 @@ func (b *Bucket) mutateUnmetered(ctx context.Context, p principal, id volume.Obj
 		release := s.replicas.lock(volume.Key{Bucket: b.ID(), Object: id})
 		defer release()
 	}
-	s.opMu.Lock()
+	s.lockUserObjectIO()
 	opLocked := true
 	defer func() {
 		if opLocked {
-			s.opMu.Unlock()
+			s.unlockUserObjectIO()
 		}
 	}()
 	if b.underMaintenance() {
@@ -749,7 +753,7 @@ func (b *Bucket) mutateUnmetered(ctx context.Context, p principal, id volume.Obj
 			mutationRelease()
 			mutationRelease = nil
 		}
-		s.opMu.Unlock()
+		s.unlockUserObjectIO()
 		opLocked = false
 		if record.State == volume.ReplicaPrepared {
 			if e = s.replicas.preparePeers(ctx, replicatedEntry, header, src.(io.ReadSeeker)); e != nil {
@@ -758,13 +762,13 @@ func (b *Bucket) mutateUnmetered(ctx context.Context, p principal, id volume.Obj
 				}
 				return result, fail(503, "waiting for required replicas: "+e.Error())
 			}
-			s.opMu.Lock()
+			s.lockUserObjectIO()
 			h, e = v.Open(true)
 			if e == nil {
 				e = h.DecideReplica(opt.RequestID, record.Binding)
 				h.Close()
 			}
-			s.opMu.Unlock()
+			s.unlockUserObjectIO()
 			if e != nil {
 				return result, e
 			}
@@ -772,7 +776,7 @@ func (b *Bucket) mutateUnmetered(ctx context.Context, p principal, id volume.Obj
 		if e = s.replicas.commitPeers(ctx, replicatedEntry, header); e != nil {
 			return result, fail(503, "commit is waiting for required replicas: "+e.Error())
 		}
-		s.opMu.Lock()
+		s.lockUserObjectIO()
 		opLocked = true
 		h, e = v.Open(true)
 		if e != nil {

@@ -24,3 +24,8 @@ func (s *Server) waitForUserIO(ctx context.Context) error {
 func (s *Server) cleanupIdle() bool {
 	return s.ioPriority.users.Load() == 0 && s.ioPriority.rebuilds.Load() == 0
 }
+
+// Count local running/queued storage work, not time waiting on a remote peer.
+// A dependency on a rebuild must not itself prevent that rebuild from running.
+func (s *Server) lockUserObjectIO()   { s.ioPriority.users.Add(1); s.opMu.Lock() }
+func (s *Server) unlockUserObjectIO() { s.opMu.Unlock(); s.ioPriority.users.Add(-1) }

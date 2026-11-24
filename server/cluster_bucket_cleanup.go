@@ -137,10 +137,10 @@ func (s *Server) purgeDeletedBucket(body []byte, actor client.ID) ([]byte, error
 }
 
 type cleanupVolumeProgress struct {
-	id                volume.ID
-	objectsDone, done bool
-	objectAfter       *volume.ObjectID
-	requestAfter      *volume.ID
+	id           volume.ID
+	objectsDone  bool
+	objectAfter  *volume.ObjectID
+	requestAfter *volume.ID
 }
 type bucketCleanupJob struct {
 	volumes []cleanupVolumeProgress
@@ -256,6 +256,23 @@ func (s *Server) reclaimBucketStep() bool {
 				return false
 			}
 			defer h.Close()
+			usage, err := h.StorageUsage()
+			if err != nil {
+				return false
+			}
+			found := false
+			for _, u := range usage {
+				if u.Bucket == id && u.Physical > 0 {
+					found = true
+					break
+				}
+			}
+			// Maintained accounting includes tombstones, receipts and import shadows.
+			// An absent bucket cannot require a sweep through unrelated retry records.
+			if !found {
+				job.next++
+				return true
+			}
 			if !progress.objectsDone {
 				records, err := h.ScanBucketObjects(id, progress.objectAfter, 8)
 				if err != nil {
