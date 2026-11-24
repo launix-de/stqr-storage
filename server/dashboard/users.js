@@ -1,28 +1,62 @@
 // SPDX-License-Identifier: GPL-3.0-only
+import {formatNumber} from './numbers.js';
+import {entityRate,throughputHTML} from './throughput.js';
 import {EndlessList} from './endless.js';
 import {newID} from './protocol.js';
 import {setupS3Keys} from './s3-keys.js';
 const $=id=>document.getElementById(id);
-export function setupUserViews({connection,currentUsername,escape,toast,showView,requireLogin,openBucketCreate}){
+export function setupUserViews({connection,currentUsername,escape,toast,showView,requireLogin,openBucketCreate,statsEntries=()=>[]}){
  let users=[],createRetry,passwordRetry,selected,deleteID,loading=0,pageMeta={},searchTimer;
  const keys=setupS3Keys({connection});
+ const traffic=new Map();let trafficPoll;
  const roleRetries=new Map();
  const utf8=new TextEncoder();
  function passwordValid(input){input.setCustomValidity(utf8.encode(input.value).length>72?'Das Passwort darf maximal 72 UTF-8-Bytes lang sein.':'');return input.reportValidity()}
- function render({append=false,added=users}={}){
-  $('user-count').textContent=String(pageMeta.total??users.length);$('nav-users-count').textContent=String(pageMeta.all_total??users.length);
+ function render({append=false,added=users,loading=false}={}){
+ if(loading){if(!users.length)$('user-rows').innerHTML='<tr><td colspan="5" class="empty">Benutzer werden geladen …</td></tr>';return}
+  $('user-count').textContent=formatNumber(pageMeta.total??users.length);$('nav-users-count').textContent=formatNumber(pageMeta.all_total??users.length);
   const html=(append?added:users).map(u=>{
    const self=u.name===currentUsername();
-   return `<tr data-user="${u.id}"><td><div class="user-cell"><span class="user-avatar">${escape(u.name.slice(0,1).toUpperCase())}</span><div><div class="volume-name">${escape(u.name)}${self?'<span class="system-label">DU</span>':''}</div><div class="volume-path">${escape(u.id)}</div></div></div></td><td><select class="user-role-select" data-user-role="${u.id}" ${self?'disabled title="Die eigene Rolle kann nicht geändert werden"':''} aria-label="Rolle für ${escape(u.name)}"><option value="0" ${u.role===0?'selected':''}>User</option><option value="1" ${u.role===1?'selected':''}>Administrator</option></select></td><td><span class="state-badge ${u.disabled?'detached':''}"><i></i>${u.disabled?'Deaktiviert':'Aktiv'}</span></td><td><div class="row-actions"><button class="row-action" data-user-s3="${u.id}">S3-Schlüssel</button><button class="row-action" data-user-password="${u.id}">Passwort ändern</button><button class="row-action danger-action" data-user-delete="${u.id}" ${self?'disabled title="Das eigene Konto kann nicht gelöscht werden"':''}>Löschen</button></div></td></tr>`;
-  }).join('');if(append)$('user-rows').insertAdjacentHTML('beforeend',html);else $('user-rows').innerHTML=html||'<tr><td colspan="4">Keine passenden Benutzer.</td></tr>';
+   return `<tr data-user="${u.id}"><td><div class="user-cell"><span class="user-avatar">${escape(u.name.slice(0,1).toUpperCase())}</span><div><div class="volume-name">${escape(u.name)}${self?'<span class="system-label">DU</span>':''}</div><div class="volume-path">${escape(u.id)}</div></div></div></td><td><select class="user-role-select" data-user-role="${u.id}" ${self?'disabled title="Die eigene Rolle kann nicht geändert werden"':''} aria-label="Rolle für ${escape(u.name)}"><option value="0" ${u.role===0?'selected':''}>User</option><option value="1" ${u.role===1?'selected':''}>Administrator</option></select></td><td data-user-throughput="${u.id}">${userThroughput(u.id)}</td><td><span class="state-badge ${u.disabled?'detached':''}"><i></i>${u.disabled?'Deaktiviert':'Aktiv'}</span></td><td><div class="row-actions"><button class="row-action" data-user-s3="${u.id}">S3-Schlüssel</button><button class="row-action" data-user-password="${u.id}">Passwort ändern</button><button class="row-action danger-action" data-user-delete="${u.id}" ${self?'disabled title="Das eigene Konto kann nicht gelöscht werden"':''}>Löschen</button></div></td></tr>`;
+  }).join('');if(append)$('user-rows').insertAdjacentHTML('beforeend',html);else $('user-rows').innerHTML=html||'<tr><td colspan="5">Keine passenden Benutzer.</td></tr>';
   for(const select of document.querySelectorAll('[data-user-role]'))select.onchange=()=>changeRole(select);
   for(const b of document.querySelectorAll('[data-user-s3]'))b.onclick=()=>keys.open(users.find(u=>u.id===b.dataset.userS3));
   for(const b of document.querySelectorAll('[data-user-password]'))b.onclick=()=>openPassword(b.dataset.userPassword);
   for(const b of document.querySelectorAll('[data-user-delete]'))b.onclick=()=>openDelete(b.dataset.userDelete);
  }
  $('user-rows').closest('.storage-panel').querySelector('.panel-heading').insertAdjacentHTML('beforeend','<label class="search"><span>⌕</span><input id="user-search" placeholder="Name oder ID suchen …" aria-label="Benutzer durchsuchen"></label>');
- const pager=new EndlessList({container:$('user-rows').closest('.storage-panel'),visible:()=>!$('users-view').hidden,fetchPage:(after,limit,query)=>connection().listUsersPage(after,limit,query),entries:page=>page.users,onUpdate:(items,state)=>{users=items;pageMeta=state.meta;render(state)},onError:e=>{$('users-error').textContent=e.message},onLoading:busy=>{$('refresh-users').disabled=busy}});
- async function load(){loading++;$('users-error').textContent='';return pager.reset($('user-search').value.trim())}
+ const pager=new EndlessList({container:$('user-rows').closest('.storage-panel'),visible:()=>!$('users-view').hidden,fetchPage:(after,limit,query)=>connection().listUsersPage(after,limit,query),entries:page=>page.users,onUpdate:(items,state)=>{if(!state.loading){users=items;pageMeta=state.meta;observeTraffic(state.meta);scheduleTraffic()}render(state)},onError:e=>{$('users-error').textContent=e.message},onLoading:busy=>{$('refresh-users').disabled=busy}});
+ async function load(){if(pager.busy)return;loading++;$('users-error').textContent='';return pager.reset($('user-search').value.trim())}
+
+ function observeTraffic(page){
+  if(!page.node||!page.boot||!page.captured_ns)return;
+  const snapshot={boot:page.boot,captured:BigInt(page.captured_ns),users:page.users.map(u=>({id:u.id,io:{logicalRead:BigInt(u.read_bytes??0),logicalWrite:BigInt(u.write_bytes??0)}}))};
+  const old=traffic.get(page.node);
+  if(old&&snapshot.boot===old.snapshot.boot&&snapshot.captured<=old.snapshot.captured)return;
+  traffic.set(page.node,{snapshot,previous:old?.snapshot,received:Date.now()});
+ }
+ function userThroughput(id){
+  const nodes=new Set(statsEntries().map(e=>e.snapshot.node));
+  if(!nodes.size)for(const node of traffic.keys())nodes.add(node);
+  const rates=['logicalRead','logicalWrite'].map(key=>{let total=0n;for(const node of nodes){const value=entityRate(traffic.get(node),'users',id,key);if(value==null)return null;total+=value}return nodes.size?total:null});
+  return throughputHTML(...rates,true);
+ }
+ function refreshThroughput(){for(const cell of $('user-rows').querySelectorAll('[data-user-throughput]'))cell.innerHTML=userThroughput(cell.dataset.userThroughput)}
+ function scheduleTraffic(){clearTimeout(trafficPoll);if(!$('users-view').hidden)trafficPoll=setTimeout(refreshTraffic,3000)}
+ async function refreshTraffic(){
+  if($('users-view').hidden)return;
+  const seq=loading,ids=users.slice(0,1000).map(u=>u.id);
+  if(!ids.length){scheduleTraffic();return}
+  try{
+   const connectionNow=connection();
+   const page=await connectionNow.listUsersPage('',ids.length,'',ids);if(seq!==loading)return;observeTraffic(page);
+   const local=page.node;
+   await Promise.all(statsEntries().filter(e=>e.snapshot.node!==local).map(async entry=>{
+    try{const remote=await connectionNow.forNode(entry.snapshot.node).listUsersPage('',ids.length,'',ids);if(seq===loading)observeTraffic(remote)}catch{}
+   }));
+   if(seq===loading)refreshThroughput();
+  }catch(e){if(seq===loading)$('users-error').textContent=e.message}finally{if(seq===loading)scheduleTraffic()}
+ }
  $('user-search').oninput=()=>{clearTimeout(searchTimer);searchTimer=setTimeout(load,250)};
  $('refresh-users').onclick=load;
  $('add-user').onclick=()=>{createRetry=null;$('user-add-form').reset();$('user-password').setCustomValidity('');$('user-add-error').textContent='';$('user-add-dialog').showModal();$('user-name').focus()};
@@ -58,5 +92,5 @@ export function setupUserViews({connection,currentUsername,escape,toast,showView
  });
  function openDelete(id){selected=users.find(u=>u.id===id);if(!selected||selected.name===currentUsername())return;deleteID=newID();$('user-delete-description').textContent=`Soll „${selected.name}“ wirklich gelöscht werden?`;$('user-delete-error').textContent='';$('user-delete-dialog').showModal()}
  $('user-delete-form').addEventListener('submit',async e=>{e.preventDefault();e.submitter.disabled=true;$('user-delete-error').textContent='';try{await connection().deleteUser(selected.id,deleteID);$('user-delete-dialog').close();toast(`User „${selected.name}“ wurde gelöscht.`);await load()}catch(e){$('user-delete-error').textContent=e.message}finally{e.submitter.disabled=false}});
- return {load,clear(){keys.clear();loading++;clearTimeout(searchTimer);pager.clear();pageMeta={};roleRetries.clear();users=[];render()}};
+ return {load,clear(){keys.clear();loading++;clearTimeout(trafficPoll);traffic.clear();clearTimeout(searchTimer);pager.clear();pageMeta={};roleRetries.clear();users=[];render()}};
 }

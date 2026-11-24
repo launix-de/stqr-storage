@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-only
+import {formatNumber,formatBytes} from './numbers.js';
 import {NodeConnection,newID} from './protocol.js';
 import {memberIDs,nodeMembership,currentSnapshots,seedMembers} from './membership.js';
 import {versionWarning,versionLabel} from './node-versions.js';
@@ -6,7 +7,7 @@ import {setupRecovery} from './recovery.js';
 import {setupForceDisconnect} from './force-disconnect.js';
 import {setupUserViews} from './users.js';
 import {setupPlacementGroups} from './placement-groups.js';
-import {entityRate,nodeRate,throughputHTML} from './throughput.js';
+import {entityRate,nodeRate,throughputHTML,bucketTotals} from './throughput.js';
 import {setupBucketViews} from './buckets.js';
 import {MIN_VOLUME_SIZE,parseSize,sizeSteps,sizeLimit,formatSize,sizeLabel} from './size.js';
 const $=id=>document.getElementById(id),escape=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -16,7 +17,7 @@ const localNode=()=>configView?.config.node.id;
 const volumeConnection=()=>volumeNode&&volumeNode!==localNode()?node.forNode(volumeNode):node;
 const volumeConfig=()=>nodeStates.get(volumeNode)?.config??configView;
 const states=['pending','active','draining','detached','failed'],stateNames=['Ausstehend','Aktiv','Wird geleert','Ausgehängt','Fehler'],classes=['hdd','ssd','ram','ramcache'];
-export function bytes(n){n=BigInt(n??0);const units=['B','KiB','MiB','GiB','TiB','PiB','EiB'];let unit=0,div=1n;while(n>=div*1024n&&unit<units.length-1){div*=1024n;unit++}const v=Number(n*10n/div)/10;return `${v.toLocaleString('de-DE',{maximumFractionDigits:unit?1:0})} ${units[unit]}`}
+export const bytes=formatBytes;
 function toast(message,error=false){const div=document.createElement('div');div.className='toast'+(error?' error-toast':'');div.textContent=message;while($('toasts').children.length>=3)$('toasts').firstElementChild.remove();$('toasts').append(div);setTimeout(()=>div.remove(),error?10000:5000)}
 function setConnected(connected){$('connection').classList.toggle('offline',!connected);$('connection').innerHTML=`<span class="dot"></span>${connected?'Live · alle 3 Sekunden':'Verbindung wird wiederhergestellt'}`;$('refresh').disabled=!connected}
 function beginSession(session){
@@ -52,7 +53,7 @@ const forceView=setupForceDisconnect({connection:()=>node,config:()=>configView,
 $('add-error').insertAdjacentHTML('beforebegin','<section id="volume-pg-selection" class="bucket-form-section"></section>');
 const pgViews=setupPlacementGroups({connection:()=>node,escape,toast,states:nodeStates});
 const bucketViews=setupBucketViews({connection:()=>node,escape,toast,showView,statsEntries:()=>currentSnapshots(configView,nodeStates)});
-const userViews=setupUserViews({connection:()=>node,currentUsername:()=>$('profile-name').textContent,escape,toast,showView,requireLogin,openBucketCreate:options=>bucketViews.openCreate(options)});
+const userViews=setupUserViews({connection:()=>node,currentUsername:()=>$('profile-name').textContent,escape,toast,showView,requireLogin,openBucketCreate:options=>bucketViews.openCreate(options),statsEntries:()=>currentSnapshots(configView,nodeStates)});
 
 function applyConfig(view){
  configView=view;const id=view.config.node.id,entry=nodeStates.get(id)??{};entry.config=view;nodeStates.set(id,entry);seedMembers(view,nodeStates);
@@ -85,14 +86,16 @@ function renderMetrics(){
  const entries=currentSnapshots(configView,nodeStates);const memberCount=memberIDs(configView)?.size??entries.length;
  const volumes=entries.flatMap(e=>e.snapshot.volumes),t=totals(volumes);
  for(const prefix of ['', 'bucket-']){$(prefix+'metric-capacity').textContent=bytes(t.capacity);$(prefix+'metric-used').textContent=`${bytes(t.allocated)} belegt · ${bytes(t.admission)} nutzbar`;}
- $('metric-volumes').textContent=String(volumes.length);
+ $('metric-volumes').textContent=formatNumber(volumes.length);
  const active=volumes.filter(v=>v.state===1).length,draining=volumes.filter(v=>v.state===2).length;
- $('metric-active').textContent=`${active} aktiv${draining?` · ${draining} im Drain`:''}`;$('nav-count').textContent=String(volumes.length);
+ $('metric-active').textContent=`${active} aktiv${draining?` · ${draining} im Drain`:''}`;$('nav-count').textContent=formatNumber(volumes.length);
  for(const key of ['read','write']){
   let sum=0n,count=0;
   for(const {snapshot:s,previous:p,received}of entries){const seconds=p&&p.boot===s.boot?Number(s.captured-p.captured)/1e9:0;
    if(seconds>0&&s.io[key]>=p.io[key]&&Date.now()-received<10000){sum+=BigInt(Math.round(Number(s.io[key]-p.io[key])/seconds));count++}}
-  for(const prefix of ['', 'bucket-'])$(prefix+'metric-'+key).textContent=count?bytes(sum)+'/s':'—';
+  $('metric-'+key).textContent=count?bytes(sum)+'/s':'—';
+  const logical=bucketTotals(entries)[key==='read'?0:1];
+  $('bucket-metric-'+key).textContent=logical==null?'—':bytes(logical)+'/s';
  }
  const count=memberCount===1?'1 Node':`${memberCount} Nodes`;$('node-count').textContent=count;$('topbar-node-count').textContent=count.toUpperCase();
  const mode=document.querySelector('.mode-card');mode.querySelector('strong').textContent=count;

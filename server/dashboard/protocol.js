@@ -80,7 +80,7 @@ export class NodeConnection{
  stop(){this.stopped=true;clearTimeout(this.reconnect);clearTimeout(this.flushTimer);if(this.ws?.readyState===WebSocket.OPEN){try{this.fireAndForget(OP.STATS_UNSUBSCRIBE,new Writer().id(this.sub).bytes())}catch{}}this.ws?.close()}
  forNode(target){
   const scoped={request:(op,body=new Uint8Array,id=newID())=>this.request(OP.NODE_ADMIN,new Writer().id(target).u16(op).blob(body).bytes(),id,op)};
-  for(const name of ['stageRecoveryVolume','commitRecoveredVolumes','releaseRecoveryVolume','drainNode','shortShutdown','getConfig','setConfig','volumeGrowInfo','growVolume','volumeCapacity','listVolumeCandidates','addVolume','releaseVolumePlacement','removeVolume','rescanVolume','operationStatus'])scoped[name]=NodeConnection.prototype[name];
+  for(const name of ['listUsersPage','adminPage','stageRecoveryVolume','commitRecoveredVolumes','releaseRecoveryVolume','drainNode','shortShutdown','getConfig','setConfig','volumeGrowInfo','growVolume','volumeCapacity','listVolumeCandidates','addVolume','releaseVolumePlacement','removeVolume','rescanVolume','operationStatus'])scoped[name]=NodeConnection.prototype[name];
   return scoped;
  }
  drainNode(target,id){return this.request(OP.NODE_DRAIN,new Writer().id(target).bytes(),id)}

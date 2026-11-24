@@ -11,14 +11,14 @@ function quotaUsageBase(b,escape){
  const l=b.policy.limits,accounting=l.quota_accounting==='logical'?'Logisch':'Physisch';
  if(l.absolute_unlimited)return `<span class="bucket-quota">Unbegrenzt</span><div class="bucket-sub">${accounting}</div>`;
  const quota=BigInt(l.absolute_quota_bytes);
- if(b.used_bytes==null)return `<span class="bucket-quota">${escape(quotaText(quota))}</span><div class="bucket-sub" title="${escape(b.usage_error??'')}">Belegung nicht verfügbar · ${accounting}</div>`;
+ if(b.used_bytes==null)return `<span class="bucket-quota">${escape(sizeLabel(quota))}</span><div class="bucket-sub" title="${escape(b.usage_error??'')}">Belegung nicht verfügbar · ${accounting}</div>`;
  const used=BigInt(b.used_bytes),percent=quota>0n?Number((used*10000n/quota)>10000n?10000n:used*10000n/quota)/100:used>0n?100:0;
- return `<div class="bucket-usage"><div class="usage-label"><strong title="${used} Bytes belegt">${escape(used<1024n?quotaText(used):sizeLabel(used))}</strong><span title="${quota} Bytes Kontingent">von ${escape(quotaText(quota))}</span></div><div class="usage-track" role="progressbar" aria-label="${escape('Kontingent für '+b.name)}" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${percent}" aria-valuetext="${escape(quotaText(used)+' von '+quotaText(quota))}"><i class="usage-used" data-percent="${percent}"></i></div><div class="bucket-sub">${accounting}</div></div>`;
+ return `<div class="bucket-usage"><div class="usage-label"><strong title="${used} Bytes belegt">${escape(used<1024n?quotaText(used):sizeLabel(used))}</strong><span title="${quota} Bytes Kontingent">von ${escape(sizeLabel(quota))}</span></div><div class="usage-track" role="progressbar" aria-label="${escape('Kontingent für '+b.name)}" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${percent}" aria-valuetext="${escape(quotaText(used)+' von '+sizeLabel(quota))}"><i class="usage-used" data-percent="${percent}"></i></div><div class="bucket-sub">${accounting}</div></div>`;
 }
 function bucketUsage(b,escape){
  let html=quotaUsageBase(b,escape),g=BigInt(b.policy.limits.guaranteed_quota_bytes);if(g===0n)return html;
- html+=`<div class="bucket-sub">${escape(quotaText(g))} garantiert${b.guaranteed_remaining_physical!=null?' · '+escape(quotaText(b.guaranteed_remaining_physical))+' physisch geschützt':''}</div>`;
- if(BigInt(b.guarantee_estimate_shortfall??0)>0n)html+=`<div class="error">Zusicherung unterdeckt · ${escape(quotaText(b.guarantee_estimate_shortfall))} Reserve fehlt</div>`;
+ html+=`<div class="bucket-sub">${escape(sizeLabel(g))} garantiert${b.guaranteed_remaining_physical!=null?' · '+escape(sizeLabel(b.guaranteed_remaining_physical))+' physisch geschützt':''}</div>`;
+ if(BigInt(b.guarantee_estimate_shortfall??0)>0n)html+=`<div class="error">Zusicherung unterdeckt · ${escape(sizeLabel(b.guarantee_estimate_shortfall))} Reserve fehlt</div>`;
  return html;
 }
 const permissions=[[1,'Lesen'],[2,'Schreiben'],[4,'Anhängen'],[8,'Löschen']];
@@ -129,14 +129,14 @@ export function setupBucketViews({connection,escape,toast,showView,statsEntries=
   $('bucket-quota-slider-wrap').hidden=false;$('bucket-quota-max').disabled=!quotaInfo;slider.disabled=!quotaInfo||unlimited;
   if(!quotaInfo){$('bucket-quota-capacity').textContent='Verfügbarer Platz wird ermittelt …';$('bucket-quota-limit').textContent='—';$('bucket-quota-value').textContent='—';input.setCustomValidity('');return}
   const info=quotaInfo;$('bucket-quota-capacity').textContent=`${sizeLabel(info.available)} frei${info.reservedOther?' · '+sizeLabel(info.reservedOther)+' geschützt':''}${info.used?' · '+sizeLabel(info.used)+' bereits genutzt':''}`;
-  $('bucket-quota-min').textContent=quotaText(info.used);$('bucket-quota-limit').textContent=quotaText(info.maximum);$('bucket-quota-limit').title=info.maximum+' Bytes';
+  $('bucket-quota-min').textContent=sizeLabel(info.used);$('bucket-quota-limit').textContent=sizeLabel(info.maximum);$('bucket-quota-limit').title=info.maximum+' Bytes';
   try{const value=parseQuota(input.value);if(!unlimited&&(value<info.used||value>info.maximum))throw Error(`Kontingent muss zwischen ${quotaText(info.used)} und ${quotaText(info.maximum)} liegen.`);
-   input.setCustomValidity('');quotaSteps=sizeSteps(info.maximum,value,info.used,1n);slider.min='0';slider.max=String(Math.max(0,quotaSteps.length-1));slider.step='1';slider.value=String(Math.max(0,quotaSteps.indexOf(value)));$('bucket-quota-value').textContent=unlimited?'Unbegrenzt':quotaText(value);slider.setAttribute('aria-valuetext',unlimited?'Unbegrenzt':quotaText(value));
+   input.setCustomValidity('');quotaSteps=sizeSteps(info.maximum,value,info.used,1n);slider.min='0';slider.max=String(Math.max(0,quotaSteps.length-1));slider.step='1';slider.value=String(Math.max(0,quotaSteps.indexOf(value)));$('bucket-quota-value').textContent=unlimited?'Unbegrenzt':sizeLabel(value);slider.setAttribute('aria-valuetext',unlimited?'Unbegrenzt':quotaText(value));
   }catch(e){input.setCustomValidity(unlimited?'':e.message)}
  }
  $('bucket-quota').oninput=syncQuota;
  $('bucket-quota').onchange=()=>{syncQuota();if($('bucket-quota').validity.valid)$('bucket-quota').value=quotaText(parseQuota($('bucket-quota').value))};
- $('bucket-quota-slider').oninput=()=>{const value=quotaSteps[Number($('bucket-quota-slider').value)];if(value===undefined)return;$('bucket-quota').value=quotaText(value);$('bucket-quota').setCustomValidity('');$('bucket-quota-value').textContent=quotaText(value);$('bucket-quota-slider').setAttribute('aria-valuetext',quotaText(value))};
+ $('bucket-quota-slider').oninput=()=>{const value=quotaSteps[Number($('bucket-quota-slider').value)];if(value===undefined)return;$('bucket-quota').value=quotaText(value);$('bucket-quota').setCustomValidity('');$('bucket-quota-value').textContent=sizeLabel(value);$('bucket-quota-slider').setAttribute('aria-valuetext',quotaText(value))};
  $('bucket-quota-max').onclick=async()=>{await refreshQuota();if(!quotaInfo)return;$('bucket-unlimited').checked=false;$('bucket-quota').value=quotaText(quotaInfo.maximum);updateFields()};
  $('bucket-create-dialog').addEventListener('close',()=>{quotaEpoch++;clearTimeout(quotaPoll)});
 

@@ -70,6 +70,7 @@ type Server struct {
 	sockets                map[*wsSession]struct{}
 	latest                 atomic.Pointer[client.StatsSnapshot]
 	retiredIO              client.IOStats
+	userIO                 sync.Map
 	peerStatsMu            sync.RWMutex
 	peerStats              map[client.ID]*peerObservation
 	peerManagers           map[string]bool
