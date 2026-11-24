@@ -149,7 +149,7 @@ func (s *Server) executeBucketListPage(body []byte, p principal) ([]byte, int, e
 		}
 		b.Receipts = nil
 		entry := bucketListEntry{BucketDescription: b}
-		if !b.Policy.Limits.Unlimited && b.Policy.Limits.Accounting == "logical" {
+		if !b.Policy.Limits.Unlimited {
 			bucket, e := s.Bucket(mustBucketID(b.ID))
 			if e != nil {
 				return nil, 0, e
@@ -161,6 +161,7 @@ func (s *Server) executeBucketListPage(body []byte, p principal) ([]byte, int, e
 				entry.UsedBytes = &used
 			}
 		}
+		s.addQuotaDiagnostics(&entry)
 		raw, e := json.Marshal(entry)
 		if e != nil {
 			return nil, 0, e

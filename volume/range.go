@@ -74,7 +74,7 @@ func (t *transaction) patchRaw(s *dataSpan, offset, length uint64, src io.Reader
 		index, within := position/BlockSize, position%BlockSize
 		size := min(uint64(BlockSize), s.Stored-index*BlockSize)
 		raw := make([]byte, size)
-		if err := t.v.readBytes(raw, s.Location+index*BlockSize); err != nil {
+		if err := t.readBytes(raw, s.Location+index*BlockSize); err != nil {
 			return err
 		}
 		crc := s.CRC

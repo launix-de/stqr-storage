@@ -75,6 +75,12 @@ func (c *controlCoordinator) beginWithExclusion(ctx context.Context, kind uint16
 // ResultReady is durable therefore always has a safe abort path; afterward the
 // requester consistently completes this decision instead of abandoning peers.
 func (c *controlCoordinator) prepared(ctx context.Context, proposal controlProposal, result []byte) error {
+	return c.prepareResult(ctx, proposal, result, false)
+}
+func (c *controlCoordinator) preparedAll(ctx context.Context, proposal controlProposal, result []byte) error {
+	return c.prepareResult(ctx, proposal, result, true)
+}
+func (c *controlCoordinator) prepareResult(ctx context.Context, proposal controlProposal, result []byte, all bool) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if !c.building {
@@ -85,7 +91,13 @@ func (c *controlCoordinator) prepared(ctx context.Context, proposal controlPropo
 	if r == nil || r.Claim.Round != proposal.Claim.Round || r.Kind != proposal.Kind {
 		return errControlConflict
 	}
-	if _, err := c.participants.Prepare(ctx, c.ledger.node, proposal); err != nil {
+	if all {
+		if _, err := collectControlProofs(ctx, r.Claim.Required, func(ctx context.Context, node client.ID) (client.Proof, error) {
+			return c.participants.Prepare(ctx, node, proposal)
+		}); err != nil {
+			return err
+		}
+	} else if _, err := c.participants.Prepare(ctx, c.ledger.node, proposal); err != nil {
 		return err
 	}
 	return c.ledger.saveRequestResult(proposal.Claim.Round, result)

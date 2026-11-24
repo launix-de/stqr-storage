@@ -24,6 +24,11 @@ func (h *Handle) PurgeBatch(records []ObjectRecord) error {
 		seen := make(map[Key]bool, len(records))
 		// Validate everything before releasing any storage or editing the tree.
 		for _, record := range records {
+			if busy, err := v.pending(record.Key); err != nil {
+				return err
+			} else if busy {
+				return ErrBusy
+			}
 			if record.Info.Version == 0 || seen[record.Key] {
 				return ErrRange
 			}

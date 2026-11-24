@@ -90,6 +90,7 @@ func (s *Server) installSystemView(view *systemView) error {
 		}
 	}
 	s.currentSystem.Store(view)
+	s.pendingQuotas.Store(nil)
 	if err := s.retirePreviousEpochLeases(view.manifest.Membership.Epoch); err != nil {
 		return err
 	}
@@ -111,6 +112,9 @@ func (s *Server) installSystemView(view *systemView) error {
 	} else {
 		s.resyncMovedSubscriptions(view.placement)
 		s.placement.Store(view.placement)
+	}
+	if err := s.applyQuotaProtectionLocked(); err != nil {
+		return err
 	}
 	if s.scopes != nil {
 		if err := s.ensureVolumeAuthorityLocked(); err != nil {

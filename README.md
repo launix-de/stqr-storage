@@ -156,7 +156,7 @@ those owners and migrates ranges as capacity and placement requirements change.
 | Object API | `Get`, `Put`, ranged access, atomic `Append`, `Trunc`, `Delete`, `Stat`, whole-object and ranged CAS, streaming transfers and retry deduplication |
 | Storage | File and Linux raw-device volumes, volatile RAM volumes, checksums, crash recovery and raw/gzip/LZ4/xz storage |
 | Placement | Bucket storage classes and placement groups, automatic capacity distribution and migration for policy changes |
-| Dashboard | Users, bucket grants, S3 access keys, quota configuration, node and volume management, live statistics and maintenance operations |
+| Dashboard | Users, bucket grants, S3 access keys, logical/physical quotas and protected guarantees, node and volume management, live statistics and maintenance operations |
 | Go client | Authenticated, bucket-bound connections, direct routing to range owners, reconnects and request IDs for retry deduplication |
 | S3 | GET/HEAD/PUT/DELETE, range and conditional requests, listing, multipart uploads, server-side copy, bulk delete, checksums, SigV4 and presigned URLs |
 | Linux FUSE | Read/write and readonly mounts, permissions, sparse files, rename, symlinks, hardlinks for incremental backups, extended attributes and offline `--fsck` |
@@ -164,13 +164,23 @@ those owners and migrates ranges as capacity and placement requirements change.
 | Windows client | WinFsp drive-letter client sharing the Linux inode format; build and limits in [windows/](windows/README.md) |
 | Native overlays | Partial-content copy-up, metadata overrides, whiteouts and persisted write whitelists |
 
-Current data placement uses **one primary owner per range**. Adding a node adds
-capacity; it does not yet create redundant copies or provide failover for that
-owner's data. Replication, read-cache tiers and erasure coding remain part of the
-vision below. Integration tests exercise multiple daemon processes on one host;
-large multi-host deployments and petabyte-scale operation still need field
-validation and reproducible benchmarks. Distributed quota enforcement also
-remains under development.
+Disk replication uses **one primary and required full replicas per range**.
+PG settings select a fixed replica count or EVERYWHERE within the PG's node
+mask. Writes require ALL copies; a missing required node never silently reduces
+durability. Prepared writes stay invisible, retries retain their original result,
+and reads can use a committed replica while the primary is offline. Independent
+buckets remain available. Online replica additions, count reductions and codec
+changes preserve versions and retry receipts. Logical quotas count data once;
+physical quotas include every required copy and staging allocation.
+
+RAM replica restore and automatic relocation of existing multi-copy groups are
+still pending; multi-copy RAM writes return 501. No automatic writer failover is
+performed. Read-cache tiers and erasure coding remain on the roadmap. Local
+daemon, fault-injection and opt-in SSH tests cover replication and recovery;
+large deployments still need field validation and reproducible benchmarks.
+The replication storage records require volume format 4. Formats 2 and 3 remain
+readable and upgrade on the next write; older binaries must not reopen an
+upgraded volume. See [replication notes](docs/replication.md).
 
 The native store offers atomic operations per object. Applications and frontends
 build their own coordination above that interface; STQR does not provide a

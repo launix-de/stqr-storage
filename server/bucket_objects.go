@@ -15,7 +15,8 @@ import (
 // Bucket object operations own authorization, lifecycle, codec and admission.
 // The transport only decodes/encodes. Committed ranges select the authoritative
 // node and optional pinned volume; local versions/tombstones/receipts resolve
-// unrestricted local placement. No automatic failover or data replicas exist.
+// unrestricted local placement. Required replicas use the staged ALL path;
+// transport failures never elect a replacement writer.
 func (b *Bucket) authorize(p principal, permission BucketPermissions) (BucketDescription, error) {
 	b.mu.RLock()
 	maintenance := b.maintenance
@@ -113,15 +114,6 @@ func bucketCodec(policy BucketPolicy) volume.Compression {
 	return volume.Raw
 }
 func bucketLocalPolicy(p BucketPolicy) error {
-	if p.Redundancy.Mode == "replication" && p.PlacementMode == "count" && p.Redundancy.Replicas != 1 {
-		return fail(501, "multiple-node replication is not implemented")
-	}
-	if p.Limits.Guaranteed != 0 {
-		return fail(501, "bucket guaranteed reservations are not implemented")
-	}
-	if !p.Limits.Unlimited && p.Limits.Accounting != "logical" {
-		return fail(501, "finite physical bucket quotas are not implemented")
-	}
 	return nil
 }
 func (b *Bucket) selectVolume(d BucketDescription, key volume.Key, request volume.ID, create bool) (*volume.Volume, volume.Info, bool, error) {
@@ -161,6 +153,16 @@ func (b *Bucket) selectVolume(d BucketDescription, key volume.Key, request volum
 			}
 		}
 		info, err := h.RecordInfo(key)
+		if err == nil && b.server.controller != nil {
+			if entry, ok := b.server.placement.Load().lookup(client.ID(key.Bucket), client.ObjectID(key.Object)); ok && len(entry.Locations) == 1 && entry.Locations[0].Volume == (client.ID{}) {
+				shadow, e := h.ImportShadow(key)
+				if e != nil {
+					err = e
+				} else if shadow {
+					err = volume.ErrNotFound
+				}
+			}
+		}
 		h.Close()
 		if err == nil {
 			if !found || info.Version > latest.Version {
@@ -233,12 +235,12 @@ func (b *Bucket) GetRange(ctx context.Context, p principal, id volume.ObjectID, 
 	if err != nil {
 		return nil, volume.Info{}, err
 	}
-	if err := b.server.checkObjectOwner(b.ID(), id); err != nil {
+	if err := b.server.checkObjectOwner(b.ID(), id, true); err != nil {
 		return nil, volume.Info{}, err
 	}
 	v, prior, _, err := b.selectVolume(d, volume.Key{Bucket: b.ID(), Object: id}, volume.ID{}, false)
 	if err != nil {
-		if bindingErr := b.server.checkObjectBinding(ctx, b.ID(), id); bindingErr != nil {
+		if bindingErr := b.server.checkObjectBinding(ctx, b.ID(), id, true); bindingErr != nil {
 			return nil, volume.Info{}, bindingErr
 		}
 		return nil, volume.Info{}, b.absenceError(id, prior, err)
@@ -248,7 +250,7 @@ func (b *Bucket) GetRange(ctx context.Context, p principal, id volume.ObjectID, 
 		return nil, volume.Info{}, err
 	}
 	defer h.Close()
-	if err := b.server.checkObjectBinding(ctx, b.ID(), id); err != nil {
+	if err := b.server.checkObjectBinding(ctx, b.ID(), id, true); err != nil {
 		return nil, volume.Info{}, err
 	}
 	return h.GetRange(volume.Key{Bucket: b.ID(), Object: id}, offset, length)
@@ -269,13 +271,13 @@ func (b *Bucket) copyToVersion(ctx context.Context, p principal, id volume.Objec
 	if err != nil {
 		return volume.Info{}, 0, err
 	}
-	if err := b.server.checkObjectOwner(b.ID(), id); err != nil {
+	if err := b.server.checkObjectOwner(b.ID(), id, true); err != nil {
 		return volume.Info{}, 0, err
 	}
 	key := volume.Key{Bucket: b.ID(), Object: id}
 	v, prior, _, err := b.selectVolume(d, key, volume.ID{}, false)
 	if err != nil {
-		if bindingErr := b.server.checkObjectBinding(ctx, b.ID(), id); bindingErr != nil {
+		if bindingErr := b.server.checkObjectBinding(ctx, b.ID(), id, true); bindingErr != nil {
 			return volume.Info{}, 0, bindingErr
 		}
 		return volume.Info{}, 0, b.absenceError(id, prior, err)
@@ -285,7 +287,7 @@ func (b *Bucket) copyToVersion(ctx context.Context, p principal, id volume.Objec
 		return volume.Info{}, 0, err
 	}
 	defer h.Close()
-	if err := b.server.checkObjectBinding(ctx, b.ID(), id); err != nil {
+	if err := b.server.checkObjectBinding(ctx, b.ID(), id, true); err != nil {
 		return volume.Info{}, 0, err
 	}
 	info, err := h.Stat(key)
@@ -330,11 +332,11 @@ func (b *Bucket) Stat(ctx context.Context, p principal, id volume.ObjectID) (vol
 	if err != nil {
 		return volume.Info{}, err
 	}
-	if err := b.server.checkObjectOwner(b.ID(), id); err != nil {
+	if err := b.server.checkObjectOwner(b.ID(), id, true); err != nil {
 		return volume.Info{}, err
 	}
 	_, info, _, err := b.selectVolume(d, volume.Key{Bucket: b.ID(), Object: id}, volume.ID{}, false)
-	if bindingErr := b.server.checkObjectBinding(ctx, b.ID(), id); bindingErr != nil {
+	if bindingErr := b.server.checkObjectBinding(ctx, b.ID(), id, true); bindingErr != nil {
 		err = bindingErr
 	}
 	if info.Deleted && err == nil {
@@ -350,8 +352,17 @@ func (b *Bucket) mutate(ctx context.Context, p principal, id volume.ObjectID, op
 	if s.metadataPreview {
 		return volume.Result{}, fail(503, "metadata preview cannot mutate user objects")
 	}
+	if s.replicas != nil {
+		release := s.replicas.lock(volume.Key{Bucket: b.ID(), Object: id})
+		defer release()
+	}
 	s.opMu.Lock()
-	defer s.opMu.Unlock()
+	opLocked := true
+	defer func() {
+		if opLocked {
+			s.opMu.Unlock()
+		}
+	}()
 	if b.underMaintenance() {
 		if view := s.currentSystem.Load(); view != nil && len(view.manifest.Membership.Members) > 1 && s.leaseRecord(b) == nil {
 			return volume.Result{}, fail(501, "exclusive maintenance cannot mutate after multi-node admission")
@@ -395,18 +406,30 @@ func (b *Bucket) mutate(ctx context.Context, p principal, id volume.ObjectID, op
 	if s.bucketFrozen(b.ID()) {
 		return volume.Result{}, fail(503, "bucket quota/policy change is in progress")
 	}
+	var mutationRelease func()
 	if s.scopes != nil {
 		release, err := s.scopes.guard(b.ID(), id)
 		if err != nil {
 			return volume.Result{}, err
 		}
-		defer release()
+		mutationRelease = release
+		defer func() {
+			if mutationRelease != nil {
+				mutationRelease()
+			}
+		}()
 	}
-	if d.DesiredPolicy != nil {
-		return volume.Result{}, fail(503, "bucket policy transition in progress")
+	if s.controller == nil {
+		err = bucketLocalPolicy(d.Policy)
+		if d.Policy.Redundancy.Mode == "replication" && (d.Policy.PlacementMode == "everywhere" || d.Policy.Redundancy.Replicas > 1) {
+			return volume.Result{}, fail(501, "replication requires the cluster controller")
+		}
 	}
-	if err = bucketLocalPolicy(d.Policy); err != nil {
+	if err != nil {
 		return volume.Result{}, err
+	}
+	if s.controller == nil && d.DesiredPolicy != nil && bucketCodec(d.Policy) != bucketCodec(*d.DesiredPolicy) {
+		return volume.Result{}, fail(503, "bucket codec conversion is in progress")
 	}
 	if opt.RequestID == (volume.ID{}) {
 		return volume.Result{}, fail(400, "mutation request ID is required")
@@ -425,6 +448,26 @@ func (b *Bucket) mutate(ctx context.Context, p principal, id volume.ObjectID, op
 	if old.Version == 0 && opcode != 0x0102 && opcode != 0x0106 && b.lostRange(id) {
 		return volume.Result{}, fail(410, "partial mutation cannot recreate a lost object")
 	}
+	var replicatedEntry client.RangeEntry
+	if s.controller != nil {
+		entry, known := s.placement.Load().lookup(client.ID(b.ID()), client.ObjectID(id))
+		if known && d.DesiredPolicy != nil {
+			if entry.PolicyVersion == d.DesiredPolicy.Version {
+				d.Policy = *d.DesiredPolicy
+			} else if s.requiredReplicas(*d.DesiredPolicy, s.currentSystem.Load().manifest.Membership) == 1 && bucketCodec(d.Policy) != bucketCodec(*d.DesiredPolicy) {
+				return volume.Result{}, fail(503, "bucket codec conversion is in progress")
+			}
+		}
+		if known && len(entry.Locations) > 1 {
+			replicatedEntry = entry
+		}
+		if known && len(entry.Locations) < s.requiredReplicas(d.Policy, s.currentSystem.Load().manifest.Membership) {
+			return volume.Result{}, fail(503, "required replica set is being built")
+		}
+		if known && len(entry.Locations) > 1 && d.Policy.StorageStrategy == "ram" {
+			return volume.Result{}, fail(501, "RAM replica runtime restore is not implemented")
+		}
+	}
 	// Persist the first local placement before acknowledging any object bytes.
 	if len(d.LocalVolumes) == 0 && s.controller == nil {
 		d.LocalVolumes = []string{v.Identity().VolumeID.String()}
@@ -433,6 +476,9 @@ func (b *Bucket) mutate(ctx context.Context, p principal, id volume.ObjectID, op
 			return volume.Result{}, e
 		}
 		d = saved.Describe()
+	}
+	if err := s.refreshQuotaProtectionLocked(); err != nil {
+		return volume.Result{}, err
 	}
 	if err := s.ensureVolumeAuthorityLocked(); err != nil {
 		return volume.Result{}, err
@@ -444,6 +490,15 @@ func (b *Bucket) mutate(ctx context.Context, p principal, id volume.ObjectID, op
 		return volume.Result{}, err
 	}
 	retry, repeated, err := h.OperationStatus(opt.RequestID)
+	if err == nil && len(replicatedEntry.Locations) > 1 && !repeated {
+		prepared, exists, e := h.ReplicaStatus(opt.RequestID)
+		if e != nil {
+			err = e
+		} else if exists {
+			retry = prepared.Request.Result
+			repeated = true
+		}
+	}
 	h.Close()
 	if err != nil {
 		return volume.Result{}, err
@@ -453,7 +508,25 @@ func (b *Bucket) mutate(ctx context.Context, p principal, id volume.ObjectID, op
 		codec = retry.Info.Compression
 	}
 	opt.Compression = &codec
-	if !repeated && !d.Policy.Limits.Unlimited {
+	if len(replicatedEntry.Locations) > 1 {
+		// Capture an incoming stream once. The primary and every follower hash
+		// the identical original operation; retries retain its APPEND offset.
+		spool, e := newReplicaSpool(v.Identity().Class == volume.RAM)
+		if e != nil {
+			return volume.Result{}, e
+		}
+		defer spool.Close()
+		if opcode != 0x0105 && opcode != 0x0106 && length > 0 {
+			if _, e = io.CopyN(spool, bucketContextReader{ctx: ctx, r: src}, int64(length)); e != nil {
+				return volume.Result{}, e
+			}
+		}
+		if _, e = spool.Seek(0, io.SeekStart); e != nil {
+			return volume.Result{}, e
+		}
+		src = spool
+	}
+	if !repeated && !d.Policy.Limits.Unlimited && d.Policy.Limits.Accounting == "logical" {
 		oldLength := old.Length
 		if old.Deleted {
 			oldLength = 0
@@ -485,6 +558,13 @@ func (b *Bucket) mutate(ctx context.Context, p principal, id volume.ObjectID, op
 		if e != nil {
 			return volume.Result{}, e
 		}
+		if s.controller != nil {
+			pending, e := s.pendingReplicaGrowth(b.ID())
+			if e != nil {
+				return volume.Result{}, e
+			}
+			usage = addCapacity(usage, pending)
+		}
 		limit := d.Policy.Limits.Absolute
 		if s.controller != nil {
 			limit, e = s.quotaAllowance(client.ID(b.ID()))
@@ -498,6 +578,80 @@ func (b *Bucket) mutate(ctx context.Context, p principal, id volume.ObjectID, op
 			}
 			return volume.Result{}, volume.ErrFull
 		}
+	}
+	if len(replicatedEntry.Locations) > 1 {
+		result, e := b.prepareReplicated(v, key, replicatedEntry, opcode, offset, length, src, expected, opt)
+		if e != nil {
+			return result, e
+		}
+		h, e := v.Open(false)
+		if e != nil {
+			return result, e
+		}
+		record, ok, e := h.ReplicaStatus(opt.RequestID)
+		h.Close()
+		if e != nil {
+			return result, e
+		}
+		if !ok {
+			if repeated {
+				return result, nil
+			}
+			return result, volume.ErrRecovery
+		}
+		if record.State == volume.ReplicaPublished {
+			return result, nil
+		}
+		header := replicaHeader{Volume: v.Identity().VolumeID, Request: record.Request, Binding: record.Binding, PreviousVersion: record.PreviousVersion, Opcode: replicaOpcode(opcode), Offset: offset, Length: length, Expected: expected, Options: opt}
+		if mutationRelease != nil {
+			mutationRelease()
+			mutationRelease = nil
+		}
+		s.opMu.Unlock()
+		opLocked = false
+		if record.State == volume.ReplicaPrepared {
+			if e = s.replicas.preparePeers(ctx, replicatedEntry, header, src.(io.ReadSeeker)); e != nil {
+				if status := statusOf(e); status == 507 || status == 412 || status == 409 {
+					return result, s.replicas.abortPrepared(ctx, v, replicatedEntry, record, uint16(status))
+				}
+				return result, fail(503, "waiting for required replicas: "+e.Error())
+			}
+			s.opMu.Lock()
+			h, e = v.Open(true)
+			if e == nil {
+				e = h.DecideReplica(opt.RequestID, record.Binding)
+				h.Close()
+			}
+			s.opMu.Unlock()
+			if e != nil {
+				return result, e
+			}
+		}
+		if e = s.replicas.commitPeers(ctx, replicatedEntry, header); e != nil {
+			return result, fail(503, "commit is waiting for required replicas: "+e.Error())
+		}
+		s.opMu.Lock()
+		opLocked = true
+		h, e = v.Open(true)
+		if e != nil {
+			return result, e
+		}
+		defer h.Close()
+		current, _, statusErr := h.ReplicaStatus(opt.RequestID)
+		if statusErr != nil {
+			return result, statusErr
+		}
+		result, e = h.PublishReplica(opt.RequestID, record.Binding)
+		if e == nil {
+			if current.State != volume.ReplicaPublished && s.objectSubscriptions.watched(key) {
+				s.objectSubscriptions.publish(key, old.Version, result.Info, h)
+			}
+			h.Close()
+			b.usage.mu.Lock()
+			b.usage.valid = false
+			b.usage.mu.Unlock()
+		}
+		return result, e
 	}
 	b.usage.mu.Lock()
 	usageLocked := true
@@ -575,6 +729,13 @@ func (b *Bucket) mutate(ctx context.Context, p principal, id volume.ObjectID, op
 	b.updateUsage(oldLength, newLength, repeated, err)
 	b.usage.mu.Unlock()
 	usageLocked = false
+	var quotaFull *physicalQuotaFull
+	if errors.As(err, &quotaFull) {
+		if quotaFull.Waiting {
+			return result, fail(503, "waiting for physical bucket growth credits")
+		}
+		return result, err
+	}
 	if errors.Is(err, volume.ErrFull) && !errors.Is(err, volume.ErrRecovery) && !repeated && s.scopes != nil {
 		needed := addCapacity(length, 64<<10)
 		if opcode == 0x0105 || opcode == 0x0106 {

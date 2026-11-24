@@ -1,7 +1,7 @@
 # Accepted writes and explicit durability barriers
 
 Native mutations keep their existing durable acknowledgement by default. With
-HELLO capability `1024`, a client may explicitly request an **accepted** ACK:
+HELLO capability `8192`, a client may explicitly request an **accepted** ACK:
 the complete atomic mutation is visible to reads/CAS and subscriptions, but its
 latest bytes and retry record may still be volatile. This is a weaker promise,
 not a change to authentication, placement authority or object atomicity.

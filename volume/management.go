@@ -66,6 +66,9 @@ func (v *Volume) syncThroughLocked(k Key, version uint64) error {
 func (v *Volume) Detach() error {
 	v.mu.Lock()
 	defer v.mu.Unlock()
+	if v.preparing {
+		return ErrBusy
+	}
 	if e := v.check(false); e != nil {
 		return e
 	}

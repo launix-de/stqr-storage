@@ -72,3 +72,19 @@ func openVolumeFile(path string) (*os.File, error) {
 	}
 	return f, e
 }
+
+func ensureFileBacking(f *os.File, size int64) error {
+	st, err := f.Stat()
+	if err != nil {
+		return err
+	}
+	if !st.Mode().IsRegular() {
+		return nil
+	}
+	// KEEP_SIZE: a larger physical backing must never resize the STQR header or
+	// truncate trailing bytes of an externally grown file/device.
+	if err = syscall.Fallocate(int(f.Fd()), 1, 0, size); err != nil {
+		return fmt.Errorf("%w: preallocate physical backing: %v", ErrFull, err)
+	}
+	return f.Sync()
+}

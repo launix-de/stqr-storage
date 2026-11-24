@@ -27,6 +27,7 @@ type quotaNodeSnapshot struct {
 type quotaBucketSnapshot struct {
 	Bucket          client.ID
 	Allowance, Used uint64
+	Physical        uint64 `json:",omitempty"`
 }
 
 func quotaPolicy(d BucketDescription) BucketPolicy {
@@ -39,20 +40,26 @@ func quotaPolicy(d BucketDescription) BucketPolicy {
 func (s *Server) quotaCheckpoint(body []byte, actor client.ID) ([]byte, error) {
 	d := client.Decoder{B: body}
 	schema := d.U16()
-	if schema != 1 && schema != 2 {
+	if schema != 1 && schema != 2 && schema != 3 {
 		return nil, client.ErrProtocol
 	}
 	claim, err := decodeControlClaim(d.Blob())
 	var planned volume.ObjectID
-	if schema == 2 {
+	if schema >= 2 {
 		copy(planned[:], d.Take(32))
 	}
 	count := d.Count(10000)
 	var buckets []client.ID
 	var usage []bool
+	var physical []bool
 	for i := 0; i < count; i++ {
 		buckets = append(buckets, d.ID())
 		usage = append(usage, d.Bool())
+		phys := false
+		if schema == 3 {
+			phys = d.Bool()
+		}
+		physical = append(physical, phys)
 	}
 	if err != nil || d.Done() != nil || claim.Round.Initiator != actor || s.quotas == nil {
 		return nil, errControlConflict
@@ -116,6 +123,16 @@ func (s *Server) quotaCheckpoint(body []byte, actor client.ID) ([]byte, error) {
 				return nil, e
 			}
 		}
+		if b, e := s.Bucket(volume.ID(bucket)); physical[i] && e == nil {
+			if plannedView != nil {
+				entry.Physical, err = b.plannedPhysicalUsage(plannedView)
+			} else {
+				entry.Physical, err = b.physicalUsage()
+			}
+			if err != nil {
+				return nil, err
+			}
+		}
 		snap.Buckets = append(snap.Buckets, entry)
 	}
 	return json.Marshal(snap)
@@ -139,7 +156,10 @@ func (c *clusterController) captureQuotaAllocations(ctx context.Context, claim c
 		}
 		old := findQuota(view, client.ID(id))
 		a := quotaAllocation{Bucket: client.ID(id), Limit: p.Limits.Absolute}
-		changed := claim.Exclusion != nil || old == nil || old.Limit != a.Limit
+		changed := claim.Exclusion != nil || old == nil || old.Limit != a.Limit || quotaAccounting(old.Accounting) != p.Limits.Accounting
+		if p.Limits.Accounting == "physical" {
+			a.Accounting = "physical"
+		}
 		if changed {
 			a.Epoch = client.NewRequestID()
 		} else {
@@ -160,15 +180,28 @@ func (c *clusterController) captureQuotaAllocations(ctx context.Context, claim c
 	if len(planned) > 0 && planned[0] != (volume.ObjectID{}) {
 		schema = 2
 	}
+	for _, a := range allocations {
+		if a.Accounting == "physical" {
+			schema = 3
+			break
+		}
+	}
 	e.U16(schema)
 	e.Blob(claimWire)
-	if schema == 2 {
-		e.B = append(e.B, planned[0][:]...)
+	if schema >= 2 {
+		var root volume.ObjectID
+		if len(planned) > 0 {
+			root = planned[0]
+		}
+		e.B = append(e.B, root[:]...)
 	}
 	e.V(uint64(len(allocations)))
 	for i, a := range allocations {
 		e.ID(a.Bucket)
 		e.Bool(measure[i])
+		if schema == 3 {
+			e.Bool(a.Accounting == "physical" && measure[i])
+		}
 	}
 	var snapshots []quotaNodeSnapshot
 	for _, node := range claim.Required {
@@ -193,6 +226,9 @@ func (c *clusterController) captureQuotaAllocations(ctx context.Context, claim c
 			amount := entry.Allowance
 			if measure[i] {
 				amount = entry.Used
+				if a.Accounting == "physical" {
+					amount = entry.Physical
+				}
 			}
 			if amount > math.MaxUint64-total {
 				return nil, volume.ErrRange
@@ -258,7 +294,7 @@ func validateQuotaAllocations(view *systemView) error {
 		for _, description := range view.descriptions {
 			if description.ID == a.Bucket.String() && !description.DeletionComplete {
 				p := quotaPolicy(description)
-				found = !p.Limits.Unlimited && p.Limits.Accounting == "logical" && p.Limits.Absolute == a.Limit
+				found = !p.Limits.Unlimited && (p.Limits.Accounting == "logical" && (a.Accounting == "" || a.Accounting == "logical") || p.Limits.Accounting == "physical" && a.Accounting == "physical") && p.Limits.Absolute == a.Limit
 				break
 			}
 		}
@@ -287,7 +323,7 @@ func (c *clusterController) ensureQuotaAllocations(ctx context.Context) {
 	busy := l.slot != nil || l.request != nil
 	members := membershipIDs(l.current.Membership)
 	l.mu.Unlock()
-	if busy || len(members) == 0 || members[0] != l.node {
+	if busy || len(members) == 0 || c.server.quotaRefreshCoordinator(members) != l.node {
 		return
 	}
 	var frozen []client.ID
@@ -299,7 +335,7 @@ func (c *clusterController) ensureQuotaAllocations(ctx context.Context) {
 			}
 		}
 	}
-	if len(frozen) != 0 {
+	if len(frozen) != 0 || c.server.quotaBackingDrains() {
 		_, _, _ = c.change(ctx, nil, nil, frozen...)
 	}
 }

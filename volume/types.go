@@ -15,7 +15,7 @@ const (
 	PageSize        = 4096
 	BlockSize       = 1 << 20
 	MinVolumeSize   = 256 << 10
-	FormatVersion   = 3
+	FormatVersion   = 4
 	pageHeaderSize  = 64
 	pagePayload     = PageSize - pageHeaderSize
 	superblockBytes = 2 * PageSize
@@ -141,9 +141,11 @@ type Options struct {
 	WholeObject                     bool
 	UseGuaranteed                   bool   // trusted owner of the entire volume reserve; shared buckets use GuaranteedAllowance
 	GuaranteedAllowance             uint64 // trusted physical budget from this caller's guarantee; never consumes another bucket's reserve
+	ImportShadow                    bool   // trusted fenced incoming copy; becomes authoritative only through committed placement
 	InFlightAllowance               uint64 // trusted physical allowance; never consumes bucket guarantees
 	restoreSameVersion              bool
 	restoreSegmented                bool
+	prepare                         *ReplicaBinding
 }
 
 type Extent struct {
@@ -168,6 +170,7 @@ type Stats struct {
 // a segment list and byte-packed, growable tail arenas. Compression chunks are
 // positions inside an allocation, not separate allocator extents.
 type object struct {
+	importShadow                  bool
 	Info                          Info
 	Segmented                     bool
 	Spans                         []dataSpan
@@ -186,9 +189,10 @@ type dataSpan struct {
 	CRC                                                   uint32
 }
 type dedupe struct {
-	Key         Key
-	Fingerprint [32]byte
-	Result      Result
+	importShadow bool
+	Key          Key
+	Fingerprint  [32]byte
+	Result       Result
 }
 
 func add(a, b uint64) (uint64, error) {

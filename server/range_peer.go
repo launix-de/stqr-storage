@@ -17,12 +17,19 @@ func (c rangeCommit) marshal() ([]byte, error) {
 		return nil, err
 	}
 	e := client.Encoder{}
-	e.U16(2)
+	schema := uint16(2)
+	if c.QuotaUsed != 0 {
+		schema = 3
+	}
+	e.U16(schema)
 	e.B = append(e.B, c.ID[:]...)
 	e.B = append(e.B, c.Digest[:]...)
 	e.B = append(e.B, source...)
 	e.B = append(e.B, target...)
 	e.U64(c.LogicalUsed)
+	if schema == 3 {
+		e.U64(c.QuotaUsed)
+	}
 	return e.B, nil
 }
 func decodeRangeCommit(body []byte) (rangeCommit, error) {
@@ -34,10 +41,13 @@ func decodeRangeCommit(body []byte) (rangeCommit, error) {
 	var a, b error
 	c.Source, a = client.DecodeProof(d.Take(56))
 	c.Target, b = client.DecodeProof(d.Take(56))
-	if schema == 2 {
+	if schema >= 2 {
 		c.LogicalUsed = d.U64()
 	}
-	if (schema != 1 && schema != 2) || a != nil || b != nil || d.Done() != nil {
+	if schema == 3 {
+		c.QuotaUsed = d.U64()
+	}
+	if (schema != 1 && schema != 2 && schema != 3) || a != nil || b != nil || d.Done() != nil {
 		return rangeCommit{}, client.ErrProtocol
 	}
 	return c, nil

@@ -99,7 +99,7 @@ export class NodeConnection{
  commitRecoveredVolumes(volumes,epoch,id){const ids=[...new Set(volumes)].sort(),w=new Writer().u64(epoch).v(ids.length);for(const v of ids)w.id(v);return this.request(OP.VOLUME_RECOVERY_COMMIT,w.bytes(),id)}
  clusterShutdown(id){return this.request(OP.CLUSTER_SHUTDOWN,new Writer().u8(2).bytes(),id)}
  getConfig(){return this.request(OP.CONFIG_GET)}setConfig(fields){return this.request(OP.CONFIG_SET,new Writer().text(JSON.stringify(fields)).bytes())}
- bucketQuotaCapacity(bucket,strategy,profile=255,overhead=0,group){const w=new Writer();if(group)w.u16(1).id(group);return this.request(group?OP.BUCKET_GROUP_CAPACITY:OP.BUCKET_QUOTA_CAPACITY,w.id(bucket).u8({hdd:0,ssd:1,ram:2}[strategy]).u8(profile).u32(overhead).bytes())}
+ bucketQuotaCapacity(bucket,strategy,profile=255,overhead=0,group,accounting="logical"){const w=new Writer(),physical=accounting==="physical";if(group)w.u16(physical?2:1).id(group);w.id(bucket).u8({hdd:0,ssd:1,ram:2}[strategy]).u8(profile).u32(overhead);if(group&&physical)w.u8(1);return this.request(group?OP.BUCKET_GROUP_CAPACITY:OP.BUCKET_QUOTA_CAPACITY,w.bytes())}
  listPlacementGroups(after='',limit=100){return this.request(OP.PG_LIST,new Writer().u16(1).text(after).u32(limit).bytes())}
  setPlacementGroup(group,expected,name,settings,id){return this.request(OP.PG_SET,new Writer().u16(2).id(group).u64(expected).text(name).text(storageJSON(settings)).bytes(),id)}
  deletePlacementGroup(group,expected,id){return this.request(OP.PG_DELETE,new Writer().u16(1).id(group).u64(expected).bytes(),id)}

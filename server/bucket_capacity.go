@@ -95,7 +95,11 @@ func (s *Server) bucketQuotaCapacity(id volume.ID, strategy uint8, selection ...
 		group = b.Describe().Policy.PlacementGroup
 		maskVersion = b.Describe().Policy.PlacementMaskVersion
 		var err error
-		used, err = b.logicalUsage()
+		policy := b.storageDescription().Policy
+		if len(selection) > 0 {
+			policy.Limits.Accounting = selection[0].Limits.Accounting
+		}
+		used, err = b.accountedUsageFor(policy)
 		if err != nil {
 			return bucketQuotaCapacity{}, err
 		}
@@ -114,10 +118,30 @@ func (s *Server) bucketQuotaCapacity(id volume.ID, strategy uint8, selection ...
 			continue
 		}
 		node.Free[class] = addCapacity(node.Free[class], addCapacity(stats.AdmissionFreePhysical, stats.GuaranteedRemainingPhysical))
-		node.Reserved[class] = addCapacity(node.Reserved[class], stats.GuaranteedRemainingPhysical)
+		own := uint64(0)
+		if view := s.currentSystem.Load(); view != nil && id != (volume.ID{}) {
+			h, err := store.Open(false)
+			if err != nil {
+				return bucketQuotaCapacity{}, err
+			}
+			u, err := h.StorageUsage()
+			h.Close()
+			if err != nil {
+				return bucketQuotaCapacity{}, err
+			}
+			for _, r := range view.manifest.QuotaReserves {
+				if r.Bucket == client.ID(id) && r.Node == s.quotaNode && r.Volume == client.ID(stats.Identity.VolumeID) {
+					own = addCapacity(own, subtractCapacity(r.Backing, storagePhysical(u, id)))
+				}
+			}
+		}
+		node.Reserved[class] = addCapacity(node.Reserved[class], subtractCapacity(stats.GuaranteedRemainingPhysical, own))
 	}
 	var guarantees [3]uint64
 	for _, d := range s.bucketSnapshots() {
+		if s.currentSystem.Load() != nil {
+			break
+		}
 		if d.ID == id.String() || d.ID == systemBucket.String() || d.DeletionComplete {
 			continue
 		}
@@ -161,8 +185,11 @@ func (s *Server) executeBucketQuotaCapacity(m client.Message, p principal) ([]by
 	}
 	d := client.Decoder{B: m.Body}
 	group := ""
+	schema := uint16(1)
+	accounting := "logical"
 	if m.Opcode == client.BucketGroupCapacity {
-		if d.U16() != 1 {
+		schema = d.U16()
+		if schema != 1 && schema != 2 {
 			return nil, 0, client.ErrProtocol
 		}
 		group = d.ID().String()
@@ -171,6 +198,13 @@ func (s *Server) executeBucketQuotaCapacity(m client.Message, p principal) ([]by
 	strategy := d.U8()
 	profile := d.U8()
 	ppm := d.U32()
+	if schema == 2 {
+		a := d.U8()
+		if a > 1 {
+			return nil, 0, client.ErrProtocol
+		}
+		accounting = []string{"logical", "physical"}[a]
+	}
 	if d.Done() != nil {
 		return nil, 0, fail(400, "invalid bucket capacity request")
 	}
@@ -187,13 +221,18 @@ func (s *Server) executeBucketQuotaCapacity(m client.Message, p principal) ([]by
 			return nil, 0, err
 		}
 		strategy = uint8(bucketClass(policy))
+		policy.Limits.Accounting = accounting
 		selection = append(selection, policy)
 	}
 	c, err := s.administrativeQuotaCapacity(id, strategy, p, selection...)
 	if err != nil {
 		return nil, 0, err
 	}
-	c.Maximum = addCapacity(c.Used, logicalCapacity(c.Available, ppm))
+	if accounting == "physical" {
+		c.Maximum = addCapacity(c.Used, c.Available)
+	} else {
+		c.Maximum = addCapacity(c.Used, logicalCapacity(c.Available, ppm))
+	}
 	e := client.Encoder{}
 	e.U64(c.Used)
 	e.U64(c.Available)

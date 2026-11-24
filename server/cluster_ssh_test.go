@@ -32,6 +32,8 @@ func TestSSHRecoveryFenceClearance(t *testing.T) {
 	runSSHClusterAcceptance(t, false, true)
 }
 
+func TestSSHReplicationAcceptance(t *testing.T) { runSSHClusterAcceptance(t, false, false, true) }
+
 func TestSSHPM2ClusterAcceptance(t *testing.T) {
 	if os.Getenv("STQR_TEST_PM2") != "1" {
 		t.Skip("set STQR_TEST_PM2=1 to use a disposable PM2 entry on the SSH host")
@@ -226,6 +228,10 @@ func runSSHClusterAcceptance(t *testing.T, usePM2 bool, recovery ...bool) {
 		t.Fatal("remote volume add through local node", status, err)
 	}
 	t.Log("remote volume added through local node")
+	if len(recovery) > 1 && recovery[1] {
+		runSSHReplication(t, sshRecoveryFixture{ctx: ctx, source: s, http: h, remote: peer, remoteDir: remoteDir, sshTarget: sshTarget, localVolume: localVolume.VolumeID, request: request, ssh: ssh, start: start})
+		return
+	}
 	bucket, _ := createProtocolBucket(t, s, "ssh-extension")
 	if len(recovery) > 0 && recovery[0] {
 		d := client.Decoder{B: added}

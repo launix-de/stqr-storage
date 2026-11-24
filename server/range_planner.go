@@ -104,7 +104,13 @@ func (r *rangeManager) destinations(d BucketDescription) ([]rangeDestination, ma
 				continue
 			}
 			capacity[snapshot.Node] = addCapacity(capacity[snapshot.Node], v.CapacityPhysical)
-			out = append(out, rangeDestination{node: snapshot.Node, volume: v, capacity: v.CapacityPhysical, free: v.AdmissionFreePhysical, observed: seen[snapshot.Node]})
+			own := uint64(0)
+			for _, reserve := range view.manifest.QuotaReserves {
+				if reserve.Bucket.String() == d.ID && reserve.Node == snapshot.Node && reserve.Volume == v.ID {
+					own = addCapacity(own, reserve.Backing)
+				}
+			}
+			out = append(out, rangeDestination{node: snapshot.Node, volume: v, capacity: v.CapacityPhysical, free: addCapacity(v.AdmissionFreePhysical, min(own, v.GuaranteedRemainingPhysical)), observed: seen[snapshot.Node]})
 		}
 	}
 	sort.Slice(out, func(i, j int) bool {
@@ -149,6 +155,12 @@ func (r *rangeManager) planNext() (rangePlan, bool) {
 	for _, d := range s.bucketSnapshots() {
 		if d.ID == systemBucket.String() || d.DeletionComplete || d.State == BucketDeleting {
 			continue
+		}
+		if plan, ok := r.planReplicaAdd(d); ok {
+			return plan, true
+		}
+		if plan, ok := r.planReplicaRemove(d); ok {
+			return plan, true
 		}
 		if d.Policy.StorageStrategy == "ram" {
 			if plan, ok := r.planRuntimeReset(d); ok {
@@ -393,6 +405,9 @@ func (r *rangeManager) finishEmptyDrains() error {
 	s := r.server
 	s.opMu.Lock()
 	defer s.opMu.Unlock()
+	if err := s.refreshQuotaProtectionLocked(); err != nil {
+		return err
+	}
 	s.mu.RLock()
 	var candidates []*managedVolume
 	for _, v := range s.volumes {
@@ -403,6 +418,9 @@ func (r *rangeManager) finishEmptyDrains() error {
 	s.mu.RUnlock()
 	for _, v := range candidates {
 		id := v.store.Identity().VolumeID
+		if s.volumeBacksGuarantee(id) {
+			continue
+		}
 		r.mu.Lock()
 		busy := false
 		for _, txn := range r.txns {

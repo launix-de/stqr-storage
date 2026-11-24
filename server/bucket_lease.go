@@ -296,6 +296,9 @@ func (s *Server) releaseLeaseParticipants(ctx context.Context, ids []client.ID, 
 	return s.storeLease(b, l)
 }
 func (s *Server) reserveLeaseLocked(b *Bucket, l bucketLease) error {
+	if err := s.checkPendingReplicas(func(k volume.Key) bool { return k.Bucket == l.Bucket }); err != nil {
+		return err
+	}
 	_, epoch, e := s.leaseMembers()
 	if e != nil {
 		return e

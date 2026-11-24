@@ -84,7 +84,7 @@ func DecodeSuperblock(b []byte) (Superblock, error) {
 		return s, ErrCorrupt
 	}
 	version := diskOrder.Uint16(b[8:])
-	if version != FormatVersion && version != 2 || version == 2 && string(b[:8]) != "STQRVOL2" {
+	if version != FormatVersion && version != 3 && version != 2 || version == 2 && string(b[:8]) != "STQRVOL2" {
 		return s, ErrVersion
 	}
 	s.Identity.Class = Class(b[10])

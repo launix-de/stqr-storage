@@ -10,7 +10,7 @@ const (
 	ObjectAccepted       uint16 = 0x0118
 	BucketSync           uint16 = 0x0119
 	DurabilityNotice     uint16 = 0x011a
-	CapabilityDurability uint64 = 1024
+	CapabilityDurability uint64 = 8192
 	DurabilityHeader     uint64 = 48
 )
 

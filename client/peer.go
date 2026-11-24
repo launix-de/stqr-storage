@@ -17,6 +17,7 @@ const CapabilityVolumeRecovery uint64 = 256
 
 // Persistent target cancellation proofs can clear a rescued source's fence.
 const CapabilityRecoveryFenceClearance uint64 = 1024
+const CapabilityReplication uint64 = 4096
 const NodeHelloMessage uint16 = 0x1000
 
 type NodeHello struct {
@@ -213,3 +214,6 @@ func (m NodeHelloAck) validMembership() bool {
 	}
 	return len(m.Membership.Members) > 0 && m.Generation > 0
 }
+
+// CapabilityPhysicalQuotas gates volume-backed guarantees and physical credit handoffs.
+const CapabilityPhysicalQuotas uint64 = 2048

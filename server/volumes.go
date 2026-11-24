@@ -24,6 +24,10 @@ type apiError struct {
 func (e *apiError) Error() string           { return e.message }
 func fail(status int, message string) error { return &apiError{status, message} }
 func statusOf(e error) int {
+	var aborted *volume.ReplicaAbortError
+	if errors.As(e, &aborted) && aborted.Status >= 400 && aborted.Status <= 599 {
+		return int(aborted.Status)
+	}
 	if e == nil {
 		return 200
 	}

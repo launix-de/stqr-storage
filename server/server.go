@@ -79,8 +79,16 @@ type Server struct {
 	controller             *clusterController
 	currentSystem          atomic.Pointer[systemView]
 	placement              atomic.Pointer[placementImage]
+	quotaNode              client.ID
+	quotaUsage             atomic.Pointer[quotaUsageImage]
+	quotaPolicies          atomic.Pointer[quotaPolicyImage]
+	quotaRanges            atomic.Pointer[quotaRangeImage]
+	quotaImports           atomic.Pointer[quotaImportImage]
+	pendingQuotas          atomic.Pointer[systemView]
+	quotaHooked            map[volume.ID]*volume.Volume
 	quotas                 *quotaManager
 	scopes                 *rangeManager
+	replicas               *replicaManager
 }
 
 func Open(opts Options) (s *Server, err error) {
@@ -283,6 +291,12 @@ func Open(opts Options) (s *Server, err error) {
 			return s, e
 		}
 	}
+	if e = s.restoreQuotaProtection(); e != nil {
+		return s, e
+	}
+	if e = s.initReplicas(); e != nil {
+		return s, e
+	}
 	if e = s.recoverOperations(); e != nil {
 		return s, e
 	}
@@ -340,6 +354,9 @@ func Open(opts Options) (s *Server, err error) {
 		s.startQuotaWorker()
 	}
 	s.startKnownPeers()
+	if s.controller != nil {
+		s.replicas.start()
+	}
 	if s.controller != nil {
 		s.controller.start()
 	}

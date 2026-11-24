@@ -36,6 +36,16 @@ type Volume struct {
 	durableGeneration uint64
 
 	mu               sync.RWMutex
+	preparing        bool
+	prepareCond      *sync.Cond
+	accountMu        sync.Mutex
+	accounting       map[ID]bucketAllocation
+	owned            map[ID]bucketAllocation
+	ownerStamp       any
+	ownerFilter      func(Key, bool) bool
+	admission        Admission
+	observer         func(StorageSnapshot)
+	overlay          *transaction
 	dev              VolumeIO
 	sb               Superblock
 	cache            *objectCache
@@ -253,6 +263,9 @@ func (v *Volume) publish(s Superblock) error {
 	return t.commit(false)
 }
 func (v *Volume) check(write bool) error {
+	if write && v.preparing {
+		return ErrBusy
+	}
 	if v.closed {
 		return ErrClosed
 	}
@@ -331,6 +344,9 @@ func (v *Volume) Sync() error {
 func (v *Volume) Close() error {
 	v.mu.Lock()
 	defer v.mu.Unlock()
+	for v.preparing {
+		v.prepareCond.Wait()
+	}
 	if v.closed {
 		return nil
 	}

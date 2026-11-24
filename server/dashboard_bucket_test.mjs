@@ -25,3 +25,8 @@ test('node wrappers use existing bucket commands, pagination and grants',async()
  const b=draft(),user='02000000000000000000000000000000';await connection.grantBucket(b.id,user,5,'request');const grant=calls.pop();assert.equal(grant[0],OP.BUCKET_GRANT);r=new Reader(grant[1]);assert.equal(r.id(),b.id);assert.equal(r.id(),user);assert.equal(r.u32(),5);r.done();
  await connection.setBucketPolicy(b,3,'same-request');const policy=calls.pop();assert.equal(policy[0],OP.BUCKET_SET_POLICY);assert.equal(policy[2],'same-request');assert.deepEqual(policy[1].slice(0,-8),writeBucketPolicy(new Writer(),b).bytes());assert.equal(new Reader(policy[1].slice(-8)).u64(),3n);
 });
+test('physical PG capacity requests explicitly encode their accounting unit',async()=>{
+ const connection=Object.create(NodeConnection.prototype);let call;connection.request=(...args)=>{call=args;return Promise.resolve({})};
+ const bucket='01000000000000000000000000000000',group='02000000000000000000000000000000';
+ await connection.bucketQuotaCapacity(bucket,'hdd',5,540,group,'physical');assert.equal(call[0],OP.BUCKET_GROUP_CAPACITY);const r=new Reader(call[1]);assert.equal(r.u16(),2);assert.equal(r.id(),group);assert.equal(r.id(),bucket);assert.equal(r.u8(),0);assert.equal(r.u8(),5);assert.equal(r.u32(),540);assert.equal(r.u8(),1);r.done();
+});

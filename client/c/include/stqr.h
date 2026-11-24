@@ -80,7 +80,7 @@ int stqr_cas(stqr_client *, stqr_object_id, unsigned scope, stqr_u64 offset,
              const void *expected, size_t expected_len,
              const void *replacement, size_t replacement_len,
              const stqr_options *, stqr_info *);
-#define STQR_CAP_DURABILITY 1024U
+#define STQR_CAP_DURABILITY 8192U
 typedef struct { stqr_id boot; stqr_u64 sequence; } stqr_commit_mark;
 /* Mark observation includes reads and subscription updates, preserving causal
  * dependencies. Close is not a durability barrier. Marks survive reconnect;

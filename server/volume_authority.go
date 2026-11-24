@@ -60,10 +60,23 @@ func (s *Server) dirtyVolumeAuthority() {
 // or in an explicit pinned placement. Unrelated unpinned ranges cannot see old
 // copies, even if an old object's numeric version exceeds their current value.
 func (s *Server) volumeAllowedForEntry(bucket client.ID, entry client.RangeEntry, id volume.ID, view *systemView) bool {
-	if len(entry.Locations) != 1 {
+	if len(entry.Locations) == 0 {
 		return false
 	}
 	loc := entry.Locations[0]
+	if len(entry.Locations) > 1 {
+		found := false
+		for _, candidate := range entry.Locations {
+			if candidate.Node == s.control.ledger.node && candidate.Role <= 1 {
+				loc = candidate
+				found = true
+				break
+			}
+		}
+		if !found {
+			return false
+		}
+	}
 	if loc.Volume != (client.ID{}) {
 		return loc.Volume == client.ID(id)
 	}

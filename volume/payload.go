@@ -56,6 +56,15 @@ func (v *Volume) loadObject(k Key) (*object, error) {
 	if ptr == 0 {
 		return nil, ErrNotFound
 	}
+	o, e := v.loadObjectAt(ptr)
+	if e == nil {
+		v.cache.put(k, o)
+	}
+	return o, e
+}
+
+func (v *Volume) loadObjectAt(ptr uint64) (*object, error) {
+	var e error
 	head := make([]byte, objectHeader)
 	if e = v.readBytes(head, ptr); e != nil {
 		return nil, e
@@ -73,7 +82,7 @@ func (v *Volume) loadObject(k Key) (*object, error) {
 	if checksum(b) != stored {
 		return nil, ErrCorrupt
 	}
-	o := &object{Base: ptr, Size: uint64(n), Info: Info{Version: diskOrder.Uint64(b[8:]), Length: diskOrder.Uint64(b[16:]), Compression: Compression(b[24]), Deleted: b[25]&1 != 0}, Segmented: b[25]&2 != 0}
+	o := &object{Base: ptr, Size: uint64(n), Info: Info{Version: diskOrder.Uint64(b[8:]), Length: diskOrder.Uint64(b[16:]), Compression: Compression(b[24]), Deleted: b[25]&1 != 0}, importShadow: b[25]&4 != 0, Segmented: b[25]&2 != 0}
 	count := uint64(diskOrder.Uint32(b[28:]))
 	if !o.Info.Compression.valid() {
 		return nil, ErrCorrupt
@@ -131,10 +140,16 @@ func (v *Volume) loadObject(k Key) (*object, error) {
 		}
 		last = x.Offset + x.Length
 	}
-	v.cache.put(k, o)
 	return o, nil
 }
 func (t *transaction) saveObject(k Key, o *object) error {
+	if err := t.writeObject(o); err != nil {
+		return err
+	}
+	return t.set(&t.sb.ObjectRoot, objectKey(k), o.Base)
+}
+
+func (t *transaction) writeObject(o *object) error {
 	count := len(o.Spans)
 	n := objectHeader + count*spanBytes
 	if o.Segmented {
@@ -206,6 +221,9 @@ func (t *transaction) saveObject(k Key, o *object) error {
 	if o.Segmented {
 		b[25] |= 2
 	}
+	if o.importShadow {
+		b[25] |= 4
+	}
 	diskOrder.PutUint32(b[28:], uint32(count))
 	if o.Segmented {
 		diskOrder.PutUint64(b[40:], o.ListHead)
@@ -234,7 +252,7 @@ func (t *transaction) saveObject(k Key, o *object) error {
 	if e := t.patch(o.Base, b); e != nil {
 		return e
 	}
-	return t.set(&t.sb.ObjectRoot, objectKey(k), o.Base)
+	return nil
 }
 func (t *transaction) readBytes(dst []byte, off uint64) error {
 	for len(dst) > 0 {
@@ -268,15 +286,7 @@ func releaseSpan(t *transaction, s dataSpan) {
 	}
 }
 func releaseData(t *transaction, o *object) {
-	if o == nil {
-		return
-	}
-	for _, s := range o.Spans {
-		releaseSpan(t, s)
-	}
-	for _, off := range o.ListBlocks {
-		t.release(off, listBytes, true)
-	}
+	releaseUnsharedData(t, o, nil)
 }
 
 // storePacked reserves one contiguous allocation for all supplied logical data

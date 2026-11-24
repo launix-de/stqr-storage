@@ -1,4 +1,4 @@
-# Volume library and on-volume format 3
+# Volume library and on-volume format 4
 
 The implementation is the Go package `github.com/launix-de/stqr-storage/volume`.
 There are no UI handlers, CLI commands, or networking code. Runtime files live in
@@ -30,6 +30,12 @@ writers invoked under a lock must not reenter the same volume. When composing
 operations on different volumes, callers must establish a consistent lock order.
 The server is responsible for cluster ownership, replication, bucket access and
 quotas across volumes. `Bind` persists/checks the node/cluster identity.
+
+`PrepareMutation` is the deliberate exception to the write handle's read
+exclusion: private payload staging admits readers of the previous committed
+index. Other mutations remain excluded until staging finishes, and local WAL
+application/publication reacquires the write lock. Closing waits for this
+private staging phase before releasing the device.
 
 `Volume.Stat` is an independent general metadata query. All other object access
 is exclusively through a handle from `Volume.Open(write bool)`; there is no
@@ -103,12 +109,20 @@ An explicit codec change uses `Recompress`, preserving the logical version.
 can replace a corrupted physical representation at the same logical version.
 These are trusted server primitives, not authority to perform a cluster cutover.
 
-## Packed format 3
+## Packed format 4
 
-The packed object layout from format 2 is retained. Format 3 adds a private
+The packed object layout from format 2 is retained. Format 3 added a private
 management-root pointer and length at superblock offsets 160 and 168. Format-2
 volumes open without copying data and are upgraded on the next transaction.
-Older binaries reject version 3; a downgrade after writing is unsupported.
+Format 4 adds checksummed private replication records: index kind 2 stores the
+original request/result, epoch, sequence, replica-set hash, protocol state and
+staged descriptor/receipt references; kind 3 indexes pending decisions by object.
+Prepared payload is not reachable through the visible kind-0 object record.
+Publication replaces the object pointer and installs its kind-1 retry receipt in
+one transaction. Unchanged encoded allocations remain shared until retirement;
+allocation accounting and freeing use the union of referenced intervals.
+Readers accept formats 2 and 3 and upgrade on their next write. Older binaries
+reject version 4; a downgrade after writing is unsupported.
 
 The physical layout starts with two alternating 4096-byte superblocks, two
 commit-anchor pages and eight redo scratch pages (32 KiB). The initial object
@@ -278,3 +292,35 @@ before admitting further writes. It invalidates source claims before a migration
 FENCE. A disk without this provenance, an incomplete cohort or an unresolved
 source fence cannot be adopted merely because it contains an object index.
 See specification §8.2.3 for the administrative recovery protocol.
+
+
+## Bucket accounting and trusted admission
+
+`SetAdmission` reconstructs five counters per bucket from the canonical index;
+transactions subsequently update changed object/request keys, not a complete RAM
+directory or a full scan per write. `Handle.StorageUsage` reports actual private
+allocations and deterministic shared metadata shares. `SetOwnershipFilter` and
+`OwnedStorageUsage` distinguish authoritative copies from migration operating
+space; the server supplies a comparable placement stamp and a pure predicate.
+Callbacks must not acquire node/config/range locks or reenter volumes. The server
+uses immutable accounting/range images to preserve the statistics lock order.
+The optional post-commit observer receives immutable All/Owned snapshots.
+
+Admission inspects the completed allocation plan before WAL publication and can
+reject it without publishing bytes, index entries, a request receipt or counters.
+It returns the required physical guarantee remainder; import allowances remain
+separate. Extra redo pages beyond fixed scratch must also fit unprotected space.
+`EnsurePhysicalBacking` conservatively preallocates Linux file volumes using
+KEEP_SIZE before persistent guarantee READY; size and payload stay unchanged.
+
+The OBJ2 flag byte at offset 25 uses bit 0 for tombstones, bit 1 for segmented
+layout and now bit 2 for a trusted imported copy. REQ2 byte 102 bit 0 marks an
+imported retry record; it participates in the existing CRC. `Restore` and
+`RestoreRequestWithOptions` set these markers via `Options.ImportShadow`.
+An unpinned local cohort must not select these copies as writers/snapshot sources
+or count them as additional required copies. Committed explicit placement at that
+volume makes them canonical. This is important for local volume migrations near
+an absolute quota, including restart before COMMIT. Public object Info and the
+native object wire format stay unchanged. Whole-volume Export/Import preserves
+both marker types and replaces initialized accounting counters atomically with
+the imported root; omitted frame fields are reset before decoding the next frame.

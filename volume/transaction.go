@@ -14,13 +14,16 @@ type allocation struct {
 	meta   bool
 }
 type transaction struct {
-	v                      *Volume
-	sb                     Superblock
-	pages                  map[uint64][]byte
-	spilled                map[uint64]int64
-	spool                  *encodedSpool
-	busy, pending, retired []allocation
-	reusable               allocation
+	v                                *Volume
+	changed                          map[indexKey]bool
+	replaceAccounting                bool
+	replacementAll, replacementOwned map[ID]bucketAllocation
+	sb                               Superblock
+	pages                            map[uint64][]byte
+	spilled                          map[uint64]int64
+	spool                            *encodedSpool
+	busy, pending, retired           []allocation
+	reusable                         allocation
 	// Split free-tree siblings remain searchable until their parent is published.
 	freeSiblings []uint64
 	// A claim removes its old extent before reinserting its free remainders.
@@ -310,6 +313,9 @@ func (t *transaction) finalize() error {
 	return nil
 }
 func (v *Volume) readPage(off uint64) ([]byte, error) {
+	if v.overlay != nil {
+		return v.overlay.page(off)
+	}
 	if off%PageSize != 0 || off >= v.limit {
 		return nil, ErrCorrupt
 	}
@@ -326,6 +332,9 @@ func (v *Volume) readPage(off uint64) ([]byte, error) {
 	return b, nil
 }
 func (v *Volume) readBytes(dst []byte, off uint64) error {
+	if v.overlay != nil {
+		return v.overlay.readBytes(dst, off)
+	}
 	if v.deferred != nil || v.staging != nil {
 		return v.readLayer(dst, off)
 	}
@@ -411,6 +420,25 @@ func (t *transaction) commitReserved(useGuaranteed bool, allowance, guaranteedAl
 	if e := t.finalize(); e != nil {
 		return e
 	}
+	accounts, err := t.projectAccounting()
+	if err != nil {
+		return err
+	}
+	owned, err := t.projectAccounts(t.v.owned, t.v.ownerFilter)
+	if err != nil {
+		return err
+	}
+	if t.replaceAccounting {
+		accounts = t.replacementAll
+		owned = t.replacementOwned
+	}
+	dynamicReserve := uint64(0)
+	if t.v.admission != nil {
+		dynamicReserve, err = t.v.admission(StorageChange{Before: t.v.usage(t.v.accounting, t.v.sb), After: t.v.usage(accounts, t.sb), BeforeOwned: t.v.ownedUsage(t.v.owned, t.v.accounting, t.v.sb), AfterOwned: t.v.ownedUsage(owned, accounts, t.sb), Temporary: allowance != 0})
+		if err != nil {
+			return err
+		}
+	}
 	allowance = min(allowance, t.v.inFlightReserved)
 	guaranteedAllowance = min(guaranteedAllowance, t.v.guaranteed)
 	if useGuaranteed {
@@ -421,6 +449,13 @@ func (t *transaction) commitReserved(useGuaranteed bool, allowance, guaranteedAl
 		return ErrFull
 	}
 	protected += t.v.guaranteed - guaranteedAllowance
+	if t.v.admission != nil {
+		protected = t.v.inFlightReserved - allowance
+		if dynamicReserve > ^uint64(0)-protected {
+			return ErrFull
+		}
+		protected += dynamicReserve
+	}
 	if t.sb.FreeBytes < protected {
 		return ErrFull
 	}
@@ -464,8 +499,18 @@ func (t *transaction) commitReserved(useGuaranteed bool, allowance, guaranteedAl
 			t.v.deferred.pages[off] = page
 		}
 		t.v.sb = t.sb
+		if accounts != nil {
+			t.v.accounting = accounts
+			t.v.owned = owned
+			if t.v.observer != nil {
+				t.v.observer(StorageSnapshot{All: t.v.usage(accounts, t.sb), Owned: t.v.ownedUsage(owned, accounts, t.sb)})
+			}
+		}
 		t.v.inFlightReserved -= consumed
 		t.v.guaranteed -= guaranteedConsumed
+		if t.v.admission != nil {
+			t.v.guaranteed = dynamicReserve
+		}
 		for off, page := range t.v.staging {
 			if string(page[:4]) == "BPT2" {
 				if node, err := decodeNode(page, t.sb.Identity.VolumeID); err == nil {
@@ -530,6 +575,10 @@ func (t *transaction) commitReserved(useGuaranteed bool, allowance, guaranteedAl
 		}
 	}
 	count := (payload.size + PageSize - 17) / (PageSize - 16)
+	extra := uint64(max(int64(0), count-scratchPages)) * PageSize
+	if extra > t.sb.FreeBytes-protected {
+		return ErrFull
+	}
 	logPages := make([]uint64, count)
 	for i := 0; i < len(logPages); {
 		if i < scratchPages {
@@ -610,9 +659,19 @@ func (t *transaction) commitReserved(useGuaranteed bool, allowance, guaranteedAl
 		return e
 	}
 	t.v.sb = t.sb
+	if accounts != nil {
+		t.v.accounting = accounts
+		t.v.owned = owned
+		if t.v.observer != nil {
+			t.v.observer(StorageSnapshot{All: t.v.usage(accounts, t.sb), Owned: t.v.ownedUsage(owned, accounts, t.sb)})
+		}
+	}
 	t.v.durableGeneration = t.sb.Generation
 	t.v.inFlightReserved -= consumed
 	t.v.guaranteed -= guaranteedConsumed
+	if t.v.admission != nil {
+		t.v.guaranteed = dynamicReserve
+	}
 	for off := range all {
 		b, err := t.page(off)
 		if err != nil {

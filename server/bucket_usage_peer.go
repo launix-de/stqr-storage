@@ -18,14 +18,22 @@ func (s *Server) receiveBucketUsage(ctx context.Context, body []byte, actor clie
 	schema, bucket, user, name := d.U16(), volume.ID(d.ID()), d.ID(), d.Text()
 	var stamp [32]byte
 	copy(stamp[:], d.Take(32))
-	if (schema != 1 && schema != 2) || d.Done() != nil || bucket == systemBucket {
+	accounting := "logical"
+	internal := schema == 2 && len(d.B) == 0 || schema == 3
+	if schema == 2 && !internal || schema == 3 {
+		if d.U8() != 1 {
+			return nil, client.ErrProtocol
+		}
+		accounting = "physical"
+	}
+	if (schema != 1 && schema != 2 && schema != 3) || d.Done() != nil || bucket == systemBucket {
 		return nil, client.ErrProtocol
 	}
 	view := s.currentSystem.Load()
 	if view == nil || !hasControlNode(membershipIDs(view.manifest.Membership), actor) {
 		return nil, ErrBucketForbidden
 	}
-	if schema == 1 {
+	if !internal {
 		account, err := s.findAccount(name)
 		if err != nil || account.ID != user.String() || account.Disabled || account.Role != "ADMIN" {
 			return nil, ErrBucketForbidden
@@ -41,17 +49,23 @@ func (s *Server) receiveBucketUsage(ctx context.Context, body []byte, actor clie
 		return nil, err
 	}
 	entries := s.placement.Load().bucketEntries(client.ID(bucket))
-	if inventoryStamp(entries, s.control.ledger.node) != stamp {
+	stampNode := s.control.ledger.node
+	if accounting == "physical" {
+		stampNode = client.ID{}
+	}
+	if inventoryStamp(entries, stampNode) != stamp {
 		return nil, fail(503, "usage owner map differs")
 	}
 	if err := b.inventoryAvailable(entries); err != nil {
 		return nil, err
 	}
-	used, err := b.logicalUsage()
+	policy := b.storageDescription().Policy
+	policy.Limits.Accounting = accounting
+	used, err := b.accountedUsageFor(policy)
 	if err != nil {
 		return nil, err
 	}
-	if inventoryStamp(s.placement.Load().bucketEntries(client.ID(bucket)), s.control.ledger.node) != stamp {
+	if inventoryStamp(s.placement.Load().bucketEntries(client.ID(bucket)), stampNode) != stamp {
 		return nil, fail(503, "usage owner changed")
 	}
 	e := client.Encoder{}

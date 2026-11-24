@@ -9,6 +9,7 @@ import (
 	"hash"
 	"hash/crc32"
 	"io"
+	"sort"
 )
 
 const MaxBufferedRead = 16 << 20
@@ -215,6 +216,7 @@ func (v *Volume) loadDedupe(id ID) (dedupe, bool, error) {
 	if string(b[:4]) != "REQ2" || checksum(b[:140]) != diskOrder.Uint32(b[140:]) {
 		return d, false, ErrCorrupt
 	}
+	d.importShadow = b[102]&1 != 0
 	copy(d.Key.Bucket[:], b[4:20])
 	copy(d.Key.Object[:], b[20:52])
 	copy(d.Fingerprint[:], b[52:84])
@@ -225,8 +227,18 @@ func (t *transaction) saveReceipt(id ID, d dedupe) error {
 	if id == (ID{}) {
 		return nil
 	}
+	off, err := t.writeReceipt(d)
+	if err != nil {
+		return err
+	}
+	return t.set(&t.sb.ObjectRoot, requestKey(id), off)
+}
+func (t *transaction) writeReceipt(d dedupe) (uint64, error) {
 	b := make([]byte, receiptBytes)
 	copy(b, "REQ2")
+	if d.importShadow {
+		b[102] = 1
+	}
 	copy(b[4:20], d.Key.Bucket[:])
 	copy(b[20:52], d.Key.Object[:])
 	copy(b[52:84], d.Fingerprint[:])
@@ -240,12 +252,12 @@ func (t *transaction) saveReceipt(id ID, d dedupe) error {
 	diskOrder.PutUint32(b[140:], checksum(b[:140]))
 	off, e := t.alloc(receiptBytes, true)
 	if e != nil {
-		return e
+		return 0, e
 	}
 	if e = t.patch(off, b); e != nil {
-		return e
+		return 0, e
 	}
-	return t.set(&t.sb.ObjectRoot, requestKey(id), off)
+	return off, nil
 }
 func (v *Volume) operationStatusLocked(id ID) (Result, bool, error) {
 	d, found, e := v.loadDedupe(id)
@@ -255,11 +267,24 @@ func (v *Volume) forgetRequestLocked(id ID) error {
 	if id == (ID{}) {
 		return ErrRange
 	}
+	r, hasReplica, err := v.loadReplica(id)
+	if err != nil {
+		return err
+	}
+	if hasReplica && r.State != ReplicaPublished {
+		return ErrBusy
+	}
 	off, e := v.lookup(requestKey(id))
 	if e != nil || off == 0 {
 		return e
 	}
 	t := v.transaction()
+	if hasReplica {
+		t.release(r.base, replicaBytes, true)
+		if e = t.remove(&t.sb.ObjectRoot, replicaKey(id)); e != nil {
+			return e
+		}
+	}
 	t.release(off, receiptBytes, true)
 	if e = t.remove(&t.sb.ObjectRoot, requestKey(id)); e != nil {
 		return e
@@ -316,6 +341,31 @@ func (v *Volume) mutateCore(op uint8, k Key, offset, length uint64, src io.Reade
 		}
 	}
 	h := fingerprint(op, k, offset, length, opts, expected)
+	if opts.RequestID != (ID{}) {
+		r, found, err := v.loadReplica(opts.RequestID)
+		if err != nil {
+			return Result{}, err
+		}
+		if found && r.State != ReplicaPublished {
+			if r.State != ReplicaAborted && (opts.prepare == nil || r.Binding != *opts.prepare) {
+				return Result{}, ErrBusy
+			}
+			if payload && length > 0 {
+				if _, err := io.CopyN(h, src, int64(length)); err != nil {
+					return Result{}, err
+				}
+			}
+			var fp [32]byte
+			copy(fp[:], h.Sum(nil))
+			if r.Request.Key != k || r.Request.Fingerprint != fp {
+				return Result{}, ErrRequestID
+			}
+			if r.State == ReplicaAborted {
+				return Result{}, &ReplicaAbortError{Status: r.AbortStatus}
+			}
+			return r.Request.Result, nil
+		}
+	}
 	prior, retry, e := v.loadDedupe(opts.RequestID)
 	if e != nil {
 		return Result{}, e
@@ -333,6 +383,11 @@ func (v *Volume) mutateCore(op uint8, k Key, offset, length uint64, src io.Reade
 		}
 		return prior.Result, nil
 	}
+	if busy, err := v.pending(k); err != nil {
+		return Result{}, err
+	} else if busy {
+		return Result{}, ErrBusy
+	}
 	old, e := v.loadObject(k)
 	if errors.Is(e, ErrNotFound) {
 		old = nil
@@ -341,6 +396,21 @@ func (v *Volume) mutateCore(op uint8, k Key, offset, length uint64, src io.Reade
 	}
 	if e = precondition(old, opts); e != nil {
 		return Result{}, e
+	}
+	if opts.prepare == nil && (op == opPutRange || op == opCAS && !opts.WholeObject) && objectAliases(old) {
+		direct := false
+		for _, span := range old.Spans {
+			direct = direct || span.Direct
+		}
+		if direct {
+			if e = v.rewriteObject(k, old, old.Info.Compression, opts); e != nil {
+				return Result{}, e
+			}
+			old, e = v.loadObject(k)
+			if e != nil {
+				return Result{}, e
+			}
+		}
 	}
 	o := cloneObject(old)
 	alive := old != nil && !old.Info.Deleted
@@ -400,6 +470,82 @@ func (v *Volume) mutateCore(op uint8, k Key, offset, length uint64, src io.Reade
 	if payload && length > 0 {
 		reader = io.TeeReader(src, h)
 	}
+	if opts.prepare != nil {
+		// Prepared versions own their allocations. Never change an arena,
+		// checksum table or descriptor still used by the visible old version.
+		var pieces []payloadPiece
+		cow := !replace && op != opDelete
+		switch {
+		case replace:
+			if length > 0 {
+				pieces = []payloadPiece{{0, length, reader}}
+			}
+		case op == opDelete:
+		case op == opTrunc:
+			if !cow {
+				pieces = oldPieces(v, old, newLength, 0, 0)
+			}
+		default:
+			if !cow {
+				pieces = oldPieces(v, old, newLength, offset, end)
+			}
+			if length > 0 {
+				pieces = append(pieces, payloadPiece{offset, length, reader})
+			}
+			sort.Slice(pieces, func(i, j int) bool { return pieces[i].offset < pieces[j].offset })
+		}
+		var spans []dataSpan
+		var err error
+		appendArena := op == opAppend
+		if appendArena {
+			spans, err = v.stageReplicaAppend(t, old, offset, length, reader)
+		} else {
+			spans, err = v.stageReplicaPayload(t, pieces, codec)
+		}
+		if err != nil {
+			return Result{}, err
+		}
+		if cow && !appendArena {
+			cutStart, cutEnd := offset, end
+			if op == opTrunc {
+				cutStart, cutEnd = 0, 0
+			}
+			retained, err := v.retainSpans(old, newLength, cutStart, cutEnd)
+			if err != nil {
+				return Result{}, err
+			}
+			spans = append(retained, spans...)
+			sort.Slice(spans, func(i, j int) bool { return spans[i].Offset < spans[j].Offset })
+		}
+		o = &object{Info: Info{Version: version, Length: newLength, Compression: codec, Deleted: op == opDelete}, Spans: spans, Segmented: op == opAppend || len(spans) > 1}
+		if err = t.writeObject(o); err != nil {
+			return Result{}, err
+		}
+		result := Result{Info: o.Info, Offset: offset}
+		var fp [32]byte
+		copy(fp[:], h.Sum(nil))
+		r := ReplicaRecord{Request: RequestRecord{ID: opts.RequestID, Key: k, Fingerprint: fp, Result: result}, Binding: *opts.prepare, State: ReplicaPrepared, object: o.Base}
+		r.receipt, err = t.writeReceipt(dedupe{Key: k, Fingerprint: fp, Result: result})
+		if err != nil {
+			return Result{}, err
+		}
+		if old != nil {
+			r.PreviousVersion = old.Info.Version
+			if !old.Info.Deleted {
+				r.PreviousLength = old.Info.Length
+			}
+		}
+		if err = t.saveReplica(&r); err != nil {
+			return Result{}, err
+		}
+		if err = t.set(&t.sb.ObjectRoot, pendingKey(k), r.base); err != nil {
+			return Result{}, err
+		}
+		if err = t.commitReserved(opts.UseGuaranteed, opts.InFlightAllowance, opts.GuaranteedAllowance); err != nil {
+			return Result{}, err
+		}
+		return result, nil
+	}
 	if op == opAppend {
 		o.Segmented = true
 		o.dirtyFrom = max(0, len(o.Spans)-1)
@@ -454,7 +600,7 @@ func (v *Volume) mutateCore(op uint8, k Key, offset, length uint64, src io.Reade
 	result := Result{Info: o.Info, Offset: offset}
 	var fp [32]byte
 	copy(fp[:], h.Sum(nil))
-	if e = t.saveReceipt(opts.RequestID, dedupe{k, fp, result}); e != nil {
+	if e = t.saveReceipt(opts.RequestID, dedupe{Key: k, Fingerprint: fp, Result: result}); e != nil {
 		return Result{}, e
 	}
 	if e = t.commitReserved(opts.UseGuaranteed, opts.InFlightAllowance, opts.GuaranteedAllowance); e != nil {
@@ -466,8 +612,12 @@ func (v *Volume) mutateCore(op uint8, k Key, offset, length uint64, src io.Reade
 func arenaUnused(o *object) uint64 {
 	var n uint64
 	if o != nil && o.Segmented {
+		var regions []allocation
 		for _, s := range o.Spans {
-			n += s.Capacity - s.Stored
+			regions = append(regions, allocation{s.Location + s.Stored, s.Capacity - s.Stored, false})
+		}
+		for _, a := range mergeAllocations(regions) {
+			n += a.n
 		}
 	}
 	return n
@@ -478,7 +628,7 @@ func arenaAfter(total uint64, old, next *object) uint64 {
 func (t *transaction) appendPayload(o *object, offset uint64, src io.Reader, length uint64) error {
 	if len(o.Spans) > 0 {
 		last := &o.Spans[len(o.Spans)-1]
-		if !last.Direct && last.Codec == Raw && last.Skip == 0 && last.Offset+last.Length == offset && length <= last.Capacity-last.Stored {
+		if !last.Direct && last.Codec == Raw && last.Skip == 0 && last.Length == last.Stored && last.Offset+last.Length == offset && length <= last.Capacity-last.Stored {
 			// Continue the stored CRC with only the new bytes. Reading the old
 			// arena would turn each tiny append into an ever larger read.
 			oldLength := last.Length
