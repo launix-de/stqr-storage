@@ -36,16 +36,45 @@ jobs:
           cache-dependency-path: '**/go.sum'
       - run: go vet ./...
       - name: Unit, crash/recovery and localhost cluster tests
+        if: matrix.module != '.'
         run: go test -race ./... -count=1 -timeout=15m
+      - name: Root packages (server suite runs in separate shards)
+        if: matrix.module == '.'
+        run: |
+          python3 - <<'PY'
+          import subprocess
+          packages = subprocess.check_output(['go', 'list', './...'], text=True).splitlines()
+          packages = [p for p in packages if p != 'github.com/launix-de/stqr-storage/server']
+          subprocess.run(['go', 'test', '-race', *packages, '-count=1', '-timeout=15m'], check=True)
+          PY
       - name: Networkboot tools and PAM harness
         if: matrix.module == 'networkboot'
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential libpam0g-dev
+          sudo apt-get install -y build-essential libpam0g-dev dnsmasq-base
           test -f /usr/include/security/pam_modules.h
           make all pam
           python3 -m unittest discover -s tests -v
           sh -n initramfs/hooks/stqr initramfs/scripts/stqr
+
+  server:
+    name: Go / server shard ${{ matrix.shard }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3]
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+      - name: Disjoint server tests, examples and fuzz seeds with race detector
+        run: python3 tools/ci/server-tests.py --shard ${{ matrix.shard }} --shards 4
 
   dashboard:
     name: Dashboard / Chromium

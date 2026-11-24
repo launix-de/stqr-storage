@@ -7,7 +7,8 @@ are needed.
 
 | Job | Activated checks |
 | --- | --- |
-| Go / root | `go vet`, full race suite, native object operations, local multinode replication, quotas, migrations, crash/fault injection and parser fuzz seeds |
+| Go / root | `go vet ./...`; race suite for the client, volume, NBD and CLI packages, including crash/fault injection and parser fuzz seeds |
+| Go / server shards 0–3 | Complete automatically discovered server tests/examples/fuzz seeds, including operations, localhost clusters, quotas and migrations, partitioned into disjoint processes with race detector; avoids one long bcrypt-heavy package exceeding its job budget |
 | Go / networkboot | Independent Go module with race detector, static helpers, PAM build and real private PAM harness, Python workflows and shell syntax |
 | Go / windows | Portable filesystem and settings tests with race detector on Linux |
 | Dashboard | JavaScript tests and all existing browser acceptance tests with a pinned Playwright Chromium |
