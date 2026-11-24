@@ -91,6 +91,10 @@ func checkRecoveryCancelledSourceFence(t *testing.T, interrupt bool) {
 		if status, _ := bucketHTTPReply(t, target.node, message, admin.Username, admin.Password); status != 202 {
 			t.Fatal("injected recovery interruption", status)
 		}
+		// Staging must remain fenced while the exclusion decision is pending.
+		if _, err := target.node.StageRecoveryVolume("rescued", path); statusOf(err) != 503 {
+			t.Fatal("pending recovery allowed volume staging", err)
+		}
 		target = restartDaemonTestNode(t, target)
 		for len(target.node.currentSystem.Load().manifest.VolumeRecoveries) == 0 {
 			if ctx.Err() != nil {
@@ -118,6 +122,23 @@ func checkRecoveryCancelledSourceFence(t *testing.T, interrupt bool) {
 	// The recovered candidate is part of the immutable control graph, not
 	// volatile coordinator state or the old source's private range journal.
 	target = restartDaemonTestNode(t, target)
+	// Open restores the committed recovery image before the coordinator has
+	// necessarily collected RELEASE and cleared its durable slot/request.
+	// Wait for that exact protocol boundary, not just a published map or an
+	// arbitrary sleep. Real administration returns retryable 503 until then.
+	for {
+		ledger := target.node.control.ledger
+		ledger.mu.Lock()
+		finished := ledger.slot == nil && ledger.request == nil
+		ledger.mu.Unlock()
+		if finished {
+			break
+		}
+		if ctx.Err() != nil {
+			t.Fatal("recovery decision was not released after restart", ctx.Err())
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
 	id, err := target.node.StageRecoveryVolume("rescued", path)
 	if err != nil {
 		t.Fatal(err)
@@ -137,7 +158,7 @@ func checkRecoveryCancelledSourceFence(t *testing.T, interrupt bool) {
 	if retry, err := c.Append(ctx, object, []byte("last acknowledged tail"), client.AppendOptions{RequestID: request}); err != nil || retry.Length != info.Length {
 		t.Fatal("source retry receipt lost", err)
 	}
-	// A high numeric version on an unsealed shadow cannot become authority or
+	// Repeated writes to an unsealed shadow cannot give it authority or
 	// prevent collection once the imported source cohort is committed.
 	shadow := target.node.volumes[destination.VolumeID].store
 	h, err := shadow.Open(true)
