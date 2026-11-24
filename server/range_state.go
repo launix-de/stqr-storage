@@ -8,6 +8,7 @@ import (
 	"reflect"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/launix-de/stqr-storage/client"
 	"github.com/launix-de/stqr-storage/volume"
@@ -76,19 +77,21 @@ type rangeTxn struct {
 	remaining                                                     uint64
 }
 type rangeManager struct {
-	activity     atomic.Pointer[rangeActivity]
-	lastError    error
-	pressures    []rangePressure
-	mu           sync.Mutex
-	server       *Server
-	journal      *controlJournal
-	node         client.ID
-	txns         map[[32]byte]*rangeTxn
-	order        [][32]byte
-	initialized  bool
-	memoCursor   *volume.Key
-	work         sync.Mutex
-	capacityWake chan struct{}
+	activity         atomic.Pointer[rangeActivity]
+	lastError        error
+	pressures        []rangePressure
+	capacityGoals    map[volume.ID]*capacityGoal
+	capacityMoveTime time.Duration
+	mu               sync.Mutex
+	server           *Server
+	journal          *controlJournal
+	node             client.ID
+	txns             map[[32]byte]*rangeTxn
+	order            [][32]byte
+	initialized      bool
+	memoCursor       *volume.Key
+	work             sync.Mutex
+	capacityWake     chan struct{}
 }
 
 func (s *Server) initRanges(dataDir string) error {
