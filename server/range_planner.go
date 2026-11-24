@@ -3,7 +3,6 @@ package server
 
 import (
 	"bytes"
-	"math"
 	"sort"
 	"time"
 
@@ -195,12 +194,6 @@ func (r *rangeManager) planNext() (rangePlan, bool) {
 			continue
 		}
 		entries := image.bucketEntries(client.ID(b.ID()))
-		fractions := make(map[client.ID]float64)
-		for _, entry := range entries {
-			if len(entry.Locations) == 1 {
-				fractions[entry.Locations[0].Node] += math.Ldexp(1, -int(entry.PrefixBits))
-			}
-		}
 		for _, entry := range entries {
 			if entry.State == 4 || len(entry.Locations) != 1 || entry.Locations[0].Node != r.node {
 				continue
@@ -213,90 +206,62 @@ func (r *rangeManager) planNext() (rangePlan, bool) {
 				continue
 			}
 			volumeDrain := r.rangeOnDraining(before, draining)
-			for _, destination := range destinations {
-				if destination.node == r.node && (!volumeDrain || draining[volume.ID(destination.volume.ID)]) {
-					continue
+			if !drainingNode && !volumeDrain {
+				if plan, ok := r.planLazyCapacity(d, before, entry, destinations); ok {
+					return plan, true
 				}
-				if drainingNode && destination.node == r.node {
-					continue
+				continue
+			}
+			if plan, ok := r.planRequiredRangeMove(d, before, entry, destinations, draining, drainingNode, volumeDrain); ok {
+				return plan, true
+			}
+
+		}
+	}
+	return rangePlan{}, false
+}
+
+func (r *rangeManager) planRequiredRangeMove(d BucketDescription, before client.MapPatch, entry client.RangeEntry, destinations []rangeDestination, draining map[volume.ID]bool, drainingNode, volumeDrain bool) (rangePlan, bool) {
+	costOf, closeCosts := r.rangeCosts(before)
+	defer closeCosts()
+	for _, destination := range destinations {
+		if destination.node == r.node && (!volumeDrain || draining[volume.ID(destination.volume.ID)]) {
+			continue
+		}
+		if drainingNode && destination.node == r.node {
+			continue
+		}
+		moving := entry
+		for {
+			cost, count, err := costOf(moving, nil)
+			if err != nil {
+				break
+			}
+			if cost <= destination.free {
+				plan, err := planRangeMove(before, moving, destination.node, volume.ID(destination.volume.ID), destination.volume.Class, bucketCodec(d.Policy), cost)
+				if err == nil {
+					return plan, true
 				}
-				if !drainingNode && !volumeDrain {
-					ideal := float64(capacity[r.node]) / float64(total)
-					targetIdeal := float64(capacity[destination.node]) / float64(total)
-					if fractions[r.node] <= ideal+1e-12 || fractions[destination.node] >= targetIdeal-1e-12 {
-						continue
-					}
-				}
-				moving := entry
-				if !drainingNode && !volumeDrain && capacity[r.node] != 0 {
-					left, right, err := client.SplitRange(entry)
-					if err != nil {
-						continue
-					}
-					leftCost, _, err := r.rangeCost(before, left)
-					if err != nil {
-						continue
-					}
-					rightCost, _, err := r.rangeCost(before, right)
-					if err != nil {
-						continue
-					}
-					moving = left
-					if rightCost < leftCost {
-						moving = right
-					}
-					// Never transfer more hash share than the current surplus and
-					// recipient deficit. Overshooting makes empty groups bounce
-					// repeatedly and needlessly delays global administration.
-					share := min(fractions[r.node]-float64(capacity[r.node])/float64(total), float64(capacity[destination.node])/float64(total)-fractions[destination.node])
-					for math.Ldexp(1, -int(moving.PrefixBits)) > share+1e-12 && moving.PrefixBits < 256 {
-						left, right, err := client.SplitRange(moving)
-						if err != nil {
-							break
-						}
-						lc, _, le := r.rangeCost(before, left)
-						rc, _, re := r.rangeCost(before, right)
-						if le != nil || re != nil {
-							break
-						}
-						moving = left
-						if rc < lc {
-							moving = right
-						}
-					}
-				}
-				for {
-					cost, count, err := r.rangeCost(before, moving)
-					if err != nil {
-						break
-					}
-					if cost <= destination.free {
-						plan, err := planRangeMove(before, moving, destination.node, volume.ID(destination.volume.ID), destination.volume.Class, bucketCodec(d.Policy), cost)
-						if err == nil {
-							return plan, true
-						}
-						break
-					}
-					if count <= 1 || moving.PrefixBits == 256 {
-						break
-					}
-					left, right, err := client.SplitRange(moving)
-					if err != nil {
-						break
-					}
-					a, _, err := r.rangeCost(before, left)
-					if err != nil {
-						break
-					}
-					b, _, err := r.rangeCost(before, right)
-					if err != nil {
-						break
-					}
-					moving = left
-					if b < a {
-						moving = right
-					}
-				}
+				break
+			}
+			if count <= 1 || moving.PrefixBits == 256 {
+				break
+			}
+			left, right, err := client.SplitRange(moving)
+			if err != nil {
+				break
+			}
+			a, _, err := costOf(left, nil)
+			if err != nil {
+				break
+			}
+			b, _, err := costOf(right, nil)
+			if err != nil {
+				break
+			}
+			moving = left
+			if b < a {
+				moving = right
 			}
 		}
 	}
@@ -305,50 +270,9 @@ func (r *rangeManager) planNext() (rangePlan, bool) {
 func newVolumeID(raw string) volume.ID { id, _ := bucketID(raw); return id }
 
 func (r *rangeManager) rangeCost(before client.MapPatch, moving client.RangeEntry) (uint64, uint64, error) {
-	plan := rangePlan{Before: before, Moving: moving}
-	var cost, count uint64
-	for _, v := range r.sourceVolumes(plan) {
-		h, err := v.Open(false)
-		if err != nil {
-			return 0, 0, err
-		}
-		var after *volume.ObjectID
-		for {
-			records, err := h.ScanBucketObjects(volume.ID(before.Bucket), after, 128)
-			if err != nil {
-				h.Close()
-				return 0, 0, err
-			}
-			if len(records) == 0 {
-				break
-			}
-			for _, record := range records {
-				if !plan.contains(record.Key.Object) {
-					continue
-				}
-				n, err := h.AllocatedPhysical(record.Key)
-				if err != nil {
-					h.Close()
-					return 0, 0, err
-				}
-				cost = addCapacity(cost, addCapacity(n, 256))
-				count++
-			}
-			last := records[len(records)-1].Key.Object
-			after = &last
-		}
-		err = h.ScanRequests(func(record volume.RequestRecord) error {
-			if record.Key.Bucket == volume.ID(before.Bucket) && plan.contains(record.Key.Object) {
-				cost = addCapacity(cost, 512)
-			}
-			return nil
-		})
-		h.Close()
-		if err != nil {
-			return 0, 0, err
-		}
-	}
-	return addCapacity(cost, 64<<10), count, nil
+	costOf, closeCosts := r.rangeCosts(before)
+	defer closeCosts()
+	return costOf(moving, nil)
 }
 
 func (r *rangeManager) rangeOnDraining(before client.MapPatch, draining map[volume.ID]bool) bool {
@@ -376,7 +300,7 @@ func (r *rangeManager) rangeOnDraining(before client.MapPatch, draining map[volu
 		if !found {
 			var after *volume.ObjectID
 			for {
-				records, err := h.ScanBucketObjects(volume.ID(before.Bucket), after, 128)
+				records, err := p.scanObjects(h, after, 128)
 				if err != nil || len(records) == 0 {
 					break
 				}

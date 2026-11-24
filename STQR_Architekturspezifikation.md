@@ -647,19 +647,34 @@ Bucket- und Range-LogicalBytes in einem Node-Snapshot zählen lokale Kopien und 
 
 ### 7.2 Balancing-Ziele
 
-Priorität:
+**Bestehendes gültiges Placement ist der Ausgangspunkt, keine gleichmäßige Sollverteilung.** Eine veröffentlichte Map erlaubt, Daten am bisherigen Ort zu behalten. Unterschiede in Hash-Anteilen, absoluten freien Bytes oder prozentualer Belegung allein rechtfertigen keine Migration. Insbesondere dürfen neue Nodes/Volumes und vergrößerte Masken bei ausreichend freiem Platz keine automatische Gleichverteilung bestehender Payloads auslösen. Eine PG-/Policy-Version kann ohne Payload-I/O wirksam werden, wenn alle vorhandenen Locations die neue Vorgabe bereits erfüllen.
 
-1. **Sicherheit:** vereinbarte Redundanz und Failure Domains erfüllen; gefährdete Ranges priorisiert wiederherstellen.
-2. **Kapazität:** maximalen Volume-/Node-Füllstand reduzieren, reservierte Rebuild-Kapazität beachten.
-3. **Migration minimieren:** vorhandene zulässige Eigentümer behalten; wenn die Constraints schon erfüllt sind, bevorzugt **0 Byte Migration**.
-4. **Last:** notwendige Hotspot-Entlastung mit möglichst wenig Kopierarbeit; keine beliebigen kosmetischen Moves.
-5. **Kosten/Policy:** HDD/SSD-Basis und Premium-RAM-Cache-Budgets einhalten.
+Planung erfolgt in dieser Reihenfolge:
 
-Eine mögliche Zielfunktion lautet:
+1. **Verbindliche Constraints:** erforderliche Kopien, zulässige Speicherklassen/PG-Masken, Failure Domains und Garantiereserven erhalten bzw. herstellen; explizites Drain durchführen. Unerreichbarkeit allein erlaubt keinen Ownerwechsel oder Replica-Abbau.
+2. **Notwendigkeit prüfen:** tatsächlichen Platzbedarf eines Writes oder erhebliche relative Knappheit nach §7.2.1 feststellen. Ohne solchen Anlass und ohne zwingende Placement-Änderung bleibt die bestehende Map unverändert. Lastmigration braucht einen eigenen belegten Anlass mit Hysterese.
+3. **Vorhandenes verwenden:** Metadaten-/Policy-Aktualisierung und Rollenwechsel vor Payload-Kopien prüfen. Erhaltene gültige Kopien bleiben unverändert; beim Reduzieren der Kopienzahl werden keine Ersatzkopien aufgebaut, wenn ein bereits gültiges Set genügt.
+4. **Arbeit minimieren:** unter den notwendigen zulässigen Plänen zuerst die insgesamt zu lesenden, zu schreibenden und zu übertragenden Payload-Bytes minimieren. Lokale Kopien zählen ebenfalls als Arbeit. Erst danach Last-/Tier-Präferenzen und stabile Tie-Breaker berücksichtigen. Nicht unmittelbar betroffene Daten möglichst liegen lassen.
+5. **Aufhören:** sobald die Constraints und der erforderliche Spielraum erfüllt sind, keine kosmetische Angleichung fortsetzen. Kleine Veränderungen dürfen keine Hin-und-her-Migration auslösen.
 
-`J = w1 * risk + w2 * max_utilization + w3 * p99_latency + w4 * bytes_to_move + w5 * tier_cost`
+Eine gewichtete Zielfunktion darf diese Notwendigkeitsprüfung nicht ersetzen: eine beliebig kleine Verbesserung der Gleichverteilung darf keine positive Menge Datenbewegung rechtfertigen. Für v1 genügt ein deterministischer Greedy-Plan mit nachvollziehbaren Kosten und Simulation vor Commit. Range-Teilung ist ein Metadatenvorgang und muss nicht mit einer Migration verbunden sein; die Kosten zusätzlicher Map-Einträge werden bei der Auswahl kleiner Entlastungsbereiche mit berücksichtigt.
 
-Diese Zielfunktion ist ein Planungsmodell, keine zugesagte globale optimale Lösung. Für v1 genügt ein deterministischer Greedy-Plan mit nachvollziehbaren Kosten und Simulation vor Commit.
+### 7.2.1 Träges kapazitätsbedingtes Rebalancing
+
+Maßgeblich ist **nutzbarer physischer Spielraum je Volume**, einschließlich Metadaten, Reservierungen und Bucket-/PG-Zulässigkeit. Ein Mittelwert über die ganze Node darf ein fast volles einzelnes Volume nicht verstecken. Geschützte Garantien anderer Buckets, Operating- und Inflight-Reserven sind kein verfügbarer Zielplatz. Nicht austauschbare Klassen und unzulässige Ziele werden nicht in einen gemeinsamen Ausgleichspool gerechnet.
+
+Ein tatsächlicher blockierter Write wird unabhängig von einer weichen Rebalancing-Schwelle behandelt: nur den notwendigen Spielraum und einen begrenzten Puffer schaffen; bei fehlendem zulässigem Platz 507 statt unerfüllbarer Zusage. Eine Range darf nicht vollständig verschoben werden, bloß weil sie noch auf ein Ziel passt. Kleinere Entlastungsbereiche und vorhandene gültige Kopien sind zu vergleichen.
+
+Für vorbeugende Entlastung werden freie Anteile relativ zur verbleibenden freien Kapazität verglichen. Der Ein-Kopie-Planer verwendet als initiale, noch durch Workloads zu kalibrierende Marken:
+
+- `f_v = admission_free_v / capacity_v`; `f_pool = sum(admission_free) / sum(capacity)` über tatsächlich geeignete aktive Volumes derselben austauschbaren Kapazitätsklasse.
+- Start nur bei `f_v < min(0.15, 0.5 * f_pool)`; nahe leere Volumes lösen damit auch bei unterschiedlich großen Hash-Anteilen keine Migration aus.
+- Ein begonnener Entlastungsschritt zielt auf `min(0.20, 0.75 * f_pool)`, begrenzt durch tatsächlich verfügbaren Zielplatz, zulässige Objekt-/Range-Granularität und die Kosten der Bewegung. Das Ziel wird nicht auf vollständige Gleichverteilung angehoben.
+- Das Ziel darf durch den Move nicht selbst kritisch werden. Konservative Kapazitätsbilder, laufende Reservationen sowie Hysterese/Cooldown verhindern Gegenbewegungen durch kurzlebige Schwankungen. Ein Restart oder eine kleine Änderung des Messwerts erzeugt keine neue Verpflichtung zu einer exakten Verteilung.
+
+Beispiel: Bei `f_pool=0.40` beginnt vorbeugende Entlastung unter 15 % freiem Platz und zielt ungefähr auf 20 %, nicht auf 40 %. Bei `f_pool=0.08` liegen die entsprechenden relativen Marken bei 4 % und 6 %. Das sind lokale Spielräume, keine Zusage eines durchschnittlich freizuräumenden Byte-Volumens; Rebalancing erzeugt insgesamt keinen freien Speicher und kann durch zusätzliche Metadaten sogar etwas Platz verbrauchen. Die konkreten Faktoren sind durch Füllstands-/Workload-Messungen festzulegen.
+
+**Implementierungsstand:** Der Ein-Kopie-Planer verwendet diese relativen freien Kapazitäten statt kapazitätsgewichteter Hash-Anteile. Ein gesunder Cluster liest für diese Entscheidung keine Objekt-Payload und verteilt auch einen leeren Bucket nicht vorsorglich um. Harte Write-Pressure isoliert das betroffene vorhandene Objekt bzw. einen leeren Bereich für ein neues Objekt, bevor ein Ziel gewählt wird. Ein Planungsdurchlauf liest Objekt-/Retry-Metadaten pro Parent einmal und bewertet Teilungen danach aus einem auf 16.384 Records begrenzten RAM-Puffer; größere Bereiche verwenden temporäre sortierte Metadaten-Runs mit Prefix-Summen, die nach der Planung entfernt werden; Objekt-Scans suchen direkt den betroffenen Indexbereich. Replica-Reduktion verwendet vorhandene gültige Kopien und Rollenwechsel, bevor sie Ersatz-Payload kopiert. Vorbeugender kapazitätsgetriebener Ausgleich von Mehrfachgruppen ist weiterhin gesondert auszubauen; deren bestehende PG-/Drain-/Replica-Übergaben behalten ihre Sicherheitsregeln.
 
 ### 7.3 Read vs. Write
 
@@ -1410,8 +1425,8 @@ Nur authentifizierte NODE-Rolle, gebunden an Membership-Epoch. In der Tabelle be
 | 0x104e | VERIFY_FRONTEND_OPERATION / Q | `operation:ID,binding_digest:Digest` => leer bei tatsächlich aktivem, bereits authentifiziertem Frontend-Auftrag; Ursprungsnode prüft Context, Bucket und ursprüngliche Berechtigung erneut |
 | 0x1050 | RANGE_RESERVE / Q | `plan:RangeHandoffPlan` => leer; dauerhafte Reservierung der vollständigen bisherigen Parent-Range und physischer Zielkapazität |
 | 0x1051 | RANGE_SNAPSHOT_BEGIN / Q | `schema:u16=1,plan:Digest,final:Bool` => leer |
-| 0x1052 | RANGE_OBJECT_BEGIN / Q | `schema:u16=1,plan:Digest,transfer:ID,record:RangeObjectRecord` => leer |
-| 0x1053 | RANGE_OBJECT_CHUNK / Q | `schema:u16=1,plan:Digest,transfer:ID,offset:u64,data:Blob` => leer; höchstens 1 MiB je Chunk, Sparse-Lücken werden ausgelassen |
+| 0x1052 | RANGE_OBJECT_BEGIN / Q | `schema:u16,plan:Digest,transfer:ID,record:RangeObjectRecord,[base_version:u64]` => leer; Schema 1 vollständige logische Extents, Schema 2 In-place-Delta einer Shadow-Kopie mit `base_version`, Schema 3 unverändert kodierte Chunks |
+| 0x1053 | RANGE_OBJECT_CHUNK / Q | Schema 1: `schema:u16=1,plan:Digest,transfer:ID,offset:u64,data:Blob`; Schema 2 für kodierte Chunks: `schema:u16=2,plan:Digest,transfer:ID,offset:u64,length:u64,skip:u64,decoded_length:u32,codec:u8,raw_crc:u32,encoded_crc:u32,data:Blob` => leer; höchstens 1 MiB Daten, Sparse-Lücken ausgelassen |
 | 0x1054 | RANGE_OBJECT_END / Q | `schema:u16=1,plan:Digest,transfer:ID,digest:Digest` => leer; kanonische Version vor Import-Memo dauerhaft schreiben |
 | 0x1055 | RANGE_REQUEST_RECORDS / Q | `schema:u16=1,plan:Digest,records:Vec(RangeRequestRecord)` => leer; maximal 64 Records |
 | 0x1056 | RANGE_SNAPSHOT_END / Q | `schema:u16=1,plan:Digest,digest:Digest` => `digest:Digest` für Bulk bzw. `proof:Proof` für finalen READY-Stand |
@@ -1419,7 +1434,7 @@ Nur authentifizierte NODE-Rolle, gebunden an Membership-Epoch. In der Tabelle be
 | 0x1058 | RANGE_DONE / Q | `schema:u16=1,plan:Digest` => `proof:Proof`; Ziel erst nach Source-Cleanup, Source beendet nach Zielbeleg |
 | 0x1059 | RANGE_OBSERVE / Q/F | `plan:Blob(RangeHandoffPlan),commit:Blob(RangeHandoffCommit)` => leer bei Q; nicht beteiligte Nodes vereinigen committed Map-Ausschnitte |
 | 0x105a | RANGE_ARCHIVE / Q | `offset:u64` => `next_offset:u64,done:Bool,records:Vec(Blob(plan:Blob,commit:Blob))`; maximal 24 Records bzw. 1 MiB |
-| 0x105b | RANGE_OBJECT_PROBE / Q | `schema:u16=1,plan:Digest,record:RangeObjectRecord` => `present:Bool,[digest:Digest]`; Memo und aktuelle kanonische Version prüfen |
+| 0x105b | RANGE_OBJECT_PROBE / Q | `schema:u16=1,plan:Digest,record:RangeObjectRecord` => `present:Bool,[digest:Digest]`; bei `present=false` optional `base_version:u64,page_size:u32=4096,count:u32,hashes:Digest[]` für eine passende dichte Raw-Shadow-Kopie bis 64 MiB; Memo und kanonische Version prüfen |
 | 0x105c | RANGE_ABORT / Q | `plan:RangeHandoffPlan` => leer; vor FENCE/READY/COMMIT auf beiden Teilnehmern dauerhaft absagen, auch ohne vorheriges RESERVE; verspätete RESERVE derselben Runden-ID bleiben abgewiesen |
 | 0x105d | RANGE_RAM_STATE / Q | `schema:u16=1,plan:Digest` => `schema:u16=2,holding_boot:ID,source_boot:ID,live_ready:Bool,committed:Bool,digest:Digest,ready_proof:Opt(Proof),logical_used:u64`; READY ist nur im haltenden RAM-Prozess live |
 | 0x105e | RANGE_RAM_LOST_OFFER / Q | `plan:Blob(RangeHandoffPlan),old_source_boot:ID,new_source_boot:ID` => leer; schließt einen nicht committed RAM-Offer nach bestätigtem Prozesswechsel und ohne überlebenden versiegelten Zielstand |
@@ -1953,6 +1968,21 @@ Ein Transport-ACK bestätigt Empfang, niemals durable Speicherung. Nach Reconnec
 
 ### 14.1 Gemeinsame Semantik
 
+**Stabile Objektidentität statt impliziter Datenhistorie:** Ein normaler Write darf nicht allein wegen der Änderung eine neue Objekt-ID für denselben logischen Datenblock erzeugen. Native Objekt-IDs, Blockdevice-Stripes, Filesystem-Datenblöcke und vorhandene Index-/Verzeichnisseiten behalten ihre Identität bei Überschreiben, APPEND und unveränderter Zuordnung. Range-PUT/CAS/TRUNC aktualisieren die betroffenen Bereiche; Range-Migration und Replikation ändern Locations, nicht die Objekt-ID. Numerische Objektversionen für CAS, Reihenfolge, Dedupe und Fencing bleiben ausdrücklich nötig, bedeuten aber keine Aufbewahrung alter Payload-Versionen.
+
+Neue IDs sind für tatsächlich neue Objekte/Blöcke, neue Indexseiten bei einem echten Split sowie einmaliges Overlay-Copy-up zulässig. Nach Copy-up bleiben die eigenen Upper-Blöcke stabil. Unveränderte Daten und Indexseiten werden bei Teilwrites nicht neu angelegt oder neu adressiert. Beim Verkleinern/Entfernen werden nicht mehr benötigte Blöcke sicher freigegeben. Ein späteres explizites Snapshot-/Clone-Feature benötigt einen eigenen Vertrag; gewöhnlicher Storage-I/O erzeugt keine solche Historie.
+
+Crashsicherheit darf zeitlich begrenztes Redo-/Recovery-Staging benötigen. Dessen Identität ist von der dauerhaft sichtbaren Blockidentität getrennt; der Abschluss muss die sichere Freigabe vorbereiten. Stabile IDs werden nicht durch ungesicherte In-place-Updates erkauft: CAS-Konflikte, Multi-Mount-Zugriffe, verlorene Antworten, Truncation und Wiederanlauf müssen weiterhin ohne verlorene Änderungen funktionieren. Erforderliche Synchronisation bleibt in den Frontends bzw. in ihren normalen Metadatenobjekten, nicht in einer zweiten Storage-Datenbank-API.
+
+**Gemeinsamer Formatvertrag für Kernel, FUSE und Windows:** FUSE und Windows verwenden denselben Go-Filesystem-Kern; der Kernel implementiert denselben Vertrag unabhängig in C. Neue mutable Inodes verwenden `STFS v6`: die bisherigen v5-Felder plus einen abschließenden, positiven `stamp:u64`. Dieser Stempel unterscheidet Cache-Einträge trotz stabiler Index-ID; er speichert keine alte Payload. Frühere Inodes bleiben lesbar und werden beim Schreiben umgestellt. NBD-Stripes behalten ebenfalls ihre bereits stabilen IDs.
+
+Stabile Adressen entstehen durch SHA-256 über die exakte Bytefolge `"STQR mutable filesystem block v1\0" || inode:OID || kind:u8 || level:u8 || slot:u64LE`. `kind=0` adressiert eigene Datenblöcke (reguläre Dateien in 1-MiB-Einheiten, Directory-/Overlay-Bodies in 4-KiB-Seiten), `kind=1` Indexseiten je Baumebene und Ordinal, `kind=2` feinkörnige 4-KiB-Overlay-Copy-up-Blöcke. Unveränderte Seiten bleiben ohne Mutation; Teilwrites verwenden Range-PUT. Eine neue Inode-ID bei echter Dateianlage ist weiterhin korrekt.
+
+Mutable Updates verwenden den vorhandenen recoverbaren Inode-Marker `STFL v1` und `STFT v2`. Nach jedem Member-Feld `after:Blob` folgt `writes:Vec(oid:OID,base_version:u64,absent:Bool,full:Bool,remove:Bool,offset:u64,data:Blob)`. Pro Member ist eine Block-ID höchstens einmal zulässig. `full` ersetzt den Inhalt, ansonsten gilt Range-PUT; `remove` enthält keine Daten. Version/Absent und Operations-ID bleiben bei jeder Wiederholung identisch. Die Operations-ID sind die ersten 16 SHA-256-Bytes von `"STQR filesystem REDO request v1\0" || transaction:OID || write_ordinal:u64LE`, über alle Member fortlaufend gezählt. Metadaten werden vor Änderungen gesperrt; nach der Commit-Entscheidung werden die Redo-Änderungen dauerhaft angewendet, erst danach die Inode-Heads freigegeben. Ein anderer Mount kann den Vorgang fertigstellen. Leser prüfen ihren Inode-/Intent-Stand nach dem Lesen erneut; Read-only-Mounts können einen noch markierten Stand aus Before/After plus Redo materialisieren.
+
+Bis 64 KiB bleibt das Intent inline; größere temporäre Redo-Bodies verwenden `STFJ || version:u16LE=1 || state:u8 || total_bytes:u32LE || chunk_count:u32LE || chunks:OID[]`, mit höchstens 1 MiB je Chunk und insgesamt höchstens 128 MiB je Intent. Nach Freigabe aller Marker wird der Entscheidungs-Head auf `STFD || version:u16LE=1 || state:u8` verkleinert und die externen Payload-Chunks werden entfernt. Kleine abgeschlossene Entscheidungsobjekte können offline durch fsck eingesammelt werden. Sie sind keine Dateiversionen. TRUNC gibt entfernte Blöcke frei und entfernt den abgeschnittenen Schwanz auch physisch, damit späteres Wachstum keine alten Bytes zurückbringt. Alle beteiligten Mount-Implementierungen müssen diesen Formatvertrag verstehen.
+
+
 Der native Store kennt ausschließlich Buckets und 256-Bit-Objekte samt vollständigen/ranged Reads/Writes, APPEND, TRUNC und CAS. FUSE-, S3- und Blockdevice-Libs **kodieren ihre Metadaten in geeigneten normalen Objekten** und verwenden dafür dieselben GET/PUT/CAS-Operationen wie für Nutzdaten. Keine gesonderte MDS-, Namensindex- oder Manifest-Operation im nativen Storage-Protokoll. Der im Cluster-Server integrierte S3-HTTP-Adapter verwendet dieselben normalen Objektoperationen für seine Metadaten.
 
 Die Clients besitzen eine segmentierte adaptive Map und lernen über 301/Map-Patches (§6.4). Ein bekannter beliebiger Kontakt genügt; keine vollständige Map oder Agent-Installation zum Start nötig. Langlebige Clients können relevante Patches vorladen. Zustands-/Servernamenauflösung ist Protokollhilfe, keine privilegierte fachliche Metadatenengine.
@@ -2217,6 +2247,8 @@ Mit künstlich kleinen Volumes (z. B. **4, 8, 16, 32 und 64 MiB**) und determini
 - Viele kleine parallele Appends auf **dasselbe** Log sowie viele unabhängige Logs; verifizierter sequentieller Byte-Präfix.
 - 1→2→3→N Nodes, jeweils mit MiB-Volumes; Verteilung/Replikation unter Last.
 - 95–99 % Füllstand, GCs und Rebalancing, neue leere Ziel-Volumes, kritische Backfill-Situation.
+- Träges Placement: fast leere/ausreichend freie Volumes, neue leere Nodes und erweiterte PG-Masken verursachen keine kosmetische Payload-Migration; relative Freiplatzschwelle, Hysterese, belegte Entlastungswirkung und reale Kapazitätserweiterung prüfen. Bestehende gültige Replikate und Owner werden erhalten, wenn ein Rollen-/Policy-Wechsel genügt.
+- Stabile Frontend-IDs: dieselben bereits allokierten logischen Datenblöcke und unveränderten Indexseiten behalten bei wiederholtem Überschreiben/APPEND ihre IDs. Truncate/Re-Grow, konkurrierende Clients, Rename, Overlay-Copy-up sowie Crash/Retry prüfen; temporäre Journale getrennt von dauerhafter Payload zählen. Pro Test Volume-Read/Write-Bytes, Netzwerkbytes, zurückbleibende alte Payloads und Map-Änderungen erfassen; gleiche Belegung allein beweist keine I/O-Minimierung.
 - Hot-Range durch 90 % Reads auf einem Schlüssel; Split-Isolation und Cache-Replikation; separate hohe Write-/Append-Last.
 - Tausende kleine Buckets, viele leere Ranges, aggressive Merge-Folgen.
 - Tausende Kunden-Buckets mit gemeinsam referenzierten PGs: eine zentrale Änderung an Kompression/Replikation erfasst alle zugeordneten Buckets, erhält individuelle Quotas und ACLs und erzeugt keine Bucket-Overrides. Gemischte wirksame PG-Versionen während einer Umstellung einschließlich Offline-Bereichen, Reconnect, neu angelegten Buckets und PG-Wechseln prüfen; das gemeinsame Cache-Budget darf nicht je Bucket vervielfacht werden.

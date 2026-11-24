@@ -85,35 +85,44 @@ func (r *rangeManager) pressurePlan(hint rangePressure) (rangePlan, bool) {
 	}
 	destinations, _ := r.destinations(b.Describe())
 	old := before.Entries[0]
+	costOf, closeCosts := r.rangeCosts(before)
+	defer closeCosts()
 	for _, destination := range destinations {
-		if destination.node == r.node && (old.Locations[0].Volume == (client.ID{}) || old.Locations[0].Volume == destination.volume.ID) {
+		if destination.node == r.node && old.Locations[0].Volume == destination.volume.ID {
 			continue
 		}
 		if destination.free < hint.needed {
 			continue
 		}
 		moving := old
-		// Refine toward the blocked object's hash, rather than assuming uniform
-		// object distribution. Unrelated hashes keep their current placement.
-		for {
-			cost, _, err := r.rangeCost(before, moving)
-			if err != nil {
+		cost, count, err := costOf(moving, nil)
+		if err != nil {
+			continue
+		}
+		// Refine to isolate existing payload, not to arbitrarily tiny empty hash
+		// intervals. At most the first differing bit between real object IDs is
+		// needed for an empty blocked address.
+		_, oldInfo, found, e := b.selectVolume(b.Describe(), volume.Key{Bucket: hint.bucket, Object: hint.object}, volume.ID{}, false)
+		existing := e == nil && found && oldInfo.Version != 0
+		for moving.PrefixBits < 256 && count > 0 && !(existing && count == 1) {
+			left, right, e := client.SplitRange(moving)
+			if e != nil {
 				break
 			}
-			if cost <= destination.free-hint.needed {
-				plan, err := planRangeMove(before, moving, destination.node, volume.ID(destination.volume.ID), destination.volume.Class, bucketCodec(b.Describe().Policy), cost)
-				if err == nil {
-					return plan, true
-				}
-				break
-			}
-			left, right, err := client.SplitRange(moving)
-			if err != nil {
-				break
-			}
-			moving = left
+			child := left
 			if bytes.Compare(hint.object[:], right.Start[:]) >= 0 {
-				moving = right
+				child = right
+			}
+			childCost, childCount, e := costOf(child, nil)
+			if e != nil {
+				break
+			}
+			moving, cost, count = child, childCost, childCount
+		}
+		if cost <= destination.free-hint.needed {
+			plan, e := planRangeMove(before, moving, destination.node, volume.ID(destination.volume.ID), destination.volume.Class, bucketCodec(b.Describe().Policy), cost)
+			if e == nil {
+				return plan, true
 			}
 		}
 	}
@@ -135,7 +144,7 @@ func (r *rangeManager) awaitPressureStats(hint rangePressure) bool {
 	destinations, _ := r.destinations(b.Describe())
 	old := before.Entries[0]
 	for _, destination := range destinations {
-		if destination.node == r.node && (old.Locations[0].Volume == (client.ID{}) || old.Locations[0].Volume == destination.volume.ID) {
+		if destination.node == r.node && old.Locations[0].Volume == destination.volume.ID {
 			continue
 		}
 		if destination.capacity >= addCapacity(hint.needed, 64<<10) && destination.observed.Before(hint.requested) {

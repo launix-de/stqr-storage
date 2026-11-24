@@ -269,33 +269,11 @@ func startAutomaticDaemonPair(t *testing.T, automatic ...bool) (*daemonTestNode,
 // than one node's physical data capacity available through one bucket client.
 func TestDaemonAutomaticExtension(t *testing.T) {
 	source, target := startAutomaticDaemonPair(t)
-	deadline := time.Now().Add(20 * time.Second)
 	addTestVolume(t, source.node, "data", "hdd", 4<<20)
 	addTestVolume(t, target.node, "data", "hdd", 4<<20)
 	bucket, _ := createProtocolBucket(t, source.node, "automatic-extension")
-	deadline = time.Now().Add(20 * time.Second)
-	for {
-		entries := source.node.placement.Load().bucketEntries(client.ID(bucket.ID()))
-		owners := map[client.ID]bool{}
-		for _, entry := range entries {
-			for _, location := range entry.Locations {
-				owners[location.Node] = true
-			}
-		}
-		source.node.scopes.mu.Lock()
-		active := false
-		for _, txn := range source.node.scopes.txns {
-			active = active || source.node.scopes.active(txn)
-		}
-		source.node.scopes.mu.Unlock()
-		if len(owners) == 2 && !active {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("automatic distribution timed out: entries=%v", entries)
-		}
-		time.Sleep(25 * time.Millisecond)
-	}
+	// An empty bucket stays where it was created. Extension is triggered by
+	// actual pressure from the writes below, not cosmetic hash-space balancing.
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	admin := source.node.cfg.Auth.BootstrapAdmin
@@ -374,7 +352,7 @@ func TestDaemonAutomaticExtension(t *testing.T) {
 	if _, err := source.node.RemoveVolume(newID(), withdrawn); err != nil {
 		t.Fatal(err)
 	}
-	deadline = time.Now().Add(25 * time.Second)
+	deadline := time.Now().Add(25 * time.Second)
 	for {
 		source.node.mu.RLock()
 		_, attached := source.node.volumes[withdrawn]
@@ -792,8 +770,9 @@ func TestDaemonBucketDeletionReclaimsEveryNode(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer c.Close()
+	// Populate beyond one volume so the fixture exercises real extension.
 	payload := bytes.Repeat([]byte{0x39}, 1<<20)
-	for _, id := range []client.ObjectID{{1}, {0x81}} {
+	for _, id := range []client.ObjectID{{1}, {2}, {0x81}, {0x82}} {
 		if _, err := c.Put(ctx, id, payload, client.PutOptions{}); err != nil {
 			t.Fatal(err)
 		}

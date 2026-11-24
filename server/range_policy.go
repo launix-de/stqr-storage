@@ -144,7 +144,7 @@ func (r *rangeManager) policyPlacementCost(before client.MapPatch, moving client
 			if err != nil {
 				return 0, 0, err
 			}
-			records, err := h.ScanBucketObjects(volume.ID(before.Bucket), after, 128)
+			records, err := p.scanObjects(h, after, 128)
 			h.Close()
 			if err != nil {
 				return 0, 0, err
@@ -221,7 +221,7 @@ func (r *rangeManager) policyPlacementCost(before client.MapPatch, moving client
 				if err != nil {
 					return 0, 0, err
 				}
-				records, err := h.ScanBucketObjects(volume.ID(before.Bucket), after, 128)
+				records, err := p.scanObjects(h, after, 128)
 				h.Close()
 				if err != nil {
 					return 0, 0, err

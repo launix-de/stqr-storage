@@ -4,7 +4,6 @@ package client
 import (
 	"context"
 	"errors"
-	"math"
 	"sort"
 	"syscall"
 	"time"
@@ -116,7 +115,20 @@ func (f *Filesystem) mutate(ctx context.Context, id ObjectID, fn func(*fsNode) e
 		n, i := s.node, s.info
 		n.ctime = uint64(time.Now().UnixNano())
 		if err = fn(&n); err != nil {
+			if errors.Is(err, ErrPrecondition) || errors.Is(f.checkNodeView(ctx, s.node), ErrPrecondition) {
+				continue
+			}
 			return FSInfo{}, err
+		}
+		if len(n.edits) > 0 {
+			committed, e := f.transact(ctx, []fsTxMember{fsMember(s, n)})
+			if e != nil {
+				return FSInfo{}, e
+			}
+			if !committed {
+				continue
+			}
+			return f.Stat(ctx, id)
 		}
 		result, err := f.store.CAS(ctx, id, 0, nil, encodeFSNode(n), CASOptions{Scope: CASObject, MutationOptions: MutationOptions{RequestID: NewRequestID(), ExpectedVersion: &i.Version}})
 		if errors.Is(err, ErrPrecondition) {
@@ -131,6 +143,22 @@ func (f *Filesystem) directory(ctx context.Context, n fsNode) ([]FSEntry, error)
 	return append([]FSEntry(nil), entries...), err
 }
 func (f *Filesystem) directoryView(ctx context.Context, n fsNode) ([]FSEntry, error) {
+	for attempt := 0; attempt < 128; attempt++ {
+		entries, err := f.readDirectoryView(ctx, n)
+		if !errors.Is(err, ErrPrecondition) {
+			return entries, err
+		}
+		if n.identity == (ObjectID{}) {
+			return nil, err
+		}
+		n, _, err = f.load(ctx, n.identity)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return nil, syscall.EAGAIN
+}
+func (f *Filesystem) readDirectoryView(ctx context.Context, n fsNode) ([]FSEntry, error) {
 	if n.kind != fsDirectory {
 		return nil, syscall.ENOTDIR
 	}
@@ -145,6 +173,9 @@ func (f *Filesystem) directoryView(ctx context.Context, n fsNode) ([]FSEntry, er
 	key, cacheable := directoryKey(n.blob)
 	if cacheable {
 		if entries, ok := f.directoryCache.get(key); ok {
+			if err := f.checkNodeView(ctx, n); err != nil {
+				return nil, err
+			}
 			return entries, nil
 		}
 	}
@@ -155,17 +186,27 @@ func (f *Filesystem) directoryView(ctx context.Context, n fsNode) ([]FSEntry, er
 		}
 	}
 	entries, err := decodeFSDirectory(data)
+	if e := f.checkNodeView(ctx, n); e != nil {
+		return nil, e
+	}
 	if err == nil && cacheable {
 		f.directoryCache.put(key, entries)
 	}
 	return entries, err
 }
 func (f *Filesystem) ReadDir(ctx context.Context, id ObjectID) ([]FSEntry, error) {
-	n, _, err := f.load(ctx, id)
-	if err != nil {
-		return nil, err
+	for attempt := 0; attempt < 128; attempt++ {
+		n, _, err := f.load(ctx, id)
+		if err != nil {
+			return nil, err
+		}
+		out, err := f.directory(ctx, n)
+		if errors.Is(err, ErrPrecondition) {
+			continue
+		}
+		return out, err
 	}
-	return f.directory(ctx, n)
+	return nil, syscall.EAGAIN
 }
 func findFSEntry(entries []FSEntry, name string) int {
 	i := sort.Search(len(entries), func(i int) bool { return entries[i].Name >= name })
@@ -178,11 +219,7 @@ func (f *Filesystem) Lookup(ctx context.Context, parent ObjectID, name string) (
 	if !validFSName(name) {
 		return FSInfo{}, syscall.EINVAL
 	}
-	node, _, err := f.load(ctx, parent)
-	if err != nil {
-		return FSInfo{}, err
-	}
-	entries, err := f.directoryView(ctx, node)
+	entries, err := f.ReadDir(ctx, parent)
 	if err != nil {
 		return FSInfo{}, err
 	}
@@ -216,7 +253,7 @@ func (f *Filesystem) editDirectory(ctx context.Context, id ObjectID, fn func([]F
 		if err = f.directoryLinks(ctx, n, entries); err != nil {
 			return err
 		}
-		n.blob, err = f.blobFromBytes(ctx, data)
+		err = f.stableBody(ctx, n, data)
 		n.mtime = n.ctime
 		return err
 	})
@@ -277,60 +314,31 @@ func (f *Filesystem) ReadAt(ctx context.Context, id ObjectID, dst []byte, offset
 	if offset < 0 {
 		return 0, syscall.EINVAL
 	}
-	n, _, err := f.load(ctx, id)
-	if err != nil {
-		return 0, err
-	}
-	if n.kind != fsFile {
-		return 0, syscall.EISDIR
-	}
 	if len(dst) == 0 {
 		return 0, nil
 	}
-	return f.readBlob(ctx, n.blob, dst, uint64(offset))
+	for attempt := 0; attempt < 128; attempt++ {
+		n, _, err := f.load(ctx, id)
+		if err != nil {
+			return 0, err
+		}
+		if n.kind != fsFile {
+			return 0, syscall.EISDIR
+		}
+		count, readErr := f.readBlob(ctx, n.blob, dst, uint64(offset))
+		if err = f.checkNodeView(ctx, n); errors.Is(err, ErrPrecondition) {
+			continue
+		} else if err != nil {
+			return 0, err
+		}
+		return count, readErr
+	}
+	return 0, syscall.EAGAIN
 }
 
 // writeNode builds a new extent view; the caller publishes it by inode CAS.
 func (f *Filesystem) writeNode(ctx context.Context, n *fsNode, data []byte, start uint64) error {
-	if n.kind != fsFile {
-		return syscall.EISDIR
-	}
-	if uint64(len(data)) > uint64(math.MaxInt64)-start {
-		return syscall.EFBIG
-	}
-	if len(data) == 0 {
-		return nil
-	}
-	n.mtime = n.ctime
-	end := start + uint64(len(data))
-	length := max(n.blob.length, end)
-	if length <= fsInlineSize {
-		inline := make([]byte, int(length))
-		if n.blob.length != 0 {
-			if _, err := f.readBlob(ctx, n.blob, inline[:int(n.blob.length)], 0); err != nil {
-				return err
-			}
-		}
-		copy(inline[int(start):], data)
-		n.blob = fsBlob{length: length, inline: inline}
-		return nil
-	}
-	segments, err := f.segments(ctx, n.blob)
-	if err != nil {
-		return err
-	}
-	next := sliceFSSegments(segments, 0, min(start, n.blob.length))
-	if start > n.blob.length {
-		next = append(next, fsSegment{length: start - n.blob.length})
-	}
-	written, err := f.dataSegments(ctx, data)
-	if err != nil {
-		return err
-	}
-	next = append(next, written...)
-	next = append(next, sliceFSSegments(segments, end, n.blob.length)...)
-	n.blob, err = f.buildBlob(ctx, next, length)
-	return err
+	return f.stableWriteNode(ctx, n, data, start)
 }
 func (f *Filesystem) WriteAt(ctx context.Context, id ObjectID, data []byte, offset int64) (int, error) {
 	if offset < 0 {
@@ -353,37 +361,7 @@ func (f *Filesystem) Append(ctx context.Context, id ObjectID, data []byte) (int,
 	return len(data), nil
 }
 func (f *Filesystem) resize(ctx context.Context, n *fsNode, length uint64) error {
-	if n.kind != fsFile {
-		return syscall.EISDIR
-	}
-	if length > math.MaxInt64 {
-		return syscall.EFBIG
-	}
-	if length == n.blob.length {
-		return nil
-	}
-	n.mtime = n.ctime
-	if length <= fsInlineSize {
-		inline := make([]byte, int(length))
-		count := min(length, n.blob.length)
-		if count != 0 {
-			if _, err := f.readBlob(ctx, n.blob, inline[:int(count)], 0); err != nil {
-				return err
-			}
-		}
-		n.blob = fsBlob{length: length, inline: inline}
-		return nil
-	}
-	segments, err := f.segments(ctx, n.blob)
-	if err != nil {
-		return err
-	}
-	segments = sliceFSSegments(segments, 0, min(length, n.blob.length))
-	if length > n.blob.length {
-		segments = append(segments, fsSegment{length: length - n.blob.length})
-	}
-	n.blob, err = f.buildBlob(ctx, segments, length)
-	return err
+	return f.stableResize(ctx, n, length)
 }
 func (f *Filesystem) Truncate(ctx context.Context, id ObjectID, length uint64) (FSInfo, error) {
 	return f.mutate(ctx, id, func(n *fsNode) error { return f.resize(ctx, n, length) })

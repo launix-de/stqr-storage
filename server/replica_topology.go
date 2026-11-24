@@ -101,7 +101,7 @@ func (s *Server) replicaTopologyMessage(m client.Message, actor client.ID) ([]by
 	}
 	var cursor *volume.ObjectID
 	for {
-		records, err := h.ScanBucketObjects(volume.ID(t.plan.Before.Bucket), cursor, 128)
+		records, err := t.plan.scanObjects(h, cursor, 128)
 		if err != nil {
 			return nil, err
 		}

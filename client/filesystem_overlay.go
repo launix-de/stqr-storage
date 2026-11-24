@@ -126,7 +126,16 @@ func equalStrings(a, b []string) bool {
 	return true
 }
 func (o *OverlayFilesystem) state(ctx context.Context) (*overlayState, ObjectInfo, fsBlob, error) {
-	raw, info, err := o.upper.store.Get(ctx, FilesystemRootID())
+	for attempt := 0; attempt < 128; attempt++ {
+		s, info, blob, err := o.readState(ctx)
+		if !errors.Is(err, ErrPrecondition) {
+			return s, info, blob, err
+		}
+	}
+	return nil, ObjectInfo{}, fsBlob{}, syscall.EAGAIN
+}
+func (o *OverlayFilesystem) readState(ctx context.Context) (*overlayState, ObjectInfo, fsBlob, error) {
+	raw, info, guard, err := o.upper.overlayRootImage(ctx)
 	if err != nil {
 		return nil, info, fsBlob{}, err
 	}
@@ -149,11 +158,15 @@ func (o *OverlayFilesystem) state(ctx context.Context) (*overlayState, ObjectInf
 	if blob.length > o.upper.directoryMemoryLimit {
 		return nil, info, blob, syscall.ENOMEM
 	}
+	blob.view = guard.blob.view
 	data := make([]byte, int(blob.length))
 	if _, err = o.upper.readBlob(ctx, blob, data, 0); err != nil && !(len(data) == 0 && errors.Is(err, io.EOF)) {
 		return nil, info, blob, err
 	}
 	s, err := decodeOverlayState(data)
+	if e := o.upper.checkNodeView(ctx, guard); e != nil {
+		return nil, info, blob, e
+	}
 	if err == nil && len(data) <= 1<<20 {
 		o.stateMu.Lock()
 		o.cachedState = s
@@ -171,11 +184,36 @@ func (o *OverlayFilesystem) publish(ctx context.Context, s *overlayState, versio
 	if uint64(len(body)) > o.upper.directoryMemoryLimit {
 		return syscall.ENOMEM
 	}
-	blob, err := o.upper.blobFromBytes(ctx, body)
+	raw, info, guard, err := o.upper.overlayRootImage(ctx)
 	if err != nil {
 		return err
 	}
-	_, err = o.upper.store.CAS(ctx, FilesystemRootID(), 0, nil, encodeOverlayRoot(o.lowerID, blob), CASOptions{Scope: CASObject, MutationOptions: MutationOptions{RequestID: NewRequestID(), ExpectedVersion: &version}})
+	if info.Version != version {
+		return ErrPrecondition
+	}
+	_, old, err := decodeOverlayRoot(raw)
+	if err != nil {
+		return err
+	}
+	n := fsNode{identity: FilesystemRootID(), version: info.Version, kind: fsDirectory, blob: old}
+	if err = o.upper.stableBody(ctx, &n, body); err != nil {
+		return err
+	}
+	if err = o.upper.checkNodeView(ctx, guard); err != nil {
+		return err
+	}
+	after := encodeOverlayRoot(o.lowerID, n.blob)
+	if len(n.edits) > 0 {
+		committed, e := o.upper.transact(ctx, []fsTxMember{{id: FilesystemRootID(), version: info.Version, before: raw, after: after, writes: n.edits}})
+		if e != nil {
+			return e
+		}
+		if !committed {
+			return ErrPrecondition
+		}
+		return nil
+	}
+	_, err = o.upper.store.CAS(ctx, FilesystemRootID(), 0, nil, after, CASOptions{Scope: CASObject, MutationOptions: MutationOptions{RequestID: NewRequestID(), ExpectedVersion: &version}})
 	return err
 }
 func (o *OverlayFilesystem) edit(ctx context.Context, fn func(*overlayState) error) error {

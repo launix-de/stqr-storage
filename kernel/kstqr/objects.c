@@ -21,7 +21,7 @@ struct segments {
 struct member {
 	stqr_object_id id;
 	u64 version;
-	struct buf before, after;
+	struct buf before, after, writes;
 };
 static bool eqid(stqr_object_id a, stqr_object_id b) { return !memcmp(a.bytes, b.bytes, 32); }
 static bool nullid(stqr_object_id id) { return zero(id.bytes, 32); }
@@ -56,7 +56,7 @@ static int cas_object(struct ks_fs *f, stqr_object_id id, const void *p, size_t 
 	int err;
 	if (f->readonly)
 		return -EROFS;
-	o.accepted = 1;
+	o.accepted = 0;
 	o.has_version = !absent;
 	o.version = version;
 	o.absent = absent;
@@ -86,6 +86,7 @@ static int immutable(struct ks_fs *f, const void *p, size_t n, stqr_object_id *i
 	sq_random(id->bytes, 32);
 	return cas_object(f, *id, p, n, 0, true);
 }
+#include "redo.c"
 static int decode_node(const void *p, size_t n, struct ks_node *node)
 {
 	struct buf d = {.p = (u8 *)p, .n = n};
@@ -97,7 +98,7 @@ static int decode_node(const void *p, size_t n, struct ks_node *node)
 		return -EUCLEAN;
 	take(&d, 4);
 	version = readnum(&d, 2);
-	if (version < 1 || version > 5)
+	if (version < 1 || version > 6)
 		return -EOPNOTSUPP;
 	node->kind = readnum(&d, 1);
 	node->mode = readnum(&d, 4);
@@ -136,7 +137,7 @@ static int decode_node(const void *p, size_t n, struct ks_node *node)
 	} else
 		node->atime = node->ctime = node->mtime;
 	node->links = 1;
-	if (version == 5) {
+	if (version >= 5) {
 		size_t start = d.pos, previous_length = 0;
 		const u8 *previous = NULL;
 		unsigned count, at;
@@ -171,8 +172,13 @@ static int decode_node(const void *p, size_t n, struct ks_node *node)
 		node->xattrs = d.p + start;
 		node->xattrs_size = d.pos - start;
 	}
-	if (version == 5 && node->kind == 2 && !node->removed && !node->links)
+	if (version >= 5 && node->kind == 2 && !node->removed && !node->links)
 		return -EUCLEAN;
+	if (version >= 6) {
+		node->stamp = readnum(&d, 8);
+		if (!node->stamp)
+			return -EUCLEAN;
+	}
 	if (done(&d) || node->kind < 1 || node->kind > 5 || (node->kind > 2 && version < 5) ||
 	    (node->removed && node->kind != 2) || (node->mode & ~07777U) || node->size > S64_MAX ||
 	    node->atime > S64_MAX || node->mtime > S64_MAX || node->ctime > S64_MAX)
@@ -187,7 +193,7 @@ static int decode_node(const void *p, size_t n, struct ks_node *node)
 static void encode_node(struct buf *b, const struct ks_node *node)
 {
 	put(b, "STFS", 4);
-	number(b, 5, 2);
+	number(b, node->stamp ? 6 : 5, 2);
 	number(b, node->kind, 1);
 	number(b, node->mode, 4);
 	number(b, node->uid, 4);
@@ -209,10 +215,13 @@ static void encode_node(struct buf *b, const struct ks_node *node)
 		put(b, node->xattrs, node->xattrs_size);
 	else
 		number(b, 0, 4);
+	if (node->stamp)
+		number(b, node->stamp, 8);
 }
 void ks_snapshot_free(struct ks_snapshot *s)
 {
 	sq_free(s->raw);
+	sq_free(s->view);
 	memset(s, 0, sizeof(*s));
 }
 static bool marker(const void *raw, size_t n, stqr_object_id *id)
@@ -230,7 +239,8 @@ static int tx_decode(struct buf *raw, stqr_object_id txid, struct member **out, 
 	unsigned i;
 	const u8 *p;
 	size_t n;
-	if (raw->n < 11 || raw->n > SQ_CHUNK || memcmp(raw->p, "STFT\1\0", 6))
+	if (raw->n < 11 || raw->n > (128U << 20) ||
+	    (memcmp(raw->p, "STFT", 4) || raw->p[5] || raw->p[4] < 1 || raw->p[4] > 2))
 		return -EUCLEAN;
 	take(&d, 6);
 	*state = readnum(&d, 1);
@@ -254,6 +264,8 @@ static int tx_decode(struct buf *raw, stqr_object_id txid, struct member **out, 
 		p = readblob(&d, &n);
 		m[i].after.p = (u8 *)p;
 		m[i].after.n = n;
+		if (raw->p[4] >= 2 && skip_edits(&d, &m[i].writes))
+			goto bad;
 		if (d.err || decode_node(p, n, &check) || !m[i].version || nullid(m[i].id) ||
 		    eqid(txid, m[i].id) || (i && memcmp(m[i - 1].id.bytes, m[i].id.bytes, 32) >= 0))
 			goto bad;
@@ -276,7 +288,7 @@ static int help_tx(struct ks_fs *f, stqr_object_id first)
 		return -ENOMEM;
 	stack[0] = first;
 	while (rounds++ < 8192) {
-		struct buf raw = {0};
+		struct buf raw = {0}, journal = {0};
 		stqr_info info;
 		struct member *m = NULL;
 		unsigned count = 0, state, i;
@@ -284,12 +296,28 @@ static int help_tx(struct ks_fs *f, stqr_object_id first)
 		u8 mark[38] = "STFL\1\0";
 		stqr_object_id id = stack[depth];
 		memcpy(mark + 6, id.bytes, 32);
-		err = get_object(f, id, (void **)&raw.p, &raw.n, &info);
-		if (err)
+		err = intent_get(f, id, &raw, &journal, &info);
+		if (err) {
+			drop(&raw);
+			drop(&journal);
 			break;
+		}
+		if (raw.n == 7 && !memcmp(raw.p, "STFD\1\0", 6)) {
+			unsigned completed = raw.p[6];
+			drop(&raw);
+			drop(&journal);
+			if (!depth) {
+				first_result = completed == 1 ? 0 : -EAGAIN;
+				break;
+			}
+			// A completed dependency is not the decision of our own intent.
+			depth--;
+			continue;
+		}
 		err = tx_decode(&raw, id, &m, &count, &state);
 		if (err) {
 			drop(&raw);
+			drop(&journal);
 			break;
 		}
 		for (i = 0; i < count; i++) {
@@ -304,6 +332,30 @@ static int help_tx(struct ks_fs *f, stqr_object_id first)
 			if (state) {
 				if (head.n == sizeof(mark) && !memcmp(head.p, mark, sizeof(mark))) {
 					struct buf *image = state == 1 ? &m[i].after : &m[i].before;
+					if (state == 1 && m[i].writes.n) {
+						u64 index = 0;
+						unsigned j;
+						for (j = 0; j < i; j++) {
+							struct buf scan = m[j].writes;
+							if (scan.n)
+								index += readnum(&scan, 4);
+						}
+						err = apply_edits(f, id, &m[i].writes, &index);
+						if (err) {
+							struct buf observed = {0};
+							stqr_info oi;
+							int check = get_object(f, m[i].id,
+									       (void **)&observed.p,
+									       &observed.n, &oi);
+							if (!check && (observed.n != sizeof(mark) ||
+								       memcmp(observed.p, mark,
+									      sizeof(mark))))
+								err = 0;
+							drop(&observed);
+							drop(&head);
+							break;
+						}
+					}
 					err = cas_object(f, m[i].id, image->p, image->n, ci.version,
 							 false);
 					if (err == -EAGAIN) {
@@ -343,18 +395,20 @@ static int help_tx(struct ks_fs *f, stqr_object_id first)
 				break;
 		}
 		if (!err && state && decision > 0) {
+			intent_retire(f, id, &journal, &info, state);
 			if (!depth)
 				first_result = state == 1 ? 0 : -EAGAIN;
 			else
 				depth--;
 		} else if (!err && !state && decision > 0) {
-			raw.p[6] = decision;
-			err = cas_object(f, id, raw.p, raw.n, info.version, false);
+			journal.p[6] = decision;
+			err = cas_object(f, id, journal.p, journal.n, info.version, false);
 			if (err == -EAGAIN)
 				err = 0;
 		}
 		sq_free(m);
 		drop(&raw);
+		drop(&journal);
 		if (err || (state && decision > 0 && eqid(id, first)))
 			break;
 		cond_resched();
@@ -372,6 +426,10 @@ int ks_snapshot_cached(struct ks_fs *f, stqr_object_id id, struct ks_snapshot *s
 		err = decode_node(s->raw, s->raw_len, &s->node);
 	if (err)
 		ks_snapshot_free(s);
+	else {
+		s->node.identity = id;
+		s->node.version = s->info.version;
+	}
 	return err;
 }
 int ks_snapshot(struct ks_fs *f, stqr_object_id id, struct ks_snapshot *s)
@@ -391,16 +449,27 @@ int ks_snapshot(struct ks_fs *f, stqr_object_id id, struct ks_snapshot *s)
 			err = decode_node(s->raw, s->raw_len, &s->node);
 			if (err)
 				ks_snapshot_free(s);
+			else {
+				s->node.identity = id;
+				s->node.version = s->info.version;
+			}
 			return err;
 		}
 		ks_cache_forget(f, id);
 		if (f->readonly) {
-			struct buf raw = {0};
+			struct buf raw = {0}, journal = {0}, view = {0};
 			stqr_info info;
 			struct member *m = NULL;
 			unsigned n, state, i;
 			struct buf selected = {0};
-			err = get_object(f, txid, (void **)&raw.p, &raw.n, &info);
+			err = intent_get(f, txid, &raw, &journal, &info);
+			if (!err && raw.n == 7 && !memcmp(raw.p, "STFD\1\0", 6)) {
+				drop(&raw);
+				drop(&journal);
+				sq_free(s->raw);
+				s->raw = NULL;
+				continue;
+			}
 			if (!err)
 				err = tx_decode(&raw, txid, &m, &n, &state);
 			if (!err) {
@@ -410,19 +479,32 @@ int ks_snapshot(struct ks_fs *f, stqr_object_id id, struct ks_snapshot *s)
 						struct buf *image =
 						    state == 1 ? &m[i].after : &m[i].before;
 						put(&selected, image->p, image->n);
-						err = selected.err;
+						if (state == 1 && m[i].writes.n)
+							put(&view, m[i].writes.p, m[i].writes.n);
+						err = selected.err ? selected.err : view.err;
 						break;
 					}
 			}
 			sq_free(m);
 			drop(&raw);
+			drop(&journal);
 			sq_free(s->raw);
 			s->raw = selected.p;
 			s->raw_len = selected.n;
 			if (!err)
 				err = decode_node(s->raw, s->raw_len, &s->node);
-			if (err)
+			if (!err) {
+				s->view = view.p;
+				s->node.view = view.p;
+				s->node.view_size = view.n;
+				s->node.identity = id;
+				s->node.version = s->info.version;
+				s->node.guard = txid;
+				s->node.guard_version = info.version;
+			} else {
+				drop(&view);
 				ks_snapshot_free(s);
+			}
 			return err;
 		}
 		sq_free(s->raw);
@@ -458,15 +540,16 @@ static int segment_add(struct segments *s, struct segment segment)
 	s->p[s->n++] = segment;
 	return 0;
 }
-static int index_segments(struct ks_fs *f, stqr_object_id id, u64 length, unsigned depth,
-			  struct segments *out)
+static int index_segments_view(struct ks_fs *f, const struct ks_node *view, stqr_object_id id,
+			       u64 length, unsigned depth, struct segments *out)
 {
 	struct buf b = {0};
 	stqr_info info;
 	unsigned version, count, i;
 	u64 total = 0;
 	int err;
-	err = get_object(f, id, (void **)&b.p, &b.n, &info);
+	err = view ? get_view_object(f, view, id, (void **)&b.p, &b.n, &info)
+		   : get_object(f, id, (void **)&b.p, &b.n, &info);
 	if (err)
 		return err;
 	if (b.n < 10 || b.n > SQ_CHUNK || memcmp(b.p, "STIX", 4)) {
@@ -504,7 +587,7 @@ static int index_segments(struct ks_fs *f, stqr_object_id id, u64 length, unsign
 		}
 		total += s.length;
 		if (depth > 1 && !nullid(s.id))
-			err = index_segments(f, s.id, s.length, depth - 1, out);
+			err = index_segments_view(f, view, s.id, s.length, depth - 1, out);
 		else
 			err = segment_add(out, s);
 		if (err)
@@ -517,23 +600,17 @@ out:
 	drop(&b);
 	return err;
 }
-static int segments(struct ks_fs *f, const struct ks_node *n, struct segments *s)
+static int index_segments(struct ks_fs *f, stqr_object_id id, u64 length, unsigned depth,
+			  struct segments *out)
 {
-	struct segment part = {.length = n->size};
-	int err;
-	if (!n->size)
-		return 0;
-	if (n->depth)
-		return index_segments(f, n->root, n->size, n->depth, s);
-	err = immutable(f, n->inline_data, n->size, &part.id);
-	return err ? err : segment_add(s, part);
+	return index_segments_view(f, NULL, id, length, depth, out);
 }
-static int index_read(struct ks_fs *f, stqr_object_id id, u64 length, unsigned depth, void *dst,
-		      size_t count, u64 offset)
+static int index_read(struct ks_fs *f, const struct ks_node *view, stqr_object_id id, u64 length,
+		      unsigned depth, void *dst, size_t count, u64 offset)
 {
 	struct segments s = {0};
 	size_t i;
-	int err = index_segments(f, id, length, depth, &s);
+	int err = index_segments_view(f, view, id, length, depth, &s);
 	if (err)
 		goto out;
 	for (i = 0; i < s.n && count; i++) {
@@ -550,7 +627,23 @@ static int index_read(struct ks_fs *f, stqr_object_id id, u64 length, unsigned d
 			void *data = NULL;
 			size_t actual;
 			stqr_info info;
-			struct ks_rpc *rpc = ks_rpc_lock(f, p->id);
+			struct ks_rpc *rpc;
+			if (view && view->view) {
+				size_t size;
+				err = get_view_object(f, view, p->id, &data, &size, &info);
+				if (!err) {
+					u64 at = p->offset + offset;
+					memset(dst, 0, n);
+					if (at < size)
+						memcpy(dst, (u8 *)data + at,
+						       min_t(u64, n, size - at));
+				}
+				sq_free(data);
+				if (err)
+					goto out;
+				goto copied;
+			}
+			rpc = ks_rpc_lock(f, p->id);
 			atomic64_inc(&f->rpc_ranges);
 			err = stqr_get_range(rpc->client, p->id, p->offset + offset, n, &data,
 					     &actual, &info);
@@ -570,6 +663,7 @@ static int index_read(struct ks_fs *f, stqr_object_id id, u64 length, unsigned d
 			if (err)
 				goto out;
 		}
+	copied:
 		dst = (u8 *)dst + n;
 		count -= n;
 		offset = 0;
@@ -580,17 +674,54 @@ out:
 	sq_free(s.p);
 	return err;
 }
-int ks_read(struct ks_fs *f, const struct ks_node *n, void *dst, size_t count, u64 offset)
+static int read_node(struct ks_fs *f, const struct ks_node *n, void *dst, size_t count, u64 offset)
 {
 	if (offset > n->size || count > n->size - offset)
-		return -EINVAL;
+		return -EAGAIN;
 	if (!count)
 		return 0;
 	if (!n->depth) {
 		memcpy(dst, n->inline_data + offset, count);
 		return 0;
 	}
-	return index_read(f, n->root, n->size, n->depth, dst, count, offset);
+	return index_read(f, n, n->root, n->size, n->depth, dst, count, offset);
+}
+int ks_read(struct ks_fs *f, const struct ks_node *node, void *dst, size_t count, u64 offset)
+{
+	const struct ks_node *n = node;
+	struct ks_snapshot fresh = {0};
+	unsigned attempt;
+	int err = 0;
+	for (attempt = 0; attempt < 128; attempt++) {
+		stqr_info observed;
+		int readerr = read_node(f, n, dst, count, offset);
+		if (!n->depth || nullid(n->identity)) {
+			err = readerr;
+			break;
+		}
+		err = object_stat(f, nullid(n->guard) ? n->identity : n->guard, &observed);
+		if (!err &&
+		    observed.version == (nullid(n->guard) ? n->version : n->guard_version)) {
+			err = readerr;
+			break;
+		}
+		if (err && err != -ENOENT)
+			break;
+		ks_cache_forget(f, node->identity);
+		ks_snapshot_free(&fresh);
+		err = ks_snapshot(f, node->identity, &fresh);
+		if (err)
+			break;
+		if (fresh.node.size != node->size) {
+			err = -EAGAIN;
+			break;
+		}
+		n = &fresh.node;
+	}
+	if (attempt == 128)
+		err = -EAGAIN;
+	ks_snapshot_free(&fresh);
+	return err;
 }
 static int build_segments(struct ks_fs *f, struct ks_node *node, struct segments *s)
 {
@@ -626,7 +757,10 @@ static int build_segments(struct ks_fs *f, struct ks_node *node, struct segments
 				number(&b, 0, 8);
 				part.length += s->p[j].length;
 			}
-			err = b.err ? b.err : immutable(f, b.p, b.n, &part.id);
+			err = b.err ? b.err
+				    : stable_id(node->identity, 1, depth + 1, i / 1024, &part.id);
+			if (!err)
+				err = stage_block(f, node, part.id, 0, b.p, b.n, true, false);
 			drop(&b);
 			if (!err)
 				err = segment_add(&next, part);
@@ -650,18 +784,22 @@ static int build_segments(struct ks_fs *f, struct ks_node *node, struct segments
 static int blob_bytes(struct ks_fs *f, struct ks_node *node, const void *data, size_t n)
 {
 	struct segments s = {0};
-	size_t pos;
+	size_t pos, unit = node->kind == 2 ? 4096 : SQ_CHUNK;
 	int err = 0;
 	if (n <= 4096) {
+		node->stamp = node->version + 1;
 		node->size = n;
 		node->depth = 0;
 		node->inline_data = data;
 		memset(&node->root, 0, 32);
 		return 0;
 	}
-	for (pos = 0; pos < n; pos += SQ_CHUNK) {
-		struct segment part = {.length = min_t(size_t, n - pos, SQ_CHUNK)};
-		err = immutable(f, (const u8 *)data + pos, part.length, &part.id);
+	for (pos = 0; pos < n; pos += unit) {
+		struct segment part = {.length = min_t(size_t, n - pos, unit)};
+		err = stable_id(node->identity, 0, 0, pos / unit, &part.id);
+		if (!err)
+			err = stage_block(f, node, part.id, 0, (const u8 *)data + pos, part.length,
+					  true, false);
 		if (!err)
 			err = segment_add(&s, part);
 		if (err)
@@ -693,14 +831,34 @@ static int slice_segments(struct segments *out, struct segments *in, u64 start, 
 	}
 	return 0;
 }
-static int node_cas(struct ks_fs *f, struct ks_snapshot *old, const struct ks_node *next)
+static int member_set(struct member *, struct ks_snapshot *, const struct ks_node *);
+static void member_free(struct member *);
+static int transact(struct ks_fs *, struct member *, unsigned);
+static int node_cas(struct ks_fs *f, struct ks_snapshot *old, struct ks_node *next)
 {
 	struct buf b = {0};
 	int err;
+	if (next->edits) {
+		struct member m = {0};
+		err = member_set(&m, old, next);
+		if (!err)
+			err = transact(f, &m, 1);
+		member_free(&m);
+		edits_free(next->edits);
+		next->edits = NULL;
+		return err;
+	}
 	encode_node(&b, next);
 	err = b.err ? b.err : cas_object(f, old->id, b.p, b.n, old->info.version, false);
 	drop(&b);
 	return err;
+}
+#include "mutable.c"
+static bool snapshot_changed(struct ks_fs *f, const struct ks_snapshot *old)
+{
+	stqr_info observed;
+	return !nullid(old->id) && !object_stat(f, old->id, &observed) &&
+	       observed.version != old->info.version;
 }
 int ks_write(struct ks_fs *f, stqr_object_id id, u64 *position, const void *data, size_t count,
 	     bool append)
@@ -739,31 +897,20 @@ int ks_write(struct ks_fs *f, stqr_object_id id, u64 *position, const void *data
 				err = blob_bytes(f, &next, small, max(end, next.size));
 			}
 		} else {
-			struct segment part = {.length = count};
-			err = segments(f, &old.node, &before);
-			if (!err)
-				err = slice_segments(&after, &before, 0, min(off, old.node.size));
-			if (!err && off > old.node.size) {
-				struct segment gap = {.length = off - old.node.size};
-				err = segment_add(&after, gap);
-			}
-			if (!err && count) {
-				err = immutable(f, data, count, &part.id);
-				if (!err)
-					err = segment_add(&after, part);
-			}
-			if (!err && end < old.node.size)
-				err = slice_segments(&after, &before, end, old.node.size);
-			if (!err)
-				err = build_segments(f, &next, &after);
+			err = prepare_mutable_write(f, &old, &next, off, data, count);
 		}
+
 		next.mtime = next.ctime = ktime_get_real_ns();
 		atomic64_add(ktime_get_ns() - phase, &f->write_prepare_ns);
 		phase = ktime_get_ns();
 		if (!err)
 			err = node_cas(f, &old, &next);
 		atomic64_add(ktime_get_ns() - phase, &f->write_publish_ns);
+		if (err && snapshot_changed(f, &old))
+			err = -EAGAIN;
 		ks_snapshot_free(&old);
+		edits_free(next.edits);
+		next.edits = NULL;
 		sq_free(small);
 		sq_free(before.p);
 		sq_free(after.p);
@@ -807,17 +954,14 @@ int ks_setattr(struct ks_fs *f, stqr_object_id id, struct iattr *attr)
 				err = ks_read(f, &old.node, small, min(size, next.size), 0);
 				if (!err)
 					err = blob_bytes(f, &next, small, size);
-			} else {
-				err = segments(f, &old.node, &in);
-				if (!err)
-					err = slice_segments(&out, &in, 0, min(size, next.size));
-				if (!err && size > next.size) {
-					struct segment gap = {.length = size - next.size};
-					err = segment_add(&out, gap);
+				if (!err) {
+					struct segments none = {0};
+					err = retire_pages(f, &old.node, &next, &none);
 				}
-				if (!err)
-					err = build_segments(f, &next, &out);
+			} else {
+				err = prepare_mutable_resize(f, &old, &next, size);
 			}
+
 			next.mtime = ktime_get_real_ns();
 		}
 		if (attr->ia_valid & ATTR_MODE)
@@ -841,7 +985,11 @@ int ks_setattr(struct ks_fs *f, stqr_object_id id, struct iattr *attr)
 		next.ctime = ktime_get_real_ns();
 		if (!err)
 			err = node_cas(f, &old, &next);
+		if (err && snapshot_changed(f, &old))
+			err = -EAGAIN;
 		ks_snapshot_free(&old);
+		edits_free(next.edits);
+		next.edits = NULL;
 		sq_free(small);
 		sq_free(in.p);
 		sq_free(out.p);
@@ -989,7 +1137,27 @@ static int directory_image(struct ks_fs *f, struct ks_node *node, struct ks_entr
 	if (content->err)
 		return content->err;
 	node->mtime = node->ctime = ktime_get_real_ns();
-	return blob_bytes(f, node, content->p, content->n);
+	{
+		struct ks_node before = *node;
+		struct segments keep = {0};
+		int e = blob_bytes(f, node, content->p, content->n);
+		size_t at;
+		if (!e && node->depth) {
+			for (at = 0; at < content->n; at += 4096) {
+				struct segment ref = {.length =
+							  min_t(size_t, 4096, content->n - at)};
+				e = stable_id(node->identity, 0, 0, at / 4096, &ref.id);
+				if (!e)
+					e = segment_add(&keep, ref);
+				if (e)
+					break;
+			}
+		}
+		if (!e)
+			e = retire_pages(f, &before, node, &keep);
+		sq_free(keep.p);
+		return e;
+	}
 }
 int ks_initialize(struct ks_fs *f, u32 uid, u32 gid)
 {
@@ -1068,6 +1236,10 @@ int ks_newnode(struct ks_fs *f, stqr_object_id parent, const char *name, unsigne
 			if (!err)
 				err = node_cas(f, &old, &next);
 		}
+		edits_free(next.edits);
+		next.edits = NULL;
+		if (err && snapshot_changed(f, &old))
+			err = -EAGAIN;
 		ks_snapshot_free(&old);
 		sq_free(entries);
 		drop(&content);
@@ -1080,6 +1252,7 @@ static void member_free(struct member *m)
 {
 	drop(&m->before);
 	drop(&m->after);
+	drop(&m->writes);
 }
 static int member_set(struct member *m, struct ks_snapshot *s, const struct ks_node *after)
 {
@@ -1087,6 +1260,9 @@ static int member_set(struct member *m, struct ks_snapshot *s, const struct ks_n
 	m->version = s->info.version;
 	put(&m->before, s->raw, s->raw_len);
 	encode_node(&m->after, after);
+	encode_edits(&m->writes, after);
+	edits_free(after->edits);
+	((struct ks_node *)after)->edits = NULL;
 	return m->before.err ? m->before.err : m->after.err;
 }
 static int member_cmp(const void *a, const void *b)
@@ -1103,7 +1279,7 @@ static int transact(struct ks_fs *f, struct member *m, unsigned count)
 	if (!count || count > 1024)
 		return -E2BIG;
 	sort(m, count, sizeof(*m), member_cmp, NULL);
-	put(&b, "STFT\1\0", 6);
+	put(&b, "STFT\2\0", 6);
 	number(&b, 0, 1);
 	number(&b, count, 4);
 	for (i = 0; i < count; i++) {
@@ -1115,8 +1291,12 @@ static int transact(struct ks_fs *f, struct member *m, unsigned count)
 		number(&b, m[i].version, 8);
 		blob(&b, m[i].before.p, m[i].before.n);
 		blob(&b, m[i].after.p, m[i].after.n);
+		if (m[i].writes.n)
+			put(&b, m[i].writes.p, m[i].writes.n);
+		else
+			number(&b, 0, 4);
 	}
-	err = b.err ? b.err : immutable(f, b.p, b.n, &id);
+	err = b.err ? b.err : intent_store(f, &b, &id);
 	drop(&b);
 	return err ? err : help_tx(f, id);
 }
@@ -1183,6 +1363,10 @@ int ks_remove(struct ks_fs *f, stqr_object_id parent, const char *name, bool dir
 			member_free(&members[1]);
 			sq_free(members);
 		}
+		edits_free(next.edits);
+		next.edits = NULL;
+		if (err && snapshot_changed(f, &old))
+			err = -EAGAIN;
 		ks_snapshot_free(&old);
 		ks_snapshot_free(&child);
 		sq_free(entries);
@@ -1263,7 +1447,7 @@ int ks_rename(struct ks_fs *f, stqr_object_id from, const char *name, stqr_objec
 		struct ks_snapshot *a, *b, *source, *dest;
 		struct ks_entry *ae = NULL, *be = NULL, *children = NULL;
 		struct buf ac = {0}, bc = {0};
-		struct ks_node an, bn;
+		struct ks_node an = {0}, bn = {0};
 		struct member *m = sq_alloc(1024 * sizeof(*m));
 		unsigned count = 0, i;
 		size_t na = 0, nb = 0, nc;
@@ -1369,6 +1553,8 @@ int ks_rename(struct ks_fs *f, stqr_object_id from, const char *name, stqr_objec
 			if (!err)
 				err = transact(f, m, count);
 		}
+		edits_free(an.edits);
+		edits_free(bn.edits);
 		for (i = 0; i < count; i++)
 			member_free(&m[i]);
 		sq_free(m);
@@ -1401,7 +1587,7 @@ int ks_link(struct ks_fs *f, stqr_object_id parent, const char *name, stqr_objec
 		struct ks_entry *entries = NULL;
 		struct member *m = sq_alloc(2 * sizeof(*m));
 		struct buf content = {0};
-		struct ks_node next, linked;
+		struct ks_node next = {0}, linked;
 		size_t n;
 		int err;
 		if (!m)
@@ -1434,11 +1620,15 @@ int ks_link(struct ks_fs *f, stqr_object_id parent, const char *name, stqr_objec
 			if (!err)
 				err = transact(f, m, 2);
 		}
+		edits_free(next.edits);
+		next.edits = NULL;
 		member_free(m);
 		member_free(m + 1);
 		sq_free(m);
 		sq_free(entries);
 		drop(&content);
+		if (err && snapshot_changed(f, &p))
+			err = -EAGAIN;
 		ks_snapshot_free(&p);
 		ks_snapshot_free(&child);
 		if (err != -EAGAIN)

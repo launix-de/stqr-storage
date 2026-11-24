@@ -15,6 +15,7 @@ type directoryCacheKey struct {
 	length uint64
 	depth  uint8
 	inline bool
+	stamp  uint64
 }
 type directoryCacheValue struct {
 	key     directoryCacheKey
@@ -38,7 +39,7 @@ func directoryKey(blob fsBlob) (directoryCacheKey, bool) {
 	if blob.source != (ObjectID{}) {
 		return directoryCacheKey{}, false
 	}
-	key := directoryCacheKey{id: blob.root, length: blob.length, depth: blob.depth}
+	key := directoryCacheKey{id: blob.root, length: blob.length, depth: blob.depth, stamp: blob.stamp}
 	if blob.root == (ObjectID{}) {
 		key.id = sha256.Sum256(blob.inline)
 		key.inline = true

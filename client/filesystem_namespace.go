@@ -4,6 +4,7 @@ package client
 import (
 	"bytes"
 	"context"
+	"errors"
 	"syscall"
 	"time"
 )
@@ -61,7 +62,12 @@ func (f *Filesystem) Rmdir(ctx context.Context, parent ObjectID, name string) er
 	return syscall.EAGAIN
 }
 
-func (f *Filesystem) directoryImage(ctx context.Context, n fsNode, entries []FSEntry) (fsNode, error) {
+func (f *Filesystem) directoryImage(ctx context.Context, n fsNode, entries []FSEntry) (next fsNode, err error) {
+	defer func() {
+		if err != nil && errors.Is(f.checkNodeView(ctx, n), ErrPrecondition) {
+			err = ErrPrecondition
+		}
+	}()
 	data, err := encodeFSDirectory(entries)
 	if err != nil {
 		return n, err
@@ -72,7 +78,7 @@ func (f *Filesystem) directoryImage(ctx context.Context, n fsNode, entries []FSE
 	if err = f.directoryLinks(ctx, &n, entries); err != nil {
 		return n, err
 	}
-	n.blob, err = f.blobFromBytes(ctx, data)
+	err = f.stableBody(ctx, &n, data)
 	n.mtime = uint64(time.Now().UnixNano())
 	n.ctime = n.mtime
 	return n, err

@@ -14,7 +14,7 @@ type RequestRecord struct {
 	Result      Result
 }
 
-func (v *Volume) restoreLocked(k Key, info Info, source ExtentSource, opts Options) error {
+func (v *Volume) restoreLocked(k Key, info Info, source ExtentSource, opts Options, replayable bool) error {
 	if busy, err := v.pending(k); err != nil {
 		return err
 	} else if busy {
@@ -43,11 +43,14 @@ func (v *Volume) restoreLocked(k Key, info Info, source ExtentSource, opts Optio
 	}
 	// Trusted migration sources need not be seekable. Stage logical payload only,
 	// never sparse zero ranges, then allocate its final packed region exactly once.
-	spool, e := os.CreateTemp("", "stqr-restore-*")
-	if e != nil {
-		return e
+	var spool *os.File
+	if !replayable {
+		spool, e = os.CreateTemp("", "stqr-restore-*")
+		if e != nil {
+			return e
+		}
+		defer func() { name := spool.Name(); spool.Close(); os.Remove(name) }()
 	}
-	defer func() { name := spool.Name(); spool.Close(); os.Remove(name) }()
 	h := fingerprint(opSnapshot, k, info.Version, info.Length, opts, nil)
 	flags := byte(0)
 	if info.Deleted {
@@ -65,10 +68,31 @@ func (v *Volume) restoreLocked(k Key, info Info, source ExtentSource, opts Optio
 			diskOrder.PutUint64(b[:], off)
 			diskOrder.PutUint64(b[8:], n)
 			h.Write(b[:])
-			if _, e := io.CopyN(io.MultiWriter(spool, h), r, int64(n)); e != nil {
-				return e
+			if replayable {
+				section, ok := r.(interface {
+					io.Reader
+					io.Seeker
+				})
+				if !ok {
+					return ErrUnsupported
+				}
+				position, err := section.Seek(0, io.SeekCurrent)
+				if err != nil {
+					return err
+				}
+				if _, err = io.CopyN(h, section, int64(n)); err != nil {
+					return err
+				}
+				if _, err = section.Seek(position, io.SeekStart); err != nil {
+					return err
+				}
+				pieces = append(pieces, payloadPiece{off, n, section})
+			} else {
+				if _, e := io.CopyN(io.MultiWriter(spool, h), r, int64(n)); e != nil {
+					return e
+				}
+				pieces = append(pieces, payloadPiece{off, n, io.NewSectionReader(spool, int64(physical), int64(n))})
 			}
-			pieces = append(pieces, payloadPiece{off, n, io.NewSectionReader(spool, int64(physical), int64(n))})
 			last = off + n
 			physical += n
 			return nil
@@ -86,6 +110,7 @@ func (v *Volume) restoreLocked(k Key, info Info, source ExtentSource, opts Optio
 		return nil
 	}
 	t := v.transaction()
+	defer t.close()
 	spans, e := t.storePacked(pieces, info.Compression)
 	if e != nil {
 		return e
@@ -135,6 +160,7 @@ func (v *Volume) restoreRequestLocked(x RequestRecord, opts Options) error {
 		return nil
 	}
 	t := v.transaction()
+	defer t.close()
 	if e = t.saveReceipt(x.ID, dedupe{importShadow: opts.ImportShadow, Key: x.Key, Fingerprint: x.Fingerprint, Result: x.Result}); e != nil {
 		return e
 	}

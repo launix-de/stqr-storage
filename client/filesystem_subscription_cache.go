@@ -79,7 +79,10 @@ func (c *SubscriptionStore) Get(ctx context.Context, id ObjectID) ([]byte, Objec
 	if closed {
 		return nil, ObjectInfo{}, ErrClosed
 	}
-	if disabled {
+	// Intent decisions and marker ownership must be observed from the owner,
+	// even if the subscription push on another socket has not arrived yet.
+	durable, _ := ctx.Value(fsDurableKey{}).(bool)
+	if disabled || durable {
 		return c.readUncached(ctx, id)
 	}
 	attempts := 0
@@ -317,11 +320,15 @@ func (c *SubscriptionStore) CAS(ctx context.Context, id ObjectID, off uint64, ex
 		return ObjectInfo{}, err
 	}
 	defer release()
-	opt.Accepted = opt.Accepted || c.accepted
+	if durable, _ := ctx.Value(fsDurableKey{}).(bool); durable {
+		opt.Accepted = false
+	} else {
+		opt.Accepted = opt.Accepted || c.accepted
+	}
 	info, err := c.client.CAS(ctx, id, off, expected, replacement, opt)
 	// A failed precondition may race an update on another socket. Drop that
 	// snapshot now, rather than spinning CAS retries against a stale local copy.
-	if errors.Is(err, ErrPrecondition) {
+	if err == nil || errors.Is(err, ErrPrecondition) {
 		c.remove(id, nil)
 	}
 	return info, err
@@ -410,3 +417,39 @@ func (o *OverlayFilesystem) subscribed(id ObjectID, version uint64) bool {
 // Unsupported nodes retain the durable path. Call Sync at filesystem barriers.
 func (c *SubscriptionStore) EnableAcceptedWrites()          { c.accepted = true }
 func (c *SubscriptionStore) Sync(ctx context.Context) error { return c.client.Sync(ctx) }
+
+// Payload mutations retain their stable OID. Only inode/index snapshots belong
+// in this cache; ranged writes use the native path and durable REDO ordering.
+func (c *SubscriptionStore) PutRange(ctx context.Context, id ObjectID, off uint64, data []byte, opt PutOptions) (ObjectInfo, error) {
+	ctx, release, err := c.backend(ctx)
+	if err != nil {
+		return ObjectInfo{}, err
+	}
+	defer release()
+	if durable, _ := ctx.Value(fsDurableKey{}).(bool); durable {
+		opt.Accepted = false
+	} else {
+		opt.Accepted = opt.Accepted || c.accepted
+	}
+	info, err := c.client.PutRange(ctx, id, off, data, opt)
+	c.remove(id, nil)
+	return info, err
+}
+func (c *SubscriptionStore) Stat(ctx context.Context, id ObjectID) (ObjectInfo, error) {
+	ctx, release, err := c.backend(ctx)
+	if err != nil {
+		return ObjectInfo{}, err
+	}
+	defer release()
+	return c.client.Stat(ctx, id)
+}
+func (c *SubscriptionStore) Delete(ctx context.Context, id ObjectID, opt DeleteOptions) error {
+	ctx, release, err := c.backend(ctx)
+	if err != nil {
+		return err
+	}
+	defer release()
+	err = c.client.Delete(ctx, id, opt)
+	c.remove(id, nil)
+	return err
+}

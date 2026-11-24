@@ -58,6 +58,8 @@ type rangeIncomingObject struct {
 	payload, extents *os.File
 	hash             hash.Hash
 	last             uint64
+	baseVersion      uint64
+	encoded          bool
 }
 
 func (o *rangeIncomingObject) close() {
@@ -115,7 +117,7 @@ func (r *rangeManager) receiveSnapshot(m client.Message, actor client.ID, force 
 	schema := d.U16()
 	var id [32]byte
 	copy(id[:], d.Take(32))
-	if (schema != 1 && !(schema == 2 && m.Opcode == peerRangeSnapshotEnd)) || d.Err != nil {
+	if (schema != 1 && !(schema == 2 && (m.Opcode == peerRangeSnapshotEnd || m.Opcode == peerRangeObject || m.Opcode == peerRangeChunk) || schema == 3 && m.Opcode == peerRangeObject)) || d.Err != nil {
 		return nil, client.ErrProtocol
 	}
 	t, snapshot, err := r.snapshot(id)
@@ -194,13 +196,28 @@ func (r *rangeManager) receiveSnapshot(m client.Message, actor client.ID, force 
 				}
 				snapshot.logicalUsed += info.Length
 			}
+		} else if hashes, base, e2 := r.deltaHashes(t, key, info); e2 == nil && len(hashes) != 0 {
+			e.U64(base)
+			e.U32(rangeDeltaPage)
+			e.U32(uint32(len(hashes)))
+			for _, sum := range hashes {
+				e.B = append(e.B, sum[:]...)
+			}
 		}
 		return e.B, nil
 	case peerRangeObject:
 		transfer := d.ID()
 		header := append([]byte{}, d.B...)
 		key, info := decodeRangeInfo(&d)
-		if d.Done() != nil || transfer == (client.ID{}) || key.Bucket != volume.ID(t.plan.Before.Bucket) || !t.plan.contains(key.Object) || info.Version == 0 || info.Compression > volume.XZ || info.Deleted && info.Length != 0 {
+		var baseVersion uint64
+		if schema == 2 {
+			baseVersion = d.U64()
+			if d.Err != nil || len(header) < 8 {
+				return nil, client.ErrProtocol
+			}
+			header = header[:len(header)-8]
+		}
+		if d.Done() != nil || schema == 2 && (baseVersion == 0 || baseVersion >= info.Version || info.Deleted || info.Compression != volume.Raw || t.plan.Compression != volume.Raw) || transfer == (client.ID{}) || key.Bucket != volume.ID(t.plan.Before.Bucket) || !t.plan.contains(key.Object) || info.Version == 0 || info.Compression > volume.XZ || info.Deleted && info.Length != 0 {
 			return nil, client.ErrProtocol
 		}
 		if snapshot.object != nil {
@@ -216,32 +233,56 @@ func (r *rangeManager) receiveSnapshot(m client.Message, actor client.ID, force 
 			os.Remove(payload.Name())
 			return nil, err
 		}
-		o := &rangeIncomingObject{transfer: transfer, key: key, info: info, header: header, payload: payload, extents: extents, hash: sha256.New()}
+		o := &rangeIncomingObject{transfer: transfer, key: key, info: info, header: header, payload: payload, extents: extents, hash: sha256.New(), baseVersion: baseVersion, encoded: schema == 3}
 		o.hash.Write(header)
 		snapshot.object = o
 		return nil, nil
 	case peerRangeChunk:
 		transfer := d.ID()
-		offset := d.U64()
+		var encoded volume.EncodedChunk
+		var offset, logicalLength uint64
+		if schema == 2 {
+			encoded = decodeRangeEncoded(&d)
+			offset = encoded.Offset
+			logicalLength = encoded.Length
+		} else {
+			offset = d.U64()
+		}
 		data := d.Blob()
+		if schema != 2 {
+			logicalLength = uint64(len(data))
+		}
 		o := snapshot.object
-		if d.Done() != nil || o == nil || o.transfer != transfer || len(data) == 0 || len(data) > 1<<20 || offset < o.last || offset > o.info.Length || uint64(len(data)) > o.info.Length-offset {
+		if d.Done() != nil || o == nil || o.transfer != transfer || len(data) == 0 || len(data) > 1<<20 || o.encoded != (schema == 2) || logicalLength == 0 || offset < o.last || offset > o.info.Length || logicalLength > o.info.Length-offset {
 			return nil, client.ErrProtocol
 		}
-		var descriptor [16]byte
-		binary.LittleEndian.PutUint64(descriptor[:8], offset)
-		binary.LittleEndian.PutUint64(descriptor[8:], uint64(len(data)))
-		if _, err := o.extents.Write(descriptor[:]); err != nil {
-			return nil, err
+		if o.encoded {
+			meta := client.Encoder{}
+			encodeRangeEncoded(&meta, encoded)
+			meta.U32(uint32(len(data)))
+			if _, err := o.extents.Write(meta.B); err != nil {
+				return nil, err
+			}
+		} else {
+			var descriptor [16]byte
+			binary.LittleEndian.PutUint64(descriptor[:8], offset)
+			binary.LittleEndian.PutUint64(descriptor[8:], uint64(len(data)))
+			if _, err := o.extents.Write(descriptor[:]); err != nil {
+				return nil, err
+			}
 		}
 		if _, err := o.payload.Write(data); err != nil {
 			return nil, err
 		}
 		e := client.Encoder{}
-		e.U64(offset)
+		if o.encoded {
+			encodeRangeEncoded(&e, encoded)
+		} else {
+			e.U64(offset)
+		}
 		e.Blob(data)
 		o.hash.Write(e.B)
-		o.last = offset + uint64(len(data))
+		o.last = offset + logicalLength
 		return nil, nil
 	case peerRangeObjectEnd:
 		transfer := d.ID()
@@ -287,12 +328,27 @@ func (r *rangeManager) receiveSnapshot(m client.Message, actor client.ID, force 
 					if length > uint64(^uint64(0)>>1) {
 						return volume.ErrRange
 					}
-					reader := bucketContextReader{ctx: r.server.ctx, r: io.NewSectionReader(o.payload, at, int64(length))}
+					reader := io.NewSectionReader(o.payload, at, int64(length))
 					if err := yield(offset, reader, length); err != nil {
 						return err
 					}
 					at += int64(length)
 				}
+			}
+			if o.baseVersion != 0 {
+				var patches []volume.RestorePatch
+				e := source(func(offset uint64, reader io.Reader, length uint64) error {
+					data := make([]byte, int(length))
+					if _, e := io.ReadFull(reader, data); e != nil {
+						return e
+					}
+					patches = append(patches, volume.RestorePatch{Offset: offset, Data: data})
+					return nil
+				})
+				if e != nil {
+					return e
+				}
+				return h.RestoreDelta(o.key, o.baseVersion, info, patches, volume.Options{InFlightAllowance: allowance, ImportShadow: true})
 			}
 			prior, err := h.RecordInfo(o.key)
 			if err == nil {
@@ -308,7 +364,10 @@ func (r *rangeManager) receiveSnapshot(m client.Message, actor client.ID, force 
 			if err != nil && !errors.Is(err, volume.ErrNotFound) {
 				return err
 			}
-			return h.Restore(o.key, info, source, volume.Options{InFlightAllowance: allowance, ImportShadow: true})
+			if o.encoded {
+				return h.RestoreEncoded(o.key, info, o.encodedSource(), volume.Options{InFlightAllowance: allowance, ImportShadow: true})
+			}
+			return h.RestoreSeekable(o.key, info, source, volume.Options{InFlightAllowance: allowance, ImportShadow: true})
 		}()
 		r.consumed(t, store, reservedBefore)
 		r.server.opMu.Unlock()
@@ -496,7 +555,7 @@ func (r *rangeManager) sendSnapshot(ctx context.Context, p rangePlan, final bool
 			if err != nil {
 				return [32]byte{}, client.Proof{}, err
 			}
-			records, err := h.ScanBucketObjects(volume.ID(p.Before.Bucket), after, 128)
+			records, err := p.scanObjects(h, after, 128)
 			h.Close()
 			if err != nil {
 				return [32]byte{}, client.Proof{}, err
@@ -669,6 +728,19 @@ func (r *rangeManager) sendObject(ctx context.Context, p rangePlan, v *volume.Vo
 	if have {
 		copy(prior[:], decoder.Take(32))
 	}
+	var deltaBase uint64
+	var deltaHashes [][32]byte
+	if !have && len(decoder.B) != 0 {
+		deltaBase = decoder.U64()
+		page, count := decoder.U32(), decoder.U32()
+		if page != rangeDeltaPage || count == 0 || count > rangeDeltaMaxPages || uint64(count)*32 != uint64(len(decoder.B)) || probeInfo.Length == 0 || uint64(count) != (probeInfo.Length+rangeDeltaPage-1)/rangeDeltaPage {
+			return nil, [32]byte{}, client.ErrProtocol
+		}
+		deltaHashes = make([][32]byte, int(count))
+		for i := range deltaHashes {
+			copy(deltaHashes[i][:], decoder.Take(32))
+		}
+	}
 	if decoder.Done() != nil {
 		return nil, [32]byte{}, client.ErrProtocol
 	}
@@ -692,6 +764,7 @@ func (r *rangeManager) sendObject(ctx context.Context, p rangePlan, v *volume.Vo
 	}
 	defer func() { meta.Close(); os.Remove(meta.Name()) }()
 	var info volume.Info
+	encodedTransfer := false
 	err = func() error {
 		defer h.Close()
 		var err error
@@ -701,6 +774,23 @@ func (r *rangeManager) sendObject(ctx context.Context, p rangePlan, v *volume.Vo
 		}
 		if info.Deleted {
 			return nil
+		}
+		if info.Compression != volume.Raw && info.Compression == p.Compression {
+			encodedTransfer = true
+			_, err := h.ExportEncoded(key, func(c volume.EncodedChunk) error {
+				if err := ctx.Err(); err != nil {
+					return err
+				}
+				descriptor := client.Encoder{}
+				encodeRangeEncoded(&descriptor, c)
+				descriptor.U32(uint32(len(c.Data)))
+				if _, err := meta.Write(descriptor.B); err != nil {
+					return err
+				}
+				_, err := data.Write(c.Data)
+				return err
+			})
+			return err
 		}
 		extents, err := h.Extents(key)
 		if err != nil {
@@ -747,9 +837,24 @@ func (r *rangeManager) sendObject(ctx context.Context, p rangePlan, v *volume.Vo
 	encodeRangeInfo(&header, key, info)
 	hash := sha256.New()
 	hash.Write(header.B)
+	// Only a dense snapshot with exactly the probed shape can use page deltas.
+	useDelta := deltaBase != 0 && info.Length == probeInfo.Length && info.Compression == volume.Raw && p.Compression == volume.Raw && !info.Deleted && info.Version > deltaBase
+	if useDelta {
+		extentData, e2 := data.Stat()
+		useDelta = e2 == nil && extentData.Size() == int64(info.Length)
+	}
 	e := rangeMessage(peerRangeObject, id)
+	if useDelta {
+		binary.LittleEndian.PutUint16(e.B[:2], 2)
+	}
+	if encodedTransfer {
+		binary.LittleEndian.PutUint16(e.B[:2], 3)
+	}
 	e.ID(transfer)
 	e.B = append(e.B, header.B...)
+	if useDelta {
+		e.U64(deltaBase)
+	}
 	if _, err := r.call(ctx, p.Target, peerRangeObject, e.B); err != nil {
 		return nil, [32]byte{}, err
 	}
@@ -760,6 +865,38 @@ func (r *rangeManager) sendObject(ctx context.Context, p rangePlan, v *volume.Vo
 		return nil, [32]byte{}, err
 	}
 	for {
+		if encodedTransfer {
+			descriptor := make([]byte, rangeEncodedDescriptorSize+4)
+			_, err := io.ReadFull(meta, descriptor)
+			if err == io.EOF {
+				break
+			}
+			if err != nil {
+				return nil, [32]byte{}, err
+			}
+			d := client.Decoder{B: descriptor}
+			c := decodeRangeEncoded(&d)
+			n := d.U32()
+			if d.Done() != nil || n == 0 || n > 1<<20 {
+				return nil, [32]byte{}, client.ErrProtocol
+			}
+			c.Data = make([]byte, int(n))
+			if _, err = io.ReadFull(data, c.Data); err != nil {
+				return nil, [32]byte{}, err
+			}
+			chunk := client.Encoder{}
+			encodeRangeEncoded(&chunk, c)
+			chunk.Blob(c.Data)
+			hash.Write(chunk.B)
+			e := rangeMessage(peerRangeChunk, id)
+			binary.LittleEndian.PutUint16(e.B[:2], 2)
+			e.ID(transfer)
+			e.B = append(e.B, chunk.B...)
+			if _, err = r.call(ctx, p.Target, peerRangeChunk, e.B); err != nil {
+				return nil, [32]byte{}, err
+			}
+			continue
+		}
 		var descriptor [16]byte
 		_, err := io.ReadFull(meta, descriptor[:])
 		if err == io.EOF {
@@ -773,15 +910,42 @@ func (r *rangeManager) sendObject(ctx context.Context, p rangePlan, v *volume.Vo
 		if _, err := io.ReadFull(data, payload); err != nil {
 			return nil, [32]byte{}, err
 		}
-		chunk := client.Encoder{}
-		chunk.U64(offset)
-		chunk.Blob(payload)
-		hash.Write(chunk.B)
-		e := rangeMessage(peerRangeChunk, id)
-		e.ID(transfer)
-		e.B = append(e.B, chunk.B...)
-		if _, err := r.call(ctx, p.Target, peerRangeChunk, e.B); err != nil {
-			return nil, [32]byte{}, err
+		unchanged := func(at, stop int) bool {
+			pos := offset + uint64(at)
+			return useDelta && pos%rangeDeltaPage == 0 && pos/rangeDeltaPage < uint64(len(deltaHashes)) && sha256.Sum256(payload[at:stop]) == deltaHashes[pos/rangeDeltaPage]
+		}
+		for at := 0; at < len(payload); {
+			start := at
+			stop := len(payload)
+			if useDelta {
+				stop = min(at+rangeDeltaPage, len(payload))
+				if unchanged(at, stop) {
+					at = stop
+					continue
+				}
+				// Adjacent changed pages share one request, up to the normal
+				// 1-MiB message bound; scattered updates keep their gaps.
+				for stop < len(payload) {
+					next := min(stop+rangeDeltaPage, len(payload))
+					if unchanged(stop, next) {
+						break
+					}
+					stop = next
+				}
+			}
+			piece := payload[start:stop]
+			pos := offset + uint64(start)
+			at = stop
+			chunk := client.Encoder{}
+			chunk.U64(pos)
+			chunk.Blob(piece)
+			hash.Write(chunk.B)
+			e := rangeMessage(peerRangeChunk, id)
+			e.ID(transfer)
+			e.B = append(e.B, chunk.B...)
+			if _, err := r.call(ctx, p.Target, peerRangeChunk, e.B); err != nil {
+				return nil, [32]byte{}, err
+			}
 		}
 	}
 	var sum [32]byte

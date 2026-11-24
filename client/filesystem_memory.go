@@ -9,7 +9,7 @@ import (
 )
 
 // MemoryFilesystemStore is an explicitly volatile backend for dry filesystem
-// development. It implements just the Get/CAS subset, not a network connection.
+// development. It implements local object access, not a network connection.
 // All handles sharing this instance share atomic version checks and object data.
 // It retains immutable/orphan objects and is not intended for unbounded workloads.
 type MemoryFilesystemStore struct {
@@ -105,3 +105,60 @@ func (m *MemoryFilesystemStore) CAS(ctx context.Context, id ObjectID, offset uin
 }
 
 var _ FilesystemStore = (*MemoryFilesystemStore)(nil)
+
+func (m *MemoryFilesystemStore) Stat(ctx context.Context, id ObjectID) (ObjectInfo, error) {
+	if err := ctx.Err(); err != nil {
+		return ObjectInfo{}, err
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	o, ok := m.objects[id]
+	if !ok {
+		return ObjectInfo{}, ErrNotFound
+	}
+	return ObjectInfo{Version: o.version, Length: uint64(len(o.data))}, nil
+}
+func (m *MemoryFilesystemStore) PutRange(ctx context.Context, id ObjectID, offset uint64, data []byte, opt PutOptions) (ObjectInfo, error) {
+	if offset > FSObjectSize || uint64(len(data)) > FSObjectSize-offset {
+		return ObjectInfo{}, ErrRange
+	}
+	// This helper uses one CAS image but retains the caller's logical request
+	// fingerprint through a separate operation namespace, just like native PUT_RANGE.
+	e := Encoder{B: append([]byte("range"), id[:]...)}
+	e.U64(offset)
+	e.Blob(data)
+	e.Bool(opt.Absent)
+	e.Bool(opt.ExpectedVersion != nil)
+	if opt.ExpectedVersion != nil {
+		e.U64(*opt.ExpectedVersion)
+	}
+	digest := sha256.Sum256(e.B)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return ObjectInfo{}, err
+	}
+	if prior, ok := m.requests[opt.RequestID]; opt.RequestID != (RequestID{}) && ok {
+		if prior.digest != digest {
+			return ObjectInfo{}, errors.New("client: reused request ID")
+		}
+		return prior.info, nil
+	}
+	old, exists := m.objects[id]
+	if opt.Absent && exists || !opt.Absent && !exists || opt.ExpectedVersion != nil && old.version != *opt.ExpectedVersion {
+		return ObjectInfo{}, ErrPrecondition
+	}
+	body := append([]byte(nil), old.data...)
+	end := offset + uint64(len(data))
+	if end > uint64(len(body)) {
+		body = append(body, make([]byte, end-uint64(len(body)))...)
+	}
+	copy(body[offset:], data)
+	next := fsMemoryObject{data: body, version: old.version + 1}
+	m.objects[id] = next
+	info := ObjectInfo{Version: next.version, Length: uint64(len(body))}
+	if opt.RequestID != (RequestID{}) {
+		m.requests[opt.RequestID] = fsMemoryRequest{digest: digest, info: info}
+	}
+	return info, nil
+}

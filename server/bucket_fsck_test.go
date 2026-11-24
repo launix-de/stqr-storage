@@ -86,7 +86,9 @@ func TestBucketFsckNetworkExclusiveSweep(t *testing.T) {
 	c = dial()
 	defer c.Close()
 	result, err := c.CheckFilesystem(ctx)
-	if err != nil || result.Deleted != 1 || result.DeletedBytes != 11 {
+	// The successful mutable write leaves only its seven-byte terminal
+	// decision; offline fsck collects it together with the explicit orphan.
+	if err != nil || result.Deleted != 2 || result.DeletedBytes != 18 {
 		t.Fatalf("%+v %v", result, err)
 	}
 	if _, _, err = c.Get(ctx, orphan); !errors.Is(err, client.ErrNotFound) {

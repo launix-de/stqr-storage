@@ -184,19 +184,23 @@ func TestFrontendCredentialsStayPrivateAndBucketBound(t *testing.T) {
 
 func TestNodeDrainLetsActiveFrontendFinishBeforeMembershipLeave(t *testing.T) {
 	source, target := startAutomaticDaemonPair(t)
-	addTestVolume(t, target.node, "data", "hdd", 4<<20)
+	remote := addTestVolume(t, target.node, "data", "hdd", 4<<20)
 	bucket, _ := createProtocolBucket(t, source.node, "frontend-drain")
 	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
 	defer cancel()
-	for {
-		patch, known := source.node.routingPatch(bucket.ID(), [32]byte{})
-		if known && patch.Entries[0].Locations[0].Node == target.node.control.ledger.node {
-			break
-		}
-		if ctx.Err() != nil {
-			t.Fatal("empty source range did not relocate", ctx.Err())
-		}
-		time.Sleep(25 * time.Millisecond)
+	// This test needs a remote owner before admitting the frontend operation;
+	// request that handoff explicitly rather than depending on idle rebalancing.
+	before, known := source.node.routingPatch(bucket.ID(), volume.ObjectID{})
+	if !known {
+		t.Fatal("missing initial placement")
+	}
+	vid, _ := parseID(remote.VolumeID)
+	plan, err := planRangeMove(before, before.Entries[0], target.node.control.ledger.node, vid, uint8(volume.HDD), volume.Raw, 64<<10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = source.node.scopes.move(ctx, plan); err != nil {
+		t.Fatal(err)
 	}
 	p := userPrincipal(t, source.node)
 	p.frontendPermission = BucketRead

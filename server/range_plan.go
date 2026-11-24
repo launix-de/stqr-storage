@@ -293,3 +293,12 @@ func planRangeMove(before client.MapPatch, moving client.RangeEntry, target clie
 	})
 	return p, p.validate()
 }
+
+// Seek to the selected range instead of scanning every object in the bucket.
+func (p rangePlan) scanObjects(h *volume.Handle, after *volume.ObjectID, limit int) ([]volume.ObjectRecord, error) {
+	end, toEnd, err := client.RangeEnd(p.Moving.Start, p.Moving.PrefixBits)
+	if err != nil {
+		return nil, err
+	}
+	return h.ScanBucketRange(volume.ID(p.Before.Bucket), volume.ObjectID(p.Moving.Start), volume.ObjectID(end), toEnd, after, limit)
+}

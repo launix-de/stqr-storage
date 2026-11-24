@@ -322,7 +322,7 @@ func (m *fsCheckMarker) inode(ctx context.Context, id ObjectID, root bool) error
 		return ErrFSFormat
 	}
 	if node.blob.root != (ObjectID{}) {
-		if err = m.segment(ctx, fsSegment{id: node.blob.root, length: node.blob.length}, node.blob.depth); err != nil {
+		if err = m.segment(context.WithValue(ctx, fsSparsePageKey{}, node.blob.stamp != 0), fsSegment{id: node.blob.root, length: node.blob.length}, node.blob.depth); err != nil {
 			return err
 		}
 	}
@@ -357,8 +357,9 @@ func (m *fsCheckMarker) segment(ctx context.Context, segment fsSegment, depth ui
 			return m.lowerSource(ctx, segment.id, segment.lowerVersion, segment.offset, segment.length)
 		}
 		info, ok := m.inventory[segment.id]
-		if !ok || uint64(segment.offset) > info.Length || segment.length > info.Length-uint64(segment.offset) {
-			return ErrFSFormat
+		sparse, _ := ctx.Value(fsSparsePageKey{}).(bool)
+		if !ok || segment.offset > FSObjectSize || segment.length > FSObjectSize-segment.offset || (!sparse && (segment.offset > info.Length || segment.length > info.Length-segment.offset)) {
+			return fmt.Errorf("invalid data span %s offset=%d length=%d stored=%d mutable=%t: %w", segment.id, segment.offset, segment.length, info.Length, sparse, ErrFSFormat)
 		}
 		if m.roles[segment.id] == fsCheckData {
 			return nil

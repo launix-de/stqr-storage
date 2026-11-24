@@ -162,6 +162,9 @@ int main(void)
     REQUIRE(!close(fd));
     puts("kstqr: concurrent append through independent mounts");
     save("/mnt/append", "");
+    fd = open("/mnt/append", O_RDWR);
+    REQUIRE(fd >= 0 && !ftruncate(fd, 8192) && !fsync(fd));
+    REQUIRE(!close(fd));
     {
         pid_t child = fork();
         int j, status;
@@ -179,8 +182,10 @@ int main(void)
         REQUIRE(fd >= 0);
         {
             double end=test_monotonic()+2;
-            do { REQUIRE(!fstat(fd,&st)); if(st.st_size==2560)break;usleep(1000); }while(test_monotonic()<end);
-            REQUIRE(st.st_size==2560);
+            do { REQUIRE(!fstat(fd,&st)); if(st.st_size==8192+2560)break;usleep(1000); }while(test_monotonic()<end);
+            if(st.st_size!=8192+2560)fprintf(stderr,"concurrent append: actual size=%lld expected=%d\n",(long long)st.st_size,8192+2560);
+            REQUIRE(st.st_size==8192+2560);
+            REQUIRE(lseek(fd, 8192, SEEK_SET) == 8192);
             int a = 0, b = 0;
             for (j = 0; j < 40; j++) {
                 int k;

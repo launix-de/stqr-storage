@@ -30,6 +30,7 @@ type fsTxMember struct {
 	id            ObjectID
 	version       uint64
 	before, after []byte
+	writes        []fsBlockWrite
 }
 type fsTransaction struct {
 	state   uint8
@@ -60,7 +61,13 @@ func fsLockID(raw []byte) (ObjectID, bool, error) {
 }
 func encodeFSTransaction(tx fsTransaction) []byte {
 	e := Encoder{B: []byte("STFT")}
-	e.U16(1)
+	version := uint16(1)
+	for _, m := range tx.members {
+		if len(m.writes) > 0 {
+			version = 2
+		}
+	}
+	e.U16(version)
 	e.U8(tx.state)
 	e.U32(uint32(len(tx.members)))
 	for _, m := range tx.members {
@@ -68,13 +75,18 @@ func encodeFSTransaction(tx fsTransaction) []byte {
 		e.U64(m.version)
 		e.Blob(m.before)
 		e.Blob(m.after)
+		if version >= 2 {
+			encodeFSWrites(&e, m.writes)
+		}
 	}
 	return e.B
 }
 func decodeFSTransaction(raw []byte, id ObjectID) (fsTransaction, error) {
 	var tx fsTransaction
 	d := Decoder{B: raw}
-	if len(raw) > FSObjectSize || string(d.Take(4)) != "STFT" || d.U16() != 1 {
+	magic := string(d.Take(4))
+	version := d.U16()
+	if len(raw) > fsMaxIntentBytes || magic != "STFT" || (version != 1 && version != 2) {
 		return tx, ErrFSFormat
 	}
 	tx.state = d.U8()
@@ -88,14 +100,35 @@ func decodeFSTransaction(raw []byte, id ObjectID) (fsTransaction, error) {
 		m.version = d.U64()
 		m.before = d.Blob()
 		m.after = d.Blob()
+		if version >= 2 {
+			var err error
+			m.writes, err = decodeFSWrites(&d)
+			if err != nil {
+				return tx, err
+			}
+		}
 		if d.Err != nil || m.id == (ObjectID{}) || m.id == id || m.version == 0 || i > 0 && bytes.Compare(tx.members[i-1].id[:], m.id[:]) >= 0 {
 			return tx, ErrFSFormat
 		}
-		if _, err := decodeFSNode(m.before); err != nil {
-			return tx, err
-		}
-		if _, err := decodeFSNode(m.after); err != nil {
-			return tx, err
+		if len(m.before) >= 4 && string(m.before[:4]) == "STOR" {
+			if m.id != FilesystemRootID() {
+				return tx, ErrFSFormat
+			}
+			before, _, e := decodeOverlayRoot(m.before)
+			if e != nil {
+				return tx, e
+			}
+			after, _, e := decodeOverlayRoot(m.after)
+			if e != nil || before != after {
+				return tx, ErrFSFormat
+			}
+		} else {
+			if _, err := decodeFSNode(m.before); err != nil {
+				return tx, err
+			}
+			if _, err := decodeFSNode(m.after); err != nil {
+				return tx, err
+			}
 		}
 		tx.members = append(tx.members, m)
 	}
@@ -122,6 +155,8 @@ func (f *Filesystem) snapshot(ctx context.Context, id ObjectID) (fsSnapshot, err
 			continue
 		}
 		node, err := decodeFSNode(raw)
+		node.identity = id
+		node.version = info.Version
 		return fsSnapshot{id, node, info, raw}, err
 	}
 	return fsSnapshot{}, syscall.EAGAIN
@@ -131,6 +166,15 @@ func (f *Filesystem) snapshot(ctx context.Context, id ObjectID) (fsSnapshot, err
 // PENDING exposes the old committed image; COMMITTED exposes the new image.
 // Mutators always use snapshot(), so a virtual version cannot overwrite a lock.
 func (f *Filesystem) readLockedSnapshot(ctx context.Context, id ObjectID) (fsNode, ObjectInfo, error) {
+	for attempt := 0; attempt < 128; attempt++ {
+		n, info, err := f.readLockedSnapshotOnce(ctx, id)
+		if !errors.Is(err, ErrPrecondition) {
+			return n, info, err
+		}
+	}
+	return fsNode{}, ObjectInfo{}, syscall.EAGAIN
+}
+func (f *Filesystem) readLockedSnapshotOnce(ctx context.Context, id ObjectID) (fsNode, ObjectInfo, error) {
 	raw, info, err := f.store.Get(ctx, id)
 	if err != nil {
 		return fsNode{}, info, err
@@ -141,15 +185,19 @@ func (f *Filesystem) readLockedSnapshot(ctx context.Context, id ObjectID) (fsNod
 	}
 	if !locked {
 		n, e := decodeFSNode(raw)
+		n.identity = id
+		n.version = info.Version
 		return n, info, e
 	}
-	raw, _, err = f.store.Get(ctx, txID)
+	tx, txInfo, _, err := f.loadIntent(ctx, txID)
 	if err != nil {
+		if errors.Is(err, ErrNotFound) {
+			err = ErrPrecondition
+		}
 		return fsNode{}, info, err
 	}
-	tx, err := decodeFSTransaction(raw, txID)
-	if err != nil {
-		return fsNode{}, info, err
+	if len(tx.members) == 0 {
+		return fsNode{}, info, ErrPrecondition
 	}
 	for _, m := range tx.members {
 		if m.id == id {
@@ -158,6 +206,13 @@ func (f *Filesystem) readLockedSnapshot(ctx context.Context, id ObjectID) (fsNod
 				image = m.after
 			}
 			n, e := decodeFSNode(image)
+			n.identity = id
+			n.version = info.Version
+			n.guardTx = txID
+			n.guardVersion = txInfo.Version
+			if tx.state == fsTxCommitted {
+				n.blob.view = fsWriteView(m.writes)
+			}
 			info.Length = uint64(len(image))
 			return n, info, e
 		}
@@ -166,6 +221,7 @@ func (f *Filesystem) readLockedSnapshot(ctx context.Context, id ObjectID) (fsNod
 }
 
 func (f *Filesystem) transact(ctx context.Context, members []fsTxMember) (bool, error) {
+	ctx = context.WithValue(ctx, fsDurableKey{}, true)
 	if len(members) == 0 || len(members) > 1024 {
 		return false, syscall.E2BIG
 	}
@@ -176,10 +232,10 @@ func (f *Filesystem) transact(ctx context.Context, members []fsTxMember) (bool, 
 		}
 	}
 	raw := encodeFSTransaction(fsTransaction{members: members})
-	if len(raw) > FSObjectSize {
+	if len(raw) > fsMaxIntentBytes {
 		return false, syscall.E2BIG
 	}
-	id, err := f.putImmutable(ctx, raw)
+	id, err := f.storeIntent(ctx, raw)
 	if err != nil {
 		return false, err
 	}
@@ -250,6 +306,7 @@ func (f *Filesystem) recoverNamespace(ctx context.Context) error {
 }
 
 func (f *Filesystem) helpTransaction(ctx context.Context, id ObjectID, depth int) (bool, error) {
+	ctx = context.WithValue(ctx, fsDurableKey{}, true)
 	if depth >= 128 {
 		return false, syscall.EAGAIN
 	}
@@ -258,15 +315,36 @@ func (f *Filesystem) helpTransaction(ctx context.Context, id ObjectID, depth int
 		if err := ctx.Err(); err != nil {
 			return false, err
 		}
-		raw, info, err := f.store.Get(ctx, id)
+		tx, info, raw, err := f.loadIntent(ctx, id)
 		if err != nil {
 			return false, err
 		}
-		tx, err := decodeFSTransaction(raw, id)
-		if err != nil {
-			return false, err
+		if len(raw) >= 7 && string(raw[:4]) == "STFD" {
+			return raw[6] == fsTxCommitted, nil
 		}
 		if tx.state != fsTxPending {
+			writeIndex := uint64(0)
+			if tx.state == fsTxCommitted {
+				for _, m := range tx.members {
+					current, _, e := f.store.Get(ctx, m.id)
+					if e != nil {
+						return false, e
+					}
+					owns := bytes.Equal(current, marker)
+					for _, w := range m.writes {
+						if owns {
+							if e = f.applyFSWrite(ctx, id, writeIndex, w); e != nil {
+								// A delayed helper cannot modify a newer inode.
+								head, _, readErr := f.store.Get(ctx, m.id)
+								if readErr != nil || bytes.Equal(head, marker) {
+									return false, e
+								}
+							}
+						}
+						writeIndex++
+					}
+				}
+			}
 			// Final state is durable before removing any marker. A concurrent
 			// writer may already have changed an inode after another helper
 			// removed its marker; only our own markers can be replaced here.
@@ -293,6 +371,7 @@ func (f *Filesystem) helpTransaction(ctx context.Context, id ObjectID, depth int
 					break
 				}
 			}
+			f.retireIntentPayload(ctx, id, tx, raw, info)
 			return tx.state == fsTxCommitted, nil
 		}
 		decision := uint8(fsTxCommitted)
@@ -335,7 +414,9 @@ func (f *Filesystem) helpTransaction(ctx context.Context, id ObjectID, depth int
 			continue
 		}
 		tx.state = decision
-		_, err = f.store.CAS(ctx, id, 0, nil, encodeFSTransaction(tx), CASOptions{Scope: CASObject, MutationOptions: MutationOptions{RequestID: NewRequestID(), ExpectedVersion: &info.Version}})
+		raw = bytes.Clone(raw)
+		raw[6] = decision
+		_, err = f.store.CAS(ctx, id, 0, nil, raw, CASOptions{Scope: CASObject, MutationOptions: MutationOptions{RequestID: NewRequestID(), ExpectedVersion: &info.Version}})
 		if err != nil && !errors.Is(err, ErrPrecondition) {
 			return false, err
 		}
@@ -344,5 +425,5 @@ func (f *Filesystem) helpTransaction(ctx context.Context, id ObjectID, depth int
 }
 
 func fsMember(s fsSnapshot, next fsNode) fsTxMember {
-	return fsTxMember{s.id, s.info.Version, s.raw, encodeFSNode(next)}
+	return fsTxMember{id: s.id, version: s.info.Version, before: s.raw, after: encodeFSNode(next), writes: next.edits}
 }

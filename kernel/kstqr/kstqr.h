@@ -14,7 +14,15 @@ struct ks_rpc {
 	stqr_client *client;
 };
 #define KS_DIR_LIMIT (16U << 20)
+struct ks_edit;
 struct ks_node {
+ stqr_object_id identity;
+ u64 version,stamp;
+ stqr_object_id guard;
+ u64 guard_version;
+ const void *view;
+ size_t view_size;
+ struct ks_edit *edits;
 	unsigned kind, mode, uid, gid, depth;
 	u64 size, mtime, atime, ctime;
 	bool removed;
@@ -30,6 +38,7 @@ struct ks_snapshot {
 	struct ks_node node;
 	void *raw;
 	size_t raw_len;
+ void *view;
 };
 struct ks_entry {
 	stqr_object_id id;

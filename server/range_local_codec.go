@@ -39,7 +39,7 @@ func (r *rangeManager) reencodeLocalDestination(ctx context.Context, p rangePlan
 			if err != nil {
 				return false, err
 			}
-			records, err := h.ScanBucketObjects(volume.ID(p.Before.Bucket), after, 128)
+			records, err := p.scanObjects(h, after, 128)
 			h.Close()
 			if err != nil {
 				return false, err

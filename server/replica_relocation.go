@@ -70,7 +70,7 @@ func (r *rangeManager) replicaLogicalUsage(p rangePlan, store *volume.Volume) (u
 	var total uint64
 	var after *volume.ObjectID
 	for {
-		records, err := h.ScanBucketObjects(volume.ID(p.Before.Bucket), after, 128)
+		records, err := p.scanObjects(h, after, 128)
 		if err != nil {
 			return 0, err
 		}
@@ -244,6 +244,11 @@ func (r *rangeManager) planReplicaRelocation(d BucketDescription) (rangePlan, bo
 		if !bad[0] && len(entry.Locations) > need {
 			continue
 		}
+		if bad[0] && len(entry.Locations) > need {
+			if plan, ok := r.planReplicaPromotion(d, before, entry, bad, destinations); ok {
+				return plan, true
+			}
+		}
 		for _, destination := range destinations {
 			if destination.node != entry.Locations[firstBad].Node || destination.volume.ID == entry.Locations[firstBad].Volume {
 				continue
@@ -266,37 +271,13 @@ func (r *rangeManager) planReplicaRelocation(d BucketDescription) (rangePlan, bo
 				return p, true
 			}
 		}
-		if bad[0] {
-			for i := 1; i < len(entry.Locations); i++ {
-				if bad[i] {
-					continue
-				}
-				abortCost, err := r.replicaAbortCost(before, entry)
-				if err != nil {
-					continue
-				}
-				capacity := false
-				for _, destination := range destinations {
-					if destination.node == entry.Locations[i].Node && destination.volume.ID == entry.Locations[i].Volume && destination.free >= abortCost {
-						capacity = true
-					}
-				}
-				if !capacity {
-					continue
-				}
-				next := entry
-				next.OwnerEpoch++
-				next.Locations = append([]client.Location(nil), entry.Locations...)
-				next.Locations[0], next.Locations[i] = next.Locations[i], next.Locations[0]
-				next.Locations[0].Role, next.Locations[i].Role = 0, 1
-				after := before
-				after.Entries = []client.RangeEntry{next}
-				p := rangePlan{Attempt: client.NewRequestID(), Before: before, After: after, Moving: entry, Source: r.node, Target: next.Locations[0].Node, Volume: volume.ID(next.Locations[0].Volume), Compression: bucketCodec(d.Policy), Physical: abortCost, ReplicaPromote: true}
-				if p.validate() == nil {
-					return p, true
-				}
+
+		if bad[0] && len(entry.Locations) <= need {
+			if plan, ok := r.planReplicaPromotion(d, before, entry, bad, destinations); ok {
+				return plan, true
 			}
 		}
+
 		for _, destination := range destinations {
 			present := false
 			for _, loc := range entry.Locations {
@@ -322,5 +303,40 @@ func (r *rangeManager) planReplicaRelocation(d BucketDescription) (rangePlan, bo
 			}
 		}
 	}
+	return rangePlan{}, false
+}
+
+func (r *rangeManager) planReplicaPromotion(d BucketDescription, before client.MapPatch, entry client.RangeEntry, bad []bool, destinations []rangeDestination) (rangePlan, bool) {
+
+	for i := 1; i < len(entry.Locations); i++ {
+		if bad[i] {
+			continue
+		}
+		abortCost, err := r.replicaAbortCost(before, entry)
+		if err != nil {
+			continue
+		}
+		capacity := false
+		for _, destination := range destinations {
+			if destination.node == entry.Locations[i].Node && destination.volume.ID == entry.Locations[i].Volume && destination.free >= abortCost {
+				capacity = true
+			}
+		}
+		if !capacity {
+			continue
+		}
+		next := entry
+		next.OwnerEpoch++
+		next.Locations = append([]client.Location(nil), entry.Locations...)
+		next.Locations[0], next.Locations[i] = next.Locations[i], next.Locations[0]
+		next.Locations[0].Role, next.Locations[i].Role = 0, 1
+		after := before
+		after.Entries = []client.RangeEntry{next}
+		p := rangePlan{Attempt: client.NewRequestID(), Before: before, After: after, Moving: entry, Source: r.node, Target: next.Locations[0].Node, Volume: volume.ID(next.Locations[0].Volume), Compression: bucketCodec(d.Policy), Physical: abortCost, ReplicaPromote: true}
+		if p.validate() == nil {
+			return p, true
+		}
+	}
+
 	return rangePlan{}, false
 }

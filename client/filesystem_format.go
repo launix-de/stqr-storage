@@ -83,8 +83,16 @@ type fsBlob struct {
 	depth         uint8
 	source        ObjectID // lazy lower inode; no payload copy for metadata-only changes
 	sourceVersion uint64
+	stamp         uint64
+	view          map[ObjectID]fsBlockWrite
 }
 type fsNode struct {
+	identity     ObjectID
+	version      uint64
+	edits        []fsBlockWrite
+	guardTx      ObjectID
+	guardVersion uint64
+
 	kind           uint8
 	mode, uid, gid uint32
 	mtime          uint64
@@ -132,7 +140,13 @@ func validFSName(name string) bool {
 }
 func encodeFSNode(n fsNode) []byte {
 	e := Encoder{B: []byte("STFS")}
-	if n.extended || len(n.xattrs) != 0 || n.kind > fsDirectory {
+	if n.blob.stamp != 0 && !n.extended {
+		n.links = fsLinks(n)
+		n.extended = true
+	}
+	if n.blob.stamp != 0 {
+		e.U16(6)
+	} else if n.extended || len(n.xattrs) != 0 || n.kind > fsDirectory {
 		e.U16(5)
 	} else if n.atime != 0 || n.ctime != 0 {
 		e.U16(4)
@@ -184,6 +198,9 @@ func encodeFSNode(n fsNode) []byte {
 			e.Blob(n.xattrs[name])
 		}
 	}
+	if n.blob.stamp != 0 {
+		e.U64(n.blob.stamp)
+	}
 	return e.B
 }
 func decodeFSNode(data []byte) (fsNode, error) {
@@ -196,7 +213,7 @@ func decodeFSNode(data []byte) (fsNode, error) {
 		return n, ErrFSFormat
 	}
 	version := d.U16()
-	if version != 1 && version != 2 && version != 3 && version != 4 && version != 5 {
+	if version != 1 && version != 2 && version != 3 && version != 4 && version != 5 && version != 6 {
 		return n, ErrFSFormat
 	}
 	n.kind = d.U8()
@@ -248,7 +265,7 @@ func decodeFSNode(data []byte) (fsNode, error) {
 	} else {
 		n.atime, n.ctime = n.mtime, n.mtime
 	}
-	if version == 5 {
+	if version >= 5 {
 		n.extended = true
 		n.links = d.U32()
 		start := len(d.B)
@@ -273,6 +290,12 @@ func decodeFSNode(data []byte) (fsNode, error) {
 	}
 	if n.kind == fsDirectory && !n.removed && n.extended && n.links == 0 {
 		return n, ErrFSFormat
+	}
+	if version >= 6 {
+		n.blob.stamp = d.U64()
+		if n.blob.stamp == 0 {
+			return n, ErrFSFormat
+		}
 	}
 	if d.Done() != nil || (n.kind < fsFile || n.kind > fsSocket) || n.mode & ^uint32(07777) != 0 || n.blob.length > math.MaxInt64 {
 		return n, ErrFSFormat

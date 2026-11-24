@@ -293,7 +293,15 @@ func (h *Handle) RecompressWithOptions(k Key, codec Compression, opts Options) e
 // equal existing versions are rejected; a retry ID makes repeats idempotent.
 // Neither source nor its callbacks may reenter the handle or destination volume.
 func (h *Handle) Restore(k Key, info Info, source ExtentSource, opts Options) error {
-	return h.do(true, func(v *Volume) error { return v.restoreLocked(k, info, source, opts) })
+	return h.do(true, func(v *Volume) error { return v.restoreLocked(k, info, source, opts, false) })
+}
+
+// RestoreSeekable imports an immutable, replayable snapshot without another
+// temporary payload copy. Every reader yielded by source must implement io.Seeker
+// and remain open and unchanged until this call returns. Readers must be distinct
+// for extents with independent cursors. Untrusted streams should use Restore.
+func (h *Handle) RestoreSeekable(k Key, info Info, source ExtentSource, opts Options) error {
+	return h.do(true, func(v *Volume) error { return v.restoreLocked(k, info, source, opts, true) })
 }
 
 // Repair replaces damaged physical data using a trusted replica of the current

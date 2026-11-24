@@ -79,16 +79,13 @@ func TestFilesystemFsckCollectsOrphansAndPreservesSharedSparseData(t *testing.T)
 	if _, err = f.WriteAt(ctx, file.ID, want, 0); err != nil {
 		t.Fatal(err)
 	}
-	// Two inodes really share immutable data/index objects, as after COW.
+	// Distinct files own distinct mutable blocks. A normal copy writes the
+	// content once; subsequent edits must not alter the other file.
 	alias, err := f.Create(ctx, root, "shared", 0644, 5, 7, false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	n, _, err := f.load(ctx, file.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err = store.CAS(ctx, alias.ID, 0, nil, encodeFSNode(n), CASOptions{Scope: CASObject, MutationOptions: MutationOptions{ExpectedVersion: &alias.Version}}); err != nil {
+	if _, err = f.WriteAt(ctx, alias.ID, want, 0); err != nil {
 		t.Fatal(err)
 	}
 	if _, err = f.WriteAt(ctx, file.ID, []byte("NEW"), 12); err != nil {

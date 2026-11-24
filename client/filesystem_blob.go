@@ -4,6 +4,7 @@ package client
 import (
 	"context"
 	"crypto/rand"
+	"errors"
 	"io"
 	"syscall"
 )
@@ -15,7 +16,11 @@ func newFSID() ObjectID {
 	}
 	return id
 }
+
+// putImmutable allocates an identity for a genuinely new object or transient
+// redo chunk. Publish its bytes durably before another object can reference it.
 func (f *Filesystem) putImmutable(ctx context.Context, data []byte) (ObjectID, error) {
+	ctx = context.WithValue(ctx, fsDurableKey{}, true)
 	if f.readOnly {
 		return ObjectID{}, syscall.EROFS
 	}
@@ -24,7 +29,7 @@ func (f *Filesystem) putImmutable(ctx context.Context, data []byte) (ObjectID, e
 	return id, err
 }
 func (f *Filesystem) index(ctx context.Context, s fsSegment, depth uint8) ([]fsSegment, error) {
-	data, _, err := f.store.Get(ctx, s.id)
+	data, _, err := f.objectBytes(ctx, s.id)
 	if err != nil {
 		return nil, err
 	}
@@ -45,15 +50,50 @@ func (f *Filesystem) readSegment(ctx context.Context, s fsSegment, depth uint8, 
 		if s.lowerVersion != 0 {
 			return f.readLower(ctx, s.id, s.lowerVersion, dst, s.offset+off)
 		}
+		if writes, _ := ctx.Value(fsReadViewKey{}).(map[ObjectID]fsBlockWrite); len(writes) > 0 {
+			data, _, e := f.objectBytes(ctx, s.id)
+			if e != nil {
+				return e
+			}
+			start := s.offset + off
+			if start > uint64(len(data)) || uint64(len(dst)) > uint64(len(data))-start {
+				if sparse, _ := ctx.Value(fsSparsePageKey{}).(bool); !sparse {
+					return ErrFSFormat
+				}
+				clear(dst)
+				if start < uint64(len(data)) {
+					copy(dst, data[start:])
+				}
+				return nil
+			}
+			copy(dst, data[start:start+uint64(len(dst))])
+			return nil
+		}
 		if ranged, ok := f.store.(interface {
 			GetRange(context.Context, ObjectID, uint64, uint64) ([]byte, ObjectInfo, error)
 		}); ok {
 			data, _, err := ranged.GetRange(ctx, s.id, uint64(s.offset)+off, uint64(len(dst)))
+			sparse, _ := ctx.Value(fsSparsePageKey{}).(bool)
+			if sparse && errors.Is(err, ErrRange) {
+				all, _, e := f.objectBytes(ctx, s.id)
+				if e != nil {
+					return e
+				}
+				at := s.offset + off
+				clear(dst)
+				if at < uint64(len(all)) {
+					copy(dst, all[at:])
+				}
+				return nil
+			}
 			if err != nil {
 				return err
 			}
 			if len(data) != len(dst) {
-				return ErrFSFormat
+				if !sparse || len(data) > len(dst) {
+					return ErrFSFormat
+				}
+				clear(dst)
 			}
 			copy(dst, data)
 			return nil
@@ -64,6 +104,13 @@ func (f *Filesystem) readSegment(ctx context.Context, s fsSegment, depth uint8, 
 		}
 		start := uint64(s.offset) + off
 		if start > uint64(len(data)) || uint64(len(dst)) > uint64(len(data))-start {
+			if sparse, _ := ctx.Value(fsSparsePageKey{}).(bool); sparse {
+				clear(dst)
+				if start < uint64(len(data)) {
+					copy(dst, data[start:])
+				}
+				return nil
+			}
 			return ErrFSFormat
 		}
 		copy(dst, data[start:start+uint64(len(dst))])
@@ -91,6 +138,12 @@ func (f *Filesystem) readSegment(ctx context.Context, s fsSegment, depth uint8, 
 	return nil
 }
 func (f *Filesystem) readBlob(ctx context.Context, b fsBlob, dst []byte, off uint64) (int, error) {
+	if b.stamp != 0 {
+		ctx = context.WithValue(ctx, fsSparsePageKey{}, true)
+	}
+	if b.view != nil {
+		ctx = context.WithValue(ctx, fsReadViewKey{}, b.view)
+	}
 	if off >= b.length {
 		return 0, io.EOF
 	}
@@ -147,23 +200,6 @@ func sliceFSSegments(in []fsSegment, start, end uint64) []fsSegment {
 	}
 	return out
 }
-func (f *Filesystem) segments(ctx context.Context, b fsBlob) ([]fsSegment, error) {
-	if b.length == 0 {
-		return nil, nil
-	}
-	if b.source != (ObjectID{}) {
-		return []fsSegment{{length: b.length, id: b.source, lowerVersion: b.sourceVersion}}, nil
-	}
-	if b.root != (ObjectID{}) {
-		return f.flatten(ctx, fsSegment{length: b.length, id: b.root}, b.depth)
-	}
-	id, err := f.putImmutable(ctx, b.inline)
-	if err != nil {
-		return nil, err
-	}
-	return []fsSegment{{length: b.length, id: id}}, nil
-}
-
 func (f *Filesystem) readLower(ctx context.Context, id ObjectID, version uint64, dst []byte, offset uint64) error {
 	if f.lower == nil {
 		return ErrOverlayNeedsLower
@@ -179,6 +215,11 @@ func (f *Filesystem) readLower(ctx context.Context, id ObjectID, version uint64,
 		return ErrFSFormat
 	}
 	_, err = f.lower.readBlob(ctx, n.blob, dst, offset)
+	if check := f.lower.checkNodeView(ctx, n); errors.Is(check, ErrPrecondition) {
+		return syscall.ESTALE
+	} else if check != nil {
+		return check
+	}
 	return err
 }
 func (f *Filesystem) dataSegments(ctx context.Context, data []byte) ([]fsSegment, error) {

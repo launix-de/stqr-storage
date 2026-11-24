@@ -6,34 +6,48 @@ import "errors"
 // ScanBucketObjects pages live objects and tombstones in one bucket, strictly
 // after the optional cursor. A nil cursor includes the zero object address.
 func (h *Handle) ScanBucketObjects(bucket ID, after *ObjectID, limit int) ([]ObjectRecord, error) {
+	return h.ScanBucketRange(bucket, ObjectID{}, ObjectID{}, true, after, limit)
+}
+
+// ScanBucketRange seeks directly to [start,end), avoiding unrelated object
+// descriptors. toEnd denotes the end of this bucket's 256-bit address space.
+func (h *Handle) ScanBucketRange(bucket ID, start, end ObjectID, toEnd bool, after *ObjectID, limit int) ([]ObjectRecord, error) {
 	return withHandle(h, false, func(v *Volume) ([]ObjectRecord, error) {
-		if limit < 1 || limit > 4096 {
+		if limit < 1 || limit > 4096 || !toEnd && !lessKey(objectKey(Key{Bucket: bucket, Object: start}), objectKey(Key{Bucket: bucket, Object: end})) {
 			return nil, ErrRange
 		}
-		out := make([]ObjectRecord, 0, limit)
-		stop := errors.New("bucket scan page complete")
-		cursor := objectKey(Key{Bucket: bucket})
-		upper := cursor
-		for i := 16; i >= 0; i-- {
-			upper[i]++
-			if upper[i] != 0 {
-				break
+		lower := objectKey(Key{Bucket: bucket, Object: start})
+		upper := objectKey(Key{Bucket: bucket, Object: end})
+		if toEnd {
+			upper = objectKey(Key{Bucket: bucket})
+			for i := 16; i >= 0; i-- {
+				upper[i]++
+				if upper[i] != 0 {
+					break
+				}
 			}
 		}
+		exclusive := false
 		if after != nil {
-			cursor = objectKey(Key{Bucket: bucket, Object: *after})
+			cursor := objectKey(Key{Bucket: bucket, Object: *after})
+			if !lessKey(cursor, lower) {
+				lower = cursor
+				exclusive = true
+			}
 		}
-		err := v.walkIndexBounds(cursor, upper, func(x indexEntry) error {
-			if x.Key[0] != 0 {
+		if !lessKey(lower, upper) {
+			return nil, nil
+		}
+		out := make([]ObjectRecord, 0, limit)
+		stop := errors.New("range scan page complete")
+		err := v.walkIndexBounds(lower, upper, func(x indexEntry) error {
+			if x.Key[0] != 0 || exclusive && !lessKey(lower, x.Key) {
 				return nil
 			}
 			k := x.Key.object()
-			if k.Bucket != bucket || after != nil && !lessKey(cursor, x.Key) {
-				return nil
-			}
-			o, err := v.loadObject(k)
-			if err != nil {
-				return err
+			o, e := v.loadObject(k)
+			if e != nil {
+				return e
 			}
 			out = append(out, ObjectRecord{Key: k, Info: o.Info})
 			if len(out) == limit {

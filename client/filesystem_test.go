@@ -386,9 +386,13 @@ func TestFilesystemFailedPublishKeepsOldSnapshot(t *testing.T) {
 	if _, err = f.WriteAt(ctx, file.ID, []byte("changed"), 0); err != nil {
 		t.Fatal(err)
 	}
-	old := make([]byte, len(original))
-	if _, err = f.readBlob(ctx, snapshot.blob, old, 0); err != nil || !bytes.Equal(old, original) {
-		t.Fatal("new version corrupted open snapshot", err)
+	if err = f.checkNodeView(ctx, snapshot); !errors.Is(err, ErrPrecondition) {
+		t.Fatal("stale mutable view was accepted", err)
+	}
+	changed := append([]byte(nil), original...)
+	copy(changed, "changed")
+	if !bytes.Equal(readTestFile(t, f, file.ID), changed) {
+		t.Fatal("current data not visible")
 	}
 }
 func TestFilesystemMalformedAndCanceled(t *testing.T) {

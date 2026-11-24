@@ -191,7 +191,7 @@ func markOverlay(ctx context.Context, o *OverlayFilesystem, store fsCheckStore, 
 		return nil, nil, err
 	}
 	if blob.root != (ObjectID{}) {
-		if err := mark.segment(ctx, fsSegment{id: blob.root, length: blob.length}, blob.depth); err != nil {
+		if err := mark.segment(context.WithValue(ctx, fsSparsePageKey{}, blob.stamp != 0), fsSegment{id: blob.root, length: blob.length}, blob.depth); err != nil {
 			return nil, nil, err
 		}
 	}

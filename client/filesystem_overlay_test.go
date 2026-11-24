@@ -79,7 +79,7 @@ func TestOverlayMetadataAndRangeCopyUp(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	segments, err := lower.segments(ctx, n.blob)
+	segments, err := lower.segmentsReadOnly(ctx, n.blob)
 	if err != nil {
 		t.Fatal(err)
 	}
