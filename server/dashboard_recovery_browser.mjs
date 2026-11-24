@@ -7,7 +7,8 @@ try{
  const page=await browser.newPage(),errors=[];page.on('pageerror',e=>errors.push(e.message));
  await page.goto(config.url);await page.locator('#username').fill(config.username);await page.locator('#password').fill(config.password);
  await page.locator('#login-form button[type=submit]').click();
- await page.locator(`[data-node-replace="${config.source}"]`).click();
+ await page.locator(`[data-node-maintenance="${config.source}"]`).click();
+ await page.locator('#maintenance-replace').click();
  await page.locator('#recovery-node-submit').click();
  if(!await page.locator('#recovery-node-dialog').evaluate(e=>e.open))throw Error('Fencing confirmation must be required.');
  await page.locator('#recovery-node-fenced').check();await page.locator('#recovery-node-submit').click();
