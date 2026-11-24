@@ -11,7 +11,9 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/launix-de/stqr-storage/client"
@@ -21,82 +23,191 @@ import (
 	"golang.org/x/term"
 )
 
-func run() (result error) {
+var errMountUnavailable = errors.New("Windows mount unavailable")
+
+func run() error {
 	flags := flag.NewFlagSet("stqr-windows", flag.ContinueOnError)
-	uri := flags.String("uri", "http://127.0.0.1:7419", "STQR HTTP/WebSocket endpoint")
+	uri := flags.String("uri", "http://127.0.0.1:7419", "STQR endpoint")
 	username := flags.String("username", "", "STQR username")
-	bucket := flags.String("bucket", "", "filesystem bucket name or hexadecimal ID")
+	bucket := flags.String("bucket", "", "filesystem bucket name or ID")
 	ro := flags.Bool("readonly", false, "readonly mount")
-	init := flags.Bool("init", false, "initialize an empty filesystem bucket")
-	passwordStdin := flags.Bool("password-stdin", false, "read password from redirected standard input")
-	uid := flags.Uint64("uid", ^uint64(0), "Unix owner for new files (default: filesystem root owner)")
-	gid := flags.Uint64("gid", ^uint64(0), "Unix group for new files (default: filesystem root group)")
+	initialize := flags.Bool("init", false, "initialize an empty filesystem bucket")
+	stdin := flags.Bool("password-stdin", false, "read password from redirected standard input")
+	uid := flags.Uint64("uid", ^uint64(0), "Unix owner for new files (default: root inode owner)")
+	gid := flags.Uint64("gid", ^uint64(0), "Unix group for new files (default: root inode group)")
+	install := flags.Bool("install", false, "remember credentials and mount at user login")
+	uninstall := flags.String("uninstall", "", "remove saved drive and unmount, e.g. S:")
+	saved := flags.String("saved-drive", "", "mount a saved drive, e.g. S:")
+	background := flags.Bool("background", false, "run saved drive in background, retrying initial connection")
+	setup := flags.Bool("setup", false, "open setup dialog")
 	flags.Usage = func() {
-		fmt.Fprintln(flags.Output(), "Usage: stqr-windows --uri URL --username USER --bucket BUCKET S:\nPassword is requested in the console. WinFsp must be installed. Ctrl+C unmounts.")
+		fmt.Fprintln(flags.Output(), "Usage: stqr-windows [--setup] | --uri URL --username USER --bucket BUCKET [--install] S: | --uninstall S:\nWithout arguments, opens the setup dialog. WinFsp is required.")
 		flags.PrintDefaults()
 	}
 	if e := flags.Parse(os.Args[1:]); e != nil {
 		return e
 	}
-	if *username == "" || *bucket == "" || flags.NArg() != 1 {
-		flags.Usage()
-		return fmt.Errorf("username, bucket and drive letter required")
+	installation, e := userInstallation()
+	if e != nil {
+		return e
 	}
-	drive := flags.Arg(0)
-	if len(drive) != 2 || drive[1] != ':' || !strings.ContainsRune("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz", rune(drive[0])) {
-		return fmt.Errorf("mountpoint must be a drive letter, e.g. S:")
+	if *uninstall != "" {
+		if e = installation.remove(*uninstall); e != nil {
+			return e
+		}
+		return stopDrive(*uninstall)
 	}
-	if *ro && *init {
+	if *background && *saved == "" {
+		return fmt.Errorf("--background requires --saved-drive")
+	}
+	var c mountConfig
+	gui := len(os.Args) == 1 || *setup
+	forget := false
+	if gui {
+		hideConsole()
+		c = mountConfig{URI: *uri, Username: *username, Bucket: *bucket, Drive: "S:", ReadOnly: *ro}
+		if *saved != "" {
+			c.Drive = *saved
+		}
+		remembered := false
+		if old, err := installation.load(c.Drive); err == nil {
+			c = old
+			remembered = true
+		}
+		choice, err := showSetup(c, remembered)
+		if err != nil {
+			return err
+		}
+		if choice.cancel {
+			return nil
+		}
+		c = choice.config
+		if choice.remove {
+			if e = installation.remove(c.Drive); e != nil {
+				return e
+			}
+			if e = stopDrive(c.Drive); e != nil {
+				return e
+			}
+			messageBox(0, "STQR", "Autostart und gespeicherte Zugangsdaten entfernt. Das Laufwerk wird getrennt.", 0)
+			return nil
+		}
+		*install = choice.persist
+		forget = !*install
+		*initialize = !c.ReadOnly
+	} else if *saved != "" {
+		c, e = installation.load(*saved)
+		if e != nil {
+			return e
+		}
+	} else {
+		if flags.NArg() != 1 || *username == "" || *bucket == "" {
+			return fmt.Errorf("username, bucket and drive letter required; use --setup for the dialog")
+		}
+		c = mountConfig{URI: *uri, Username: *username, Bucket: *bucket, Drive: flags.Arg(0), ReadOnly: *ro}
+		for _, v := range []uint64{*uid, *gid} {
+			if v != ^uint64(0) && v > uint64(^uint32(0)) {
+				return fmt.Errorf("uid/gid must fit into 32 bits")
+			}
+		}
+		if *uid != ^uint64(0) {
+			v := uint32(*uid)
+			c.UID = &v
+		}
+		if *gid != ^uint64(0) {
+			v := uint32(*gid)
+			c.GID = &v
+		}
+		var secret []byte
+		if *stdin {
+			secret, e = readPassword(os.Stdin)
+		} else {
+			fmt.Fprint(os.Stderr, "Password: ")
+			secret, e = term.ReadPassword(int(os.Stdin.Fd()))
+			fmt.Fprintln(os.Stderr)
+		}
+		if e != nil {
+			return e
+		}
+		c.Password = string(secret)
+		clear(secret)
+	}
+	if e = c.validate(); e != nil {
+		return e
+	}
+	if *initialize && c.ReadOnly {
 		return fmt.Errorf("--init requires a writable mount")
 	}
-	for _, id := range []uint64{*uid, *gid} {
-		if id != ^uint64(0) && id > uint64(^uint32(0)) {
-			return fmt.Errorf("uid/gid must fit into 32 bits")
-		}
+	if *background {
+		hideConsole()
 	}
-	var secret []byte
-	var e error
-	if *passwordStdin {
-		secret, e = readPassword(os.Stdin)
-	} else {
-		fmt.Fprint(os.Stderr, "Password: ")
-		secret, e = term.ReadPassword(int(os.Stdin.Fd()))
-		fmt.Fprintln(os.Stderr)
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer cancel()
+	ctx, release, e := claimDrive(ctx, c.Drive)
+	if errors.Is(e, errAlreadyMounted) {
+		if *background {
+			return nil
+		}
+		return fmt.Errorf("%w; zuerst über den Dialog trennen", e)
 	}
 	if e != nil {
 		return e
 	}
-	password := string(secret)
-	clear(secret)
-	if password == "" {
-		return fmt.Errorf("empty password")
+	defer release()
+	if *background {
+		if e = os.MkdirAll(installation.directory, 0700); e != nil {
+			return e
+		}
+		log, e := os.OpenFile(filepath.Join(installation.directory, "mount-"+c.Drive[:1]+".log"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
+		if e != nil {
+			return e
+		}
+		defer log.Close()
+		for {
+			e = mount(ctx, c, false, installation, false, false)
+			if e == nil || ctx.Err() != nil {
+				return nil
+			}
+			fmt.Fprintf(log, "%s %v\n", time.Now().Format(time.RFC3339), e)
+			if errors.Is(e, errMountUnavailable) {
+				return e
+			}
+			select {
+			case <-ctx.Done():
+				return nil
+			case <-time.After(10 * time.Second):
+			}
+		}
 	}
-	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
-	defer cancel()
+	return mount(ctx, c, *initialize, installation, *install, forget)
+}
+
+func mount(ctx context.Context, c mountConfig, initialize bool, installation installation, persist, forget bool) (result error) {
+	var e error
 	var id client.ID
-	if decoded, err := hex.DecodeString(*bucket); err == nil && len(decoded) == len(id) {
+	if decoded, err := hex.DecodeString(c.Bucket); err == nil && len(decoded) == len(id) {
 		copy(id[:], decoded)
 	} else {
-		id, e = nbd.ResolveBucket(ctx, nbd.Config{URL: *uri, Username: *username, Password: password}, *bucket)
+		id, e = nbd.ResolveBucket(ctx, nbd.Config{URL: c.httpURI(), Username: c.Username, Password: c.Password}, c.Bucket)
 		if e != nil {
 			return e
 		}
 	}
-	conn, e := client.Dial(ctx, *uri, *username, password, id)
+	conn, e := client.Dial(ctx, c.URI, c.Username, c.Password, id)
 	if e != nil {
 		return e
 	}
 	defer conn.Close()
 	store := client.NewSubscriptionStore(conn, 8<<20)
 	defer store.Close()
-	options := client.FSOptions{Create: *init, ReadOnly: *ro}
-	if *uid != ^uint64(0) {
-		options.UID = uint32(*uid)
+	options := client.FSOptions{Create: initialize, ReadOnly: c.ReadOnly}
+	if c.UID != nil {
+		options.UID = *c.UID
 	}
-	if *gid != ^uint64(0) {
-		options.GID = uint32(*gid)
+	if c.GID != nil {
+		options.GID = *c.GID
 	}
-	if *init {
+	if initialize {
 		if _, e := conn.Stat(ctx, client.FilesystemRootID()); errors.Is(e, client.ErrNotFound) {
 			objects, _, e := conn.ScanObjects(ctx, nil, 1)
 			if e != nil {
@@ -113,23 +224,39 @@ func run() (result error) {
 	if e != nil {
 		return e
 	}
-	adapter := &winfs.Adapter{FS: winfs.New(ctx, fs, *ro)}
+	adapter := &winfs.Adapter{FS: winfs.New(ctx, fs, c.ReadOnly)}
 	root, e := fs.Stat(ctx, client.FilesystemRootID())
 	if e != nil {
 		return e
 	}
 	adapter.FS.UID, adapter.FS.GID = root.UID, root.GID
-	if *uid != ^uint64(0) {
-		adapter.FS.UID = uint32(*uid)
+	if c.UID != nil {
+		adapter.FS.UID = *c.UID
 	}
-	if *gid != ^uint64(0) {
-		adapter.FS.GID = uint32(*gid)
+	if c.GID != nil {
+		adapter.FS.GID = *c.GID
+	}
+	if persist {
+		executable, err := os.Executable()
+		if err != nil {
+			return err
+		}
+		if err = installation.save(c, executable); err != nil {
+			return err
+		}
+	} else if forget {
+		if err := installation.remove(c.Drive); err != nil {
+			return err
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 	host := fuse.NewFileSystemHost(adapter)
 	host.SetCapCaseInsensitive(false)
 	host.SetCapReaddirPlus(true)
 	opts := []string{"-o", "volname=STQR,uid=-1,gid=-1,umask=077,FileInfoTimeout=0,DirInfoTimeout=0,attr_timeout=0,entry_timeout=0,negative_timeout=0"}
-	if *ro {
+	if c.ReadOnly {
 		opts = append(opts, "-o", "ro")
 	}
 	done := make(chan struct{})
@@ -137,31 +264,60 @@ func run() (result error) {
 	go func() {
 		select {
 		case <-ctx.Done():
-			host.Unmount()
+			// Cancellation can race the driver's initial mount. Retry until
+			// it is actually detached, or Mount has already returned.
+			for {
+				select {
+				case <-done:
+					return
+				default:
+				}
+				if host.Unmount() {
+					return
+				}
+				select {
+				case <-done:
+					return
+				case <-time.After(100 * time.Millisecond):
+				}
+			}
 		case <-done:
 		}
 	}()
-	fmt.Fprintf(os.Stderr, "Mounting bucket %s on %s (Ctrl+C to unmount)\n", *bucket, drive)
+	fmt.Fprintf(os.Stderr, "Mounting bucket %s on %s (Ctrl+C to unmount)\n", c.Bucket, c.Drive)
 	// cgofuse reports a missing WinFsp runtime with a panic. Turn it into a CLI error.
 	defer func() {
 		if p := recover(); p != nil {
 			if text, ok := p.(string); ok && strings.Contains(text, "cgofuse: cannot find winfsp") {
-				result = fmt.Errorf("WinFsp runtime not found; install WinFsp before mounting")
+				result = fmt.Errorf("%w: WinFsp runtime not found; install WinFsp before mounting", errMountUnavailable)
 			} else {
 				panic(p)
 			}
 		}
 	}()
-	if !host.Mount(drive, opts) {
-		return fmt.Errorf("mount failed; check WinFsp installation and drive availability")
+	if !host.Mount(c.Drive, opts) {
+		return fmt.Errorf("%w: mount failed; check WinFsp installation and drive availability", errMountUnavailable)
 	}
 	syncCtx, syncCancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer syncCancel()
 	return conn.Sync(syncCtx)
 }
+
 func main() {
 	if e := run(); e != nil && !errors.Is(e, flag.ErrHelp) {
-		fmt.Fprintln(os.Stderr, "stqr-windows:", e)
+		if len(os.Args) == 1 || hasSetupFlag(os.Args[1:]) {
+			messageBox(0, "STQR", e.Error(), 0x10)
+		} else {
+			fmt.Fprintln(os.Stderr, "stqr-windows:", e)
+		}
 		os.Exit(1)
 	}
+}
+func hasSetupFlag(args []string) bool {
+	for _, a := range args {
+		if strings.TrimLeft(a, "-") == "setup" || strings.TrimLeft(a, "-") == "setup=true" {
+			return true
+		}
+	}
+	return false
 }
