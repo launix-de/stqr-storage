@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: GPL-3.0-only
 import contextlib
+import hashlib
 import json
 import ipaddress
 import re
@@ -19,9 +20,9 @@ def run(*args, **kwargs):
     return subprocess.run([str(a) for a in args], check=True, **kwargs)
 
 @contextlib.contextmanager
-def staging(base, prefix):
+def staging(base, prefix, existing=None):
     """Keep failed exports for retry; put bounded SDK spools on the work disk."""
-    work = tempfile.mkdtemp(prefix=prefix, dir=base)
+    work = str(existing) if existing is not None else tempfile.mkdtemp(prefix=prefix, dir=base)
     old = os.environ.get('TMPDIR')
     os.environ['TMPDIR'] = str(Path(work).resolve())
     try:
@@ -36,6 +37,52 @@ def staging(base, prefix):
             os.environ.pop('TMPDIR', None)
         else:
             os.environ['TMPDIR'] = old
+
+def preparation_record(config, bucket):
+    identity = json.dumps([str(Path(config).resolve()), bucket]).encode()
+    base = Path(os.environ.get('XDG_STATE_HOME', Path.home() / '.local/state')) / 'stqr/networkboot'
+    return base / (hashlib.sha256(identity).hexdigest() + '.json')
+
+def remember_preparation(config, bucket, work, phase='prepared'):
+    """Remember completed extraction/publication without exposing work paths in the CLI."""
+    work = Path(work).resolve()
+    if not all((work / name).is_file() for name in ('rootfs.tar', 'vmlinuz', 'initrd.img', 'release.json')):
+        return
+    record = preparation_record(config, bucket)
+    record.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    data = json.dumps({'work': str(work), 'phase': phase})
+    marker = work / '.stqr-preparation.json'
+    marker.write_text(str(record))
+    marker.chmod(0o600)
+    fd, temporary = tempfile.mkstemp(prefix='.prepare-', dir=record.parent)
+    try:
+        with os.fdopen(fd, 'w') as out:
+            out.write(data)
+            out.flush()
+            os.fsync(out.fileno())
+        os.replace(temporary, record)
+    finally:
+        Path(temporary).unlink(missing_ok=True)
+
+def prepared_release(config, bucket):
+    record = preparation_record(config, bucket)
+    try:
+        if record.is_symlink() or record.stat().st_uid != os.getuid() or record.stat().st_mode & 0o077:
+            return None
+        data = json.loads(record.read_text())
+        work = Path(data['work'])
+        marker = work / '.stqr-preparation.json'
+        if (work.is_symlink() or work.stat().st_uid != os.getuid()
+                or data['phase'] not in ('prepared', 'published')
+                or marker.read_text() != str(record)
+                or not all((work / name).is_file() for name in ('rootfs.tar', 'vmlinuz', 'initrd.img', 'release.json'))):
+            return None
+        return data
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+
+def forget_preparation(config, bucket):
+    preparation_record(config, bucket).unlink(missing_ok=True)
 
 def ctl(config, *args, capture=False):
     result = run(BIN / 'stqr-bootctl', '--config', config, *args,

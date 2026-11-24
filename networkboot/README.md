@@ -49,10 +49,11 @@ The command creates a new bucket and a sparse named `disk.raw` block device, sta
 an exclusive local Unix-socket NBD export and opens the installer in QEMU.
 The disk is already stored in STQR; there is no full local VM-disk copy.
 Rootfs archives still need staging space in `/var/tmp` (override `--work-dir`).
-SDK transfer spools use that work directory too; failed staging directories are
-retained and their path is printed. A completed export can be uploaded again with
-`networkboot/bin/stqr-bootctl --config stqr.yaml publish BUCKET DIRECTORY`, then
-`networkboot/bin/stqr-bootctl --config stqr.yaml gc BUCKET`.
+SDK transfer spools use that work directory too. The tools remember a completed
+export by bucket name and retain it after a failed publication. Retry with
+`networkboot/prepare-system BUCKET`; no internal object ID or temporary path
+is required. After successful publication, cleanup retries skip the import.
+Preparation records live in the current user's XDG state directory.
 Artifacts transfer in bounded 64-MiB ranges, so large Ubuntu images do not depend
 on a whole-file protocol transfer or a large `/tmp` RAM quota. Interrupted artifact
 uploads resume only after validating the stored prefix; downloads pin one object
@@ -68,10 +69,11 @@ networkboot/prepare-system --resume ubuntu-desktop-v1 /images/ubuntu.iso
 ```
 
 If installation completed but extraction/publication failed, retry that stage
-without an installer or another VM boot:
+without an installer or another VM boot (also after a failed `edit-image`
+publication). A completed export is reused; otherwise the disk is extracted:
 
 ```sh
-networkboot/prepare-system --publish-only ubuntu-desktop-v1
+networkboot/prepare-system ubuntu-desktop-v1
 ```
 
 Resume checks that the device has the requested size and that no release has

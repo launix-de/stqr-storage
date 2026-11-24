@@ -10,6 +10,7 @@ from unittest.mock import patch
 import json
 import contextlib
 import io
+import os
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -22,6 +23,66 @@ def load(name):
     return module
 
 class Workflows(unittest.TestCase):
+    def setUp(self):
+        state = tempfile.TemporaryDirectory()
+        self.addCleanup(state.cleanup)
+        env = patch.dict(os.environ, {'XDG_STATE_HOME': state.name})
+        env.start()
+        self.addCleanup(env.stop)
+
+    def test_bucket_only_resumes_failed_publication_without_reextracting(self):
+        import common
+        script = load('prepare-system')
+        with tempfile.TemporaryDirectory() as directory:
+            @contextlib.contextmanager
+            def disk(*args):
+                yield Path(directory) / 'disk.sock'
+            def extract(socket, work, version):
+                for name in ('rootfs.tar', 'vmlinuz', 'initrd.img', 'release.json'):
+                    Path(work, name).write_bytes(b'prepared')
+            def fail_publish(config, op, *args):
+                if op == 'publish':
+                    raise subprocess.CalledProcessError(1, ['publish'])
+            argv = ['prepare-system', 'ubuntu', '--work-dir', directory]
+            with patch.object(sys, 'argv', argv), patch.object(script, 'require'), patch.object(script, 'ctl', side_effect=fail_publish), patch.object(script, 'nbd', side_effect=disk), patch.object(script, 'qemu') as vm, patch.object(script, 'extract', side_effect=extract), contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()), self.assertRaises(subprocess.CalledProcessError):
+                script.main()
+            vm.assert_not_called()
+            prepared = common.prepared_release('stqr.yaml', 'ubuntu')
+            self.assertIsNotNone(prepared)
+            with patch.object(sys, 'argv', argv), patch.object(script, 'require'), patch.object(script, 'ctl') as ctl, patch.object(script, 'nbd') as nbd, patch.object(script, 'extract') as extract, contextlib.redirect_stdout(io.StringIO()):
+                script.main()
+            nbd.assert_not_called()
+            extract.assert_not_called()
+            ctl.assert_any_call('stqr.yaml', 'publish', 'ubuntu', prepared['work'])
+            self.assertFalse(Path(prepared['work']).exists())
+            self.assertIsNone(common.prepared_release('stqr.yaml', 'ubuntu'))
+
+    def test_published_preparation_retries_cleanup_without_republishing(self):
+        import common
+        script = load('prepare-system')
+        with tempfile.TemporaryDirectory() as directory:
+            work = Path(directory) / 'release'
+            work.mkdir()
+            for name in ('rootfs.tar', 'vmlinuz', 'initrd.img', 'release.json'):
+                (work / name).write_bytes(b'prepared')
+            common.remember_preparation('stqr.yaml', 'ubuntu', work, 'published')
+            with patch.object(sys, 'argv', ['prepare-system', 'ubuntu']), patch.object(script, 'require'), patch.object(script, 'ctl') as ctl, patch.object(script, 'nbd') as nbd, contextlib.redirect_stdout(io.StringIO()):
+                script.main()
+            nbd.assert_not_called()
+            self.assertFalse(any('publish' in call.args for call in ctl.call_args_list))
+            ctl.assert_any_call('stqr.yaml', 'gc', 'ubuntu')
+            self.assertFalse(work.exists())
+
+    def test_preparation_record_cannot_select_an_unmarked_directory(self):
+        import common
+        with tempfile.TemporaryDirectory() as directory:
+            work = Path(directory)
+            for name in ('rootfs.tar', 'vmlinuz', 'initrd.img', 'release.json'):
+                (work / name).write_bytes(b'prepared')
+            common.remember_preparation('stqr.yaml', 'ubuntu', work)
+            (work / '.stqr-preparation.json').unlink()
+            self.assertIsNone(common.prepared_release('stqr.yaml', 'ubuntu'))
+            self.assertTrue((work / 'rootfs.tar').exists())
     def test_proxy_dhcp_does_not_replace_dns_or_address_server(self):
         serve = load('serve')
         config = serve.dnsmasq_config('192.0.2.10', 'eth0', '192.0.2.0/24', '/tmp/tftp', 8088)
