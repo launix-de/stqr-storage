@@ -520,7 +520,7 @@ func TestSubscriptionStoreCoalescesParallelColdReaders(t *testing.T) {
 			want = 1
 		}
 		if count != want {
-			t.Fatal("duplicate subscriptions for parallel misses", count, want)
+			t.Fatal("unexpected active subscriptions for parallel misses", count, want)
 		}
 	}
 }

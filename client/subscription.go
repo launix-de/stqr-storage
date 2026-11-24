@@ -128,6 +128,7 @@ func (c *Client) Subscribe(ctx context.Context, id ObjectID, opt SubscribeOption
 	for _, u := range pending {
 		sub.applyLocked(u)
 	}
+	ackPending := sub.cursor > cursor
 	sub.mu.Unlock()
 	c.subMu.Lock()
 	if c.subscriptionSources == nil {
@@ -135,7 +136,13 @@ func (c *Client) Subscribe(ctx context.Context, id ObjectID, opt SubscribeOption
 	}
 	c.subscriptionSources[opt.ID] = r.source
 	c.subMu.Unlock()
-	sub.ack()
+	// The initial snapshot has no retained journal entry. A redundant ACK
+	// for each cold load can flood the bounded request queue while other
+	// readers already admit their next SUBSCRIBE. Only buffered updates need
+	// acknowledgment here; later pushes acknowledge themselves in receive.
+	if ackPending {
+		sub.ack()
+	}
 	runtime.KeepAlive(sub)
 	return sub, nil
 }
