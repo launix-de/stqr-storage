@@ -46,6 +46,7 @@ func readVolumeAuthority(store *volume.Volume) (volumeAuthorityRecord, error) {
 	if decodeVolumeAuthority(raw, &record) != nil || record.Schema != 1 || record.Volume != client.ID(identity.VolumeID) || record.Cluster != client.ID(identity.ClusterID) {
 		return record, volume.ErrCorrupt
 	}
+	canonicalAuthorityEntries(&record)
 	return record, nil
 }
 
@@ -242,15 +243,12 @@ func writeVolumeAuthorityBudget(store *volume.Volume, record volumeAuthorityReco
 		return err
 	}
 	defer h.Close()
-	useCompact := len(compact) > 0 && compact[0]
-	if !useCompact {
-		current, err := h.LocalMetadata()
-		if err != nil {
-			return err
-		}
-		useCompact = len(current) >= 4 && string(current[:4]) == "STVA"
+	current, err := h.LocalMetadata()
+	if err != nil {
+		return err
 	}
-	raw, err := marshalVolumeAuthority(record, useCompact)
+	useCompact := len(compact) > 0 && compact[0] || len(current) >= 4 && string(current[:4]) == "STVA"
+	raw, err := marshalStableVolumeAuthority(record, useCompact, current)
 	if err != nil {
 		return err
 	}

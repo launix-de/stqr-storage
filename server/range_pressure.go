@@ -12,13 +12,14 @@ type rangePressure struct {
 	bucket    volume.ID
 	object    volume.ObjectID
 	needed    uint64
+	failed    volume.ID
 	requested time.Time
 }
 
 // Volatile scheduling hints are bounded; neither an admission promise nor an
 // ownership decision is made here. A retry recreates a dropped hint. All actual
 // movement still uses the normal durable source/target handoff barriers.
-func (r *rangeManager) requestSpace(bucket volume.ID, object volume.ObjectID, needed uint64) bool {
+func (r *rangeManager) requestSpace(bucket volume.ID, object volume.ObjectID, needed uint64, failed ...volume.ID) bool {
 	b, err := r.server.Bucket(bucket)
 	if err != nil {
 		return false
@@ -28,6 +29,9 @@ func (r *rangeManager) requestSpace(bucket volume.ID, object volume.ObjectID, ne
 		return false
 	}
 	hint := rangePressure{bucket: bucket, object: object, needed: needed, requested: time.Now()}
+	if len(failed) > 0 {
+		hint.failed = failed[0]
+	}
 	r.mu.Lock()
 	for _, prior := range r.pressures {
 		if prior.bucket == bucket && prior.object == object {
@@ -85,10 +89,16 @@ func (r *rangeManager) pressurePlan(hint rangePressure) (rangePlan, bool) {
 	}
 	destinations, _ := r.destinations(b.Describe())
 	old := before.Entries[0]
+	failed := hint.failed
+	selected, _, found, selectErr := b.selectVolume(b.Describe(), volume.Key{Bucket: hint.bucket, Object: hint.object}, volume.ID{}, true)
+	existing := selectErr == nil && found
+	if failed == (volume.ID{}) && selected != nil {
+		failed = selected.Identity().VolumeID
+	}
 	costOf, closeCosts := r.rangeCosts(before)
 	defer closeCosts()
 	for _, destination := range destinations {
-		if destination.node == r.node && old.Locations[0].Volume == destination.volume.ID {
+		if destination.node == r.node && (old.Locations[0].Volume == destination.volume.ID || failed == volume.ID(destination.volume.ID)) {
 			continue
 		}
 		if destination.free < hint.needed {
@@ -99,12 +109,10 @@ func (r *rangeManager) pressurePlan(hint rangePressure) (rangePlan, bool) {
 		if err != nil {
 			continue
 		}
-		// Refine to isolate existing payload, not to arbitrarily tiny empty hash
-		// intervals. At most the first differing bit between real object IDs is
-		// needed for an empty blocked address.
-		_, oldInfo, found, e := b.selectVolume(b.Describe(), volume.Key{Bucket: hint.bucket, Object: hint.object}, volume.ID{}, false)
-		existing := e == nil && found && oldInfo.Version != 0
-		for moving.PrefixBits < 256 && count > 0 && !(existing && count == 1) {
+		// Keep updates to existing objects narrow. For new objects, move the
+		// largest containing range that fits: repeatedly isolating empty leaves
+		// never frees the full source and creates a handoff for every new ID.
+		for moving.PrefixBits < 256 && count > 0 && !(existing && count == 1) && (existing || cost > destination.free-hint.needed) {
 			left, right, e := client.SplitRange(moving)
 			if e != nil {
 				break
@@ -144,7 +152,7 @@ func (r *rangeManager) awaitPressureStats(hint rangePressure) bool {
 	destinations, _ := r.destinations(b.Describe())
 	old := before.Entries[0]
 	for _, destination := range destinations {
-		if destination.node == r.node && old.Locations[0].Volume == destination.volume.ID {
+		if destination.node == r.node && (old.Locations[0].Volume == destination.volume.ID || hint.failed == volume.ID(destination.volume.ID)) {
 			continue
 		}
 		if destination.capacity >= addCapacity(hint.needed, 64<<10) && destination.observed.Before(hint.requested) {

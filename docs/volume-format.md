@@ -349,3 +349,9 @@ Initial conversion waits until every admitted member is online and advertises
 binaries cannot interpret compact authority metadata and reject that metadata;
 downgrading after conversion requires a separate verified conversion rather
 than silently reusing old recovery proofs.
+
+Authority records retain stable physical entry slots across range splits and
+retirement. A zero bucket ID denotes an unused slot and confers no authority;
+logical readers omit these slots and return canonical range ordering. A new
+entry reuses a vacant slot of the same encoded size before extending the record.
+This avoids shifting unrelated claims during a handoff's final commit.

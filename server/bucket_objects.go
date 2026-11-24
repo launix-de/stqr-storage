@@ -772,7 +772,7 @@ func (b *Bucket) mutate(ctx context.Context, p principal, id volume.ObjectID, op
 		if opcode == 0x0105 || opcode == 0x0106 {
 			needed = 64 << 10
 		}
-		if s.scopes.requestSpace(b.ID(), id, needed) {
+		if s.scopes.requestSpace(b.ID(), id, needed, v.Identity().VolumeID) {
 			return result, fail(503, "waiting for range capacity handoff")
 		}
 	}
