@@ -1007,8 +1007,8 @@ func TestBucketCOWRecursiveNativeMutations(t *testing.T) {
 			_, err = b.Trunc(ctx, actor, id, 3, opt())
 			want = "ori"
 		case 5:
-			_, err = b.CAS(ctx, actor, id, 0, []byte("original"), []byte("cas"), opt())
-			want = "cas"
+			_, err = b.CAS(ctx, actor, id, 0, []byte("original"), []byte("CAS-data"), opt())
+			want = "CAS-data"
 		case 6:
 			err = b.Delete(ctx, actor, id, opt())
 		}
