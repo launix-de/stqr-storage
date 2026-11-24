@@ -280,12 +280,16 @@ func (f *Filesystem) stableWriteNode(ctx context.Context, n *fsNode, data []byte
 	if e != nil {
 		return e
 	}
-	hasLower := false
+	// Copy-up pages keep their 4-KiB identities even after the last lower
+	// reference disappears. Finishing copy-up must not convert them to new IDs.
+	smallPages := false
+	var logical uint64
 	for _, part := range parts {
-		hasLower = hasLower || part.lowerVersion != 0
+		smallPages = smallPages || part.lowerVersion != 0 || part.id == fsStableID(n.identity, 2, 0, logical/4096)
+		logical += part.length
 	}
 	unit := uint64(FSObjectSize)
-	if hasLower {
+	if smallPages {
 		unit = 4096
 	}
 	first := start / unit * unit
@@ -295,7 +299,7 @@ func (f *Filesystem) stableWriteNode(ctx context.Context, n *fsNode, data []byte
 		size := min(unit, length-at)
 		a, z := max(start, at), min(end, at+size)
 		id := fsStableID(n.identity, 0, 0, at/FSObjectSize)
-		if hasLower {
+		if smallPages {
 			id = fsStableID(n.identity, 2, 0, at/unit)
 		}
 		// A lower/legacy block is copied up once, then subsequent writes use its
@@ -309,7 +313,7 @@ func (f *Filesystem) stableWriteNode(ctx context.Context, n *fsNode, data []byte
 			}
 			pos += s.length
 		}
-		if hasLower {
+		if smallPages {
 			if e = f.stageBlock(ctx, n, id, a-at, data[a-start:z-start], false); e != nil {
 				return e
 			}
@@ -336,7 +340,7 @@ func (f *Filesystem) stableWriteNode(ctx context.Context, n *fsNode, data []byte
 	}
 	prefixEnd := first
 	suffixStart := stop + unit
-	if hasLower {
+	if smallPages {
 		prefixEnd = start
 		suffixStart = end
 	}
@@ -423,7 +427,19 @@ func (f *Filesystem) stableResize(ctx context.Context, n *fsNode, length uint64)
 		for _, part := range parts[:len(parts)-1] {
 			at += part.length
 		}
-		if last.lowerVersion == 0 && last.offset == 0 && last.id == fsStableID(n.identity, 0, 0, at/FSObjectSize) {
+		smallPage := last.id == fsStableID(n.identity, 2, 0, at/4096)
+		if last.lowerVersion == 0 && smallPage {
+			raw, _, e := f.objectBytes(ctx, last.id)
+			if e != nil {
+				return e
+			}
+			retained := last.offset + last.length
+			if retained < uint64(len(raw)) {
+				if e = f.stageBlock(ctx, n, last.id, 0, raw[:retained], true); e != nil {
+					return e
+				}
+			}
+		} else if last.lowerVersion == 0 && last.offset == 0 && last.id == fsStableID(n.identity, 0, 0, at/FSObjectSize) {
 			body := make([]byte, int(last.length))
 			if _, e = f.readBlob(ctx, old, body, at); e != nil {
 				return e

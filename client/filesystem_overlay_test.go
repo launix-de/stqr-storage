@@ -408,3 +408,55 @@ func TestOverlayNamespaceCrashCutpoints(t *testing.T) {
 		}
 	}
 }
+
+func TestOverlayCompletedCopyUpKeepsPageIdentity(t *testing.T) {
+	ctx := context.Background()
+	lower, o, _, _, conf, _ := overlayFixture(t, nil)
+	payload := bytes.Repeat([]byte("x"), 8192)
+	if _, err := lower.WriteAt(ctx, conf.ID, payload, 0); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := o.WriteAt(ctx, conf.ID, bytes.Repeat([]byte("y"), 8192), 0); err != nil {
+		t.Fatal(err)
+	}
+	before, _, err := o.upper.load(ctx, conf.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parts, err := o.upper.segmentsReadOnly(ctx, before.blob)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ids := map[ObjectID]bool{}
+	for _, part := range parts {
+		if part.lowerVersion != 0 {
+			t.Fatal("copy-up was not completed")
+		}
+		ids[part.id] = true
+	}
+	if _, err = o.WriteAt(ctx, conf.ID, []byte("z"), 5000); err != nil {
+		t.Fatal(err)
+	}
+	after, _, err := o.upper.load(ctx, conf.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	next, err := o.upper.segmentsReadOnly(ctx, after.blob)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.blob.root != before.blob.root {
+		t.Fatal("copy-up index identity rotated")
+	}
+	for _, part := range next {
+		if !ids[part.id] {
+			t.Fatal("completed copy-up rotated payload identity")
+		}
+	}
+	got := readOverlayFile(t, o, conf.ID)
+	want := bytes.Repeat([]byte("y"), 8192)
+	want[5000] = 'z'
+	if !bytes.Equal(got, want) {
+		t.Fatal("copy-up content changed")
+	}
+}
