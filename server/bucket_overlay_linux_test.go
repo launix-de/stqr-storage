@@ -276,7 +276,7 @@ func TestBucketNativeOverlayPHPCluster(t *testing.T) {
 	runPHP(p3, "node-1")
 	runPHP(p3, "node-1")
 	readAfter, e2 := u1.Stat(ctx, conf.ID)
-	if e2 != nil || readAfter.Version != readBefore.Version {
+	if e2 != nil || readAfter.Length != readBefore.Length {
 		t.Fatal("reading persisted a metadata update", readBefore, readAfter, e2)
 	}
 	runPHP(p3, "node-1")

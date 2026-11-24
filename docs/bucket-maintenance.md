@@ -16,7 +16,7 @@ When no suitable cluster destination can admit the write, status 507 remains a
 terminal capacity error. This also applies when HDD placement initially prefers
 a small local disk over a larger remote SSD.
 
-Filesystem maintenance and private clear/clone inventories still pin placement.
+Filesystem maintenance and private clear inventories still pin placement.
 The durable lease's opt-in `AllowHandoff` flag distinguishes native block clients
 from these operations. Old persisted leases without that flag stay pinned.
 Normal membership and bucket-policy changes still wait for lease release.
@@ -63,12 +63,42 @@ receive quota/control callbacks, independently of long delegated copies.
 binary codec; its allowlist contains only clear and clone. It does not widen the
 node-local admin proxy's allowlist.
 
-Clear and clone acquire source/destination leases in ID order. Clone preserves
-native object addresses and payloads, using at most 1 MiB of payload memory per
-iteration. Operation receipts are committed through the global system catalog
-before the first data mutation and after completion. Interrupted operations
-remain explicit partial results. Retrying a completed clear cannot delete later
-writes, including after restart or submission through a different node.
+Clear acquires an exclusive bucket lease. Its durable receipt prevents a lost
+response or later retry from clearing newly written data.
+
+## Immediate bucket copies
+
+`BUCKET_CLONE` (`0x2029`, administrator) takes source and destination bucket IDs.
+Create a fresh destination first: even retained tombstones make a used bucket
+unsuitable. The dashboard's **Kopieren** action creates it with the source storage
+policy and then sends the native clone command. Grants are independent and must
+be configured separately. Retrying uses the same operation ID.
+
+Clone publishes symmetric per-bucket connections through an ALL-member catalog
+change. Existing clients may stay connected; short write fences drain prior
+mutations. No object inventory or payload copy is needed up front. The reply's
+`objects=0` counts objects physically copied during this initial operation.
+Applications needing a consistent running database/VM image must flush or freeze
+their own writers around clone.
+
+Each opaque object ID is independent. Reads prefer an own record, falling back
+through clone connections only when no record has ever existed locally. A
+retained tombstone stops fallback. Before a mutation, servers materialize the
+old logical contents into still-dependent direct neighbors; they also preserve
+absence before creating a new object. The actual PUT/ranged CAS then runs under
+the normal volume lock. Late materializations never replace an existing record.
+No content version, frozen base bucket or frontend-specific interpretation is
+involved. Private capture/read/materialize operations are restricted to admitted
+cluster peers; a destination user needs no source grant.
+
+Identical storage policies may remain connected indefinitely. Different storage
+policies, later policy changes and bucket deletion schedule bounded background
+materialization, followed by durable edge removal. Deletion hides the bucket
+immediately but retains its backing until neighbors are independent. Interrupted
+materialization safely retries after restart. Sparse transfers carry only
+allocated extents, including for multi-terabyte logical objects. Inherited
+subscriptions do not write storage. Inventory, fsck and logical quotas include
+inherited objects; a copy's fsck never sweeps its source.
 
 Tests cover two-owner range I/O and Sync, readonly grants, passive restart with
 auxiliary reauthentication, owner-socket loss, delayed reserve/release, clear and

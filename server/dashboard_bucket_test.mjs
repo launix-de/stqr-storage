@@ -30,3 +30,10 @@ test('physical PG capacity requests explicitly encode their accounting unit',asy
  const bucket='01000000000000000000000000000000',group='02000000000000000000000000000000';
  await connection.bucketQuotaCapacity(bucket,'hdd',5,540,group,'physical');assert.equal(call[0],OP.BUCKET_GROUP_CAPACITY);const r=new Reader(call[1]);assert.equal(r.u16(),2);assert.equal(r.id(),group);assert.equal(r.id(),bucket);assert.equal(r.u8(),0);assert.equal(r.u8(),5);assert.equal(r.u32(),540);assert.equal(r.u8(),1);r.done();
 });
+test('bucket copy sends native source and destination IDs with a stable operation ID',async()=>{
+ const connection=Object.create(NodeConnection.prototype);let call;connection.request=(...args)=>{call=args;return Promise.resolve({})};
+ const source='01000000000000000000000000000000',destination='02000000000000000000000000000000';
+ await connection.cloneBucket(source,destination,'copy-request');
+ assert.equal(call[0],OP.BUCKET_CLONE);assert.equal(call[2],'copy-request');
+ const r=new Reader(call[1]);assert.equal(r.id(),source);assert.equal(r.id(),destination);r.done();
+});

@@ -279,6 +279,9 @@ func (p peerControlParticipants) call(ctx context.Context, node client.ID, opcod
 		if opcode == peerForceControlState {
 			return p.runtime.server.receiveForceControlState(body, node)
 		}
+		if opcode >= peerCowCapture && opcode <= peerCowSync {
+			return p.runtime.server.cowPeerMessage(ctx, client.Message{Kind: client.Request, Opcode: opcode, Body: body})
+		}
 		if opcode == peerBucketCopy {
 			return p.runtime.server.receiveBucketCopy(ctx, body, node)
 		}

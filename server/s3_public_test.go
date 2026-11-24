@@ -148,9 +148,9 @@ type revokePublicOnRead struct {
 	revoke func()
 }
 
-func (s *revokePublicOnRead) GetRangeToVersion(ctx context.Context, id client.ObjectID, off, n, version uint64, dst io.Writer) (client.ObjectInfo, error) {
+func (s *revokePublicOnRead) GetRangeToMatching(ctx context.Context, id client.ObjectID, off, n uint64, condition client.ReadCondition, dst io.Writer) (client.ObjectInfo, error) {
 	s.once.Do(s.revoke)
-	return s.S3Store.GetRangeToVersion(ctx, id, off, n, version, dst)
+	return s.S3Store.GetRangeToMatching(ctx, id, off, n, condition, dst)
 }
 func TestPublicACLRevocationRechecksReadSnapshot(t *testing.T) {
 	s, b, u := s3TestSetup(t)

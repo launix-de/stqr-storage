@@ -56,7 +56,7 @@ func TestOverlayFsckCollectsOnlyUpperObjects(t *testing.T) {
 	}
 }
 
-func TestOverlayFsckAbortsOnStaleLower(t *testing.T) {
+func TestOverlayFsckPreservesCopyUpAcrossLowerChanges(t *testing.T) {
 	ctx := context.Background()
 	lower, o, _, upper, conf, _ := overlayFixture(t, nil)
 	mode := uint32(0600)
@@ -71,9 +71,10 @@ func TestOverlayFsckAbortsOnStaleLower(t *testing.T) {
 	}
 	before := len(upper.objects)
 	result, err := checkOverlayFilesystem(ctx, o, &fsckMemory{MemoryFilesystemStore: upper})
-	if !errors.Is(err, syscall.ESTALE) || result.Deleted != 0 || len(upper.objects) != before {
-		t.Fatal(result, err)
-	}
+	if err != nil || result.Deleted == 0 || len(upper.objects) >= before {
+ t.Fatal(result, err)
+ }
+ if got := readOverlayFile(t, o, conf.ID); string(got) != "base-config" { t.Fatal("lower update changed copied-up content", string(got)) }
 }
 
 func TestOverlayMissingUpperNeverFallsBackToOldBase(t *testing.T) {
@@ -207,7 +208,7 @@ func TestOverlayFsckDoesNotDeleteLocalDataAfterLowerDirectoryReplacement(t *test
 				t.Fatalf("local data swept: %+v %v", result, err)
 			}
 			rootAfter, infoAfter, err := upper.Get(ctx, root)
-			if err != nil || infoBefore.Version != infoAfter.Version || !bytes.Equal(rootBefore, rootAfter) {
+			if err != nil || infoBefore.Length != infoAfter.Length || !bytes.Equal(rootBefore, rootAfter) {
 				t.Fatal("manifest modified on unsafe reconciliation", err)
 			}
 			if data := readTestFile(t, o.upper, local.ID); string(data) != "must survive lower maintenance" {
@@ -296,7 +297,7 @@ func TestOverlayFsckDoesNotTreatLowerReadErrorAsAbsence(t *testing.T) {
 		t.Fatal(result, err)
 	}
 	after, afterInfo, err := upper.Get(ctx, FilesystemRootID())
-	if err != nil || afterInfo.Version != info.Version || !bytes.Equal(body, after) {
+	if err != nil || afterInfo.Length != info.Length || !bytes.Equal(body, after) {
 		t.Fatal("failed verification changed manifest", err)
 	}
 }
@@ -304,6 +305,9 @@ func TestOverlayFsckDoesNotTreatLowerReadErrorAsAbsence(t *testing.T) {
 func TestOverlayFsckPreservesUpperWhenOfflineLowerGcLostSource(t *testing.T) {
 	ctx := context.Background()
 	lower, o, guard, upper, conf, _ := overlayFixture(t, nil)
+	if _, err := lower.WriteAt(ctx, conf.ID, bytes.Repeat([]byte("content"), 2000), 0); err != nil {
+		t.Fatal(err)
+	}
 	mode := uint32(0600)
 	if _, err := o.SetAttributes(ctx, conf.ID, FSAttributes{Mode: &mode}); err != nil {
 		t.Fatal(err)
@@ -311,9 +315,8 @@ func TestOverlayFsckPreservesUpperWhenOfflineLowerGcLostSource(t *testing.T) {
 	if err := lower.Unlink(ctx, FilesystemRootID(), "conf.json"); err != nil {
 		t.Fatal(err)
 	}
-	// Updating the persistent link count changes the source inode version.
-	// Its payload remains stored, but pinned overlay references are now stale.
-	if _, err := o.ReadAt(ctx, conf.ID, make([]byte, 1), 0); !errors.Is(err, syscall.ESTALE) {
+	// Removing the inode does not invalidate immutable data referenced by an upper.
+	if _, err := o.ReadAt(ctx, conf.ID, make([]byte, 1), 0); err != nil {
 		t.Fatal(err)
 	}
 	// A separate lower fsck cannot discover dependencies in an offline upper.

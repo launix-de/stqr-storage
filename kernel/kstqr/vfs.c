@@ -63,16 +63,14 @@ static umode_t node_mode(const struct ks_node *n)
 	}
 	return type | n->mode;
 }
-static void update_inode(struct inode *i, const struct ks_node *n, u64 version)
+static void update_inode(struct inode *i, const struct ks_node *n, stqr_proof proof)
 {
 	mutex_lock(&KS_I(i)->metadata_lock);
-	/* Unconfirmed accepted versions can roll back after an incarnation loss.
-	 * Cache/transport loss invalidates pages; accept authoritative lower versions
-	 * too instead of pinning the inode forever to a vanished volatile size. */
-	if (KS_I(i)->version && KS_I(i)->version != version)
+	/* Only a live subscription proves cached contents across calls. */
+	if (!proof.cursor || memcmp(&KS_I(i)->proof, &proof, sizeof(proof)))
 		WRITE_ONCE(KS_I(i)->invalidate, true);
-	KS_I(i)->version = version;
-	WRITE_ONCE(KS_I(i)->upper_absent_version, n->upper_absent_version);
+	KS_I(i)->proof = proof;
+	KS_I(i)->upper_absent = n->upper_absent;
 	i->i_mode = node_mode(n);
 	set_nlink(i, n->removed ? 0 : n->links);
 	i_uid_write(i, n->uid);
@@ -98,7 +96,7 @@ static int inode_set(struct inode *i, void *data)
 	return 0;
 }
 static struct inode *get_inode(struct super_block *sb, stqr_object_id id, const struct ks_node *n,
-			       u64 version)
+			       stqr_proof proof)
 {
 	struct inode *i;
 	unsigned long hash = 0;
@@ -118,10 +116,10 @@ static struct inode *get_inode(struct super_block *sb, stqr_object_id id, const 
 		mapping_set_stable_writes(i->i_mapping);
 		if (n->kind == 4 || n->kind == 5)
 			init_special_inode(i, node_mode(n), 0);
-		update_inode(i, n, version);
+		update_inode(i, n, proof);
 		unlock_new_inode(i);
 	} else
-		update_inode(i, n, version);
+		update_inode(i, n, proof);
 	return i;
 }
 static int refresh_inode(struct inode *i)
@@ -129,13 +127,13 @@ static int refresh_inode(struct inode *i)
 	struct ks_snapshot s;
 	int err = ks_snapshot(i->i_sb->s_fs_info, KS_I(i)->id, &s);
 	if (!err) {
-		update_inode(i, &s.node, s.info.version);
+		update_inode(i, &s.node, s.info.proof);
 		ks_snapshot_free(&s);
 	}
 	return err;
 }
 struct ks_dentry {
-	u64 parent_version;
+	stqr_proof parent_proof;
 };
 static struct dentry *ks_lookup(struct inode *parent, struct dentry *d, unsigned flags)
 {
@@ -158,7 +156,7 @@ static struct dentry *ks_lookup(struct inode *parent, struct dentry *d, unsigned
 					err = -ENOENT;
 				if (!err) {
 					i = get_inode(parent->i_sb, entries[k].id, &child.node,
-						      child.info.version);
+						      child.info.proof);
 					if (IS_ERR(i)) {
 						err = PTR_ERR(i);
 						i = NULL;
@@ -169,7 +167,7 @@ static struct dentry *ks_lookup(struct inode *parent, struct dentry *d, unsigned
 	if (!err) {
 		struct ks_dentry *proof = kmalloc(sizeof(*proof), GFP_NOFS);
 		if (proof) {
-			proof->parent_version = s.info.version;
+			proof->parent_proof = s.info.proof;
 			d->d_fsdata = proof;
 		}
 	}
@@ -186,7 +184,7 @@ static int ks_revalidate(struct inode *parent, const struct qstr *name, struct d
 {
 	struct ks_dentry *proof;
 	struct ks_fs *f = parent->i_sb->s_fs_info;
-	u64 version;
+	stqr_proof cached_proof;
 	(void)name;
 	if (flags & LOOKUP_RCU)
 		return -ECHILD;
@@ -218,13 +216,13 @@ static int ks_revalidate(struct inode *parent, const struct qstr *name, struct d
 	}
 
 	proof = d->d_fsdata;
-	if (!proof || !ks_cache_version(f, KS_I(parent)->id, &version) ||
-	    version != proof->parent_version)
+	if (!proof || !ks_cache_proof(f, KS_I(parent)->id, &cached_proof) ||
+	    memcmp(&cached_proof, &proof->parent_proof, sizeof(cached_proof)))
 		return 0;
 	/* Namespace proof also covers negative dentries. Refresh a positive inode
 	 * from its live subscription before permission checks use its attributes. */
 	if (d_inode(d) &&
-	    (!ks_cache_version(f, KS_I(d_inode(d))->id, &version) || refresh_inode(d_inode(d))))
+	    (!ks_cache_proof(f, KS_I(d_inode(d))->id, &cached_proof) || refresh_inode(d_inode(d))))
 		return 0;
 	return 1;
 }
@@ -257,7 +255,7 @@ static int ks_iterate(struct file *file, struct dir_context *ctx)
 				leave_fs(f, saved);
 				break;
 			}
-			ci = get_inode(i->i_sb, entries[k].id, &child.node, child.info.version);
+			ci = get_inode(i->i_sb, entries[k].id, &child.node, child.info.proof);
 			ks_snapshot_free(&child);
 			leave_fs(f, saved);
 			if (IS_ERR(ci)) {
@@ -299,7 +297,7 @@ static int create_common(struct mnt_idmap *idmap, struct inode *parent, struct d
 	if (!err) {
 		err = ks_snapshot(f, id, &s);
 		if (!err) {
-			i = get_inode(parent->i_sb, id, &s.node, s.info.version);
+			i = get_inode(parent->i_sb, id, &s.node, s.info.proof);
 			ks_snapshot_free(&s);
 			if (IS_ERR(i))
 				err = PTR_ERR(i);
@@ -360,7 +358,7 @@ static int ks_link_vfs(struct dentry *old, struct inode *parent, struct dentry *
 	if (!err) {
 		err = ks_snapshot(f, KS_I(d_inode(old))->id, &s);
 		if (!err) {
-			i = get_inode(parent->i_sb, s.id, &s.node, s.info.version);
+			i = get_inode(parent->i_sb, s.id, &s.node, s.info.proof);
 			ks_snapshot_free(&s);
 			if (IS_ERR(i))
 				err = PTR_ERR(i);
@@ -1023,7 +1021,7 @@ static void ks_invalidate_one(struct inode *i)
 	struct ks_snapshot snapshot;
 	int err = ks_snapshot_cached(i->i_sb->s_fs_info, KS_I(i)->id, &snapshot);
 	if (!err) {
-		update_inode(i, &snapshot.node, snapshot.info.version);
+		update_inode(i, &snapshot.node, snapshot.info.proof);
 		ks_snapshot_free(&snapshot);
 	}
 	WRITE_ONCE(KS_I(i)->invalidate, true);
@@ -1345,7 +1343,7 @@ static int ks_fill_super(struct super_block *sb, struct fs_context *fc)
 		if (root.node.kind != 2 || root.node.removed)
 			err = -ENOTDIR;
 		else {
-			inode = get_inode(sb, ks_root_id, &root.node, root.info.version);
+			inode = get_inode(sb, ks_root_id, &root.node, root.info.proof);
 			if (IS_ERR(inode))
 				err = PTR_ERR(inode);
 			else {

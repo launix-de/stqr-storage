@@ -33,12 +33,12 @@ type SubscribeOptions struct {
 }
 
 type ObjectUpdate struct {
-	Subscription                        ID
-	Cursor, PreviousVersion, NewVersion uint64
-	Part, Parts                         uint32
-	Change                              uint8
-	Offset, NewLength                   uint64
-	Data                                []byte
+	Subscription      ID
+	Cursor            uint64
+	Part, Parts       uint32
+	Change            uint8
+	Offset, NewLength uint64
+	Data              []byte
 }
 
 func (u ObjectUpdate) valid() bool {
@@ -51,8 +51,6 @@ func (u ObjectUpdate) MarshalBinary() ([]byte, error) {
 	e := Encoder{}
 	e.ID(u.Subscription)
 	e.U64(u.Cursor)
-	e.U64(u.PreviousVersion)
-	e.U64(u.NewVersion)
 	e.U32(u.Part)
 	e.U32(u.Parts)
 	e.U8(u.Change)
@@ -67,7 +65,7 @@ func (u ObjectUpdate) MarshalBinary() ([]byte, error) {
 }
 func DecodeObjectUpdate(b []byte) (ObjectUpdate, error) {
 	d := Decoder{B: b}
-	u := ObjectUpdate{Subscription: d.ID(), Cursor: d.U64(), PreviousVersion: d.U64(), NewVersion: d.U64(), Part: d.U32(), Parts: d.U32(), Change: d.U8(), Offset: d.U64(), NewLength: d.U64()}
+	u := ObjectUpdate{Subscription: d.ID(), Cursor: d.U64(), Part: d.U32(), Parts: d.U32(), Change: d.U8(), Offset: d.U64(), NewLength: d.U64()}
 	mode, total, digest, data := decodeTransfer(&d)
 	if d.Done() != nil || mode != 0 || total != uint64(len(data)) || sha256.Sum256(data) != digest {
 		return u, ErrProtocol

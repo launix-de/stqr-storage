@@ -29,6 +29,7 @@ type managedVolume struct {
 type Server struct {
 	leaseGate       chan struct{}
 	copyCoordinator sync.Mutex
+	cow             cowTransfers
 	leaseMu         sync.Mutex
 	activeLeases    map[volume.ID]*Bucket
 	durability      durabilityState
@@ -336,7 +337,7 @@ func Open(opts Options) (s *Server, err error) {
 	s.workers.Add(1)
 	go s.statsLoop()
 	for _, d := range s.bucketSnapshots() {
-		if !d.DeletionComplete && (d.State == BucketDeleting || d.DesiredPolicy != nil) {
+		if !d.DeletionComplete && (d.State == BucketDeleting || d.DesiredPolicy != nil || d.CloneDetach) {
 			id, _ := bucketID(d.ID)
 			s.startBucketCleanup(id)
 		}

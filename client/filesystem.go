@@ -95,7 +95,7 @@ func (f *Filesystem) load(ctx context.Context, id ObjectID) (fsNode, ObjectInfo,
 	return s.node, s.info, err
 }
 func fsInfo(id ObjectID, n fsNode, info ObjectInfo) FSInfo {
-	return FSInfo{Kind: FSKind(n.kind), Nlink: fsLinks(n), ID: id, Version: info.Version, Size: n.blob.length, Mode: n.mode, UID: n.uid, GID: n.gid, MtimeNS: n.mtime, AtimeNS: n.atime, CtimeNS: n.ctime, Directory: n.kind == fsDirectory, Removed: n.removed}
+	return FSInfo{Kind: FSKind(n.kind), Nlink: fsLinks(n), ID: id, Proof: info.Proof, Size: n.blob.length, Mode: n.mode, UID: n.uid, GID: n.gid, MtimeNS: n.mtime, AtimeNS: n.atime, CtimeNS: n.ctime, Directory: n.kind == fsDirectory, Removed: n.removed}
 }
 func (f *Filesystem) Stat(ctx context.Context, id ObjectID) (FSInfo, error) {
 	n, i, err := f.load(ctx, id)
@@ -113,12 +113,12 @@ func (f *Filesystem) mutate(ctx context.Context, id ObjectID, fn func(*fsNode) e
 		if err != nil {
 			return FSInfo{}, err
 		}
-		n, i := s.node, s.info
+		n := s.node
 		n.ctime = uint64(time.Now().UnixNano())
 		if err = fn(&n); err != nil {
 			return FSInfo{}, err
 		}
-		result, err := f.store.CAS(ctx, id, 0, nil, encodeFSNode(n), CASOptions{Scope: CASObject, MutationOptions: MutationOptions{RequestID: NewRequestID(), ExpectedVersion: &i.Version}})
+		result, err := f.store.CAS(ctx, id, 0, s.raw, encodeFSNode(n), CASOptions{Scope: CASObject, MutationOptions: MutationOptions{RequestID: NewRequestID()}})
 		if errors.Is(err, ErrPrecondition) {
 			continue
 		}

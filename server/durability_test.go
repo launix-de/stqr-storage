@@ -38,7 +38,7 @@ func TestAcceptedProtocolBarrier(t *testing.T) {
 	}
 	generation := active.Header().Generation
 	data, got, err := reader.Get(ctx, id)
-	if err != nil || string(data) != "accepted" || got.Version != info.Version {
+	if err != nil || string(data) != "accepted" || got.Length != info.Length {
 		t.Fatal(string(data), got, err)
 	}
 	if err = reader.Sync(ctx); err != nil {
@@ -209,11 +209,11 @@ func TestAcceptedCrossOwnerSubscriptionDependency(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer sub.Close(ctx)
-	updated, err := c.Put(ctx, first, []byte("accepted dependency"), client.PutOptions{Accepted: true})
+	_, err = c.Put(ctx, first, []byte("accepted dependency"), client.PutOptions{Accepted: true})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err = waitSubscription(t, ctx, sub, updated.Version); err != nil {
+	if _, _, err = waitSubscription(t, ctx, sub, "accepted dependency"); err != nil {
 		t.Fatal(err)
 	}
 	var origin *volume.Volume

@@ -82,7 +82,7 @@ func (v *Volume) loadObjectAt(ptr uint64) (*object, error) {
 	if checksum(b) != stored {
 		return nil, ErrCorrupt
 	}
-	o := &object{Base: ptr, Size: uint64(n), Info: Info{Version: diskOrder.Uint64(b[8:]), Length: diskOrder.Uint64(b[16:]), Compression: Compression(b[24]), Deleted: b[25]&1 != 0}, importShadow: b[25]&4 != 0, Segmented: b[25]&2 != 0}
+	o := &object{Base: ptr, Size: uint64(n), Info: Info{Length: diskOrder.Uint64(b[16:]), Compression: Compression(b[24]), Deleted: b[25]&1 != 0}, importShadow: b[25]&4 != 0, Segmented: b[25]&2 != 0}
 	count := uint64(diskOrder.Uint32(b[28:]))
 	if !o.Info.Compression.valid() {
 		return nil, ErrCorrupt
@@ -212,7 +212,6 @@ func (t *transaction) writeObject(o *object) error {
 	b := make([]byte, n)
 	diskOrder.PutUint32(b, uint32(n))
 	copy(b[4:], "OBJ2")
-	diskOrder.PutUint64(b[8:], o.Info.Version)
 	diskOrder.PutUint64(b[16:], o.Info.Length)
 	b[24] = byte(o.Info.Compression)
 	if o.Info.Deleted {

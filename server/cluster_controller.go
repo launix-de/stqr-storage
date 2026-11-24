@@ -119,6 +119,7 @@ func (c *clusterController) start() {
 					c.ensureQuotaAllocations(s.ctx)
 					c.admitDiscovered(s.ctx)
 				}
+				c.finishCowDetaches(s.ctx)
 				c.finishBucketDeletions(s.ctx)
 				c.finishBucketPolicies(s.ctx)
 				c.finishPlacementGroups(s.ctx)

@@ -6,6 +6,34 @@ import (
 	"sort"
 )
 
+// A full replacement may retain a prefix of an existing RAW extent. Reclaim
+// the unused suffix and recompute only its final, now shorter checksum block.
+func (t *transaction) trimRawAllocation(s *dataSpan) error {
+	if s.Codec != Raw || s.Direct || s.Skip != 0 || s.Length == 0 {
+		return ErrCorrupt
+	}
+	if s.Length < s.Stored {
+		start := (s.Length - 1) / BlockSize * BlockSize
+		b := make([]byte, s.Length-start)
+		if err := t.readBytes(b, s.Location+start); err != nil {
+			return err
+		}
+		crc := checksum(b)
+		if s.Length <= BlockSize {
+			s.CRC, s.Checksums = crc, 0
+		} else {
+			var raw [4]byte
+			diskOrder.PutUint32(raw[:], crc)
+			if err := t.patch(s.Checksums+start/BlockSize*4, raw[:]); err != nil {
+				return err
+			}
+		}
+		s.Stored = s.Length
+	}
+	s.Capacity = s.Stored
+	return nil
+}
+
 // writeRange changes only addressed bytes/chunks. The volume write handle keeps
 // readers out; redo, rather than retained object versions, makes publication atomic.
 func (t *transaction) writeRange(o *object, offset, length uint64, src io.Reader, codec Compression) error {
@@ -111,8 +139,8 @@ func (t *transaction) patchRaw(s *dataSpan, offset, length uint64, src io.Reader
 	return nil
 }
 
-// unpackChunks retains every encoded payload at its original address. Only the
-// old chunk table/padding is freed; the new descriptors own disjoint byte ranges.
+// unpackChunks retains encoded payload addresses. The caller retires the old
+// table and padding by subtracting the final allocation union exactly once.
 func (t *transaction) unpackChunks(s dataSpan) ([]dataSpan, error) {
 	if s.Stored < 8 {
 		return nil, ErrCorrupt
@@ -126,7 +154,6 @@ func (t *transaction) unpackChunks(s dataSpan) ([]dataSpan, error) {
 		return nil, ErrCorrupt
 	}
 	previous := uint64(8) + count*32
-	t.release(s.Location, previous, false)
 	out := make([]dataSpan, 0, count)
 	for i := uint64(0); i < count; i++ {
 		var b [32]byte
@@ -142,14 +169,8 @@ func (t *transaction) unpackChunks(s dataSpan) ([]dataSpan, error) {
 		if s.Skip != 0 || decoded != min(uint64(BlockSize), s.Length-i*BlockSize) {
 			return nil, ErrCorrupt
 		}
-		if off > previous {
-			t.release(s.Location+previous, off-previous, false)
-		}
 		out = append(out, dataSpan{Offset: s.Offset + i*BlockSize, Length: decoded, Location: s.Location + off, Stored: n, Capacity: n, Codec: actual, CRC: diskOrder.Uint32(b[16:]), Checksums: decoded<<32 | uint64(diskOrder.Uint32(b[20:])), Direct: true})
 		previous = off + n
-	}
-	if previous < s.Capacity {
-		t.release(s.Location+previous, s.Capacity-previous, false)
 	}
 	return out, nil
 }
@@ -175,9 +196,6 @@ func (t *transaction) patchChunk(s dataSpan, offset, length uint64, src io.Reade
 		if err = t.patch(s.Location, encoded); err != nil {
 			return s, err
 		}
-		if n < s.Capacity {
-			t.release(s.Location+n, s.Capacity-n, false)
-		}
 	} else {
 		at, e := t.alloc(n, false)
 		if e != nil {
@@ -186,7 +204,6 @@ func (t *transaction) patchChunk(s dataSpan, offset, length uint64, src io.Reade
 		if e = t.writeBytes(at, encoded); e != nil {
 			return s, e
 		}
-		t.release(s.Location, s.Capacity, false)
 		s.Location = at
 	}
 	s.Stored = n

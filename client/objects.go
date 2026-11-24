@@ -41,15 +41,22 @@ var (
 	ErrGone           = errors.New("client: object range or bucket runtime no longer valid")
 )
 
-// ObjectInfo describes one atomic object snapshot. Version zero is not a
-// wildcard precondition: use a nil ExpectedVersion to omit that precondition.
+// SnapshotProof identifies a position in a live subscription, not object contents.
+// A new subscription gets a new ID, even when its cursor starts at the same value.
+type SnapshotProof struct {
+	Subscription ID
+	Cursor       uint64
+}
+
+// ObjectInfo describes an atomic read. Proof is local and never sent on the wire.
 type ObjectInfo struct {
-	Version, Length uint64
-	PayloadDigest   *[32]byte
-	Flags           uint32
-	RuntimeID       ID
-	Compression     uint8
-	LayoutVersion   uint16
+	Length        uint64
+	Proof         SnapshotProof
+	PayloadDigest *[32]byte
+	Flags         uint32
+	RuntimeID     ID
+	Compression   uint8
+	LayoutVersion uint16
 }
 type AppendResult struct {
 	ObjectInfo
@@ -57,14 +64,25 @@ type AppendResult struct {
 }
 
 // MutationOptions must be preserved across retries. Nil preconditions are absent;
-// pointers allow an explicit expected length/version of zero.
+// pointers allow an explicit expected length of zero.
 type MutationOptions struct {
 	Accepted bool // opt-in weaker ACK; Sync confirms durability
 
-	RequestID                       RequestID
-	ExpectedVersion, ExpectedLength *uint64
-	Absent                          bool
+	RequestID      RequestID
+	ExpectedLength *uint64
+	CompareOffset  uint64
+	Compare        []byte
+	Absent         bool
 }
+
+// ReadCondition compares application bytes and length under the same read handle
+// as the payload transfer. It does not name a historical object state.
+type ReadCondition struct {
+	Offset uint64
+	Bytes  []byte
+	Length *uint64
+}
+
 type PutOptions = MutationOptions
 type DeleteOptions = MutationOptions
 type AppendOptions = MutationOptions
@@ -78,8 +96,8 @@ const (
 )
 
 // CASRange compares equal-sized byte ranges (at most 1 MiB). CASObject replaces
-// the whole object, permits length changes, and requires ExpectedVersion for an
-// existing object or Absent for creation. Absent and ExpectedVersion conflict.
+// the whole object, permits length changes, and compares the complete old bytes.
+// Use Absent for creation.
 type CASOptions struct {
 	MutationOptions
 	Scope CASScope

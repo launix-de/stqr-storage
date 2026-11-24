@@ -89,10 +89,10 @@ until the namespace is stable; only then does it inventory and mark objects.
 It enumerates live objects in bounded pages, marks from the root through inode,
 directory and segment/index objects, and verifies all reachable payloads. Shared
 segments and sparse spans are preserved. Any missing reference, invalid format,
-inconsistent version or directory cycle aborts before any deletion. Directory
+inconsistent metadata or directory cycle aborts before any deletion. Directory
 materialization is bounded to 64 MiB and nesting to 1024; exceeding either limit
 also aborts without deleting. Only after the full mark succeeds are unreferenced
-objects deleted, each with its scanned expected version and a fresh request ID.
+objects deleted, under the exclusive maintenance lease with a fresh request ID.
 A second run completes a partially interrupted sweep and leaves a clean graph
 unchanged. Missing/malformed roots are never created or repaired automatically.
 
@@ -108,7 +108,7 @@ implemented through durable multi-inode CAS intents. Rename also supports
 destination directories are rejected. Directory moves verify and protect the
 destination ancestor path against concurrent moves that could create a cycle.
 Directory lookup for that check currently walks from the root and may be costly
-in large trees. Read-only inode participants also receive new native versions.
+in large trees. Read-only inode participants are protected by byte-CAS intent markers.
 There is no global single-writer lock; ordinary writes retain per-inode CAS.
 
 The intent descriptor and inode markers are ordinary bucket objects. Another
@@ -130,7 +130,7 @@ that Bucket instance and authenticated capabilities; later data operations do
 not repeat account or grant lookups. Revocation/password changes invalidate the
 connection, and reconnect performs the complete check again.
 
-The transport uses HTTP Basic for the `stqr.v1` WebSocket upgrade, HELLO on each
+The transport uses HTTP Basic for the `stqr.v2` WebSocket upgrade, HELLO on each
 new session, bounded send/pending queues and correlated responses. Data transfers
 above 1 MiB use 1-MiB chunks and SHA-256. Streaming uses temporary files and bounded
 buffers instead of buffering a complete large object; temporary files are removed
@@ -233,12 +233,11 @@ namespace updates rewrite that manifest. This favors small per-node configuratio
 and upload overlays over huge mutable namespaces.
 
 Metadata-only copy-up stores an inode containing the overridden attributes and a
-versioned reference to the original lower inode; it does not copy file payload.
-Partial writes store only new data plus extent references to untouched lower
-ranges. Offsets are 64-bit, including sparse files. The lower inode version is
-checked before reading an inherited range. If that inode is changed in place,
-those references return `ESTALE`; they never silently read a different version.
-Keep referenced base files stable (or use versioned base buckets). Untouched
+reference to the original immutable lower index/data objects; it does not copy
+file payload. Partial writes store only new data plus extent references to
+untouched lower ranges. Offsets are 64-bit, including sparse files. Later lower
+inode updates do not retarget these references. Keep the referenced objects
+available: lower fsck must not collect dependencies of an offline upper. Untouched
 lower files remain pass-through. A complete overwrite/truncate can remove an
 inode's lower-data dependency. Moving to a different lower bucket requires a new
 upper; automatic overlay rebasing is not implemented.
@@ -262,7 +261,7 @@ Overlay cleanup uses both bucket options:
 
 Close all mounts using that upper first. The upper maintenance session is
 exclusive; the lower connection stays read-only. Fsck validates visible merged
-references and the referenced lower versions, prunes explicitly removed
+references and the referenced immutable lower objects, prunes explicitly removed
 upper-directory records, then deletes only unreachable upper objects. It never sweeps the lower
 bucket. Stale/missing base references abort cleanup before any object deletion.
 The plain `--bucket UPPER --fsck` form rejects an overlay without its lower.
@@ -278,7 +277,7 @@ new lower entry under that name becomes visible. Fsck reports whiteouts removed
 and directory records pruned separately from deleted payload objects.
 
 An independent upper file survives deletion of its lower counterpart. Missing or
-version-changed content needed by metadata-only copy-up or partial ranges still
+invalid content needed by metadata-only copy-up or partial ranges still
 aborts cleanup. A live upper directory record becoming unreachable after lower
 delete/recreation is also an error: fsck preserves its manifest and local data
 instead of mistaking them for garbage. Automatic directory rebinding or content
@@ -309,7 +308,7 @@ Normal filesystem views expose `Symlink`/`Readlink`, `Link`, `Mknod` for regular
 files/FIFOs/Unix sockets, and `GetXattr`, `SetXattr`, `ListXattr`, `RemoveXattr`.
 `FSInfo.Kind` distinguishes node types, and `FSInfo.Nlink` reports link counts.
 The FUSE adapter implements the corresponding Linux operations. These changes
-use STFS v5 and require upgrading every client accessing a bucket; see the
+use STFS v6 and require upgrading every client accessing a bucket; see the
 [shared format and semantics guide](filesystem-posix.md) before deploying them.
 
 ## Explicit durability

@@ -87,6 +87,9 @@ func (b *Bucket) scanCluster(ctx context.Context, description BucketDescription,
 		return nil, volume.ObjectID{}, false, fail(503, "bucket inventory awaits recovered volumes")
 	}
 	s := b.server
+	if len(description.ClonePeers) > 0 {
+		return s.cowLogicalPage(ctx, b.ID(), after, limit, false)
+	}
 	if s.controller == nil {
 		return b.scan(ctx, description, after, limit)
 	}
@@ -157,8 +160,8 @@ func (b *Bucket) scanCluster(ctx context.Context, description BucketDescription,
 				r := &records[i]
 				r.Key.Bucket = b.ID()
 				copy(r.Key.Object[:], d.Take(32))
-				r.Info.Version, r.Info.Length, r.Info.Compression = d.U64(), d.U64(), volume.Compression(d.U8())
-				if previous != nil && bytes.Compare(r.Key.Object[:], previous[:]) <= 0 || r.Info.Version == 0 || r.Info.Compression > volume.XZ {
+				r.Info.Length, r.Info.Compression = d.U64(), volume.Compression(d.U8())
+				if previous != nil && bytes.Compare(r.Key.Object[:], previous[:]) <= 0 || r.Info.Compression > volume.XZ {
 					d.Err = client.ErrProtocol
 				}
 				previous = &r.Key.Object
@@ -298,7 +301,6 @@ func (s *Server) receiveBucketInventory(ctx context.Context, body []byte, actor 
 	e.V(uint64(len(records)))
 	for _, record := range records {
 		e.B = append(e.B, record.Key.Object[:]...)
-		e.U64(record.Info.Version)
 		e.U64(record.Info.Length)
 		e.U8(uint8(record.Info.Compression))
 	}

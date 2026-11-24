@@ -170,7 +170,7 @@ mask. Writes require ALL copies; a missing required node never silently reduces
 durability. Prepared writes stay invisible, retries retain their original result,
 and reads can use a committed replica while the primary is offline. Independent
 buckets remain available. Online replica additions, count reductions and codec
-changes preserve versions and retry receipts. Logical quotas count data once;
+changes preserve object bytes and retry receipts. Logical quotas count data once;
 physical quotas include every required copy and staging allocation.
 
 RAM replica restore and automatic relocation of existing multi-copy groups are

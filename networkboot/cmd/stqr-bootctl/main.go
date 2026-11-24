@@ -158,8 +158,8 @@ func publish(ctx context.Context, c config, bucket, dir string) error {
 		return err
 	}
 	defer conn.Close()
-	old, info, err := conn.Get(ctx, manifestID)
-	_ = old
+	old, _, err := conn.Get(ctx, manifestID)
+	manifestAbsent := errors.Is(err, client.ErrNotFound)
 	if err != nil && !errors.Is(err, client.ErrNotFound) {
 		return err
 	}
@@ -210,12 +210,10 @@ func publish(ctx context.Context, c config, bucket, dir string) error {
 		return err
 	}
 	opt := client.CASOptions{Scope: client.CASObject, MutationOptions: client.MutationOptions{RequestID: client.NewRequestID()}}
-	if info.Version == 0 {
+	if manifestAbsent {
 		opt.Absent = true
-	} else {
-		opt.ExpectedVersion = &info.Version
 	}
-	_, err = conn.CAS(ctx, manifestID, 0, nil, raw, opt)
+	_, err = conn.CAS(ctx, manifestID, 0, old, raw, opt)
 	return err
 }
 func fetch(ctx context.Context, c config, bucket, dir string, native bool) error {

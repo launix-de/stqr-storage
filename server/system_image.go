@@ -611,7 +611,7 @@ func (s *Server) publishSystemImage(ledger *controlLedger, decision client.Decis
 		return nil, err
 	}
 	err = s.metadataWrite(func(h *volume.Handle) error {
-		old, info, err := h.Get(systemHeadKey)
+		old, _, err := h.Get(systemHeadKey)
 		if err == nil {
 			var previous systemHead
 			if decodeControlRecord(old, &previous) != nil || previous.Schema != 1 {
@@ -623,7 +623,7 @@ func (s *Server) publishSystemImage(ledger *controlLedger, decision client.Decis
 			if previous.Decision.Sequence >= decision.Sequence || previous.Decision.Digest != decision.Previous {
 				return errControlConflict
 			}
-			_, err = h.Put(systemHeadKey, raw, volume.Options{ExpectedVersion: &info.Version})
+			_, err = h.Put(systemHeadKey, raw, volume.Options{})
 			return err
 		}
 		if !errors.Is(err, volume.ErrNotFound) {

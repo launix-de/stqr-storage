@@ -131,10 +131,10 @@ func checkRecoveryCancelledSourceFence(t *testing.T, interrupt bool) {
 	}
 	defer c.Close()
 	got, current, err := c.Get(ctx, object)
-	if err != nil || !bytes.Equal(got, payload) || current.Version != info.Version {
+	if err != nil || !bytes.Equal(got, payload) || current.Length != info.Length {
 		t.Fatal("last acknowledged source version lost", err)
 	}
-	if retry, err := c.Append(ctx, object, []byte("last acknowledged tail"), client.AppendOptions{RequestID: request}); err != nil || retry.Version != info.Version {
+	if retry, err := c.Append(ctx, object, []byte("last acknowledged tail"), client.AppendOptions{RequestID: request}); err != nil || retry.Length != info.Length {
 		t.Fatal("source retry receipt lost", err)
 	}
 	// A high numeric version on an unsealed shadow cannot become authority or

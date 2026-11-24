@@ -14,6 +14,7 @@ struct ov_dir {
 struct ks_overlay_state {
 	refcount_t refs;
 	stqr_info info;
+	struct buf root_head;
 	char **policy;
 	unsigned policies;
 	struct ov_dir **dirs;
@@ -31,6 +32,7 @@ static void ov_put(struct ks_overlay_state *s)
 	if (s->policy)
 		for (unsigned i = 0; i < s->policies; i++)
 			sq_free(s->policy[i]);
+	drop(&s->root_head);
 	sq_free(s->policy);
 	sq_free(s->dirs);
 	sq_free(s);
@@ -55,8 +57,7 @@ static int ov_node(struct ov_dir *d, const struct ks_node *node)
 	n.size = n.depth = 0;
 	n.inline_data = NULL;
 	memset(&n.root, 0, 32);
-	memset(&n.source, 0, 32);
-	n.source_version = 0;
+	n.lower = false;
 	n.write_path = NULL;
 	n.write_path_len = 0;
 	n.inherited = false;
@@ -218,7 +219,7 @@ static int ov_decode(const void *raw, size_t length, struct ks_overlay_state **o
 		}
 		put(&d->image, p, n);
 		err = d->image.err ? d->image.err : decode_node(d->image.p, d->image.n, &d->node);
-		if (err || d->node.kind != 2 || !nullid(d->node.root) || !nullid(d->node.source) ||
+		if (err || d->node.kind != 2 || !nullid(d->node.root) || d->node.lower ||
 		    d->opaque != nullid(d->lower)) {
 			err = -EUCLEAN;
 			goto fail;
@@ -307,7 +308,7 @@ static int ov_state(struct ks_fs *f, struct ks_overlay_state **out)
 		return err;
 	mutex_lock(&f->overlay_cache_lock);
 	s = f->overlay_state;
-	if (s && s->info.version == info.version &&
+	if (s && s->root_head.n == raw.n && !memcmp(s->root_head.p, raw.p, raw.n) &&
 	    !memcmp(s->info.runtime.bytes, info.runtime.bytes, 16)) {
 		refcount_inc(&s->refs);
 		mutex_unlock(&f->overlay_cache_lock);
@@ -330,8 +331,7 @@ static int ov_state(struct ks_fs *f, struct ks_overlay_state **out)
 	}
 	p = readblob(&d, &n);
 	err = d.err ? d.err : decode_node(p, n, &content);
-	if (err || done(&d) || content.kind != 1 || !nullid(content.source) ||
-	    content.size > KS_DIR_LIMIT) {
+	if (err || done(&d) || content.kind != 1 || content.lower || content.size > KS_DIR_LIMIT) {
 		err = -EUCLEAN;
 		goto done;
 	}
@@ -344,9 +344,16 @@ static int ov_state(struct ks_fs *f, struct ks_overlay_state **out)
 	if (err)
 		goto done;
 	err = ov_decode(data, content.size, &s);
+
 	if (err)
 		goto done;
 	s->info = info;
+	put(&s->root_head, raw.p, raw.n);
+	if (s->root_head.err) {
+		err = s->root_head.err;
+		ov_put(s);
+		goto done;
+	}
 	mutex_lock(&f->overlay_cache_lock);
 	struct ks_overlay_state *old = f->overlay_state;
 	f->overlay_state = s;
@@ -372,6 +379,11 @@ static int ov_edit(struct ks_fs *f, struct ks_overlay_state **out)
 	}
 	refcount_set(&s->refs, 1);
 	s->info = base->info;
+	put(&s->root_head, base->root_head.p, base->root_head.n);
+	if (s->root_head.err) {
+		err = s->root_head.err;
+		goto done;
+	}
 	s->policies = base->policies;
 	s->policy = sq_alloc(s->policies * sizeof(char *));
 	if (!s->policy) {
@@ -436,8 +448,8 @@ static int ov_publish(struct ks_fs *f, struct ks_overlay_state *s)
 		put(&root, f->lower->bucket.bytes, 16);
 		blob(&root, node.p, node.n);
 		err = root.err ? root.err
-			       : cas_object(f, ks_root_id, root.p, root.n, s->info.version,
-					    s->info.version == 0);
+			       : cas_object(f, ks_root_id, root.p, root.n, s->root_head.p,
+					    s->root_head.n, !s->root_head.n);
 	}
 	drop(&body);
 	drop(&node);
@@ -571,22 +583,31 @@ static int ov_dir(struct ks_fs *f, struct ks_overlay_state *s, stqr_object_id id
 	return 0;
 }
 static int ov_inode_match(struct inode *, void *);
-static bool ov_absent(struct ks_fs *f, stqr_object_id id, u64 version)
+static bool ov_absent(struct ks_fs *f, stqr_object_id id, stqr_proof proof)
 {
-	unsigned long hash = 0;
-	struct inode *inode;
+	struct ks_inode *entry;
+	struct inode *inode = NULL;
 	bool absent = false;
-	if (!f->sb)
+	if (!proof.cursor || zero(proof.subscription.bytes, 16))
 		return false;
-	for (unsigned k = 0; k < 32; k++)
-		hash = hash * 31 + id.bytes[k];
-	inode = ilookup5(f->sb, hash, ov_inode_match, id.bytes);
+	spin_lock(&f->inode_lock);
+	list_for_each_entry(entry, &f->inodes, mount_list)
+	{
+		if (eqid(entry->id, id)) {
+			inode = igrab(&entry->inode);
+			break;
+		}
+	}
+	spin_unlock(&f->inode_lock);
 	if (inode) {
-		absent = READ_ONCE(KS_I(inode)->upper_absent_version) == version;
+		mutex_lock(&KS_I(inode)->metadata_lock);
+		absent = !memcmp(&KS_I(inode)->upper_absent, &proof, sizeof(proof));
+		mutex_unlock(&KS_I(inode)->metadata_lock);
 		iput(inode);
 	}
 	return absent;
 }
+
 static int ov_snapshot(struct ks_fs *f, struct ks_overlay_state *state, stqr_object_id id,
 		       struct ks_snapshot *out)
 {
@@ -600,7 +621,7 @@ static int ov_snapshot(struct ks_fs *f, struct ks_overlay_state *state, stqr_obj
 	memset(out, 0, sizeof(*out));
 	out->id = id;
 	if (!d) {
-		err = (!ov_upper_ref(state, id) && ov_absent(f, id, state->info.version))
+		err = (!ov_upper_ref(state, id) && ov_absent(f, id, state->info.proof))
 			  ? -ENOENT
 			  : ks_plain_snapshot(f, id, out);
 		if (!err)
@@ -615,7 +636,8 @@ static int ov_snapshot(struct ks_fs *f, struct ks_overlay_state *state, stqr_obj
 		if (base.node.kind != 2) {
 			*out = base;
 			out->node.inherited = true;
-			out->node.upper_absent_version = state->info.version;
+			out->node.upper_absent = state->info.proof;
+
 			return 0;
 		}
 	} else if (!d->opaque && !d->metadata && !d->node.removed) {
@@ -651,17 +673,23 @@ static int ov_snapshot(struct ks_fs *f, struct ks_overlay_state *state, stqr_obj
 	out->raw_len = raw.n;
 	raw.p = NULL;
 	err = decode_node(out->raw, attrs_offset, &out->node);
+
 	if (!err) {
 		out->node.kind = 2;
 		out->node.size = data.n;
 		out->node.depth = 0;
 		out->node.inline_data = (u8 *)out->raw + attrs_offset;
-		memset(&out->node.source, 0, 32);
+		out->node.lower = false;
 		out->node.inherited = false;
 		if (!d)
-			out->node.upper_absent_version = state->info.version;
+			out->node.upper_absent = state->info.proof;
 		out->info = state->info;
 		out->info.length = data.n;
+		out->namespace_head = kmemdup(state->root_head.p, state->root_head.n, GFP_NOFS);
+		if (!out->namespace_head)
+			err = -ENOMEM;
+		else
+			out->namespace_head_len = state->root_head.n;
 	}
 done:
 	ks_snapshot_free(&base);
@@ -974,15 +1002,10 @@ static int ov_copy_inode(struct ks_fs *f, stqr_object_id id, const char *path, b
 	}
 	n.write_path = (u8 *)path;
 	n.write_path_len = strlen(path);
-	if (n.kind == 1) {
-		memset(&n.root, 0, 32);
-		n.depth = 0;
-		n.inline_data = NULL;
-		n.source = id;
-		n.source_version = base.info.version;
-	}
+	if (n.kind == 1 && n.depth)
+		n.lower = true;
 	encode_node(&raw, &n);
-	err = raw.err ? raw.err : cas_object(f, id, raw.p, raw.n, 0, true);
+	err = raw.err ? raw.err : cas_object(f, id, raw.p, raw.n, NULL, 0, true);
 	if (err == -EAGAIN)
 		err = 0;
 done:
@@ -1401,20 +1424,19 @@ static int ks_overlay_node_cas(struct ks_fs *f, const struct ks_snapshot *old,
 	err = ov_edit(f, &s);
 	if (err)
 		goto done;
-	if (s->info.version != old->info.version) {
-		err = -EAGAIN;
-		goto put;
-	}
+
 	err = ov_writable(f, s, old->id, &path);
 	if (!err)
 		err = ov_dir(f, s, old->id, &d);
+	if (!err && (s->root_head.n != old->namespace_head_len ||
+		     memcmp(s->root_head.p, old->namespace_head, old->namespace_head_len)))
+		err = -EAGAIN;
 	if (!err) {
 		d->metadata = true;
 		err = ov_node(d, next);
 	}
 	if (!err)
 		err = ov_publish(f, s);
-put:
 	sq_free(path);
 	ov_put(s);
 done:

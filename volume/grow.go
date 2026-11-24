@@ -6,7 +6,7 @@ import "fmt"
 // Grow explicitly extends a regular file or RAM backend to at least sizeBytes and adopts the
 // added capacity crash-safely (volatile for RAM). It never shrinks or resizes raw
 // devices. Call outside a handle session. A successful resize preserves volume ID,
-// object versions, sparse holes, tombstones and retained request results.
+// object contents, sparse holes, tombstones and retained request results.
 func (v *Volume) Grow(sizeBytes int64) error {
 	v.mu.Lock()
 	defer v.mu.Unlock()

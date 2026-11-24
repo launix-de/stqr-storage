@@ -10,13 +10,14 @@ import (
 // Compression and redo staging are bounded in RAM. Transient input spills
 // to a 0600 temporary file; committed objects always live in the volume format.
 type encodedSpool struct {
-	memory []byte
-	file   *os.File
-	size   int64
+	noSpill bool // RAM-class payload must never enter a disk staging file
+	memory  []byte
+	file    *os.File
+	size    int64
 }
 
 func (s *encodedSpool) Write(b []byte) (int, error) {
-	if s.file == nil && s.size+int64(len(b)) > 4<<20 {
+	if !s.noSpill && s.file == nil && s.size+int64(len(b)) > 4<<20 {
 		f, e := os.CreateTemp("", "stqr-encode-*")
 		if e != nil {
 			return 0, e
@@ -61,7 +62,7 @@ func (s *encodedSpool) Close() {
 	}
 }
 func (t *transaction) storeCompressed(pieces []payloadPiece, codec Compression) ([]dataSpan, error) {
-	spool := &encodedSpool{}
+	spool := &encodedSpool{noSpill: t.sb.Identity.Class == RAM}
 	defer spool.Close()
 	buffer := make([]byte, BlockSize)
 	var spans []dataSpan

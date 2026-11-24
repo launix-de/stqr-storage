@@ -120,7 +120,7 @@ func TestAdminDraftBucketDeletionCannotTouchData(t *testing.T) {
 		t.Fatal(err)
 	}
 	got, current, err := b.Get(context.Background(), actor, object)
-	if err != nil || !bytes.Equal(got, want) || current.Version != info.Version {
+	if err != nil || !bytes.Equal(got, want) || current.Length != info.Length {
 		t.Fatal("closing private draft closed or modified the borrowed data volume", err)
 	}
 	b.mu.Lock()

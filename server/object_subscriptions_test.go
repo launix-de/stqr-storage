@@ -37,11 +37,11 @@ func subscriptionClients(t *testing.T) (*Server, *client.Client, *client.Client,
 	t.Cleanup(func() { writer.Close() })
 	return s, reader, writer, ctx
 }
-func waitSubscription(t *testing.T, ctx context.Context, sub *client.Subscription, wantVersion uint64) ([]byte, client.ObjectInfo, error) {
+func waitSubscription(t *testing.T, ctx context.Context, sub *client.Subscription, want string) ([]byte, client.ObjectInfo, error) {
 	t.Helper()
 	for {
 		data, info, _, err := sub.Snapshot()
-		if info.Version >= wantVersion {
+		if string(data) == want || want == "" && errors.Is(err, client.ErrNotFound) {
 			return data, info, err
 		}
 		select {
@@ -63,15 +63,15 @@ func TestObjectSubscriptionMutationsAndLifetime(t *testing.T) {
 		t.Fatal(err)
 	}
 	data, got, cursor, err := sub.Snapshot()
-	if err != nil || string(data) != "abc" || got.Version != info.Version || cursor == 0 {
+	if err != nil || string(data) != "abc" || got.Length != info.Length || cursor == 0 {
 		t.Fatal(string(data), got, cursor, err)
 	}
 	req := client.NewRequestID()
-	app, err := writer.Append(ctx, id, []byte("d"), client.AppendOptions{RequestID: req})
+	_, err = writer.Append(ctx, id, []byte("d"), client.AppendOptions{RequestID: req})
 	if err != nil {
 		t.Fatal(err)
 	}
-	data, _, err = waitSubscription(t, ctx, sub, app.Version)
+	data, _, err = waitSubscription(t, ctx, sub, "abcd")
 	if err != nil || string(data) != "abcd" {
 		t.Fatal(string(data), err)
 	}
@@ -80,18 +80,18 @@ func TestObjectSubscriptionMutationsAndLifetime(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	trunc, err := writer.Trunc(ctx, id, 2, client.TruncOptions{RequestID: client.NewRequestID()})
+	_, err = writer.Trunc(ctx, id, 2, client.TruncOptions{RequestID: client.NewRequestID()})
 	if err != nil {
 		t.Fatal(err)
 	}
-	data, _, err = waitSubscription(t, ctx, sub, trunc.Version)
+	data, _, err = waitSubscription(t, ctx, sub, "ab")
 	if err != nil || string(data) != "ab" {
 		t.Fatal(string(data), err)
 	}
 	if err = writer.Delete(ctx, id, client.DeleteOptions{RequestID: client.NewRequestID()}); err != nil {
 		t.Fatal(err)
 	}
-	_, _, err = waitSubscription(t, ctx, sub, trunc.Version+1)
+	_, _, err = waitSubscription(t, ctx, sub, "")
 	if !errors.Is(err, client.ErrNotFound) {
 		t.Fatal(err)
 	}
@@ -99,7 +99,7 @@ func TestObjectSubscriptionMutationsAndLifetime(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	data, _, err = waitSubscription(t, ctx, sub, info.Version)
+	data, _, err = waitSubscription(t, ctx, sub, "again")
 	if err != nil || string(data) != "again" {
 		t.Fatal(string(data), err)
 	}
@@ -137,11 +137,11 @@ func TestObjectSubscriptionStreamAndRangedUpdates(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer ranged.Close(ctx)
-	info, err := writer.PutRange(ctx, id, 1, []byte("abc"), client.PutOptions{RequestID: client.NewRequestID()})
+	_, err = writer.PutRange(ctx, id, 1, []byte("abc"), client.PutOptions{RequestID: client.NewRequestID()})
 	if err != nil {
 		t.Fatal(err)
 	}
-	got, _, err = waitSubscription(t, ctx, ranged, info.Version)
+	got, _, err = waitSubscription(t, ctx, ranged, "abc")
 	if err != nil || string(got) != "abc" {
 		t.Fatal(string(got), err)
 	}
@@ -186,7 +186,7 @@ func TestObjectSubscriptionGCCleanup(t *testing.T) {
 func TestSubscriptionStoreBoundedAndInvalidated(t *testing.T) {
 	s, reader, writer, ctx := subscriptionClients(t)
 	first, second := client.ObjectID{4}, client.ObjectID{5}
-	initial, err := writer.Put(ctx, first, []byte("first"), client.PutOptions{})
+	_, err := writer.Put(ctx, first, []byte("first"), client.PutOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -207,16 +207,16 @@ func TestSubscriptionStoreBoundedAndInvalidated(t *testing.T) {
 	if count != 1 {
 		t.Fatal("cache retained unexpected subscription count", count)
 	}
-	updated, err := writer.Put(ctx, first, []byte("updated"), client.PutOptions{})
+	_, err = writer.Put(ctx, first, []byte("updated"), client.PutOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	for {
-		data, info, err := cache.Get(ctx, first)
+		data, _, err := cache.Get(ctx, first)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if info.Version == updated.Version {
+		if string(data) == "updated" {
 			if string(data) != "updated" {
 				t.Fatal(string(data))
 			}
@@ -228,7 +228,7 @@ func TestSubscriptionStoreBoundedAndInvalidated(t *testing.T) {
 			t.Fatal(ctx.Err())
 		}
 	}
-	if _, err = cache.CAS(ctx, first, 0, nil, []byte("wrong"), client.CASOptions{Scope: client.CASObject, MutationOptions: client.MutationOptions{ExpectedVersion: &initial.Version}}); !errors.Is(err, client.ErrPrecondition) {
+	if _, err = cache.CAS(ctx, first, 0, []byte("first"), []byte("wrong"), client.CASOptions{Scope: client.CASObject, MutationOptions: client.MutationOptions{}}); !errors.Is(err, client.ErrPrecondition) {
 		t.Fatal(err)
 	}
 	if data, _, err := cache.Get(ctx, second); err != nil || string(data) != "second" {
@@ -318,11 +318,11 @@ func TestDaemonSubscriptionResyncsBeforeRangeHandoff(t *testing.T) {
 	if err != nil || string(data) != "before" || newCursor <= cursor {
 		t.Fatal(string(data), newCursor, err)
 	}
-	updated, err := c.Put(ctx, oid, []byte("after"), client.PutOptions{})
+	_, err = c.Put(ctx, oid, []byte("after"), client.PutOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	data, _, err = waitSubscription(t, ctx, resumed, updated.Version)
+	data, _, err = waitSubscription(t, ctx, resumed, "after")
 	if err != nil || string(data) != "after" {
 		t.Fatal(string(data), err)
 	}
@@ -389,7 +389,7 @@ func TestObjectSubscriptionSnapshotRegistrationBarrier(t *testing.T) {
 			t.Fatal(err)
 		}
 		data, info, _, err := sub.Snapshot()
-		if err == nil && (info.Version != uint64(len(data))+1 || info.Length != uint64(len(data))) {
+		if err == nil && (info.Length != uint64(len(data))) {
 			t.Fatal("snapshot/listener gap", info, len(data))
 		}
 		if err != nil && !errors.Is(err, client.ErrSubscriptionResync) {
@@ -412,7 +412,7 @@ func TestObjectSubscriptionJournalOverflowRequestsResync(t *testing.T) {
 		t.Fatal(err)
 	}
 	for i := 0; i < maxSubscriptionJournalEvents+1; i++ {
-		registry.publish(key, uint64(i+1), volume.Info{Version: uint64(i + 2), Deleted: true}, nil)
+		registry.publish(key, volume.Info{Deleted: true}, nil)
 	}
 	if registry.count != 0 || registry.bytes != 0 {
 		t.Fatal("retention budget leaked", registry.count, registry.bytes)

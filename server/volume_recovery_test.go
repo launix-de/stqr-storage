@@ -285,10 +285,10 @@ func TestRecoveryBeginPreservesUnavailableRanges(t *testing.T) {
 	}
 	defer c2.Close()
 	got, info, err := c2.Get(ctx, object)
-	if err != nil || !bytes.Equal(got, payload) || info.Version != appended.Version {
+	if err != nil || !bytes.Equal(got, payload) || info.Length != appended.Length {
 		t.Fatal("recovered bytes/version", err)
 	}
-	if result, err := c2.Append(ctx, object, []byte("tail"), client.AppendOptions{RequestID: appendID}); err != nil || result.Version != appended.Version {
+	if result, err := c2.Append(ctx, object, []byte("tail"), client.AppendOptions{RequestID: appendID}); err != nil || result.Length != appended.Length {
 		t.Fatal("append retry was not retained", err)
 	}
 	c2.Close()
@@ -441,7 +441,7 @@ func TestRecoveredStaleCopiesCannotOverrideOtherRanges(t *testing.T) {
 	}
 	defer c.Close()
 	got, info, err := c.Get(ctx, oid)
-	if err != nil || string(got) != "current" || info.Version != current.Version {
+	if err != nil || string(got) != "current" || info.Length != current.Length {
 		t.Fatal("stale copy overrode current data", err)
 	}
 	c.Close()

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
-// Package volume implements STQR's local, versioned storage engine. It has no
+// Package volume implements STQR's local storage engine with a versioned disk format. It has no
 // dependency on the server, client protocol, or cluster membership algorithms.
 package volume
 
@@ -15,7 +15,7 @@ const (
 	PageSize        = 4096
 	BlockSize       = 1 << 20
 	MinVolumeSize   = 256 << 10
-	FormatVersion   = 4
+	FormatVersion   = 5
 	pageHeaderSize  = 64
 	pagePayload     = PageSize - pageHeaderSize
 	superblockBytes = 2 * PageSize
@@ -119,9 +119,9 @@ type OpenOptions struct {
 }
 
 type Info struct {
-	Version, Length uint64
-	Compression     Compression
-	Deleted         bool
+	Length      uint64
+	Compression Compression
+	Deleted     bool
 }
 type Result struct {
 	Info   Info
@@ -134,18 +134,19 @@ type Result struct {
 type Options struct {
 	Accepted bool // weaker ACK; visible until grouped checkpoint, default is durable
 
-	RequestID                       ID
-	Compression                     *Compression
-	ExpectedVersion, ExpectedLength *uint64
-	CreateOnly                      bool
-	WholeObject                     bool
-	UseGuaranteed                   bool   // trusted owner of the entire volume reserve; shared buckets use GuaranteedAllowance
-	GuaranteedAllowance             uint64 // trusted physical budget from this caller's guarantee; never consumes another bucket's reserve
-	ImportShadow                    bool   // trusted fenced incoming copy; becomes authoritative only through committed placement
-	InFlightAllowance               uint64 // trusted physical allowance; never consumes bucket guarantees
-	restoreSameVersion              bool
-	restoreSegmented                bool
-	prepare                         *ReplicaBinding
+	RequestID           ID
+	Compression         *Compression
+	ExpectedLength      *uint64
+	CompareOffset       uint64 // optional byte predicate, checked under the same volume lock
+	Compare             []byte // nil disables comparison; not an object revision
+	CreateOnly          bool
+	WholeObject         bool
+	UseGuaranteed       bool   // trusted owner of the entire volume reserve; shared buckets use GuaranteedAllowance
+	GuaranteedAllowance uint64 // trusted physical budget from this caller's guarantee; never consumes another bucket's reserve
+	ImportShadow        bool   // trusted fenced incoming copy; becomes authoritative only through committed placement
+	InFlightAllowance   uint64 // trusted physical allowance; never consumes bucket guarantees
+	restoreSegmented    bool
+	prepare             *ReplicaBinding
 }
 
 type Extent struct {

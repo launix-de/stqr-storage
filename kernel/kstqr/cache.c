@@ -72,7 +72,6 @@ static void update(void *arg, const stqr_update *u)
 		if (u->cursor && u->cursor <= e->cursor)
 			goto out;
 		if (e->valid && u->cursor == e->cursor + 1 && u->parts == 1 && !u->part &&
-		    u->previous_version == e->info.version && u->version > u->previous_version &&
 		    u->change == STQR_UPDATE_REPLACE && !u->offset && u->size == u->length &&
 		    u->size <= (1U << 20) && u->size <= c->fs->cache_budget - (c->bytes - e->size))
 			raw = kmemdup(u->data, u->size, GFP_NOFS);
@@ -80,7 +79,6 @@ static void update(void *arg, const stqr_update *u)
 		if (raw) {
 			e->raw = raw;
 			e->size = u->size;
-			e->info.version = u->version;
 			e->info.length = u->length;
 			e->cursor = u->cursor;
 			e->valid = true;
@@ -132,6 +130,8 @@ static int copy_entry(struct ks_cache *c, struct cached_inode *e, void **p, size
 		return -ENOMEM;
 	*n = e->size;
 	*info = e->info;
+	info->proof.subscription = e->subscription;
+	info->proof.cursor = e->cursor;
 	list_move_tail(&e->lru, &c->lru);
 	return 0;
 }
@@ -146,7 +146,7 @@ int ks_cache_peek(struct ks_fs *f, stqr_object_id id, void **p, size_t *n, stqr_
 	mutex_unlock(&c->lock);
 	return err;
 }
-bool ks_cache_version(struct ks_fs *f, stqr_object_id id, u64 *version)
+bool ks_cache_proof(struct ks_fs *f, stqr_object_id id, stqr_proof *proof)
 {
 	struct ks_cache *c = f->cache;
 	struct cached_inode *e;
@@ -156,7 +156,8 @@ bool ks_cache_version(struct ks_fs *f, stqr_object_id id, u64 *version)
 	mutex_lock(&c->lock);
 	e = find(c, id);
 	if (c->available && e && e->valid && e->size >= 4 && !memcmp(e->raw, "STFS", 4)) {
-		*version = e->info.version;
+		proof->subscription = e->subscription;
+		proof->cursor = e->cursor;
 		found = true;
 	}
 	mutex_unlock(&c->lock);

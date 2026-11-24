@@ -210,5 +210,5 @@ func testSyncThrough(v *Volume, k Key, version uint64) error {
 		return e
 	}
 	defer h.Close()
-	return h.SyncThrough(k, version)
+	return h.SyncThrough(k)
 }

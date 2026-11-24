@@ -2,6 +2,7 @@
 package client
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"math"
@@ -150,7 +151,7 @@ func (f *Filesystem) unlinkNode(ctx context.Context, parent ObjectID, name strin
 			if e != nil {
 				return e
 			}
-			if fresh.info.Version != p.info.Version {
+			if !bytes.Equal(fresh.raw, p.raw) {
 				continue
 			}
 			return ErrFSFormat

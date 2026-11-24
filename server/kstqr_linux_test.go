@@ -369,9 +369,8 @@ func TestKSTQRVirtualMachine(t *testing.T) {
 		// Leave a valid interrupted multi-inode operation for the kernel to read
 		// without writes on the RO mount, and then finish on the RW mount.
 		type participant struct {
-			id      client.ObjectID
-			raw     []byte
-			version uint64
+			id  client.ObjectID
+			raw []byte
 		}
 		members := []participant{{id: client.FilesystemRootID()}, {id: file.ID}}
 		sort.Slice(members, func(i, j int) bool { return bytes.Compare(members[i].id[:], members[j].id[:]) < 0 })
@@ -381,30 +380,28 @@ func TestKSTQRVirtualMachine(t *testing.T) {
 			copy(transaction[i*16:], id[:])
 		}
 		descriptor := client.Encoder{B: []byte("STFT")}
-		descriptor.U16(1)
+		descriptor.U16(2)
 		descriptor.U8(0)
 		descriptor.U32(uint32(len(members)))
-		var rootVersion uint64
+		var rootRaw []byte
 		for i := range members {
-			raw, info, e := conn.Get(ctx, members[i].id)
+			raw, _, e := conn.Get(ctx, members[i].id)
 			if e != nil {
 				t.Fatal(e)
 			}
 			members[i].raw = raw
-			members[i].version = info.Version
 			descriptor.B = append(descriptor.B, members[i].id[:]...)
-			descriptor.U64(info.Version)
 			descriptor.Blob(raw)
 			descriptor.Blob(raw)
 			if members[i].id == client.FilesystemRootID() {
-				rootVersion = info.Version
+				rootRaw = raw
 			}
 		}
 		if _, err = conn.CAS(ctx, transaction, 0, nil, descriptor.B, client.CASOptions{Scope: client.CASObject, MutationOptions: client.MutationOptions{RequestID: client.NewRequestID(), Absent: true}}); err != nil {
 			t.Fatal(err)
 		}
 		marker := append([]byte("STFL\x01\x00"), transaction[:]...)
-		if _, err = conn.CAS(ctx, client.FilesystemRootID(), 0, nil, marker, client.CASOptions{Scope: client.CASObject, MutationOptions: client.MutationOptions{RequestID: client.NewRequestID(), ExpectedVersion: &rootVersion}}); err != nil {
+		if _, err = conn.CAS(ctx, client.FilesystemRootID(), 0, rootRaw, marker, client.CASOptions{Scope: client.CASObject, MutationOptions: client.MutationOptions{RequestID: client.NewRequestID()}}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -744,6 +741,21 @@ poweroff -f
 			t.Fatal("directory xattr", string(x), e)
 		}
 		watcher.Close()
+		deadline := time.Now().Add(3 * time.Second)
+		for {
+			s.wsMu.Lock()
+			connected := 0
+			for ws := range s.sockets {
+				if ws.authorization != nil && ws.authorization.bucket != nil && ws.authorization.bucket.ID() == volume.ID(nativeUpperID) {
+					connected++
+				}
+			}
+			s.wsMu.Unlock()
+			if connected <= 1 || time.Now().After(deadline) {
+				break
+			}
+			time.Sleep(time.Millisecond)
+		}
 		if _, e := uc.CheckOverlayFilesystem(ctx, conn, client.ID(b.ID())); e != nil {
 			t.Fatal("native overlay fsck", e)
 		}

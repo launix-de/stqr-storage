@@ -14,10 +14,17 @@ import (
 
 // Bucket object operations own authorization, lifecycle, codec and admission.
 // The transport only decodes/encodes. Committed ranges select the authoritative
-// node and optional pinned volume; local versions/tombstones/receipts resolve
+// node and optional pinned volume; local records/tombstones/receipts resolve
 // unrestricted local placement. Required replicas use the staged ALL path;
 // transport failures never elect a replacement writer.
 func (b *Bucket) authorize(p principal, permission BucketPermissions) (BucketDescription, error) {
+	if p.cowInternal {
+		d := b.storageDescription()
+		if d.DeletionComplete {
+			return d, ErrBucketNotFound
+		}
+		return d, nil
+	}
 	b.mu.RLock()
 	maintenance := b.maintenance
 	b.mu.RUnlock()
@@ -182,6 +189,23 @@ func (b *Bucket) selectVolume(d BucketDescription, key volume.Key, request volum
 				h.Close()
 				return v, result.Info, true, nil
 			}
+			prepared, known, e := h.ReplicaStatus(request)
+			if e != nil {
+				h.Close()
+				return nil, latest, false, e
+			}
+			if known {
+				if prepared.Request.Key != key {
+					h.Close()
+					return nil, latest, false, volume.ErrRequestID
+				}
+				current, e := h.RecordInfo(key)
+				h.Close()
+				if errors.Is(e, volume.ErrNotFound) {
+					return v, volume.Info{}, false, nil
+				}
+				return v, current, e == nil, e
+			}
 		}
 		info, err := h.RecordInfo(key)
 		if err == nil && b.server.controller != nil {
@@ -196,7 +220,10 @@ func (b *Bucket) selectVolume(d BucketDescription, key volume.Key, request volum
 		}
 		h.Close()
 		if err == nil {
-			if !found || info.Version > latest.Version {
+			if found && selected != v {
+				return nil, latest, false, fail(503, "ambiguous physical copies without an authoritative volume pin")
+			}
+			if !found {
 				selected = v
 				latest = info
 				found = true
@@ -274,6 +301,14 @@ func (b *Bucket) GetRange(ctx context.Context, p principal, id volume.ObjectID, 
 		if bindingErr := b.server.checkObjectBinding(ctx, b.ID(), id, true); bindingErr != nil {
 			return nil, volume.Info{}, bindingErr
 		}
+		if errors.Is(err, volume.ErrNotFound) && len(d.ClonePeers) > 0 {
+			var data bytes.Buffer
+			info, _, e := b.cowCopyTo(ctx, id, offset, min(length, uint64(volume.MaxBufferedRead)+1), &data, nil)
+			if data.Len() > volume.MaxBufferedRead {
+				return nil, info, volume.ErrRange
+			}
+			return data.Bytes(), info, e
+		}
 		return nil, volume.Info{}, b.absenceError(id, prior, err)
 	}
 	h, err := v.Open(false)
@@ -288,13 +323,13 @@ func (b *Bucket) GetRange(ctx context.Context, p principal, id volume.ObjectID, 
 }
 
 // CopyTo holds one snapshot handle for the complete transfer, without buffering
-// the whole object. Mutations never expose partially updated object versions.
+// the whole object. Mutations never expose partially applied object contents.
 func (b *Bucket) CopyTo(ctx context.Context, p principal, id volume.ObjectID, offset, length uint64, dst io.Writer) (volume.Info, uint64, error) {
-	return b.copyToVersion(ctx, p, id, offset, length, dst, nil)
+	return b.copyToChecked(ctx, p, id, offset, length, dst, nil)
 }
 
 // Check while holding the same native read handle that copies the data.
-func (b *Bucket) copyToVersion(ctx context.Context, p principal, id volume.ObjectID, offset, length uint64, dst io.Writer, version *uint64) (volume.Info, uint64, error) {
+func (b *Bucket) copyToChecked(ctx context.Context, p principal, id volume.ObjectID, offset, length uint64, dst io.Writer, condition *volume.Options) (volume.Info, uint64, error) {
 	if err := ctx.Err(); err != nil {
 		return volume.Info{}, 0, err
 	}
@@ -311,6 +346,9 @@ func (b *Bucket) copyToVersion(ctx context.Context, p principal, id volume.Objec
 		if bindingErr := b.server.checkObjectBinding(ctx, b.ID(), id, true); bindingErr != nil {
 			return volume.Info{}, 0, bindingErr
 		}
+		if errors.Is(err, volume.ErrNotFound) && len(d.ClonePeers) > 0 {
+			return b.cowCopyTo(ctx, id, offset, length, dst, condition)
+		}
 		return volume.Info{}, 0, b.absenceError(id, prior, err)
 	}
 	h, err := v.Open(false)
@@ -325,8 +363,10 @@ func (b *Bucket) copyToVersion(ctx context.Context, p principal, id volume.Objec
 	if err != nil {
 		return info, 0, err
 	}
-	if version != nil && info.Version != *version {
-		return info, 0, volume.ErrPrecondition
+	if condition != nil {
+		if err := h.Check(key, *condition); err != nil {
+			return info, 0, err
+		}
 	}
 	n, err := h.CopyTo(key, offset, length, bucketContextWriter{ctx: ctx, w: dst})
 	return info, n, err
@@ -370,6 +410,17 @@ func (b *Bucket) Stat(ctx context.Context, p principal, id volume.ObjectID) (vol
 	if bindingErr := b.server.checkObjectBinding(ctx, b.ID(), id, true); bindingErr != nil {
 		err = bindingErr
 	}
+	if errors.Is(err, volume.ErrNotFound) && len(d.ClonePeers) > 0 {
+		snapshot, e := b.server.cowLogicalSnapshot(ctx, b.ID(), id, true)
+		if e != nil {
+			return volume.Info{}, e
+		}
+		defer snapshot.close()
+		if snapshot == nil || snapshot.Info.Deleted {
+			return volume.Info{}, volume.ErrNotFound
+		}
+		return snapshot.Info, nil
+	}
 	if info.Deleted && err == nil {
 		err = volume.ErrNotFound
 	}
@@ -382,6 +433,22 @@ func (b *Bucket) mutate(ctx context.Context, p principal, id volume.ObjectID, op
 	s := b.server
 	if s.metadataPreview {
 		return volume.Result{}, fail(503, "metadata preview cannot mutate user objects")
+	}
+	if !p.cowInternal {
+		permission := BucketWrite
+		if opcode == 0x0104 {
+			permission = BucketAppend
+		}
+		if opcode == 0x0106 {
+			permission = blockDeletePermission(p)
+		}
+		if _, err := b.authorize(p, permission); err != nil {
+			return volume.Result{}, err
+		}
+	}
+	cowProof, cowLinked, cowErr := s.cowPrepareWrite(ctx, b, id, p)
+	if cowErr != nil {
+		return volume.Result{}, cowErr
 	}
 	if s.replicas != nil {
 		release := s.replicas.lock(volume.Key{Bucket: b.ID(), Object: id})
@@ -399,13 +466,13 @@ func (b *Bucket) mutate(ctx context.Context, p principal, id volume.ObjectID, op
 			return volume.Result{}, fail(501, "exclusive maintenance cannot mutate after multi-node admission")
 		}
 	}
-	if l := s.leaseRecord(b); l != nil && !l.Released && l.ReadOnly {
+	if l := s.leaseRecord(b); l != nil && !l.Released && l.ReadOnly && !b.cowMaintenanceAllowed(ctx, p) {
 		return volume.Result{}, ErrBucketForbidden
 	}
 	if b.underMaintenance() && p.connection != nil && p.connection.blockReadOnly.Load() {
 		return volume.Result{}, ErrBucketForbidden
 	}
-	if b.underMaintenance() && opcode != 0x0108 && opcode != 0x0106 && (p.connection == nil || !p.connection.offlineCopy && !(p.connection.blockDevice.Load() && (opcode == 0x0102 || opcode == 0x0103))) {
+	if b.underMaintenance() && !b.cowMaintenanceAllowed(ctx, p) && opcode != 0x0108 && opcode != 0x0106 && (p.connection == nil || !p.connection.offlineCopy && !(p.connection.blockDevice.Load() && (opcode == 0x0102 || opcode == 0x0103))) {
 		return volume.Result{}, fail(409, "maintenance permits only recovery CAS and DELETE")
 	}
 	s.mu.RLock()
@@ -427,6 +494,32 @@ func (b *Bucket) mutate(ctx context.Context, p principal, id volume.ObjectID, op
 	d, err := b.authorize(p, permission)
 	if err != nil {
 		return volume.Result{}, err
+	}
+	if !p.cowInternal {
+		if cowLinked {
+			g, e := s.cowGraph()
+			if e != nil {
+				return volume.Result{}, e
+			}
+			current, e := s.cowGraphDigest(g, b.ID())
+			if e != nil {
+				return volume.Result{}, e
+			}
+			if current != cowProof {
+				return volume.Result{}, fail(503, "clone graph changed before mutation")
+			}
+		} else if len(d.ClonePeers) > 0 {
+			return volume.Result{}, fail(503, "clone connection appeared before mutation")
+		}
+	}
+	if opcode == cowRestoreOpcode {
+		restore, ok := ctx.Value(cowRestoreKey{}).(cowRestore)
+		if !p.cowInternal || !ok {
+			return volume.Result{}, ErrBucketForbidden
+		}
+		if err := s.cowValidateRestore(b.ID(), restore); err != nil {
+			return volume.Result{}, err
+		}
 	}
 	if err := s.checkObjectOwner(b.ID(), id); err != nil {
 		return volume.Result{}, err
@@ -466,17 +559,20 @@ func (b *Bucket) mutate(ctx context.Context, p principal, id volume.ObjectID, op
 		return volume.Result{}, fail(400, "mutation request ID is required")
 	}
 	key := volume.Key{Bucket: b.ID(), Object: id}
-	v, old, _, err := b.selectVolume(d, key, opt.RequestID, true)
+	v, old, exists, err := b.selectVolume(d, key, opt.RequestID, true)
 	if err != nil {
 		if errors.Is(err, volume.ErrFull) && s.scopes != nil && s.scopes.requestSpace(b.ID(), id, addCapacity(length, 64<<10)) {
 			return volume.Result{}, fail(503, "waiting for range capacity handoff")
 		}
 		return volume.Result{}, err
 	}
+	if opcode == cowRestoreOpcode && exists {
+		return volume.Result{Info: old}, nil
+	}
 	if err := s.switchAcceptedVolume(b.ID(), v, opt.Accepted); err != nil {
 		return volume.Result{}, err
 	}
-	if old.Version == 0 && opcode != 0x0102 && opcode != 0x0106 && b.lostRange(id) {
+	if !exists && opcode != 0x0102 && opcode != 0x0106 && b.lostRange(id) {
 		return volume.Result{}, fail(410, "partial mutation cannot recreate a lost object")
 	}
 	var replicatedEntry client.RangeEntry
@@ -539,6 +635,14 @@ func (b *Bucket) mutate(ctx context.Context, p principal, id volume.ObjectID, op
 		codec = retry.Info.Compression
 	}
 	opt.Compression = &codec
+	var snapshotInfo *volume.Info
+	if opcode == cowRestoreOpcode {
+		restore := ctx.Value(cowRestoreKey{}).(cowRestore)
+		restore.info.Compression = codec
+		ctx = context.WithValue(ctx, cowRestoreKey{}, restore)
+		snapshotInfo = &restore.info
+	}
+
 	if len(replicatedEntry.Locations) > 1 {
 		// Capture an incoming stream once. The primary and every follower hash
 		// the identical original operation; retries retain its APPEND offset.
@@ -557,13 +661,15 @@ func (b *Bucket) mutate(ctx context.Context, p principal, id volume.ObjectID, op
 		}
 		src = spool
 	}
-	if !repeated && !d.Policy.Limits.Unlimited && d.Policy.Limits.Accounting == "logical" {
+	if !p.cowInternal && !repeated && !d.Policy.Limits.Unlimited && d.Policy.Limits.Accounting == "logical" {
 		oldLength := old.Length
 		if old.Deleted {
 			oldLength = 0
 		}
 		next := oldLength
 		switch opcode {
+		case cowRestoreOpcode:
+			next = ctx.Value(cowRestoreKey{}).(cowRestore).info.Length
 		case 0x0102:
 			next = length
 		case 0x0103:
@@ -611,7 +717,7 @@ func (b *Bucket) mutate(ctx context.Context, p principal, id volume.ObjectID, op
 		}
 	}
 	if len(replicatedEntry.Locations) > 1 {
-		result, e := b.prepareReplicated(v, key, replicatedEntry, opcode, offset, length, src, expected, opt)
+		result, e := b.prepareReplicated(ctx, v, key, replicatedEntry, opcode, offset, length, src, expected, opt)
 		if e != nil {
 			return result, e
 		}
@@ -633,7 +739,7 @@ func (b *Bucket) mutate(ctx context.Context, p principal, id volume.ObjectID, op
 		if record.State == volume.ReplicaPublished {
 			return result, nil
 		}
-		header := replicaHeader{Volume: v.Identity().VolumeID, Request: record.Request, Binding: record.Binding, PreviousVersion: record.PreviousVersion, Opcode: replicaOpcode(opcode), Offset: offset, Length: length, Expected: expected, Options: opt}
+		header := replicaHeader{Volume: v.Identity().VolumeID, Request: record.Request, Binding: record.Binding, Opcode: replicaOpcode(opcode), Offset: offset, Length: length, Expected: expected, Options: opt, Snapshot: snapshotInfo}
 		if mutationRelease != nil {
 			mutationRelease()
 			mutationRelease = nil
@@ -674,8 +780,8 @@ func (b *Bucket) mutate(ctx context.Context, p principal, id volume.ObjectID, op
 		}
 		result, e = h.PublishReplica(opt.RequestID, record.Binding)
 		if e == nil {
-			if current.State != volume.ReplicaPublished && s.objectSubscriptions.watched(key) {
-				s.objectSubscriptions.publish(key, old.Version, result.Info, h)
+			if !p.cowInternal && current.State != volume.ReplicaPublished && s.objectSubscriptions.watched(key) {
+				s.objectSubscriptions.publish(key, result.Info, h)
 			}
 			h.Close()
 			b.usage.mu.Lock()
@@ -710,6 +816,10 @@ func (b *Bucket) mutate(ctx context.Context, p principal, id volume.ObjectID, op
 		}
 	}()
 	switch opcode {
+	case cowRestoreOpcode:
+		restore := ctx.Value(cowRestoreKey{}).(cowRestore)
+		err = h.Restore(key, restore.info, cowExtentSource(src), opt)
+		result.Info = restore.info
 	case 0x0102:
 		result.Info, err = h.PutReader(key, src, length, opt)
 	case 0x0103:
@@ -739,10 +849,10 @@ func (b *Bucket) mutate(ctx context.Context, p principal, id volume.ObjectID, op
 		}
 		s.recordAccepted(b.ID(), v, generation)
 	}
-	if err == nil && !repeated && s.objectSubscriptions.watched(key) {
+	if err == nil && !p.cowInternal && !repeated && s.objectSubscriptions.watched(key) {
 		published, readErr := h.RecordInfo(key)
 		if readErr == nil {
-			s.objectSubscriptions.publish(key, old.Version, published, h)
+			s.objectSubscriptions.publish(key, published, h)
 		} else {
 			s.objectSubscriptions.resyncWhere(func(k volume.Key) bool { return k == key })
 		}

@@ -17,6 +17,9 @@ const peerBucketCopy uint16 = 0x1089
 // Route copy receipts through one admitted node. Their global catalog commit
 // makes replay protection survive restart and later coordinator/member changes.
 func (s *Server) clusterBucketCopy(ctx context.Context, m client.Message, p principal) (out []byte, err error) {
+	if m.Opcode == client.BucketClone {
+		return s.cloneCow(ctx, m, p)
+	}
 	ids, _, err := s.leaseMembers()
 	if err != nil {
 		return nil, err
@@ -131,8 +134,7 @@ func (s *Server) clusterBucketCopy(ctx context.Context, m client.Message, p prin
 		}
 		for _, r := range page {
 			if src == dst {
-				v := r.Info.Version
-				e = clients[src].Delete(ctx, r.ID, client.DeleteOptions{ExpectedVersion: &v, RequestID: client.NewRequestID()})
+				e = clients[src].Delete(ctx, r.ID, client.DeleteOptions{RequestID: client.NewRequestID()})
 			} else {
 				// Bound memory to one stripe independently of native object length.
 				for off := uint64(0); off < r.Info.Length || off == 0; {
@@ -141,7 +143,7 @@ func (s *Server) clusterBucketCopy(ctx context.Context, m client.Message, p prin
 					if readErr != nil {
 						return nil, fmt.Errorf("copy source read: %w", readErr)
 					}
-					if info.Version != r.Info.Version || uint64(len(data)) != n {
+					if info.Length != r.Info.Length || uint64(len(data)) != n {
 						return nil, fail(409, "source changed during clone")
 					}
 					opt := client.PutOptions{RequestID: client.NewRequestID(), Absent: off == 0}

@@ -47,7 +47,7 @@ func (r *rangeManager) objectMemo(plan [32]byte, key volume.Key) (rangeObjectMem
 	memo.Key, memo.Info = decodeRangeInfo(&d)
 	memo.Codec = volume.Compression(d.U8())
 	copy(memo.Digest[:], d.Take(32))
-	if d.Done() != nil || string(got) != string(plan[:]) || memo.Key != key || memo.Info.Version == 0 || memo.Digest == ([32]byte{}) {
+	if d.Done() != nil || string(got) != string(plan[:]) || memo.Key != key || memo.Digest == ([32]byte{}) {
 		return rangeObjectMemo{}, false, volume.ErrCorrupt
 	}
 	return memo, true, nil

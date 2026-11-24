@@ -4,6 +4,7 @@ package server
 import (
 	"context"
 	"crypto/sha256"
+	"errors"
 	"io"
 	"math"
 	"os"
@@ -132,7 +133,7 @@ func (r *objectSubscriptionRegistry) sendLocked(sub *objectSubscription, u clien
 
 // Called under the same native write handle which committed the mutation. The
 // reader registers under a native read handle, closing the snapshot/listen gap.
-func (r *objectSubscriptionRegistry) publish(key volume.Key, previous uint64, info volume.Info, h *volume.Handle) {
+func (r *objectSubscriptionRegistry) publish(key volume.Key, info volume.Info, h *volume.Handle) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	type window struct{ off, length uint64 }
@@ -148,7 +149,7 @@ func (r *objectSubscriptionRegistry) publish(key volume.Key, previous uint64, in
 			continue
 		}
 		sub.cursor++
-		u := client.ObjectUpdate{Subscription: sub.id, Cursor: sub.cursor, PreviousVersion: previous, NewVersion: info.Version, Parts: 1, Change: client.UpdateReplace, NewLength: info.Length}
+		u := client.ObjectUpdate{Subscription: sub.id, Cursor: sub.cursor, Parts: 1, Change: client.UpdateReplace, NewLength: info.Length}
 		off, n := uint64(0), info.Length
 		if sub.ranged {
 			off = sub.offset
@@ -271,20 +272,35 @@ func (s *Server) executeObjectSubscription(m client.Message, ws *wsSession, p pr
 	desc := op.bucket.storageDescription()
 	key := volume.Key{Bucket: op.bucket.ID(), Object: op.object}
 	v, prior, _, err := op.bucket.selectVolume(desc, key, volume.ID{}, false)
-	if err != nil {
-		return nil, 0, op.bucket.absenceError(op.object, prior, err)
-	}
-	h, err := v.Open(false)
-	if err != nil {
-		return nil, 0, err
-	}
-	defer h.Close()
-	if err = s.checkObjectBinding(ctx, key.Bucket, key.Object, true); err != nil {
-		return nil, 0, err
-	}
-	info, err := h.Stat(key)
-	if err != nil {
-		return nil, 0, err
+	var h *volume.Handle
+	var inherited *cowSnapshot
+	var info volume.Info
+	if errors.Is(err, volume.ErrNotFound) && len(desc.ClonePeers) > 0 {
+		inherited, err = s.cowLogicalSnapshot(ctx, key.Bucket, key.Object, false)
+		if err != nil {
+			return nil, 0, err
+		}
+		defer inherited.close()
+		if inherited == nil || inherited.Info.Deleted {
+			return nil, 0, volume.ErrNotFound
+		}
+		info = inherited.Info
+	} else {
+		if err != nil {
+			return nil, 0, op.bucket.absenceError(op.object, prior, err)
+		}
+		h, err = v.Open(false)
+		if err != nil {
+			return nil, 0, err
+		}
+		defer h.Close()
+		if err = s.checkObjectBinding(ctx, key.Bucket, key.Object, true); err != nil {
+			return nil, 0, err
+		}
+		info, err = h.Stat(key)
+		if err != nil {
+			return nil, 0, err
+		}
 	}
 	file, err := os.CreateTemp("", "stqr-subscription-snapshot-*")
 	if err != nil {
@@ -298,7 +314,18 @@ func (s *Server) executeObjectSubscription(m client.Message, ws *wsSession, p pr
 		n = length
 	}
 	hash := sha256.New()
-	copied, err := h.CopyTo(key, offset, n, &objectBudgetWriter{dst: bucketContextWriter{ctx: ctx, w: io.MultiWriter(file, hash)}, remaining: maxObjectStagingBytes})
+	var copied uint64
+	writer := &objectBudgetWriter{dst: bucketContextWriter{ctx: ctx, w: io.MultiWriter(file, hash)}, remaining: maxObjectStagingBytes}
+	if h != nil {
+		copied, err = h.CopyTo(key, offset, n, writer)
+	} else {
+		if offset > info.Length {
+			return nil, 0, volume.ErrRange
+		}
+		n = min(n, info.Length-offset)
+		count, e := io.CopyN(writer, io.NewSectionReader(inherited.Data, int64(offset), int64(n)), int64(n))
+		copied, err = uint64(count), e
+	}
 	if err != nil {
 		return nil, 0, err
 	}
@@ -311,10 +338,34 @@ func (s *Server) executeObjectSubscription(m client.Message, ws *wsSession, p pr
 		sub.runtime = patch.Entries[0].Runtime
 	}
 	initialCursor := sub.cursor
-	if err = r.add(sub); err != nil {
-		return nil, 0, err
+	if inherited != nil {
+		// All logical publications and first materializations take opMu. If no
+		// local record exists at this barrier, our captured fallback is still the
+		// namespace's contents. A later materialization preserves these same bytes;
+		// a later logical write is queued after this initial subscription cursor.
+		s.opMu.Lock()
+		if err = s.checkObjectBinding(ctx, key.Bucket, key.Object, true); err == nil {
+			_, _, found, e := op.bucket.selectVolume(op.bucket.storageDescription(), key, volume.ID{}, false)
+			if e != nil && !errors.Is(e, volume.ErrNotFound) {
+				err = e
+			} else if found {
+				err = fail(503, "clone object materialized during subscription; retry snapshot")
+			}
+		}
+		if err == nil {
+			err = r.add(sub)
+		}
+		s.opMu.Unlock()
+		if err != nil {
+			return nil, 0, err
+		}
+	} else {
+		if err = r.add(sub); err != nil {
+			return nil, 0, err
+		}
+		h.Close()
 	}
-	h.Close() // Only local snapshot I/O is inside the storage barrier, never network.
+	// // Only local snapshot I/O is inside the storage barrier, never network.
 	if release != nil {
 		release()
 		release = nil

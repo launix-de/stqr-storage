@@ -213,7 +213,7 @@ func (r *rangeManager) replay(record controlRecord) error {
 		t.aborted = true
 		t.remaining = 0
 	case rangeObjectStored:
-		if event.Object == nil || t.plan.Target != r.node || event.Object.Key.Bucket != volume.ID(t.plan.Before.Bucket) || !t.plan.contains(event.Object.Key.Object) || event.Object.Info.Version == 0 || event.Object.Digest == ([32]byte{}) {
+		if event.Object == nil || t.plan.Target != r.node || event.Object.Key.Bucket != volume.ID(t.plan.Before.Bucket) || !t.plan.contains(event.Object.Key.Object) || event.Object.Digest == ([32]byte{}) {
 			return volume.ErrCorrupt
 		}
 		// Legacy progress records are validated but need not be retained in RAM.

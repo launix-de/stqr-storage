@@ -16,7 +16,7 @@ func (o *OverlayFilesystem) destination(ctx context.Context, s *overlayState, pa
 	if _, err := o.entries(ctx, s, parent); err != nil {
 		return "", err
 	}
-	p, err := o.path(ctx, s, 0, parent)
+	p, err := o.path(ctx, s, string(s.rootRaw), parent)
 	if err != nil {
 		return "", err
 	}
@@ -80,7 +80,7 @@ func (o *OverlayFilesystem) remove(ctx context.Context, parent ObjectID, name st
 		if err != nil {
 			return err
 		}
-		info, err := o.stat(ctx, s, 0, id)
+		info, err := o.stat(ctx, s, string(s.rootRaw), id)
 		if err != nil {
 			return err
 		}
@@ -142,7 +142,7 @@ func (o *OverlayFilesystem) RenameWithFlags(ctx context.Context, parent ObjectID
 		if err != nil {
 			return err
 		}
-		source, err := o.stat(ctx, s, 0, id)
+		source, err := o.stat(ctx, s, string(s.rootRaw), id)
 		if err != nil {
 			return err
 		}
@@ -173,7 +173,7 @@ func (o *OverlayFilesystem) RenameWithFlags(ctx context.Context, parent ObjectID
 		}
 		var target FSInfo
 		if exists {
-			target, err = o.stat(ctx, s, 0, other)
+			target, err = o.stat(ctx, s, string(s.rootRaw), other)
 			if err != nil {
 				return err
 			}
@@ -220,7 +220,7 @@ func (o *OverlayFilesystem) RenameWithFlags(ctx context.Context, parent ObjectID
 				continue
 			}
 			if _, _, e := o.upper.store.Get(ctx, item.id); errors.Is(e, ErrNotFound) {
-				n, base, e := o.lower.load(ctx, item.id)
+				n, _, e := o.lower.load(ctx, item.id)
 				if e != nil {
 					return e
 				}
@@ -228,7 +228,7 @@ func (o *OverlayFilesystem) RenameWithFlags(ctx context.Context, parent ObjectID
 					if fsLinks(n) > 1 {
 						return syscall.EOPNOTSUPP
 					}
-					n.blob = fsBlob{length: n.blob.length, source: item.id, sourceVersion: base.Version}
+					n.blob.lower = n.blob.root != (ObjectID{})
 				}
 				n.writePath = item.p
 				_, e = o.upper.store.CAS(ctx, item.id, 0, nil, encodeFSNode(n), CASOptions{Scope: CASObject, MutationOptions: MutationOptions{RequestID: NewRequestID(), Absent: true}})

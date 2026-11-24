@@ -22,26 +22,19 @@ package client
 // and files share the same inline/index representation. The fixed root ID is
 // SHA-256("STQR filesystem root v1"); all other object IDs are random.
 //
-// Data and index objects are immutable, including after unlink/truncate. A new
-// inode version atomically publishes the complete snapshot by CAS. Every stored
-// object is <= 1 MiB. This is a development format, not a frozen production ABI.
-// Inode v1/v2 remain readable. v3 adds layout=2 (lower inode:OID,
-// expected_version:u64) and a suffix removed:Bool, write_path:Text. v4 also
-// appends atime_ns:u64, ctime_ns:u64. Legacy timestamps default to mtime.
-// STIX v2 widens source_offset to u64 and appends lower_inode_version:u64
-// per entry; a nonzero version denotes a range of that lower inode, not raw
-// upper data. Only native overlays supply a lower store. Lower data is verified
-// against the captured inode version; changed bases report ESTALE.
-// v5 retains the v4 layout and appends links:u32, xattr_count:u32,
-// (name:Text,value:Blob)* in sorted name order. Kind=3 is an inline symlink,
-// 4 a FIFO and 5 a Unix socket; the latter two have empty content. Attribute
-// limits and link publication/recovery are documented in docs/filesystem-posix.md.
-// Namespace intents use "STFT", v1:u16, state:u8 (pending=0,
-// committed=1, aborted=2), count:u32, (inode:OID, expected_version:u64,
-// before:Blob, after:Blob)* in OID order. Locked inode heads contain "STFL",
-// v1:u16, descriptor:OID. Helpers durably decide an intent before replacing its
-// markers with before/after images. A reader without CAS permission can read the
-// old/new logical image according to that decision. Upgrade all mounts together.
+// Data and index objects are immutable, including after unlink/truncate. A byte
+// CAS atomically publishes the complete inode head. Every stored object is at
+// most 1 MiB. The filesystem format version is independent of object contents.
+// STFS v6 retains removed/write_path, atime/ctime, links and xattrs. Layout 2
+// stores a lower immutable index root (depth:u8, root:OID), not a mutable inode.
+// STIX v3 uses source_offset:u64 and a lower:Bool per leaf reference. Legacy
+// versioned lower references from STFS v3-v5/STIX v2 are explicitly rejected.
+// Ordinary older inode layouts remain readable; timestamps default to mtime.
+// Namespace intents use STFT v2, state:u8 (pending=0, committed=1, aborted=2),
+// count:u32 and (inode:OID, before:Blob, after:Blob)* in OID order. Locked heads
+// contain STFL v1 plus descriptor:OID. Helpers compare the actual head bytes,
+// durably decide the intent, and then publish its before/after images. Read-only
+// readers resolve the logical image without writing. Upgrade all mounts together.
 
 import (
 	"crypto/sha256"
@@ -71,18 +64,17 @@ var ErrFSFormat = errors.New("client: invalid filesystem object")
 func FilesystemRootID() ObjectID { return sha256.Sum256([]byte("STQR filesystem root v1")) }
 
 type fsSegment struct {
-	length       uint64
-	id           ObjectID
-	offset       uint64
-	lowerVersion uint64 // nonzero: range of a lower-bucket inode snapshot
+	length uint64
+	id     ObjectID
+	offset uint64
+	lower  bool // immutable data object in the lower bucket
 }
 type fsBlob struct {
-	length        uint64
-	inline        []byte
-	root          ObjectID
-	depth         uint8
-	source        ObjectID // lazy lower inode; no payload copy for metadata-only changes
-	sourceVersion uint64
+	length uint64
+	inline []byte
+	root   ObjectID
+	depth  uint8
+	lower  bool // immutable lower index tree, not a mutable lower inode
 }
 type fsNode struct {
 	kind           uint8
@@ -119,7 +111,8 @@ type FSInfo struct {
 	Kind             FSKind
 	Nlink            uint32
 	ID               ObjectID
-	Version, Size    uint64
+	Size             uint64
+	Proof            SnapshotProof
 	Mode, UID, GID   uint32
 	MtimeNS          uint64
 	AtimeNS, CtimeNS uint64
@@ -132,27 +125,17 @@ func validFSName(name string) bool {
 }
 func encodeFSNode(n fsNode) []byte {
 	e := Encoder{B: []byte("STFS")}
-	if n.extended || len(n.xattrs) != 0 || n.kind > fsDirectory {
-		e.U16(5)
-	} else if n.atime != 0 || n.ctime != 0 {
-		e.U16(4)
-	} else if n.blob.source != (ObjectID{}) || n.writePath != "" {
-		e.U16(3)
-	} else if n.removed {
-		e.U16(2)
-	} else {
-		e.U16(1)
-	}
+	e.U16(6)
 	e.U8(n.kind)
 	e.U32(n.mode)
 	e.U32(n.uid)
 	e.U32(n.gid)
 	e.U64(n.mtime)
 	e.U64(n.blob.length)
-	if n.blob.source != (ObjectID{}) {
+	if n.blob.lower {
 		e.U8(2)
-		e.B = append(e.B, n.blob.source[:]...)
-		e.U64(n.blob.sourceVersion)
+		e.U8(n.blob.depth)
+		e.B = append(e.B, n.blob.root[:]...)
 	} else if n.blob.root == (ObjectID{}) {
 		e.U8(0)
 		e.Blob(n.blob.inline)
@@ -161,28 +144,20 @@ func encodeFSNode(n fsNode) []byte {
 		e.U8(n.blob.depth)
 		e.B = append(e.B, n.blob.root[:]...)
 	}
-	if n.extended || len(n.xattrs) != 0 || n.kind > fsDirectory || n.atime != 0 || n.ctime != 0 || n.blob.source != (ObjectID{}) || n.writePath != "" {
-		e.Bool(n.removed)
-		e.Text(n.writePath)
-		if n.extended || len(n.xattrs) != 0 || n.kind > fsDirectory || n.atime != 0 || n.ctime != 0 {
-			e.U64(n.atime)
-			e.U64(n.ctime)
-		}
-	} else if n.removed {
-		e.Bool(true)
+	e.Bool(n.removed)
+	e.Text(n.writePath)
+	e.U64(n.atime)
+	e.U64(n.ctime)
+	e.U32(fsLinks(n))
+	names := make([]string, 0, len(n.xattrs))
+	for name := range n.xattrs {
+		names = append(names, name)
 	}
-	if n.extended || len(n.xattrs) != 0 || n.kind > fsDirectory {
-		e.U32(fsLinks(n))
-		names := make([]string, 0, len(n.xattrs))
-		for name := range n.xattrs {
-			names = append(names, name)
-		}
-		sort.Strings(names)
-		e.U32(uint32(len(names)))
-		for _, name := range names {
-			e.Text(name)
-			e.Blob(n.xattrs[name])
-		}
+	sort.Strings(names)
+	e.U32(uint32(len(names)))
+	for _, name := range names {
+		e.Text(name)
+		e.Blob(n.xattrs[name])
 	}
 	return e.B
 }
@@ -196,7 +171,7 @@ func decodeFSNode(data []byte) (fsNode, error) {
 		return n, ErrFSFormat
 	}
 	version := d.U16()
-	if version != 1 && version != 2 && version != 3 && version != 4 && version != 5 {
+	if version != 1 && version != 2 && version != 3 && version != 4 && version != 5 && version != 6 {
 		return n, ErrFSFormat
 	}
 	n.kind = d.U8()
@@ -218,9 +193,13 @@ func decodeFSNode(data []byte) (fsNode, error) {
 			return n, ErrFSFormat
 		}
 	case 2:
-		copy(n.blob.source[:], d.Take(32))
-		n.blob.sourceVersion = d.U64()
-		if version < 3 || n.blob.source == (ObjectID{}) || n.blob.sourceVersion == 0 || n.kind != fsFile {
+		if version != 6 || n.kind != fsFile {
+			return n, ErrFSFormat
+		}
+		n.blob.lower = true
+		n.blob.depth = d.U8()
+		copy(n.blob.root[:], d.Take(32))
+		if n.blob.depth == 0 || n.blob.depth > fsMaxDepth || n.blob.root == (ObjectID{}) || n.blob.length == 0 {
 			return n, ErrFSFormat
 		}
 	default:
@@ -248,7 +227,7 @@ func decodeFSNode(data []byte) (fsNode, error) {
 	} else {
 		n.atime, n.ctime = n.mtime, n.mtime
 	}
-	if version == 5 {
+	if version >= 5 {
 		n.extended = true
 		n.links = d.U32()
 		start := len(d.B)
@@ -268,7 +247,7 @@ func decodeFSNode(data []byte) (fsNode, error) {
 			previous = name
 		}
 	}
-	if (n.kind > fsDirectory && version < 5) || (n.kind == fsSymlink && (n.blob.root != (ObjectID{}) || n.blob.source != (ObjectID{}) || n.blob.length == 0 || n.blob.length > 4095 || strings.ContainsRune(string(n.blob.inline), 0))) || ((n.kind == fsFIFO || n.kind == fsSocket) && n.blob.length != 0) {
+	if (n.kind > fsDirectory && version < 5) || (n.kind == fsSymlink && (n.blob.root != (ObjectID{}) || n.blob.lower || n.blob.length == 0 || n.blob.length > 4095 || strings.ContainsRune(string(n.blob.inline), 0))) || ((n.kind == fsFIFO || n.kind == fsSocket) && n.blob.length != 0) {
 		return n, ErrFSFormat
 	}
 	if n.kind == fsDirectory && !n.removed && n.extended && n.links == 0 {
@@ -283,12 +262,12 @@ func encodeFSIndex(segments []fsSegment) []byte {
 	e := Encoder{B: []byte("STIX")}
 	modern := false
 	for _, s := range segments {
-		if s.lowerVersion != 0 {
+		if s.lower {
 			modern = true
 		}
 	}
 	if modern {
-		e.U16(2)
+		e.U16(3)
 	} else {
 		e.U16(1)
 	}
@@ -298,7 +277,7 @@ func encodeFSIndex(segments []fsSegment) []byte {
 		e.B = append(e.B, s.id[:]...)
 		if modern {
 			e.U64(s.offset)
-			e.U64(s.lowerVersion)
+			e.Bool(s.lower)
 		} else {
 			e.U32(uint32(s.offset))
 		}
@@ -311,7 +290,7 @@ func decodeFSIndex(data []byte, length uint64, depth uint8) ([]fsSegment, error)
 		return nil, ErrFSFormat
 	}
 	version := d.U16()
-	if version != 1 && version != 2 {
+	if version != 1 && version != 3 {
 		return nil, ErrFSFormat
 	}
 	count := d.U32()
@@ -323,13 +302,13 @@ func decodeFSIndex(data []byte, length uint64, depth uint8) ([]fsSegment, error)
 	for i := uint32(0); i < count; i++ {
 		s := fsSegment{length: d.U64()}
 		copy(s.id[:], d.Take(32))
-		if version == 2 {
+		if version == 3 {
 			s.offset = d.U64()
-			s.lowerVersion = d.U64()
+			s.lower = d.Bool()
 		} else {
 			s.offset = uint64(d.U32())
 		}
-		if s.length == 0 || s.length > length-total || s.offset > math.MaxInt64 || s.length > math.MaxInt64-s.offset || (depth > 1 && (s.offset != 0 || s.lowerVersion != 0)) || (s.id == (ObjectID{}) && (s.offset != 0 || s.lowerVersion != 0)) || (depth == 1 && s.id != (ObjectID{}) && s.lowerVersion == 0 && (s.length > FSObjectSize || s.offset+s.length > FSObjectSize)) {
+		if s.length == 0 || s.length > length-total || s.offset > math.MaxInt64 || s.length > math.MaxInt64-s.offset || (depth > 1 && (s.offset != 0 || s.lower)) || (s.id == (ObjectID{}) && (s.offset != 0 || s.lower)) || (depth == 1 && s.id != (ObjectID{}) && (s.length > FSObjectSize || s.offset+s.length > FSObjectSize)) {
 			return nil, ErrFSFormat
 		}
 		total += s.length

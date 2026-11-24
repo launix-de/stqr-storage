@@ -345,8 +345,7 @@ func (c *Catalog) Collect(ctx context.Context, opaque []client.ObjectID) (uint64
 				}
 			}
 			if !live {
-				v := entry.Info.Version
-				if e := c.store.Delete(ctx, entry.ID, client.DeleteOptions{ExpectedVersion: &v, RequestID: client.NewRequestID()}); e != nil {
+				if e := c.store.Delete(ctx, entry.ID, client.DeleteOptions{RequestID: client.NewRequestID()}); e != nil {
 					return deleted, e
 				}
 				deleted++

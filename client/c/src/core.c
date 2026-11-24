@@ -209,7 +209,7 @@ static int handshake(stqr_client *c) {
     request = sq_alloc(capacity); headers = sq_alloc(16385);
     if (!request || !headers) { err = -ENOMEM; goto out; }
     n = (size_t)snprintf(request, capacity,
-        "GET /api/ws HTTP/1.1\r\nHost: %s\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: %s\r\nSec-WebSocket-Protocol: stqr.v1\r\nAuthorization: Basic %s\r\nX-STQR-Bucket: %s\r\n\r\n",
+        "GET /api/ws HTTP/1.1\r\nHost: %s\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: %s\r\nSec-WebSocket-Protocol: stqr.v2\r\nAuthorization: Basic %s\r\nX-STQR-Bucket: %s\r\n\r\n",
         c->authority, key, c->authorization, bucket);
     if (n >= capacity) { err = -E2BIG; goto out; }
     if ((err = sq_send(c->socket, request, n))) goto out;
@@ -231,7 +231,7 @@ static int handshake(stqr_client *c) {
         *value++ = 0; while (*value == ' ' || *value == '\t') value++;
         tail = value+strlen(value); while (tail > value && (tail[-1] == ' ' || tail[-1] == '\t')) *--tail = 0;
         if (samecase(line, "Sec-WebSocket-Accept")) { if (accept || strcmp(value, expected)) { err = -EPROTO; goto out; } accept = 1; }
-        if (samecase(line, "Sec-WebSocket-Protocol")) { if (protocol || strcmp(value, "stqr.v1")) { err = -EPROTO; goto out; } protocol = 1; }
+        if (samecase(line, "Sec-WebSocket-Protocol")) { if (protocol || strcmp(value, "stqr.v2")) { err = -EPROTO; goto out; } protocol = 1; }
         if (samecase(line, "Upgrade")) upgrade = samecase(value, "websocket");
         if (samecase(line, "Connection")) connection = contains_token(value, "upgrade");
         if (samecase(line, "Sec-WebSocket-Extensions")) { err = -EPROTO; goto out; }
@@ -308,7 +308,7 @@ static int frame_recv(stqr_client *c, struct buf *m, int polling) {
 static int info_decode(struct buf *d, stqr_info *info) {
     const stqr_u8 *p;
     memset(info, 0, sizeof(*info));
-    info->version = readnum(d, 8); info->length = readnum(d, 8);
+    info->length = readnum(d, 8);
     if (boolean(d)) take(d, 32);
     info->flags = (stqr_u32)readnum(d, 4);
     p = take(d, 16); if (p) memcpy(info->runtime.bytes, p, 16);
@@ -382,8 +382,8 @@ static int dispatch_update(stqr_client *c, unsigned opcode, struct buf *m) {
         if (c->update) c->update(c->update_arg, &u);
         return 0;
     }
-    u.cursor = readnum(m, 8); u.previous_version = readnum(m, 8);
-    u.version = readnum(m, 8); u.part = (stqr_u32)readnum(m, 4);
+    u.cursor = readnum(m, 8);
+    u.part = (stqr_u32)readnum(m, 4);
     u.parts = (stqr_u32)readnum(m, 4); u.change = (unsigned)readnum(m, 1);
     u.offset = readnum(m, 8); u.length = readnum(m, 8);
     mode = (unsigned)readnum(m, 1); total = readnum(m, 8);
@@ -559,10 +559,10 @@ int stqr_reconnect(stqr_client *c) {
     if (!err) err = handshake(c);
     if (err) { broken(c); return err; }
     c->status = 0;
-    number(&body, 1, 2); number(&body, 1, 2); number(&body, STQR_CAP_DURABILITY, 8); blob(&body, "stqr-c", 6);
+    number(&body, 2, 2); number(&body, 2, 2); number(&body, STQR_CAP_DURABILITY, 8); blob(&body, "stqr-c", 6);
     err = request(c, 1, &body, id, 0, &result, NULL);
     if (!err) {
-        if (readnum(&result, 2) != 1) result.err = -EPROTO;
+        if (readnum(&result, 2) != 2) result.err = -EPROTO;
         c->capabilities = readnum(&result, 8); take(&result, 48); err = done(&result);
     }
     drop(&body); drop(&result);
@@ -596,10 +596,15 @@ static void reference(stqr_client *c, struct buf *b, stqr_object_id id) {
     put(b, c->bucket.bytes, 16); put(b, id.bytes, 32); number(b, 0, 8); number(b, 0, 8); put(b, c->runtime.bytes, 16);
 }
 static int options(struct buf *b, const stqr_options *o) {
-    if (!o || zero(o->request_id.bytes, 16) || (o->absent && o->has_version)) return -EINVAL;
-    number(b, !!o->has_version, 1); if (o->has_version) number(b, o->version, 8);
+    if (!o || zero(o->request_id.bytes, 16)) return -EINVAL;
     number(b, !!o->has_length, 1); if (o->has_length) number(b, o->length, 8);
-    number(b, !!o->absent, 1); return b->err;
+    number(b, !!o->absent, 1);
+ number(b, !!o->has_compare, 1);
+ if (o->has_compare) {
+ if (o->compare_size > SQ_CHUNK || (o->compare_size && !o->compare)) return -EINVAL;
+ number(b, o->compare_offset, 8); blob(b, o->compare, o->compare_size);
+ }
+ return b->err;
 }
 int stqr_stat(stqr_client *c, stqr_object_id id, stqr_info *info) {
     struct buf body = {0}, r = {0}; stqr_id rid = {{0}}; int err;
@@ -616,6 +621,7 @@ static int get(stqr_client *c, stqr_object_id id, int ranged, stqr_u64 offset, s
     if (!c || (ranged && length > ~(stqr_u64)0-offset)) return -EINVAL;
     reference(c, &body, id);
     if (ranged) { number(&body, offset, 8); number(&body, length, 8); }
+    number(&body, 0, 1); /* optional read byte predicate */
     err = request(c, ranged ? 0x101 : 0x100, &body, rid, 0, &r, &s);
     if (err) goto out;
     info_decode(&r, info);
@@ -706,7 +712,7 @@ int stqr_trunc(stqr_client *c, stqr_object_id id, stqr_u64 len, const stqr_optio
 int stqr_delete(stqr_client *c, stqr_object_id id, const stqr_options *o) { return metadata_write(c,0x106,id,0,o,NULL); }
 int stqr_cas(stqr_client *c, stqr_object_id id, unsigned scope, stqr_u64 off, const void *expected, size_t en, const void *replacement, size_t rn, const stqr_options *o, stqr_info *info) {
     struct buf b = {0}, r = {0}; int err;
-    if (!c || !info || !o || scope > 1 || en > SQ_CHUNK || rn > SQ_CHUNK || (en && !expected) || (rn && !replacement) || (scope == 0 && en != rn) || (scope == 1 && (off || (!o->has_version && !o->absent))) || rn > ~(stqr_u64)0-off) return -EINVAL;
+    if (!c || !info || !o || scope > 1 || en > SQ_CHUNK || rn > SQ_CHUNK || (en && !expected) || (rn && !replacement) || (scope == 0 && en != rn) || (scope == 1 && off) || rn > ~(stqr_u64)0-off) return -EINVAL;
     reference(c, &b, id); number(&b, scope, 1); number(&b, off, 8); err = options(&b, o);
     if (!err) {
         blob(&b, expected, en); blob(&b, replacement, rn);

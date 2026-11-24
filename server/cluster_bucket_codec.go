@@ -26,7 +26,7 @@ func (c *clusterController) finishBucketPolicies(ctx context.Context) {
 		return
 	}
 	for _, description := range s.bucketSnapshots() {
-		if description.DesiredPolicy == nil || description.State == BucketDeleting {
+		if description.DesiredPolicy == nil || description.State == BucketDeleting || len(description.ClonePeers) > 0 {
 			continue
 		}
 		id, _ := bucketID(description.ID)

@@ -105,8 +105,8 @@ server; use it on loopback or an appropriately protected network.
 The module reads and writes the normal Go/FUSE filesystem format: `STFS` inodes,
 `STDR` directories, `STIX` immutable segment indexes and `STFT`/`STFL` namespace
 intents. No import/conversion is needed between upgraded normal FUSE and kernel mounts.
-STFS v5 adds node types, link counts and xattrs: **upgrade all clients before
-writing v5 metadata**. See the [format and semantics guide](filesystem-posix.md).
+STFS v6 includes node types, link counts, xattrs and immutable lower references:
+**upgrade all clients before writing v6 metadata**. See the [format and semantics guide](filesystem-posix.md).
 
 Implemented operations include regular files, directories, symlinks, hardlinks,
 FIFO/Unix-socket nodes, user/trusted xattrs, lookup/readdir,
@@ -117,7 +117,7 @@ CAS intents. Destination ancestry is validated and enrolled when moving director
 so competing clients cannot silently introduce a directory cycle. Pending intents
 can be helped after interruption without recursive kernel-stack traversal.
 
-Data and index objects are immutable. A version-checked inode CAS publishes each
+Data and index objects are immutable. A byte-compared inode CAS under the volume write lock publishes each
 new content image. Partial writes preserve unmodified segment references; sparse
 extensions store zero spans. Open-unlinked files remain usable until close.
 Successful `write`/`pwrite` chunks are atomically accepted by the server before
@@ -155,11 +155,11 @@ snapshots are retained in a bounded LRU: 8 MiB of raw snapshots and at most 512
 entries per mount, plus bounded bookkeeping. Configure it with
 `--metadata-cache-bytes N` or `-o metadata_cache_bytes=N`; zero disables it and
 the maximum is 64 MiB. Warm positive and negative dentries reuse their lookup
-only while the subscribed parent version matches; positive dentries also require
+only while the parent subscription ID and stream cursor match; positive dentries also require
 a current subscribed child. There is no metadata TTL. Pending namespace intents
 are resolved through the existing recovery path and cannot prove cached lookups.
 
-The protocol validates update hashes. Cursor/version gaps, multipart or unsupported
+The protocol validates update hashes. Cursor gaps, multipart or unsupported
 changes and socket loss invalidate cached snapshots. Eviction unsubscribes; unmount
 stops the reader, drains invalidation work and closes all connections. The reader
 reconnects after loss, but old snapshots remain invalid and resubscribe on demand.
@@ -285,7 +285,7 @@ the read benchmark: ordinary durable writes, dense/sparse mmap+msync and repeate
 
 The [explicit durability contract](durability.md) describes accepted writes,
 checkpoint bounds, cross-volume ordering and unconfirmed marks after server loss.
-After a rollback, inode versions/sizes can decrease to the recovered checkpoint;
+After a rollback, inode sizes can decrease to the recovered checkpoint;
 reads refresh that state, while fsync of the lost incarnation reports ESTALE.
 
 ## Native networkboot root
@@ -306,8 +306,10 @@ the helper mounts the lower read-only without an overlay.
 
 Directory records contain deletion markers and metadata overrides. File copy-up
 retains immutable references to unchanged lower content, so changing one range
-does not copy the entire file. Changing the lower can invalidate those pinned
-versions and return `ESTALE`; boot releases therefore use an immutable lower.
+does not copy the entire file. These references name
+immutable data/index objects. Copy-up retains those IDs when a lower inode
+is later updated. Missing referenced data is an error. Offline lower garbage
+collection still requires coordination with dependent upper buckets.
 Each bucket has its own RPC connections and subscription cache. Changes from
 other clients invalidate the merged namespace and cached file data.
 
@@ -320,3 +322,9 @@ socket into the upper superblock. The kernel holds it until unmount, after data
 connections have closed, so the gateway can revoke and collect the temporary
 identity/bucket without a resident userspace root client. It is not a data proxy.
 See [networkboot](../networkboot/README.md) for provisioning and recovery.
+
+The current native wire schema is `stqr.v2`; object contents have no version
+counter. STFS v6 stores immutable lower index references, STIX v3 stores explicit
+lower-data flags, and STFT v2 compares complete before/after inode images. Legacy
+STFS v3–v5 lower-inode references and STIX v2 lower references require an explicit
+conversion or a recreated upper. Ordinary older inode formats remain readable.

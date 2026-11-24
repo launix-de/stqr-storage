@@ -18,8 +18,8 @@ struct ks_rpc {
 struct ks_node {
 	unsigned kind, mode, uid, gid, depth;
 	u64 size, mtime, atime, ctime;
-	stqr_object_id source;
-	u64 source_version, upper_absent_version;
+	bool lower;
+	stqr_proof upper_absent;
 	const u8 *write_path;
 	size_t write_path_len;
 	bool inherited;
@@ -36,6 +36,8 @@ struct ks_snapshot {
 	struct ks_node node;
 	void *raw;
 	size_t raw_len;
+	void *namespace_head;
+	size_t namespace_head_len;
 };
 struct ks_entry {
 	stqr_object_id id;
@@ -71,9 +73,9 @@ struct ks_inode {
 	struct mutex metadata_lock;
 	struct list_head mount_list;
 	u64 invalidated_generation;
-	u64 version;
+	stqr_proof proof;
+	stqr_proof upper_absent;
 	bool invalidate;
-	u64 upper_absent_version;
 	stqr_object_id id;
 	struct inode inode;
 };
@@ -105,7 +107,7 @@ void ks_cache_stop(struct ks_fs *);
 int ks_cache_peek(struct ks_fs *, stqr_object_id, void **, size_t *, stqr_info *);
 int ks_snapshot_cached(struct ks_fs *, stqr_object_id, struct ks_snapshot *);
 int ks_cache_get(struct ks_fs *, stqr_object_id, void **, size_t *, stqr_info *);
-bool ks_cache_version(struct ks_fs *, stqr_object_id, u64 *);
+bool ks_cache_proof(struct ks_fs *, stqr_object_id, stqr_proof *);
 void ks_cache_forget(struct ks_fs *, stqr_object_id);
 void ks_queue_invalidation(struct ks_fs *, const stqr_object_id *);
 extern const stqr_object_id ks_root_id;

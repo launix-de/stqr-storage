@@ -23,14 +23,19 @@ extern "C" {
 typedef struct { stqr_u8 bytes[16]; } stqr_id;
 typedef struct { stqr_u8 bytes[32]; } stqr_object_id;
 typedef struct stqr_client stqr_client;
+typedef struct { stqr_id subscription; stqr_u64 cursor; } stqr_proof;
 typedef struct {
     stqr_id request_id;
-    stqr_u64 version, length;
-    int has_version, has_length, absent;
+    stqr_u64 length;
+    int has_length, absent;
+ stqr_u64 compare_offset;
+ const void *compare; size_t compare_size;
+ int has_compare;
     int accepted; /* opt-in visible ACK; stqr_sync confirms persistence */
 } stqr_options;
 typedef struct {
-    stqr_u64 version, length;
+    stqr_u64 length;
+ stqr_proof proof; /* local cache proof; not on wire */
     stqr_id runtime;
     stqr_u32 flags;
     stqr_u16 layout;
@@ -74,7 +79,7 @@ int stqr_trunc(stqr_client *, stqr_object_id, stqr_u64,
                const stqr_options *, stqr_info *);
 int stqr_delete(stqr_client *, stqr_object_id, const stqr_options *);
 /* scope: 0 compares equal-sized byte ranges; 1 replaces the whole object.
- * Object replacement requires an expected version or absent=1. CAS <= 1 MiB.
+ * Object replacement compares all old bytes, or uses absent=1. CAS <= 1 MiB.
  */
 int stqr_cas(stqr_client *, stqr_object_id, unsigned scope, stqr_u64 offset,
              const void *expected, size_t expected_len,
@@ -102,7 +107,7 @@ void stqr_note_durable(stqr_client *, const stqr_commit_mark *);
 #define STQR_UPDATE_RESYNC 5
 typedef struct {
     stqr_id subscription;
-    stqr_u64 cursor, previous_version, version, offset, length;
+    stqr_u64 cursor, offset, length;
     stqr_u32 part, parts;
     unsigned change;
     const void *data;

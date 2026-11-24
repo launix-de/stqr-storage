@@ -2,6 +2,7 @@
 package client
 
 import (
+	"bytes"
 	"context"
 	"crypto/md5"
 	"crypto/sha256"
@@ -46,22 +47,24 @@ type S3CompletedPart struct {
 	Checksums map[string]string
 }
 type S3Upload struct {
-	PublicRead                          bool
-	ID, Key, Owner                      string
-	State                               uint32
-	Created, Updated                    time.Time
-	Headers, Metadata                   map[string]string
-	Algorithm, ChecksumType             string
-	Parts                               []S3Part
-	Selected                            []uint32
-	Recipe                              [32]byte
-	Publication                         PutOptions
-	PublishTime                         time.Time
-	FinalChecksums                      map[string]string
-	ResultETag                          string
-	ResultSize                          uint64
-	ResultHeaders                       map[string]string
-	Version, PayloadOffset, PayloadSize uint64
+	PublicRead                 bool
+	ID, Key, Owner             string
+	State                      uint32
+	Created, Updated           time.Time
+	Headers, Metadata          map[string]string
+	Algorithm, ChecksumType    string
+	Parts                      []S3Part
+	Selected                   []uint32
+	Recipe                     [32]byte
+	Publication                PutOptions
+	PublishTime                time.Time
+	FinalChecksums             map[string]string
+	ResultETag                 string
+	ResultSize                 uint64
+	ResultHeaders              map[string]string
+	PayloadOffset, PayloadSize uint64
+	header                     []byte
+	storedLength               uint64
 }
 
 func s3UploadID(id string) (ObjectID, error) {
@@ -98,7 +101,7 @@ func s3ReadMap(d *Decoder) map[string]string {
 }
 func encodeS3Upload(u S3Upload) ([]byte, error) {
 	e := Encoder{B: []byte("STMU")}
-	e.U16(1)
+	e.U16(2)
 	if u.PublicRead {
 		e.U16(1)
 	} else {
@@ -130,9 +133,14 @@ func encodeS3Upload(u S3Upload) ([]byte, error) {
 	e.B = append(e.B, u.Recipe[:]...)
 	e.ID(u.Publication.RequestID)
 	e.Bool(u.Publication.Absent)
-	e.Bool(u.Publication.ExpectedVersion != nil)
-	if u.Publication.ExpectedVersion != nil {
-		e.U64(*u.Publication.ExpectedVersion)
+	e.Bool(u.Publication.ExpectedLength != nil)
+	if u.Publication.ExpectedLength != nil {
+		e.U64(*u.Publication.ExpectedLength)
+	}
+	e.Bool(u.Publication.Compare != nil)
+	if u.Publication.Compare != nil {
+		e.U64(u.Publication.CompareOffset)
+		e.Blob(u.Publication.Compare)
 	}
 	e.U64(uint64(u.PublishTime.UnixNano()))
 	s3WriteMap(&e, u.FinalChecksums)
@@ -153,7 +161,7 @@ func putU32(b []byte, n uint32) {
 func decodeS3Upload(raw []byte, info ObjectInfo) (S3Upload, error) {
 	var u S3Upload
 	d := Decoder{B: raw}
-	if string(d.Take(4)) != "STMU" || d.U16() != 1 {
+	if string(d.Take(4)) != "STMU" || d.U16() != 2 {
 		return u, ErrS3Format
 	}
 	flags := d.U16()
@@ -193,14 +201,19 @@ func decodeS3Upload(raw []byte, info ObjectInfo) (S3Upload, error) {
 	u.Publication.Absent = d.Bool()
 	if d.Bool() {
 		v := d.U64()
-		u.Publication.ExpectedVersion = &v
+		u.Publication.ExpectedLength = &v
+	}
+	if d.Bool() {
+		u.Publication.CompareOffset = d.U64()
+		u.Publication.Compare = append([]byte{}, d.Blob()...)
 	}
 	u.PublishTime = time.Unix(0, int64(d.U64())).UTC()
 	u.FinalChecksums = s3ReadMap(&d)
 	u.ResultETag = d.Text()
 	u.ResultSize = d.U64()
 	u.ResultHeaders = s3ReadMap(&d)
-	u.Version = info.Version
+	u.header = append([]byte(nil), raw[:u.PayloadOffset]...)
+	u.storedLength = info.Length
 	if d.Done() != nil || !validS3Key(u.Key) || u.State > S3UploadFailed || u.PayloadSize+u.PayloadOffset != info.Length {
 		return u, ErrS3Format
 	}
@@ -232,7 +245,7 @@ func (s *S3) readUpload(ctx context.Context, oid ObjectID) (S3Upload, error) {
 		if e != nil {
 			return S3Upload{}, e
 		}
-		if next.Version != info.Version {
+		if next.Length != info.Length || len(raw) < len(header) || !bytes.Equal(header, raw[:len(header)]) {
 			continue
 		}
 		return decodeS3Upload(raw, next)
@@ -259,10 +272,15 @@ func (s *S3) saveUpload(ctx context.Context, u S3Upload, body io.Reader, absent 
 	oid, _ := s3UploadID(u.ID)
 	opt := PutOptions{RequestID: NewRequestID(), Absent: absent}
 	if !absent {
-		opt.ExpectedVersion = &u.Version
+		opt.ExpectedLength = uint64Pointer(u.storedLength)
+		opt.Compare = u.header
 	}
-	info, e := s.store.PutFrom(ctx, oid, io.MultiReader(strings.NewReader(string(raw)), body), uint64(len(raw))+u.PayloadSize, opt)
-	u.Version = info.Version
+	_, e = s.store.PutFrom(ctx, oid, io.MultiReader(strings.NewReader(string(raw)), body), uint64(len(raw))+u.PayloadSize, opt)
+	if e != nil {
+		return u, e
+	}
+	u.storedLength = uint64(len(raw)) + u.PayloadSize
+	u.header = append([]byte(nil), raw...)
 	u.PayloadOffset = uint64(len(raw))
 	return u, e
 }
@@ -307,7 +325,7 @@ func (s *S3) uploadSnapshot(ctx context.Context, u S3Upload) (*os.File, error) {
 		return nil, e
 	}
 	oid, _ := s3UploadID(u.ID)
-	_, e = s.store.GetRangeToVersion(ctx, oid, u.PayloadOffset, u.PayloadSize, u.Version, f)
+	_, e = s.store.GetRangeToMatching(ctx, oid, u.PayloadOffset, u.PayloadSize, ReadCondition{Bytes: u.header, Length: uint64Pointer(u.PayloadOffset + u.PayloadSize)}, f)
 	if e != nil {
 		f.Close()
 		return nil, e
@@ -494,8 +512,8 @@ func (s *S3) CompleteMultipart(ctx context.Context, id string, parts []S3Complet
 		u.Recipe = recipe
 		u.Publication = PutOptions{RequestID: NewRequestID(), Absent: absent}
 		if !absent {
-			v := old.Version
-			u.Publication.ExpectedVersion = &v
+			u.Publication.ExpectedLength = uint64Pointer(old.PayloadOffset + old.Size)
+			u.Publication.Compare = old.header
 		}
 		u.PublishTime = time.Now().UTC()
 		u.Updated = u.PublishTime
@@ -626,7 +644,7 @@ func (s *S3) AbortMultipart(ctx context.Context, id string) error {
 			return ErrS3UploadBusy
 		}
 		oid, _ := s3UploadID(id)
-		e = s.store.Delete(ctx, oid, DeleteOptions{RequestID: NewRequestID(), ExpectedVersion: &u.Version})
+		e = s.store.Delete(ctx, oid, DeleteOptions{RequestID: NewRequestID(), ExpectedLength: uint64Pointer(u.PayloadOffset + u.PayloadSize), Compare: u.header})
 		if errors.Is(e, ErrPrecondition) {
 			continue
 		}
@@ -686,7 +704,7 @@ func (s *S3) MultipartUploads(ctx context.Context) ([]S3Upload, error) {
 }
 
 // Recover requested completions; expire idle uploads and short-lived receipts.
-// Version checks fence a concurrently committed part update before deletion.
+// Byte/length predicates fence concurrent part updates before deletion.
 func (s *S3) MaintainMultipart(ctx context.Context, now time.Time, idle, receipts time.Duration) error {
 	return s.maintainMultipart(ctx, now, idle, receipts, true)
 }
@@ -721,7 +739,7 @@ func (s *S3) maintainMultipart(ctx context.Context, now time.Time, idle, receipt
 			continue
 		}
 		oid, _ := s3UploadID(u.ID)
-		e = s.store.Delete(ctx, oid, DeleteOptions{RequestID: NewRequestID(), ExpectedVersion: &u.Version})
+		e = s.store.Delete(ctx, oid, DeleteOptions{RequestID: NewRequestID(), ExpectedLength: uint64Pointer(u.PayloadOffset + u.PayloadSize), Compare: u.header})
 		if e != nil && !errors.Is(e, ErrPrecondition) && !errors.Is(e, ErrNotFound) {
 			failures = errors.Join(failures, e)
 		}
@@ -736,7 +754,7 @@ func (s *S3) restoreMultipartOpen(ctx context.Context, u S3Upload, _ *os.File, r
 	before, next := make([]byte, 4), make([]byte, 4)
 	putU32(before, S3UploadPublishing)
 	putU32(next, S3UploadOpen)
-	_, e := s.store.CAS(ctx, id, 8, before, next, CASOptions{Scope: CASRange, MutationOptions: MutationOptions{RequestID: NewRequestID(), ExpectedVersion: &u.Version}})
+	_, e := s.store.CAS(ctx, id, 8, before, next, CASOptions{Scope: CASRange, MutationOptions: MutationOptions{RequestID: NewRequestID(), ExpectedLength: uint64Pointer(u.PayloadOffset + u.PayloadSize), Compare: u.header}})
 	if e != nil && !errors.Is(e, ErrPrecondition) {
 		return e
 	}

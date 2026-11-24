@@ -313,8 +313,9 @@ func TestOverlaySparseAndChangedBase(t *testing.T) {
 	if _, err := lower.WriteAt(ctx, conf.ID, []byte("changed"), 0); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := o.ReadAt(ctx, conf.ID, buf, 0); !errors.Is(err, syscall.ESTALE) {
-		t.Fatal("stale lower silently read", err)
+	expected := []byte{'b', 'a', 's', 'e'}
+	if _, err := o.ReadAt(ctx, conf.ID, buf, 0); err != nil || !bytes.Equal(buf, expected) {
+		t.Fatal("lower change altered upper data", buf, err)
 	}
 }
 

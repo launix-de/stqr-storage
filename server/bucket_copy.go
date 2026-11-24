@@ -9,9 +9,9 @@ import (
 	"github.com/launix-de/stqr-storage/volume"
 )
 
-// Offline native copies preserve object addresses and payload, not versions or
-// grants. A durable intent prevents a lost response from replaying a later clear.
-// Cluster maintenance must acquire a distributed exclusion before using this path.
+// Clone publishes immediate object-wise COW connections. Clear uses exclusive
+// maintenance; its durable intent prevents a lost response from replaying a later
+// clear. Both retain independent bucket grants.
 func (s *Server) executeBucketCopy(ctx context.Context, m client.Message, p principal) (out []byte, err error) {
 	if err = s.requireAdmin(p); err != nil {
 		return nil, err
@@ -24,6 +24,9 @@ func (s *Server) executeBucketCopy(ctx context.Context, m client.Message, p prin
 	}
 	if d.Done() != nil || srcID == systemBucket || dstID == systemBucket || m.Opcode == client.BucketClone && srcID == dstID {
 		return nil, fail(400, "invalid clear/clone buckets")
+	}
+	if m.Opcode == client.BucketClone {
+		return s.cloneCow(ctx, m, p)
 	}
 	if s.controller != nil {
 		return s.clusterBucketCopy(ctx, m, p)
@@ -113,7 +116,7 @@ func (s *Server) executeBucketCopy(ctx context.Context, m client.Message, p prin
 		s.opMu.Lock()
 		defer s.opMu.Unlock()
 		if err == nil {
-			if src.Describe().Revision != sourceRevision || inventoryStamp(s.placement.Load().bucketEntries(client.ID(src.ID())), client.ID{}) != sourceStamp {
+			if src != dst && src.Describe().Revision != sourceRevision || inventoryStamp(s.placement.Load().bucketEntries(client.ID(src.ID())), client.ID{}) != sourceStamp {
 				err = fail(409, "source changed during offline operation")
 			}
 			if view := s.currentSystem.Load(); view != nil && (view.manifest.Membership.Epoch != membership || len(view.manifest.Membership.Members) > 1) {
@@ -143,7 +146,14 @@ func (s *Server) executeBucketCopy(ctx context.Context, m client.Message, p prin
 		if e = ctx.Err(); e != nil {
 			return nil, e
 		}
-		records, next, more, e := src.scan(ctx, src.Describe(), after, 100)
+		var records []volume.ObjectRecord
+		var next volume.ObjectID
+		var more bool
+		if len(src.storageDescription().ClonePeers) > 0 {
+			records, next, more, e = s.cowLogicalPage(ctx, src.ID(), after, 100, false)
+		} else {
+			records, next, more, e = src.scan(ctx, src.Describe(), after, 100)
+		}
 		if e != nil {
 			return nil, e
 		}
@@ -152,8 +162,6 @@ func (s *Server) executeBucketCopy(ctx context.Context, m client.Message, p prin
 			actor.connection = owners[src]
 			opt := volume.Options{RequestID: volume.ID(client.NewRequestID())}
 			if src == dst {
-				version := record.Info.Version
-				opt.ExpectedVersion = &version
 				e = src.Delete(ctx, actor, record.Key.Object, opt)
 			} else {
 				// Finish each bounded source read before acquiring a destination

@@ -214,7 +214,7 @@ func TestDrainWaitsAndPreservesSparseTombstonesAndDedupe(t *testing.T) {
 	}
 	defer h.Close()
 	data, info, e := h.GetRange(k, 1<<30, 4)
-	if e != nil || string(data) != "far!" || info.Version != result.Info.Version {
+	if e != nil || string(data) != "far!" || info.Length != result.Info.Length {
 		t.Fatal("migration lost object", e)
 	}
 	again, e := h.Append(k, []byte("!"), volume.Options{RequestID: request})
@@ -286,7 +286,7 @@ func TestWebSocketOriginalMessagesQueuesAndStats(t *testing.T) {
 	defer httpServer.Close()
 	req, _ := http.NewRequest("GET", httpServer.URL, nil)
 	req.SetBasicAuth(s.cfg.Auth.BootstrapAdmin.Username, s.cfg.Auth.BootstrapAdmin.Password)
-	dial := websocket.Dialer{Subprotocols: []string{"stqr.v1"}}
+	dial := websocket.Dialer{Subprotocols: []string{"stqr.v2"}}
 	conn, _, e := dial.Dial("ws"+strings.TrimPrefix(httpServer.URL, "http")+"/api/ws", req.Header)
 	if e != nil {
 		t.Fatal(e)

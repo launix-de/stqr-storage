@@ -138,7 +138,7 @@ func TestDaemonRAMHandoffCrashRecovery(t *testing.T) {
 				return
 			}
 			got, info, err := c.Get(ctx, oid)
-			if err != nil || !bytes.Equal(got, payload) || info.Version != initial.Version || info.RuntimeID != initial.RuntimeID {
+			if err != nil || !bytes.Equal(got, payload) || info.Length != initial.Length || info.RuntimeID != initial.RuntimeID {
 				t.Fatal("RAM recovery changed data/version/runtime", initial, info, err)
 			}
 		})

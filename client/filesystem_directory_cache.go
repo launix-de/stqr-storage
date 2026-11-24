@@ -35,7 +35,7 @@ func newFilesystemDirectoryCache() *filesystemDirectoryCache {
 	return &filesystemDirectoryCache{entries: map[directoryCacheKey]*list.Element{}}
 }
 func directoryKey(blob fsBlob) (directoryCacheKey, bool) {
-	if blob.source != (ObjectID{}) {
+	if blob.lower {
 		return directoryCacheKey{}, false
 	}
 	key := directoryCacheKey{id: blob.root, length: blob.length, depth: blob.depth}

@@ -89,12 +89,12 @@ func (s *Server) serveWebSocket(w http.ResponseWriter, r *http.Request, p princi
 	}
 	hasProtocol := false
 	for _, p := range websocket.Subprotocols(r) {
-		if p == "stqr.v1" {
+		if p == "stqr.v2" {
 			hasProtocol = true
 		}
 	}
 	if !hasProtocol {
-		httpError(w, 400, errors.New("stqr.v1 subprotocol required"))
+		httpError(w, 400, errors.New("stqr.v2 subprotocol required"))
 		return
 	}
 	s.opMu.Lock()
@@ -109,7 +109,7 @@ func (s *Server) serveWebSocket(w http.ResponseWriter, r *http.Request, p princi
 		httpError(w, 503, errors.New("node is shutting down"))
 		return
 	}
-	up := websocket.Upgrader{Subprotocols: []string{"stqr.v1"}, CheckOrigin: sameOrigin, EnableCompression: false, ReadBufferSize: 4096, WriteBufferSize: 4096}
+	up := websocket.Upgrader{Subprotocols: []string{"stqr.v2"}, CheckOrigin: sameOrigin, EnableCompression: false, ReadBufferSize: 4096, WriteBufferSize: 4096}
 	conn, e := up.Upgrade(w, r, nil)
 	if e != nil {
 		s.opMu.Unlock()

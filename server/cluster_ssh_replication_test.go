@@ -67,7 +67,7 @@ func runSSHReplication(t *testing.T, f sshRecoveryFixture) {
 		}
 	}
 	checkRemote(uint64(len(payload)))
-	t.Log("ACKed PUT is directly readable on both hosts", info.Version)
+	t.Log("ACKed PUT is directly readable on both hosts", info.Length)
 	quote := func(s string) string { return "'" + strings.ReplaceAll(s, "'", "'\"'\"'") + "'" }
 	script := "import os,signal\np=" + strconv.Quote(f.remoteDir) + "\npid=int(open(p+'/pid').read())\nassert os.readlink('/proc/%d/exe'%pid)==p+'/stqr'\nos.kill(pid,signal.SIGKILL)\n"
 	if _, err = f.ssh(nil, "python3 -c "+quote(script)); err != nil {

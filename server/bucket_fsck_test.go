@@ -182,6 +182,19 @@ func TestBucketScanMergesTombstonesAndPages(t *testing.T) {
 		}
 		h.Close()
 	}
+	if _, _, _, err := b.scan(context.Background(), b.Describe(), nil, 2); statusOf(err) != 503 {
+		t.Fatal("conflicting copies need authoritative placement, not a content counter", err)
+	}
+	// Once maintenance removes the obsolete copy, pagination uses the tombstone.
+	h, err := s.volumes[v1.VolumeID].store.Open(true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = h.Purge(volume.Key{Bucket: b.ID(), Object: volume.ObjectID{1}})
+	h.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
 	page, next, more, err := b.scan(context.Background(), b.Describe(), nil, 2)
 	if err != nil || !more || next != (volume.ObjectID{1}) || len(page) != 1 || page[0].Key.Object != (volume.ObjectID{}) {
 		t.Fatal(page, next, more, err)

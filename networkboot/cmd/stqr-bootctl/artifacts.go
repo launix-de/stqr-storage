@@ -20,7 +20,7 @@ type artifactStore interface {
 	Stat(context.Context, client.ObjectID) (client.ObjectInfo, error)
 	PutFrom(context.Context, client.ObjectID, io.Reader, uint64, client.PutOptions) (client.ObjectInfo, error)
 	PutRangeFrom(context.Context, client.ObjectID, uint64, io.Reader, uint64, client.PutOptions) (client.ObjectInfo, error)
-	GetRangeToVersion(context.Context, client.ObjectID, uint64, uint64, uint64, io.Writer) (client.ObjectInfo, error)
+	GetRangeToMatching(context.Context, client.ObjectID, uint64, uint64, client.ReadCondition, io.Writer) (client.ObjectInfo, error)
 }
 
 func copyArtifact(ctx context.Context, store artifactStore, id client.ObjectID, size, part uint64, dst io.Writer) (client.ObjectInfo, error) {
@@ -33,7 +33,7 @@ func copyArtifact(ctx context.Context, store artifactStore, id client.ObjectID, 
 	}
 	for off := uint64(0); off < size; {
 		n := min(part, size-off)
-		if _, err = store.GetRangeToVersion(ctx, id, off, n, info.Version, dst); err != nil {
+		if _, err = store.GetRangeToMatching(ctx, id, off, n, client.ReadCondition{Length: &size}, dst); err != nil {
 			return info, err
 		}
 		off += n
@@ -85,11 +85,11 @@ func uploadArtifact(ctx context.Context, store artifactStore, id client.ObjectID
 	for off < size {
 		n := min(part, size-off)
 		opt := client.PutOptions{RequestID: client.NewRequestID()}
-		version := info.Version
+		length := info.Length
 		if !exists {
 			opt.Absent = true
 		} else {
-			opt.ExpectedVersion = &version
+			opt.ExpectedLength = &length
 		}
 		info, err = store.PutRangeFrom(ctx, id, off, src, n, opt)
 		if err != nil {

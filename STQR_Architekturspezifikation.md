@@ -1155,7 +1155,7 @@ STABLE -> PREPARED -> COPYING -> CATCHING_UP -> CUTOVER -> CLEANUP -> STABLE
 
 ### 13.1 HTTP-Einstieg und Authentifizierung
 
-Ein Go-`net/http`-Server im Daemon bedient Dashboard, Administration und das WebSocket-Upgrade unter derselben Adresse. **STQR wird ausschließlich im Rechenzentrums-Intranet ohne TLS betrieben**: HTTP und ws, keine Zertifikats-/CA-Einrichtung. Bibliotheken für HTTP/WebSocket übernehmen HTTP-Parsing und RFC-konformes Upgrade/Framing; STQR implementiert nur seinen Nachrichten-Codec. WebSocket-Subprotokoll: `stqr.v1`.
+Ein Go-`net/http`-Server im Daemon bedient Dashboard, Administration und das WebSocket-Upgrade unter derselben Adresse. **STQR wird ausschließlich im Rechenzentrums-Intranet ohne TLS betrieben**: HTTP und ws, keine Zertifikats-/CA-Einrichtung. Bibliotheken für HTTP/WebSocket übernehmen HTTP-Parsing und RFC-konformes Upgrade/Framing; STQR implementiert nur seinen Nachrichten-Codec. WebSocket-Subprotokoll: `stqr.v2`.
 
 | HTTP-Pfad | Methode | Bedeutung |
 |---|---|---|
@@ -1201,7 +1201,7 @@ Eine **binäre WebSocket-Message ist exakt eine STQR-Message**; kein zusätzlich
 
 ### 13.3 Gemeinsame binäre Strukturen
 
-Notation `a:T,b:U` bedeutet Verkettung in genau dieser Reihenfolge. Die unten referenzierten Strukturen sind vollständig rekursiv definiert; Restbytes in einem v1-Body sind Fehler. Eine Schemaerweiterung benötigt Versions-/Capability-Aushandlung. Go-In-Memory-Layouts sind kein Wireformat.
+Notation `a:T,b:U` bedeutet Verkettung in genau dieser Reihenfolge. Die unten referenzierten Strukturen sind vollständig rekursiv definiert; Restbytes in einem ausgehandelten Body sind Fehler. Eine Schemaerweiterung benötigt Versions-/Capability-Aushandlung. Go-In-Memory-Layouts sind kein Wireformat.
 
 ```text
 RoundID = membership:u64,generation:u64,initiator:ID,attempt:u64
@@ -1209,7 +1209,9 @@ Address = node:ID,url:Text
 ObjectRef = bucket:ID,object:OID,map_revision:u64,owner_epoch:u64,runtime_id:ID
 ObjectInfo = length:u64,payload_digest:Opt(Digest),flags:u32,runtime_id:ID,
              compression:u8,layout_version:u16
-Precondition = expected_length:Opt(u64),absent:Bool
+ByteCompare = offset:u64,bytes:Blob
+Precondition = expected_length:Opt(u64),absent:Bool,compare:Opt(ByteCompare)
+ReadCondition = expected_length:Opt(u64),offset:u64,bytes:Blob
 RangeResult = offset:u64,length:u64,total_length:u64
 Transfer = mode:u8,total_length:u64,digest:Digest,inline:Blob
   # mode 0 INLINE: inline enthält alle Bytes; mode 1 STREAM: inline leer,
@@ -1306,8 +1308,8 @@ Normale Clients bekommen ausschließlich Objektzugriff und die dafür nötigen R
 
 | Code | Name / Modus | Body und erfolgreiche Antwort |
 |---|---|---|
-| 0x0100 | GET / Q | `object:ObjectRef` => `info:ObjectInfo,data:Transfer` |
-| 0x0101 | GET_RANGE / Q | `object:ObjectRef,offset:u64,length:u64` => `info:ObjectInfo,range:RangeResult,data:Transfer` |
+| 0x0100 | GET / Q | `object:ObjectRef,condition:Opt(ReadCondition)` => `info:ObjectInfo,data:Transfer` |
+| 0x0101 | GET_RANGE / Q | `object:ObjectRef,offset:u64,length:u64,condition:Opt(ReadCondition)` => `info:ObjectInfo,range:RangeResult,data:Transfer` |
 | 0x0102 | PUT / Q/F | `object:ObjectRef,pre:Precondition,data:Transfer` => `info:ObjectInfo` |
 | 0x0103 | PUT_RANGE / Q/F | `object:ObjectRef,offset:u64,pre:Precondition,data:Transfer` => `info:ObjectInfo,range:RangeResult` |
 | 0x0104 | APPEND / Q/F | `object:ObjectRef,pre:Precondition,data:Transfer` => `info:ObjectInfo,start_offset:u64` |
@@ -1843,7 +1845,7 @@ ADMIN oder ausdrücklich ADMIN_READ für reine Leseoperationen. `C` bedeutet glo
 | 0x2022 | BUCKET_LIST / Q | `after_name:Text,limit:u32` (1..1000) => `page_json:Text` mit `{buckets:[BucketDescription...],next:Text}`; leeres after_name startet, leeres next beendet die Liste; nur Admin, User-Freigaben als Unterarray je Bucket, keine internen Retry-Belege; Listenansicht ergänzt bei endlicher logischer Quota `used_bytes:u64` als Live-Belegung (bei Lesefehlern stattdessen `usage_error:Text`, niemals eine vorgetäuschte Nullbelegung) |
 | 0x2023 | BUCKET_QUOTA_CAPACITY / Q | `bucket:ID,strategy:u8,object_size_profile:u8,previous_overhead_ppm:u32` => `used:u64,available_physical:u64,reserved_other_physical:u64,maximum:u64,nodes:u32,overhead_ppm:u32,profiles:Vec(key:u8,label:Text,typical_bytes:u64,overhead_ppm:u32)`; ID null = neuer Bucket; Profil 255 bewahrt eine bestehende Pauschale, sonst wird sie aus dem Format berechnet |
 | 0x2028 | BUCKET_CLEAR / Q, Admin | `bucket:ID` => `objects:u64`; offline, Single-Node-Maintenance; persistente Replay-Sperre |
-| 0x2029 | BUCKET_CLONE / Q, Admin | `source:ID,target:ID` => `objects:u64`; Ziel leer, beide offline; kopiert IDs/Payloads, keine Grants |
+| 0x2029 | BUCKET_CLONE / Q, Admin | `source:ID,target:ID` => `objects:u64`; frischer physisch leerer Zielbucket; veröffentlicht objektweises COW ohne initiale Payload-Kopie, `objects=0` bezeichnet synchron kopierte Objekte; Grants bleiben getrennt |
 | 0x202a | BUCKET_MAINTENANCE_STATUS / Q, Admin | leer => leer nach rein lesendem Capability-/Erreichbarkeits-Preflight aller Mitglieder; vor jeder Bucket-Allokation |
 | 0x201e | VOLUME_CAPACITY_GET / Q / L | leer => `filesystem_available:u64,ram_available:u64,ram_limit:u64`; Available-Wert für das aktive Volume-Verzeichnis, verfügbarer System-RAM und wirksame RAM-Grenze nach optionalem Budget |
 | 0x2024 | NODE_ADMIN_REQUEST / Q/F / L | `target:ID,opcode:u16,body:Blob` => Status/Folgeheader/result des inneren Befehls; Operations-ID bleibt die ID des äußeren Requests; kein beliebiges URL-Ziel |
@@ -1876,7 +1878,7 @@ Membership-Aufnahme noch funktionierendes Rebuild/Placement. Die spätere
 Membership-Steuerung muss die Peer-Verbindung vor Freigabe dieser Abläufe
 an den committed Kontrollstand binden.
 
-Der erste Single-Node-Dashboard-Stand verwendet bereits diese Nachrichten, VOLUME_ADD/REMOVE und STATS_SUBSCRIBE/SNAPSHOT/UNSUBSCRIBE über binäre `stqr.v1`-WebSockets. Quelle bei VOLUME_ADD: `0 FILE,1 BLOCKDEVICE,2 RAM`. Empfang, Dispatch und Senden haben getrennte begrenzte Queues; Antworten werden korreliert, Telemetrie darf nur als vollständiger neuer Snapshot einen älteren ersetzen. Der CLI-Einstieg sammelt `--config`, `--port`, `--listen`, `--connect`, `--name`, `--advertise`, `--data-dir`, `--volumes-dir`, `--ram-bytes`, `--ramcache-bytes`, `--system-volume-bytes` und `--allow-subnet`. Standardport 7419, Standardzugriff nur IPv4-/IPv6-Loopback, erweiterbar auf explizite CIDRs. Listener/Verzeichnisse/RAM-Budget benötigen nach Config-Änderung einen Neustart; Name/Advertise/Subnetze gelten unmittelbar. Bekannte authentifizierte Kontakte verbinden sich automatisch und tauschen Statistik-Pushes sowie das persistente Peer-Verzeichnis aus. Ein neuer vorbereiteter Beitrittsknoten bleibt als JOINING sichtbar und für normale Authentifizierung/Objektzugriffe gesperrt, bis Systemkopie und Membership committed aktiviert sind. Die automatische Kontaktaufnahme allein ist kein fertiger Storage-Join; fehlende Clusteridentität/-Credentials erzeugen keinen neuen Ersatzcluster.
+Der erste Single-Node-Dashboard-Stand verwendet bereits diese Nachrichten, VOLUME_ADD/REMOVE und STATS_SUBSCRIBE/SNAPSHOT/UNSUBSCRIBE über binäre `stqr.v2`-WebSockets. Quelle bei VOLUME_ADD: `0 FILE,1 BLOCKDEVICE,2 RAM`. Empfang, Dispatch und Senden haben getrennte begrenzte Queues; Antworten werden korreliert, Telemetrie darf nur als vollständiger neuer Snapshot einen älteren ersetzen. Der CLI-Einstieg sammelt `--config`, `--port`, `--listen`, `--connect`, `--name`, `--advertise`, `--data-dir`, `--volumes-dir`, `--ram-bytes`, `--ramcache-bytes`, `--system-volume-bytes` und `--allow-subnet`. Standardport 7419, Standardzugriff nur IPv4-/IPv6-Loopback, erweiterbar auf explizite CIDRs. Listener/Verzeichnisse/RAM-Budget benötigen nach Config-Änderung einen Neustart; Name/Advertise/Subnetze gelten unmittelbar. Bekannte authentifizierte Kontakte verbinden sich automatisch und tauschen Statistik-Pushes sowie das persistente Peer-Verzeichnis aus. Ein neuer vorbereiteter Beitrittsknoten bleibt als JOINING sichtbar und für normale Authentifizierung/Objektzugriffe gesperrt, bis Systemkopie und Membership committed aktiviert sind. Die automatische Kontaktaufnahme allein ist kein fertiger Storage-Join; fehlende Clusteridentität/-Credentials erzeugen keinen neuen Ersatzcluster.
 
 
 ```text
@@ -2527,4 +2529,45 @@ Die Bucket-Kontingentwahl verwendet dieselben dekadisch gestuften, bidirektional
 
 ### Networkboot- und QEMU-Frontend
 
-`networkboot/` enthält den separaten Boot-Gateway; `qemu-plugin-nbd/` enthält die Blockdevice-Library, den NBD-Exporter und den Linux-NBD-Connector. QEMU nutzt Standard-NBD ohne Neukompilierung. Ein Bucket enthält beliebig viele benannte Geräte: genau ein binäres Metadatenobjekt je Gerät (Generation-ID, Größe, Name, Hersteller/Modell/Seriennummer) und systematisch adressierte 1-MiB-Stripes, ohne Segmentliste. Kleinere I/Os verwenden direkt GET_RANGE/PUT_RANGE ohne vollständiges Read-Modify-Write; fehlende Stripes liefern Nullen. Kein zusätzlicher Client-Datencache. Format und Adressberechnung stehen in `qemu-plugin-nbd/README.md`. Exklusive NBD-Exports, GC, Clear und Clone verwenden persistente ALL-Member-Leases. Die Admin-Volume-Journale speichern Membership-Epoch, Sequenz-Hochwassermarke und pro Grant einen frischen Server-Token. Owner-Socket-Verlust bzw. Owner-Neustart lösen die geordnete Freigabe aus; bloße Netzunterbrechung führt nicht zur Entsperrung. Geroutete Objekt-I/Os bleiben direkt. Der Bootpfad nutzt HTTP, NFSv3, SquashFS und ein privates temporäres ext4-Overlay auf einem NBD/STQR-Bucket (optional RAM); PAM aktiviert separat persönliche `username_home`-Buckets. Details, Metadatenvertrag und aktuelle Grenzen stehen in `networkboot/README.md`.
+`networkboot/` enthält den separaten Boot-Gateway; `qemu-plugin-nbd/` enthält die Blockdevice-Library, den NBD-Exporter und den Linux-NBD-Connector. QEMU nutzt Standard-NBD ohne Neukompilierung. Ein Bucket enthält beliebig viele benannte Geräte: genau ein binäres Metadatenobjekt je Gerät (Generation-ID, Größe, Name, Hersteller/Modell/Seriennummer) und systematisch adressierte 1-MiB-Stripes, ohne Segmentliste. Kleinere I/Os verwenden direkt GET_RANGE/PUT_RANGE ohne vollständiges Read-Modify-Write; fehlende Stripes liefern Nullen. Kein zusätzlicher Client-Datencache. Format und Adressberechnung stehen in `qemu-plugin-nbd/README.md`. Exklusive NBD-Exports, GC und Clear verwenden persistente ALL-Member-Leases. Clone veröffentlicht seine Verbindungen unter den bestehenden ALL-Member-Schreibsperren für die beiden Buckets und benötigt keine Offline-Schaltung aktiver Clients. Die Admin-Volume-Journale speichern Membership-Epoch, Sequenz-Hochwassermarke und pro Grant einen frischen Server-Token. Owner-Socket-Verlust bzw. Owner-Neustart lösen die geordnete Freigabe aus; bloße Netzunterbrechung führt nicht zur Entsperrung. Geroutete Objekt-I/Os bleiben direkt. Der Bootpfad nutzt HTTP, NFSv3, SquashFS und ein privates temporäres ext4-Overlay auf einem NBD/STQR-Bucket (optional RAM); PAM aktiviert separat persönliche `username_home`-Buckets. Details, Metadatenvertrag und aktuelle Grenzen stehen in `networkboot/README.md`.
+
+### Umsetzung des unversionierten Objektvertrags
+
+Das geänderte Objekt-Wireformat wird ausschließlich als `stqr.v2` mit HELLO-Version 2 verwendet. v1-Clients werden abgewiesen, statt ihre bisherigen Felder neu zu interpretieren. Die Nachrichtenhülle behält ihre eigene Formatkennung. Native Objektantworten enthalten keine Inhaltszähler.
+
+Optionale Byte-Prädikate vergleichen höchstens 1 MiB unter demselben Volume-Handle wie die anschließende Mutation beziehungsweise der Read. `Precondition.compare` schützt etwa einen kleinen S3-Metadatenkopf bei einem großen PUT, ohne den gesamten Payload vergleichen zu müssen. `ReadCondition` prüft Metadatenkopf und Länge vor der Übertragung unter gehaltenem Read-Lock; es fordert keinen historischen Inhalt an. Die Byte-Prädikate und Längenbedingungen gehören zum Retry-Fingerprint.
+
+Neue Go-/Kernel-Dateisystemeinträge verwenden STFS v6: Layout 2 referenziert unmittelbar einen unveränderlichen Lower-Indexbaum (Tiefe und Objekt-ID). STIX v3 bezeichnet Lower-Datenobjekte durch ein Bool statt eines Inhaltszählers. STFT v2 enthält die vollständigen Vorher-/Nachher-Bytes ohne Inhaltszähler. Frühere Lower-Inode-Verweise mit Inhaltszähler werden ausdrücklich abgewiesen; bestehende Overlays benötigen vor einer Umstellung eine überprüfte Konvertierung oder Neuerstellung.
+
+### Objektweises Bucket-COW
+
+`BUCKET_CLONE` veröffentlicht symmetrische `clone_peers`-Einträge mit Peer-Bucket-ID und einer frischen Verbindungs-ID im Admin-Katalog. Ein Ziel muss physisch unbenutzt sein, einschließlich Tombstones. Normale Clients dürfen verbunden bleiben. ALL-Member-Bucket-Fences lassen vorherige Mutationen auslaufen und die Quelle wird vor Veröffentlichung synchronisiert. Es wird kein eingefrorener Gesamtbestand und keine Objektversion angelegt; die Operation durchläuft keine Quellobjekte. Eine konsistente laufende VM-/Datenbankkopie benötigt zusätzlich die passenden Anwendungs-Flush-/Freeze-Schritte.
+
+Auflösung und Materialisierung erfolgen ausschließlich pro Objekt-ID:
+
+1. Eigene physische Records haben Vorrang, einschließlich expliziter Tombstones. Nur eine noch nie materialisierte ID fällt durch Clone-Verbindungen durch.
+2. Nach einer Peer-Auflösung wird der eigene Record erneut geprüft. Eine zwischenzeitlich angelegte eigene Präimage hat Vorrang vor späteren Peer-Inhalten.
+3. Vor PUT, PUT_RANGE, APPEND, TRUNC, DELETE oder CAS wird die eigene bisherige logische Sicht materialisiert und anschließend für alle direkt verbundenen, noch unmaterialisierten Peers gesichert. Erst danach folgt die normale Mutation unter dem Volume-Lock. Bereits materialisierte Records werden niemals durch eine verspätete Materialisierung überschrieben.
+4. Auch Abwesenheit wird durch einen Tombstone materialisiert. Neuanlagen dürfen dadurch nicht nachträglich in andere Kopien durchsickern. Sind alle direkten Partner bereits materialisiert, sind nur Metadatenproben erforderlich; es wird kein Payload erneut kopiert.
+5. Die Verbindungsidentität wird vor dem eigentlichen Write unter der serverseitigen Mutationssperre erneut geprüft. Sie ist Kontrollzustand für den Clone-Graphen, kein Inhaltszähler eines Objekts.
+
+Private COW-Nachrichten sind nur auf authentifizierten, durch NODE_HELLO gebundenen und aufgenommenen Node-Verbindungen zugelassen. Quell-/Peer-Grants eines Endbenutzers werden nicht benötigt und nie an diesen delegiert. `0x1090 COW_CAPTURE` öffnet einen physischen Read-Snapshot; `0x1091 COW_READ` liest begrenzte Bereiche, `0x1092 COW_CLOSE` gibt ihn frei, `0x1093 COW_MATERIALIZE` installiert nur den allerersten eigenen Record, `0x1094 COW_INVENTORY` liefert physische Objekt-IDs und `0x1095 COW_SYNC` synchronisiert lokale Backing-Volumes. Die Nachrichten nutzen den kanonischen Binärcodec und bounded Transfers. Read-Snapshots sind kurzlebiger Transferzustand mit Close/Expiry, keine historische Objekt-API. Sparse Transfers tragen nur belegte Extents; ihre physische Transferlänge ist unabhängig von der logischen Objektgröße. RAM-Payload wird dabei nicht in Disk-Staging ausgelagert. Replizierte Materialisierungen verwenden denselben dauerhaften ALL-Prepare-/Commit-Pfad wie normale Mutationen.
+
+Inventur, logische Belegung und Quotas beziehen geerbte Objekte ein; physischer Platz zählt tatsächlich materialisierte Allokationen. Subscriptions können geerbte Objekte ohne Speicheränderung abonnieren: Nach dem logischen Snapshot wird unter der Mutationssperre geprüft, dass noch kein eigener Record existiert, und der Listener registriert. Eine erste Materialisierung ändert keine logischen Bytes und benötigt kein Änderungsereignis; ein anschließender tatsächlicher Write veröffentlicht den nächsten Subscription-Cursor.
+
+Gleiche Storage-Policies dürfen dauerhaft COW-verbunden bleiben. Unterschiedliche Platzierungs-/Replikations-/Codec-Policies, spätere Policy-Wechsel und Löschungen lösen eine seitenweise Hintergrundmaterialisierung aus. Fortschritt ist wiederholbar; Neustarts dürfen die Inventur erneut beginnen. Vor physischem Löschen müssen alle verbleibenden Nachbar-Sichten unabhängig erhalten sein. Anschließend entfernt ein ALL-Katalogentscheid die Verbindungen unter Bucket-Fences. Die normale Policy-/Generation-Finalisierung und physische Löschung folgen erst danach. Ein gelöschter Bucket ist für Clients bereits ab seinem Löschentscheid unerreichbar.
+
+Die privaten COW-Bodies sind im v2-Codec wie folgt aufgebaut. `ObjectID` hat 32 Bytes, `ID` 16 Bytes; `CowInfo` besteht aus `length:u64, compression:u8, deleted:Bool`. `extents` ist eine gezählte Folge von `offset:u64,length:u64`, geordnet, überschneidungsfrei und innerhalb der logischen Länge.
+
+| Opcode | Request-Body | Erfolgs-Body |
+|---|---|---|
+| COW_CAPTURE | `bucket:ID,object:ObjectID,metadataOnly:Bool,allowRequiredReplica:Bool` | `found:Bool`; bei Fund zusätzlich `transfer:ID,info:CowInfo,extents:Vec` |
+| COW_READ | `transfer:ID,offset:u64,length:u64` | `data:Blob`, höchstens 1 MiB |
+| COW_CLOSE | `transfer:ID` | leer |
+| COW_MATERIALIZE | `bucket:ID,object:ObjectID,graphProof:Bytes32,lease:ID,sourceBucket:ID,sourceNode:ID,sourceTransfer:ID,info:CowInfo,extents:Vec` | leer; vorhandene eigene Records bleiben unverändert |
+| COW_INVENTORY | `bucket:ID,after:ObjectID,hasAfter:Bool,limit:u32` | `more:Bool,objects:Vec<ObjectID>`; Limit 1 bis 1000 |
+| COW_SYNC | `bucket:ID,reserved:Bytes32` | leer; reservierte Bytes sind null |
+
+Metadatenproben liefern eine Null-Transfer-ID ohne Extents und reservieren keinen Payload-Snapshot. Nur der öffentliche Readpfad darf eine vorhandene erforderliche Replica als Quelle wählen; die Sicherung vor Mutationen bleibt beim wirksamen Primary. `graphProof` bezeichnet die veröffentlichten Verbindungen, keine Inhaltsversion. Eine implizite Abwesenheit darf nur als expliziter Tombstone mit leerer Quelle materialisiert werden. Ein verbundenes COW-Teilnetz ist auf 4096 Buckets begrenzt; weitere Clones werden vor der Veröffentlichung abgewiesen.
+
+Die Implementierung schreibt native Volumes im Format 5. Ein vorhandenes Format-4-Volume wird abgewiesen und niemals still neu formatiert. Zusammen mit `stqr.v2`, STMU v2 und den geänderten Overlayformaten erfordert ein Upgrade bestehender Installationen eine gesonderte, überprüfte Datenübernahme; ein automatischer In-place-Upgradepfad ist damit nicht zugesagt.

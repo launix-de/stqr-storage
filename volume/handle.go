@@ -113,7 +113,7 @@ func (h *Handle) Stat(k Key) (Info, error) {
 }
 
 // RecordInfo includes retained tombstones. The server uses it to keep routing
-// retries/recreation to the same version history instead of treating a deleted
+// retries/recreation to the same physical owner instead of treating a deleted
 // object as a never-seen key. Client-facing Stat continues to hide tombstones.
 func (h *Handle) RecordInfo(k Key) (Info, error) {
 	return withHandle(h, false, func(v *Volume) (Info, error) {
@@ -200,8 +200,20 @@ func (h *Handle) Delete(k Key, opts Options) error {
 	return e
 }
 
-// CAS compares and replaces an equal-length range. With WholeObject and an
-// ExpectedVersion (or CreateOnly), it replaces the entire object conditionally.
+// Check compares application bytes/length while the caller retains this read
+// or write handle. A following CopyTo therefore observes the checked content.
+func (h *Handle) Check(k Key, opts Options) error {
+	return h.do(false, func(v *Volume) error {
+		o, err := v.loadObject(k)
+		if err != nil {
+			return err
+		}
+		return v.precondition(o, opts)
+	})
+}
+
+// CAS compares bytes under the volume write lock. WholeObject also compares
+// the complete old length before replacing the object; CreateOnly requires absence.
 func (h *Handle) CAS(k Key, offset uint64, expected, replacement []byte, opts Options) (Info, error) {
 	r, e := withHandle(h, true, func(v *Volume) (Result, error) {
 		if e := validateCAS(offset, expected, replacement, opts); e != nil {
@@ -270,38 +282,35 @@ func (h *Handle) ForgetRequest(id ID) error {
 	return h.do(true, func(v *Volume) error { return v.forgetRequestLocked(id) })
 }
 
-// Recompress changes physical encoding, preserving logical versions and retries.
+// Recompress changes physical encoding, preserving object bytes and retries.
 func (h *Handle) Recompress(k Key, codec Compression) error {
 	return h.RecompressWithOptions(k, codec, Options{})
 }
 
 // RecompressWithOptions permits a trusted handoff to consume its own physical
-// import allowance. Logical versions and original retry results stay unchanged;
+// import allowance. Logical contents and original retry results stay unchanged;
 // failed encodings leave the previous canonical object readable. Only reserve
 // fields are accepted; logical mutation/precondition options return ErrRange.
 func (h *Handle) RecompressWithOptions(k Key, codec Compression, opts Options) error {
 	return h.do(true, func(v *Volume) error {
-		if opts.RequestID != (ID{}) || opts.Compression != nil || opts.ExpectedVersion != nil || opts.ExpectedLength != nil || opts.CreateOnly || opts.WholeObject {
+		if opts.RequestID != (ID{}) || opts.Compression != nil || opts.ExpectedLength != nil || opts.Compare != nil || opts.CreateOnly || opts.WholeObject {
 			return ErrRange
 		}
 		return v.recompressLocked(k, codec, opts)
 	})
 }
 
-// Restore installs a trusted object snapshot while preserving version/tombstone.
-// The server must validate source ownership and epoch before calling. Older or
-// equal existing versions are rejected; a retry ID makes repeats idempotent.
+// Restore installs trusted bytes and tombstones under the volume write lock.
+// The server must fence source/destination ownership before calling. Byte/length
+// predicates can guard installation; a retry ID makes repeats idempotent.
 // Neither source nor its callbacks may reenter the handle or destination volume.
 func (h *Handle) Restore(k Key, info Info, source ExtentSource, opts Options) error {
 	return h.do(true, func(v *Volume) error { return v.restoreLocked(k, info, source, opts) })
 }
 
 // Repair replaces damaged physical data using a trusted replica of the current
-// logical version. It preserves the version and retained retry history.
+// logical contents. It preserves retained retry history.
 func (h *Handle) Repair(k Key, info Info, source ExtentSource, opts Options) error {
-	version := info.Version
-	opts.ExpectedVersion = &version
-	opts.restoreSameVersion = true
 	return h.Restore(k, info, source, opts)
 }
 
@@ -322,11 +331,11 @@ func (h *Handle) RestoreRequestWithOptions(x RequestRecord, opts Options) error 
 	return h.do(true, func(v *Volume) error { return v.restoreRequestLocked(x, opts) })
 }
 
-// SyncThrough flushes a known object version locally. It requires a write
+// SyncThrough flushes the current object locally. It requires a write
 // handle because a failed flush fences the volume. Replicated barriers are the
 // server's responsibility.
-func (h *Handle) SyncThrough(k Key, version uint64) error {
-	return h.do(true, func(v *Volume) error { return v.syncThroughLocked(k, version) })
+func (h *Handle) SyncThrough(k Key) error {
+	return h.do(true, func(v *Volume) error { return v.syncThroughLocked(k) })
 }
 
 // ObjectRecord is logical migration metadata, including retained tombstones.

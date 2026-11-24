@@ -20,7 +20,6 @@ func (r *rangeManager) selectSnapshotSource(p rangePlan, key volume.Key) (*volum
 	}
 	pin := volume.ID(p.Before.Entries[0].Locations[0].Volume)
 	var selected *volume.Volume
-	var latest volume.Info
 	for _, store := range b.volumesFor(description) {
 		if pin != (volume.ID{}) && store.Identity().VolumeID != pin || !bucketClass(description.Policy).Allows(store.Identity().Class) || !r.server.volumeAllowedForEntry(p.Before.Bucket, p.Before.Entries[0], store.Identity().VolumeID, r.server.currentSystem.Load()) {
 			continue
@@ -29,7 +28,7 @@ func (r *rangeManager) selectSnapshotSource(p rangePlan, key volume.Key) (*volum
 		if err != nil {
 			return nil, err
 		}
-		info, err := h.RecordInfo(key)
+		_, err = h.RecordInfo(key)
 		if err == nil && pin == (volume.ID{}) {
 			shadow, e := h.ImportShadow(key)
 			if e != nil {
@@ -45,8 +44,11 @@ func (r *rangeManager) selectSnapshotSource(p rangePlan, key volume.Key) (*volum
 		if err != nil {
 			return nil, err
 		}
-		if selected == nil || info.Version > latest.Version || info.Version == latest.Version && info.Deleted {
-			selected, latest = store, info
+		if selected != nil && selected != store {
+			return nil, fail(503, "source has ambiguous physical copies")
+		}
+		if selected == nil {
+			selected = store
 		}
 	}
 	if selected == nil {

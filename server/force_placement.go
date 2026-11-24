@@ -195,7 +195,7 @@ func (s *Server) purgeUnownedLostRange(bucket client.ID, entry client.RangeEntry
 			if err == nil {
 				for _, record := range records {
 					if p.contains(record.Key.Object) {
-						err = h.Purge(record.Key, record.Info.Version)
+						err = h.Purge(record.Key)
 						if err != nil {
 							break
 						}

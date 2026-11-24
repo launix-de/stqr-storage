@@ -16,7 +16,6 @@ func encodeReplicaAbort(e *client.Encoder, record volume.ReplicaRecord) {
 	e.U64(record.Binding.Sequence)
 	e.B = append(e.B, record.Binding.SetHash[:]...)
 	e.U16(record.AbortStatus)
-	e.U64(record.PreviousVersion)
 	e.U64(record.PreviousLength)
 }
 
@@ -24,7 +23,7 @@ func decodeReplicaAbort(d *client.Decoder) volume.ReplicaRecord {
 	r := volume.ReplicaRecord{Request: decodeRangeReceipt(d), State: volume.ReplicaAborted}
 	r.Binding.Epoch, r.Binding.Sequence = d.U64(), d.U64()
 	copy(r.Binding.SetHash[:], d.Take(32))
-	r.AbortStatus, r.PreviousVersion, r.PreviousLength = d.U16(), d.U64(), d.U64()
+	r.AbortStatus, r.PreviousLength = d.U16(), d.U64()
 	return r
 }
 

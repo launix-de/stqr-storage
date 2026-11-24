@@ -81,6 +81,11 @@ type BucketPolicy struct {
 	PlacementGroup       string                 `json:"placement_group,omitempty"`
 	PlacementMaskVersion uint64                 `json:"placement_mask_version,omitempty"`
 }
+type BucketClonePeer struct {
+	Bucket string `json:"bucket"`
+	Link   string `json:"link"`
+}
+
 type BucketGrant struct {
 	UserID      string            `json:"user_id"` // canonical 128-bit hex ID, not a username
 	Permissions BucketPermissions `json:"permissions"`
@@ -100,9 +105,11 @@ type BucketDescription struct {
 	DesiredPolicy *BucketPolicy `json:"desired_policy,omitempty"`
 	// Grants is the bucket-local user sub-array. It stores stable account IDs
 	// and per-user permissions; account/password records stay in the user list.
-	Grants           []BucketGrant   `json:"grants"`
-	Receipts         []BucketReceipt `json:"receipts,omitempty"`
-	DeletionComplete bool            `json:"deletion_complete,omitempty"`
+	Grants           []BucketGrant     `json:"grants"`
+	Receipts         []BucketReceipt   `json:"receipts,omitempty"`
+	DeletionComplete bool              `json:"deletion_complete,omitempty"`
+	ClonePeers       []BucketClonePeer `json:"clone_peers,omitempty"`
+	CloneDetach      bool              `json:"clone_detach,omitempty"`
 	// LocalVolumes is the committed single-node placement until range maps own it.
 	LocalVolumes []string `json:"local_volumes,omitempty"`
 }
@@ -141,6 +148,7 @@ func (b *Bucket) storageDescription() BucketDescription {
 }
 func cloneBucketDescription(d BucketDescription) BucketDescription {
 	d.Grants = append([]BucketGrant(nil), d.Grants...)
+	d.ClonePeers = append([]BucketClonePeer(nil), d.ClonePeers...)
 	d.Receipts = append([]BucketReceipt(nil), d.Receipts...)
 	d.LocalVolumes = append([]string(nil), d.LocalVolumes...)
 	if d.DesiredPolicy != nil {
@@ -255,6 +263,17 @@ func normalizeBucketDescription(d BucketDescription) (BucketDescription, error) 
 	}
 	if d.DeletionComplete && (d.State != BucketDeleting || id == systemBucket) {
 		return d, ErrBucketInvalid
+	}
+	sort.Slice(d.ClonePeers, func(i, j int) bool { return d.ClonePeers[i].Bucket < d.ClonePeers[j].Bucket })
+	if len(d.ClonePeers) > 4096 || id == systemBucket && len(d.ClonePeers) > 0 {
+		return d, ErrBucketInvalid
+	}
+	for i, peer := range d.ClonePeers {
+		p, e := bucketID(peer.Bucket)
+		_, linkErr := bucketID(peer.Link)
+		if e != nil || linkErr != nil || p == id || p == systemBucket || i > 0 && d.ClonePeers[i-1].Bucket == peer.Bucket {
+			return d, ErrBucketInvalid
+		}
 	}
 	for _, v := range d.LocalVolumes {
 		if _, e := bucketID(v); e != nil {
@@ -454,21 +473,21 @@ func strictBucketJSON(data []byte) (BucketDescription, error) {
 	}
 	return normalized, nil
 }
-func (c *BucketCatalog) load() ([]volume.ObjectID, []BucketDescription, uint64, error) {
+func (c *BucketCatalog) load() ([]volume.ObjectID, []BucketDescription, []byte, error) {
 	h, err := c.admin.Open(false)
 	if err != nil {
-		return nil, nil, 0, err
+		return nil, nil, nil, err
 	}
 	defer h.Close()
-	data, info, err := h.Get(BucketCatalogKey())
+	data, _, err := h.Get(BucketCatalogKey())
 	if errors.Is(err, volume.ErrNotFound) {
-		return nil, nil, 0, ErrBucketCatalogMissing
+		return nil, nil, nil, ErrBucketCatalogMissing
 	}
 	if err != nil {
-		return nil, nil, 0, err
+		return nil, nil, nil, err
 	}
 	if len(data) == 0 || len(data)%32 != 0 {
-		return nil, nil, 0, ErrBucketCatalogCorrupt
+		return nil, nil, nil, ErrBucketCatalogCorrupt
 	}
 	hashes := make([]volume.ObjectID, len(data)/32)
 	descriptions := make([]BucketDescription, 0, len(hashes))
@@ -478,18 +497,18 @@ func (c *BucketCatalog) load() ([]volume.ObjectID, []BucketDescription, uint64, 
 	for i := range hashes {
 		copy(hashes[i][:], data[i*32:(i+1)*32])
 		if i > 0 && bytes.Compare(hashes[i-1][:], hashes[i][:]) >= 0 {
-			return nil, nil, 0, ErrBucketCatalogCorrupt
+			return nil, nil, nil, ErrBucketCatalogCorrupt
 		}
 		payload, _, err := h.Get(volume.Key{Bucket: systemBucket, Object: hashes[i]})
 		if err != nil {
-			return nil, nil, 0, fmt.Errorf("%w: description %x: %w", ErrBucketCatalogCorrupt, hashes[i], err)
+			return nil, nil, nil, fmt.Errorf("%w: description %x: %w", ErrBucketCatalogCorrupt, hashes[i], err)
 		}
 		if sha256.Sum256(payload) != [32]byte(hashes[i]) {
-			return nil, nil, 0, ErrBucketCatalogCorrupt
+			return nil, nil, nil, ErrBucketCatalogCorrupt
 		}
 		d, err := strictBucketJSON(payload)
 		if err != nil || ids[d.ID] || (!d.DeletionComplete && names[d.Name]) {
-			return nil, nil, 0, ErrBucketCatalogCorrupt
+			return nil, nil, nil, ErrBucketCatalogCorrupt
 		}
 		ids[d.ID] = true
 		if !d.DeletionComplete {
@@ -499,9 +518,9 @@ func (c *BucketCatalog) load() ([]volume.ObjectID, []BucketDescription, uint64, 
 		hasSystem = hasSystem || d.ID == systemBucket.String()
 	}
 	if !hasSystem {
-		return nil, nil, 0, ErrBucketCatalogCorrupt
+		return nil, nil, nil, ErrBucketCatalogCorrupt
 	}
-	return hashes, descriptions, info.Version, nil
+	return hashes, descriptions, data, nil
 }
 func (c *BucketCatalog) List() ([]*Bucket, error) {
 	_, descriptions, _, err := c.load()
@@ -554,7 +573,7 @@ func (c *BucketCatalog) Save(d BucketDescription, expectedRevision uint64) (*Buc
 		return nil, err
 	}
 	for attempt := 0; attempt < 64; attempt++ {
-		hashes, descriptions, version, err := c.load()
+		hashes, descriptions, before, err := c.load()
 		if err != nil {
 			return nil, err
 		}
@@ -593,7 +612,7 @@ func (c *BucketCatalog) Save(d BucketDescription, expectedRevision uint64) (*Buc
 			return nil, volume.ErrRange
 		}
 		err = c.write(func(h *volume.Handle) error {
-			_, err := h.CAS(BucketCatalogKey(), 0, nil, list, volume.Options{WholeObject: true, ExpectedVersion: &version})
+			_, err := h.CAS(BucketCatalogKey(), 0, before, list, volume.Options{WholeObject: true})
 			return err
 		})
 		if errors.Is(err, volume.ErrPrecondition) {

@@ -35,13 +35,17 @@ are covered by the kernel smoke test; an rsync run in a kernel VM is separate.
 
 ## Format and upgrade
 
-**Upgrade every filesystem client before using these changes.** The readers
-accept existing STFS inode versions 1 through 4, while the extended metadata uses **STFS v5**. Older clients reject v5; there is no transparent downgrade.
-The object protocol, bucket IDs, data/index addressing and volume format do not
-change. Perform an offline fsck with the upgraded client before returning a
+**Upgrade every filesystem client before using these changes.** Writers use
+**STFS v6**, **STIX v3** and **STFT v2**. Ordinary older inode layouts remain
+readable, but older overlay layouts containing content-version-pinned lower
+inode references are rejected and need verified conversion or recreation.
+The native transport is `stqr.v2` and the volume format is 5; existing format-4
+volumes require a separate migration. Bucket IDs and data addressing remain
+unchanged. Run offline fsck with the upgraded client before returning a
 previously shared bucket to service.
 
-STFS v5 retains the v4 header, content layout and suffix, then appends:
+STFS v6 retains extended node metadata and uses immutable lower index/data IDs
+instead of lower inode content counters. Its extended metadata contains:
 
 ```text
 links:u32
@@ -103,11 +107,11 @@ a directory must have exactly one parent (the root is counted once). Mismatches
 abort before deletion; this version does not guess a repair. This validation
 applies to normal buckets, not the merged namespace of native overlay buckets.
 
-A link-count update changes the native inode version. Consequently adding or
-removing a lower hardlink, including final unlink, invalidates an overlay's
-version-pinned reference to that lower inode, even if the payload still exists.
-This follows the existing stable-base requirement; content-version rebasing is
-not introduced by this format extension.
+Link-count updates compare and replace actual inode bytes under the volume
+lock. An overlay's metadata-only copy-up retains immutable data/index references,
+so a later lower hardlink update does not retarget its inherited payload.
+Referenced lower objects must remain available; lower fsck cannot discover
+an offline upper's dependencies automatically.
 
 ## Verification
 

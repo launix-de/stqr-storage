@@ -201,7 +201,7 @@ func TestReadHandleRejectsWrites(t *testing.T) {
 		func() error { return h.Restore(k, Info{}, nil, Options{}) },
 		func() error { return h.Repair(k, Info{}, nil, Options{}) },
 		func() error { return h.RestoreRequest(RequestRecord{}) },
-		func() error { return h.SyncThrough(k, 1) },
+		func() error { return h.SyncThrough(k) },
 	}
 	for i, op := range ops {
 		if e := op(); e != ErrReadOnly {
@@ -246,7 +246,7 @@ func TestHandleMigrationSession(t *testing.T) {
 	if e = dst.Recompress(k, Gzip); e != nil {
 		t.Fatal(e)
 	}
-	if e = dst.SyncThrough(k, want.Version); e != nil {
+	if e = dst.SyncThrough(k); e != nil {
 		t.Fatal(e)
 	}
 	if _, found, e := dst.OperationStatus(id); e != nil || !found {
@@ -261,7 +261,7 @@ func TestHandleMigrationSession(t *testing.T) {
 	visits := 0
 	if e = dst.Scan(k.Bucket, ObjectID{}, ObjectID{}, func(key Key, got Info) error {
 		visits++
-		if key != k || got.Version != info.Version || got.Compression != Gzip {
+		if key != k || got.Compression != Gzip {
 			return errors.New("incorrect migrated object")
 		}
 		return nil
@@ -274,7 +274,7 @@ func TestHandleMigrationSession(t *testing.T) {
 		t.Fatalf("large Get: %v", e)
 	}
 	data, finalInfo, e := dst.GetRange(k, 1<<30, 4)
-	if e != nil || string(data) != "data" || finalInfo.Version != info.Version {
+	if e != nil || string(data) != "data" || finalInfo.Length != info.Length {
 		t.Fatalf("migrated range: %q %+v %v", data, finalInfo, e)
 	}
 }
@@ -442,16 +442,16 @@ func ExampleVolume_Open() {
 	if err != nil {
 		return
 	}
-	// Headers can now use info.Length/Version without a race before streaming.
+	// Headers can now use info.Length without a race before streaming.
 	h.CopyTo(key, 0, info.Length, io.Discard)
 	h.CopyTo(key, 0, min(info.Length, 1024), io.Discard)
 }
 
-func TestHandleRecordInfoRetainsTombstoneVersion(t *testing.T) {
+func TestHandleRecordInfoRetainsTombstone(t *testing.T) {
 	v, _ := memoryVolume(t, 1<<20)
 	key := testKey(37)
 	h := mustOpenHandle(t, v, true)
-	created, err := h.Put(key, []byte("old"), Options{})
+	_, err := h.Put(key, []byte("old"), Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -462,11 +462,11 @@ func TestHandleRecordInfoRetainsTombstoneVersion(t *testing.T) {
 		t.Fatal("client-facing stat exposed tombstone", err)
 	}
 	tombstone, err := h.RecordInfo(key)
-	if err != nil || !tombstone.Deleted || tombstone.Version <= created.Version {
+	if err != nil || !tombstone.Deleted || tombstone.Length != 0 {
 		t.Fatal(tombstone, err)
 	}
-	recreated, err := h.Put(key, []byte("new"), Options{ExpectedVersion: &tombstone.Version})
-	if err != nil || recreated.Version <= tombstone.Version {
-		t.Fatal("recreation lost version history", recreated, err)
+	recreated, err := h.Put(key, []byte("new"), Options{CreateOnly: true})
+	if err != nil || recreated.Deleted || recreated.Length != 3 {
+		t.Fatal("recreation did not replace tombstone", recreated, err)
 	}
 }

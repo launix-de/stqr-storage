@@ -178,7 +178,7 @@ func TestFilesystemFsckRejectsWrongLinkCountBeforeSweep(t *testing.T) {
 		t.Fatal(err)
 	}
 	setFSLinks(&s.node, 2)
-	if _, err = store.CAS(ctx, file.ID, 0, nil, encodeFSNode(s.node), CASOptions{Scope: CASObject, MutationOptions: MutationOptions{RequestID: NewRequestID(), ExpectedVersion: &s.info.Version}}); err != nil {
+	if _, err = store.CAS(ctx, file.ID, 0, s.raw, encodeFSNode(s.node), CASOptions{Scope: CASObject, MutationOptions: MutationOptions{RequestID: NewRequestID()}}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err = f.putImmutable(ctx, []byte("unreachable but must survive failed validation")); err != nil {

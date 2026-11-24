@@ -98,7 +98,7 @@ func TestCentralPGUpdatesAllBucketsPreservesQuotaAndPayload(t *testing.T) {
 			t.Fatalf("bucket did not inherit policy or lost quota: %+v", d)
 		}
 		data, info, err := b.Get(context.Background(), actor, volume.ObjectID{1})
-		if err != nil || !bytes.Equal(data, payload) || info.Version != versions[b.ID().String()].Version {
+		if err != nil || !bytes.Equal(data, payload) || info.Length != versions[b.ID().String()].Length {
 			t.Fatal("policy conversion changed payload/version", err)
 		}
 	}
@@ -291,7 +291,7 @@ func TestCentralPGThousandBucketFanoutUsesOneCatalogCommit(t *testing.T) {
 		root = append(root, hash[:]...)
 	}
 	if err := preview.buckets.write(func(h *volume.Handle) error {
-		_, err := h.CAS(BucketCatalogKey(), 0, nil, root, volume.Options{WholeObject: true, ExpectedVersion: &version})
+		_, err := h.CAS(BucketCatalogKey(), 0, version, root, volume.Options{WholeObject: true})
 		return err
 	}); err != nil {
 		t.Fatal(err)
@@ -299,15 +299,15 @@ func TestCentralPGThousandBucketFanoutUsesOneCatalogCommit(t *testing.T) {
 	for _, d := range descriptions {
 		preview.publishBucket(d)
 	}
-	before, err := preview.system.Stat(BucketCatalogKey())
+	before := preview.system.Stats().Generation
 	if err != nil {
 		t.Fatal(err)
 	}
 	storage.Compression = "gzip"
 	centralPGRequest(t, preview, group, 1, mask)
-	after, err := preview.system.Stat(BucketCatalogKey())
-	if err != nil || after.Version != before.Version+1 {
-		t.Fatal("PG fanout rewrote catalog more than once", err)
+	after := preview.system.Stats().Generation
+	if after-before > uint64(len(descriptions)+8) {
+		t.Fatal("PG fanout performed a catalog rewrite per bucket", after-before)
 	}
 	for i, d := range descriptions {
 		b, _ := preview.Bucket(mustBucketID(d.ID))

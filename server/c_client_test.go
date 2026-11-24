@@ -88,7 +88,7 @@ func TestCClient(t *testing.T) {
 	})
 	for _, mode := range []string{"disconnect", "digest", "malformed", "wrong-id", "varint", "text", "subscription-digest"} {
 		t.Run(mode, func(t *testing.T) {
-			upgrade := websocket.Upgrader{Subprotocols: []string{"stqr.v1"}}
+			upgrade := websocket.Upgrader{Subprotocols: []string{"stqr.v2"}}
 			host := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				c, err := upgrade.Upgrade(w, r, nil)
 				if err != nil {
@@ -104,7 +104,7 @@ func TestCClient(t *testing.T) {
 					return
 				}
 				hello := client.Encoder{}
-				hello.U16(1)
+				hello.U16(2)
 				hello.U64(0)
 				hello.ID(client.ID{})
 				hello.ID(client.ID{})
@@ -120,7 +120,7 @@ func TestCClient(t *testing.T) {
 					return
 				}
 				if mode == "subscription-digest" {
-					update := client.ObjectUpdate{Subscription: client.NewRequestID(), Cursor: 1, PreviousVersion: 1, NewVersion: 2, Parts: 1, Data: []byte("x"), NewLength: 1}
+					update := client.ObjectUpdate{Subscription: client.NewRequestID(), Cursor: 1, Parts: 1, Data: []byte("x"), NewLength: 1}
 					body, _ := update.MarshalBinary()
 					body[len(body)-1] ^= 1
 					c.WriteMessage(websocket.BinaryMessage, client.EncodeMessage(client.Message{Kind: client.Push, Opcode: client.ObjectUpdateMessage, Body: body}))
@@ -144,7 +144,6 @@ func TestCClient(t *testing.T) {
 					return
 				}
 				result := client.Encoder{}
-				result.U64(1)
 				result.U64(1)
 				result.Bool(false)
 				result.U32(0)

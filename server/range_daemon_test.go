@@ -161,11 +161,11 @@ func checkDaemonRangeHandoff(t *testing.T, source, target *daemonTestNode, bucke
 		t.Fatal("range catch-up/cutover", err)
 	}
 	got, info, err := objects.Get(ctx, object)
-	if err != nil || !bytes.Equal(got, append(append([]byte{}, payload...), delta...)) || info.Version != first.Version {
+	if err != nil || !bytes.Equal(got, append(append([]byte{}, payload...), delta...)) || info.Length != first.Length {
 		t.Fatal("handoff lost committed tail", err)
 	}
 	retry, err := objects.Append(ctx, object, delta, client.AppendOptions{RequestID: appendID, ExpectedLength: &length})
-	if err != nil || retry.Version != first.Version || retry.StartOffset != first.StartOffset {
+	if err != nil || retry.Length != first.Length || retry.StartOffset != first.StartOffset {
 		t.Fatal("handoff lost retry identity", err)
 	}
 	for _, v := range r.sourceVolumes(p) {
@@ -583,7 +583,7 @@ func TestDaemonRAMNodeDrainPreservesLiveRuntime(t *testing.T) {
 	}
 	source.close()
 	got, after, err := c.Get(ctx, oid)
-	if err != nil || !bytes.Equal(got, payload) || before.RuntimeID != after.RuntimeID || before.Version != after.Version {
+	if err != nil || !bytes.Equal(got, payload) || before.RuntimeID != after.RuntimeID || before.Length != after.Length {
 		t.Fatal("live RAM handoff changed content, version or runtime", before, after, err)
 	}
 	// Once the sole remaining RAM process restarts, its latest data is lost.
@@ -925,7 +925,7 @@ func TestDaemonCodecPolicyConvertsEveryOwner(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		versions[id] = info.Version
+		versions[id] = info.Length
 	}
 	description := bucket.Describe()
 	oldVersion := description.Policy.Version
@@ -967,8 +967,8 @@ func TestDaemonCodecPolicyConvertsEveryOwner(t *testing.T) {
 	}
 	for _, id := range ids {
 		got, info, err := c.Get(ctx, id)
-		if err != nil || !bytes.Equal(got, payload) || info.Version != versions[id] || info.Compression != uint8(volume.Gzip) {
-			t.Fatal("codec conversion changed content/version or missed owner", id, info, err)
+		if err != nil || !bytes.Equal(got, payload) || info.Length != versions[id] || info.Compression != uint8(volume.Gzip) {
+			t.Fatal("codec conversion changed content or missed owner", id, info, err)
 		}
 	}
 	for _, node := range []*Server{source.node, target.node} {
@@ -1005,7 +1005,7 @@ func TestDaemonStorageClassPolicyMovesToEligibleOwner(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		versions[id] = info.Version
+		versions[id] = info.Length
 	}
 	old := bucket.Describe()
 	desired := cloneBucketDescription(old)
@@ -1049,8 +1049,8 @@ func TestDaemonStorageClassPolicyMovesToEligibleOwner(t *testing.T) {
 	}
 	for _, id := range ids {
 		got, info, err := c.Get(ctx, id)
-		if err != nil || !bytes.Equal(got, payload) || info.Version != versions[id] || info.Compression != uint8(volume.LZ4) {
-			t.Fatal("class migration changed content/version/codec", id, info, err)
+		if err != nil || !bytes.Equal(got, payload) || info.Length != versions[id] || info.Compression != uint8(volume.LZ4) {
+			t.Fatal("class migration changed content/codec", id, info, err)
 		}
 	}
 	for _, node := range []*Server{source.node, target.node} {

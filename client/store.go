@@ -59,22 +59,20 @@ func (c *Client) objectRef(e *Encoder, id ObjectID) {
 	e.ID(runtime) // TODO(multinode): map revision/epoch and per-range runtime.
 }
 func encodePrecondition(e *Encoder, o MutationOptions) error {
-	if o.Absent && o.ExpectedVersion != nil {
-		return ErrRange
-	}
-	e.Bool(o.ExpectedVersion != nil)
-	if o.ExpectedVersion != nil {
-		e.U64(*o.ExpectedVersion)
-	}
 	e.Bool(o.ExpectedLength != nil)
 	if o.ExpectedLength != nil {
 		e.U64(*o.ExpectedLength)
 	}
 	e.Bool(o.Absent)
+	e.Bool(o.Compare != nil)
+	if o.Compare != nil {
+		e.U64(o.CompareOffset)
+		e.Blob(o.Compare)
+	}
 	return nil
 }
 func readObjectInfo(d *Decoder) ObjectInfo {
-	o := ObjectInfo{Version: d.U64(), Length: d.U64()}
+	o := ObjectInfo{Length: d.U64()}
 	if d.Bool() {
 		var hash [32]byte
 		copy(hash[:], d.Take(32))
@@ -119,15 +117,14 @@ func (c *Client) GetRangeTo(ctx context.Context, id ObjectID, off, length uint64
 	return c.getTo(ctx, id, off, length, true, dst)
 }
 
-// GetRangeToVersion checks the response snapshot version before writing dst.
-// It uses the existing GET_RANGE wire operation, not a racy preliminary Stat.
-func (c *Client) GetRangeToVersion(ctx context.Context, id ObjectID, off, length, version uint64, dst io.Writer) (ObjectInfo, error) {
-	return c.getToChecked(ctx, id, off, length, true, dst, &version)
+// GetRangeToMatching checks application bytes/length before copying a range.
+func (c *Client) GetRangeToMatching(ctx context.Context, id ObjectID, off, length uint64, condition ReadCondition, dst io.Writer) (ObjectInfo, error) {
+	return c.getToChecked(ctx, id, off, length, true, dst, &condition)
 }
 func (c *Client) getTo(ctx context.Context, id ObjectID, off, length uint64, ranged bool, dst io.Writer) (ObjectInfo, error) {
 	return c.getToChecked(ctx, id, off, length, ranged, dst, nil)
 }
-func (c *Client) getToChecked(ctx context.Context, id ObjectID, off, length uint64, ranged bool, dst io.Writer, version *uint64) (ObjectInfo, error) {
+func (c *Client) getToChecked(ctx context.Context, id ObjectID, off, length uint64, ranged bool, dst io.Writer, condition *ReadCondition) (ObjectInfo, error) {
 	if e := c.ready(ctx); e != nil {
 		return ObjectInfo{}, e
 	}
@@ -141,6 +138,15 @@ func (c *Client) getToChecked(ctx context.Context, id ObjectID, off, length uint
 		op = objectGetRange
 		e.U64(off)
 		e.U64(length)
+	}
+	e.Bool(condition != nil)
+	if condition != nil {
+		e.Bool(condition.Length != nil)
+		if condition.Length != nil {
+			e.U64(*condition.Length)
+		}
+		e.U64(condition.Offset)
+		e.Blob(condition.Bytes)
 	}
 	r, err := c.do(ctx, op, e.B, ID{}, false, nil)
 	if err != nil {
@@ -157,9 +163,6 @@ func (c *Client) getToChecked(ctx context.Context, id ObjectID, off, length uint
 		if total != info.Length {
 			d.Err = ErrProtocol
 		}
-	}
-	if version != nil && info.Version != *version {
-		return info, ErrPrecondition
 	}
 	mode, total, digest, data := decodeTransfer(&d)
 	if d.Done() != nil {
@@ -294,7 +297,7 @@ func (c *Client) CAS(ctx context.Context, id ObjectID, off uint64, expected, rep
 	if e := c.ready(ctx); e != nil {
 		return ObjectInfo{}, e
 	}
-	if opt.Scope > CASObject || len(expected) > 1<<20 || len(replacement) > 1<<20 || opt.Scope == CASRange && len(expected) != len(replacement) || opt.Scope == CASObject && (off != 0 || !opt.Absent && opt.ExpectedVersion == nil) || uint64(len(replacement)) > ^uint64(0)-off {
+	if opt.Scope > CASObject || len(expected) > 1<<20 || len(replacement) > 1<<20 || opt.Scope == CASRange && len(expected) != len(replacement) || opt.Scope == CASObject && off != 0 || uint64(len(replacement)) > ^uint64(0)-off {
 		return ObjectInfo{}, ErrRange
 	}
 	e := Encoder{}

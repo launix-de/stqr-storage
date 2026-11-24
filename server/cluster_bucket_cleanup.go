@@ -21,7 +21,7 @@ func (c *clusterController) finishBucketDeletions(ctx context.Context) {
 		return
 	}
 	for _, description := range s.bucketSnapshots() {
-		if description.State != BucketDeleting || description.DeletionComplete {
+		if description.State != BucketDeleting || description.DeletionComplete || len(description.ClonePeers) > 0 {
 			continue
 		}
 		bucket, err := bucketID(description.ID)
@@ -116,7 +116,7 @@ func (s *Server) purgeDeletedBucket(body []byte, actor client.ID) ([]byte, error
 		return nil, errControlConflict
 	}
 	description := b.Describe()
-	if description.State != BucketDeleting || description.Revision != revision {
+	if description.State != BucketDeleting || description.Revision != revision || len(description.ClonePeers) > 0 {
 		s.opMu.Unlock()
 		return nil, errControlConflict
 	}
