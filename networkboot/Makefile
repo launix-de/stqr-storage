@@ -25,13 +25,14 @@ install: all pam
 	install -m 0755 bin/stqr-bootctl pam/stqr-home $(DESTDIR)$(PREFIX)/libexec/
 	install -m 0755 bin/pam_stqr.so $(DESTDIR)$(PAM_MODULE_DIR)/
 	install -d $(DESTDIR)$(PREFIX)/libexec/stqr-networkboot/bin
-	install -m 0755 prepare-system edit-image serve $(DESTDIR)$(PREFIX)/libexec/stqr-networkboot/
+	install -m 0755 prepare-system edit-image serve test-boot $(DESTDIR)$(PREFIX)/libexec/stqr-networkboot/
 	install -m 0644 common.py sessions.py $(DESTDIR)$(PREFIX)/libexec/stqr-networkboot/
 	cp -R initramfs $(DESTDIR)$(PREFIX)/libexec/stqr-networkboot/
 	install -m 0755 bin/stqr-bootctl bin/stqr-boot-nfs bin/stqr-nbd-client $(DESTDIR)$(PREFIX)/libexec/stqr-networkboot/bin/
 	ln -sf ../libexec/stqr-networkboot/prepare-system $(DESTDIR)$(PREFIX)/sbin/stqr-prepare-system
 	ln -sf ../libexec/stqr-networkboot/edit-image $(DESTDIR)$(PREFIX)/sbin/stqr-edit-image
 	ln -sf ../libexec/stqr-networkboot/serve $(DESTDIR)$(PREFIX)/sbin/stqr-networkboot
+	ln -sf ../libexec/stqr-networkboot/test-boot $(DESTDIR)$(PREFIX)/sbin/stqr-test-boot
 
 clean:
 	rm -rf bin __pycache__ tests/__pycache__

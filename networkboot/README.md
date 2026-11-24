@@ -59,6 +59,13 @@ bucket or replacing its device metadata, use:
 networkboot/prepare-system --resume ubuntu-desktop-v1 /images/ubuntu.iso
 ```
 
+If installation completed but extraction/publication failed, retry that stage
+without an installer or another VM boot:
+
+```sh
+networkboot/prepare-system --publish-only ubuntu-desktop-v1
+```
+
 Resume checks that the device has the requested size and that no release has
 already been published. The installer can then repair or reformat the existing
 virtual disk. Use `edit-image` for a published template.
@@ -186,6 +193,19 @@ If the machine has an ambiguous network configuration, it asks for explicit
 Loader paths, ports, `--upper` (default `stqr`) and upper size (default 4 GiB)
 already have defaults. No network settings need to be added to `stqr.yaml`.
 
+For a local QEMU PXE test, the gateway can run without LAN DHCP/TFTP:
+
+```sh
+sudo networkboot/serve ubuntu-desktop-v2 --no-dhcp
+# In a second terminal:
+networkboot/test-boot
+```
+
+QEMU supplies private DHCP/NAT and its iPXE ROM loads the HTTP boot script.
+This tests the published release and network root without a guest hard disk or
+changes to LAN DHCP. The default is 4 GiB RAM and two vCPUs;
+`--server ADDRESS` selects another gateway. It does not exercise physical-client Proxy-DHCP or TFTP.
+
 `--check` resolves the bucket and checks configuration/dependencies without
 starting services. `--no-dhcp` uses an existing externally configured PXE setup.
 Ports default to HTTP 8088 and NFS/MOUNT TCP 2049; dnsmasq provides Proxy-DHCP
@@ -246,6 +266,10 @@ handles remain reconstructible. No automatic live-kernel update or
 migration of persistent native STQR uppers is performed.
 
 ## PAM homes
+
+The image builder installs boot support, but does not install/enable PAM homes
+or provision Unix accounts automatically. Configure the following inside the
+image before publishing it for STQR logins.
 
 Build/install the matching `kstqr` module and `mount.kstqr` on login clients.
 Create the STQR user and an existing `username_home` bucket with the user's

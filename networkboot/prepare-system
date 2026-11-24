@@ -17,6 +17,7 @@ def main():
     p.add_argument('--cpus', type=int, default=2)
     p.add_argument('--uefi', help='optional OVMF firmware file; also pass it when editing')
     p.add_argument('--kernel-version')
+    p.add_argument('--publish-only', action='store_true', help='prepare and publish the existing installation disk without starting QEMU or needing an ISO')
     p.add_argument('--resume', action='store_true', help='reuse an unpublished installation disk after an interrupted installation')
     p.add_argument('--work-dir', default='/var/tmp', help='local archive staging directory; needs disk space')
     args = p.parse_args()
@@ -28,23 +29,26 @@ def main():
     if args.image and args.install_image:
         p.error('specify the install image only once')
     args.install_image = args.image or args.install_image
-    if not args.install_image:
+    if not args.install_image and not args.publish_only:
         p.error('installer ISO required')
-    require('qemu-system-x86_64', 'guestfish', 'sort')
+    require('guestfish', 'sort', *([] if args.publish_only else ['qemu-system-x86_64']))
     ctl(args.config, 'check-exclusive', args.bucket)
     if args.memory<512 or args.cpus<1:
         p.error("memory must be at least 512 MiB and CPU count positive")
-    if not args.install_image.is_file() or args.disk_gib <= 0:
+    if (not args.publish_only and not args.install_image.is_file()) or args.disk_gib <= 0:
         p.error('a local installer image and positive disk size are required')
     if args.resume:
         ctl(args.config, '--size', str(args.disk_gib << 30), 'check-install-disk', args.bucket)
-    else:
+    elif not args.publish_only:
         ctl(args.config, 'create', args.bucket)
         ctl(args.config, '--size', str(args.disk_gib << 30), 'init-disk', args.bucket)
     with tempfile.TemporaryDirectory(prefix='stqr-prepare-', dir=args.work_dir) as work:
         with nbd(args.config, args.bucket, work) as socket:
-            qemu(socket, args, args.install_image)
+            if not args.publish_only:
+                qemu(socket, args, args.install_image)
+            print('Preparing networkboot release from the installed disk...', flush=True)
             extract(socket, work, args.kernel_version)
+        print('Uploading and publishing networkboot release...', flush=True)
         ctl(args.config, 'publish', args.bucket, work)
         ctl(args.config, 'gc', args.bucket)
     print('Published', args.bucket)

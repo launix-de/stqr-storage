@@ -74,12 +74,47 @@ class Workflows(unittest.TestCase):
                 script.main()
             ctl.assert_any_call('stqr.yaml', '--size', str(32 << 30), 'check-install-disk', 'ubuntu')
             self.assertFalse(any('create' in call.args or 'init-disk' in call.args for call in ctl.call_args_list))
+    def test_publish_only_never_recreates_disk_or_starts_vm(self):
+        script = load('prepare-system')
+        @contextlib.contextmanager
+        def disk(*args):
+            yield Path('/private/disk.sock')
+        with patch.object(sys, 'argv', ['prepare-system', '--publish-only', 'ubuntu']), patch.object(script, 'require'), patch.object(script, 'ctl') as ctl, patch.object(script, 'nbd', side_effect=disk), patch.object(script, 'qemu') as qemu, patch.object(script, 'extract') as extract, contextlib.redirect_stdout(io.StringIO()):
+            script.main()
+        qemu.assert_not_called()
+        extract.assert_called_once()
+        ctl.assert_any_call('stqr.yaml', 'publish', 'ubuntu', unittest.mock.ANY)
+        self.assertFalse(any('create' in call.args or 'init-disk' in call.args for call in ctl.call_args_list))
+
+    def test_guest_uses_explicit_raw_format_for_readonly_nbd(self):
+        import common
+        with patch.object(common, 'run') as run:
+            common.guest('/private/disk.sock', 'ls', '/boot', readonly=True)
+        self.assertEqual(run.call_args.args[:5], ('guestfish', '--ro', '--format=raw', '-a', 'nbd:///?socket=/private/disk.sock'))
+
+    def test_cli_keeps_captured_diagnostic(self):
+        from common import cli
+        output = io.StringIO()
+        with contextlib.redirect_stderr(output), self.assertRaises(SystemExit):
+            cli(lambda: (_ for _ in ()).throw(subprocess.CalledProcessError(1, ['fixture'], stderr='disk inspection failed')))
+        self.assertIn('disk inspection failed', output.getvalue())
+
     def test_cli_operational_failure_has_no_traceback(self):
         from common import cli
         with self.assertRaises(SystemExit) as stopped:
             cli(lambda: (_ for _ in ()).throw(subprocess.CalledProcessError(7,['fixture'])))
         self.assertEqual(stopped.exception.code,7)
+    def test_diskless_pxe_command(self):
+        script = load('test-boot')
+        with patch.object(sys, 'argv', ['test-boot']), patch.object(script, 'boot_network', return_value=('eth0', '192.0.2.10', '192.0.2.0/24')), patch.object(script.shutil, 'which', return_value='/usr/bin/qemu-system-x86_64'), patch.object(script, 'run') as run, contextlib.redirect_stdout(io.StringIO()):
+            script.main()
+        args = run.call_args.args
+        self.assertIn('user,model=virtio-net-pci,bootfile=http://192.0.2.10:8088/boot.ipxe', args)
+        self.assertIn('n', args)
+        self.assertNotIn('-drive', args)
+        self.assertNotIn('-blockdev', args)
+
     def test_help_has_no_side_effects(self):
-        for script in ['prepare-system', 'edit-image', 'serve', 'pam/stqr-home']:
+        for script in ['prepare-system', 'edit-image', 'serve', 'test-boot', 'pam/stqr-home']:
             result = subprocess.run([sys.executable, str(ROOT / script), '--help'], capture_output=True)
             self.assertEqual(result.returncode, 0, result.stderr)

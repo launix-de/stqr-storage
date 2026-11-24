@@ -18,7 +18,7 @@ import threading
 import time
 import urllib.parse
 from sessions import Sessions
-from common import cli, BIN, ctl, require, run
+from common import cli, BIN, ctl, require, run, boot_network
 
 
 def dnsmasq_config(server, interface, clients, tftp, http_port):
@@ -77,27 +77,6 @@ def cache_release(args):
             os.link(release / 'export/rootfs.squashfs', release_export / 'rootfs.squashfs')
         return digest,release,exports
 
-
-def boot_network(interface=None, server=None, clients=None):
-    """Infer the boot LAN from the default route and its configured IPv4 subnet."""
-    if interface and server and clients:
-        return interface, server, clients
-    if not interface:
-        routes=json.loads(subprocess.check_output(['ip','-j','-4','route','show','default'],text=True))
-        devices={route['dev'] for route in routes if 'dev' in route}
-        if len(devices)!=1:
-            raise ValueError('cannot select a unique boot interface; specify --interface')
-        interface=devices.pop()
-    addresses=json.loads(subprocess.check_output(['ip','-j','-4','addr','show','dev',interface],text=True))
-    candidates=[a for link in addresses for a in link.get('addr_info',[]) if a.get('scope')=='global']
-    if server:
-        candidates=[a for a in candidates if a['local']==server]
-    if len(candidates)!=1:
-        raise ValueError('cannot select a unique boot IPv4 address; specify --interface and --server')
-    address=candidates[0]
-    server=server or address['local']
-    clients=clients or str(ipaddress.ip_network(f"{server}/{address['prefixlen']}",strict=False))
-    return interface,server,clients
 
 
 def main():

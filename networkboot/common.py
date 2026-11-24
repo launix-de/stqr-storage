@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-only
 import contextlib
 import json
+import ipaddress
 import os
 from pathlib import Path
 import shutil
@@ -58,8 +59,9 @@ def nbd(config, bucket, work, readonly=False):
 
 def guest(socket, *commands, readonly=False, **kwargs):
     args = ['guestfish'] + (['--ro'] if readonly else [])
-    # libguestfs uses the same standard NBD endpoint as QEMU.
-    return run(*args, '-a', f'nbd:///?socket={socket}', '-i', *commands, **kwargs)
+    # Builder devices are raw disks. Suppress format probing: libguestfs
+    # otherwise invokes qemu-img info for readonly NBD accesses.
+    return run(*args, '--format=raw', '-a', f'nbd:///?socket={socket}', '-i', *commands, **kwargs)
 
 def qemu(socket, args, installer=None):
     block = {'driver': 'nbd', 'server': {'type': 'unix', 'path': str(socket)}, 'node-name': 'stqr-disk', 'discard': 'unmap'}
@@ -87,10 +89,11 @@ def extract(socket, work, kernel_version=None):
     guest(socket, 'upload', HERE / 'initramfs/modules.conf', '/etc/initramfs-tools/conf.d/stqr')
     guest(socket, 'upload', HERE / 'initramfs/hooks/stqr', '/etc/initramfs-tools/hooks/stqr')
     guest(socket, 'chmod', '0755', '/etc/initramfs-tools/hooks/stqr')
+    print('Generating networkboot initramfs files...', flush=True)
     # Fail rather than publishing a disk with an unbootable, mismatched initramfs.
     guest(socket, 'command', '/usr/sbin/update-initramfs -u -k all')
-    listing = subprocess.run(['guestfish', '--ro', '-a', f'nbd:///?socket={socket}', '-i', 'ls', '/boot'],
-                             check=True, capture_output=True, text=True).stdout.splitlines()
+    listing = guest(socket, 'ls', '/boot', readonly=True,
+                    capture_output=True, text=True).stdout.splitlines()
     versions = [p[len('vmlinuz-'):] for p in listing if p.startswith('vmlinuz-') and 'initrd.img-' + p[len('vmlinuz-'):] in listing]
     if kernel_version:
         versions = [v for v in versions if v == kernel_version]
@@ -103,6 +106,7 @@ def extract(socket, work, kernel_version=None):
     # Work on the disk itself only after the VM has disconnected. Replace disk
     # fstab entries for network root, while preserving the original for editing.
     guest(socket, 'sh', 'cp -p /etc/fstab /etc/fstab.stqr-original; printf "# STQR network root\\n" > /etc/fstab')
+    print('Exporting installed root filesystem...', flush=True)
     try:
         guest(socket, 'tar-out', '/', work / 'rootfs.tar', 'numericowner:true',
               'xattrs:true', 'acls:true', 'selinux:true',
@@ -118,9 +122,34 @@ def cli(main):
     try:
         main()
     except subprocess.CalledProcessError as error:
+        if error.stderr:
+            detail = error.stderr.decode(errors='replace') if isinstance(error.stderr, bytes) else error.stderr
+            print(detail.rstrip(), file=sys.stderr)
         raise SystemExit(error.returncode)
     except (RuntimeError, OSError) as error:
         print(f'{Path(sys.argv[0]).name}: {error}', file=sys.stderr)
         raise SystemExit(1)
     except KeyboardInterrupt:
         raise SystemExit(130)
+
+
+def boot_network(interface=None, server=None, clients=None):
+    """Infer the boot LAN from the default route and its configured IPv4 subnet."""
+    if interface and server and clients:
+        return interface, server, clients
+    if not interface:
+        routes=json.loads(subprocess.check_output(['ip','-j','-4','route','show','default'],text=True))
+        devices={route['dev'] for route in routes if 'dev' in route}
+        if len(devices)!=1:
+            raise ValueError('cannot select a unique boot interface; specify --interface')
+        interface=devices.pop()
+    addresses=json.loads(subprocess.check_output(['ip','-j','-4','addr','show','dev',interface],text=True))
+    candidates=[a for link in addresses for a in link.get('addr_info',[]) if a.get('scope')=='global']
+    if server:
+        candidates=[a for a in candidates if a['local']==server]
+    if len(candidates)!=1:
+        raise ValueError('cannot select a unique boot IPv4 address; specify --interface and --server')
+    address=candidates[0]
+    server=server or address['local']
+    clients=clients or str(ipaddress.ip_network(f"{server}/{address['prefixlen']}",strict=False))
+    return interface,server,clients
