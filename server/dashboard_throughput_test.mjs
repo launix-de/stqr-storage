@@ -15,3 +15,10 @@ console.log('Throughput deltas, cluster sums, restarts, stale and absent counter
 const second={...entry,snapshot:{...entry.snapshot,buckets:[...entry.snapshot.buckets,{id:'c',io:{logicalRead:3000n,logicalWrite:6000n}}]},previous:{...entry.previous,buckets:[...entry.previous.buckets,{id:'c',io:{logicalRead:0n,logicalWrite:0n}}]}};
 const totals=bucketTotals([second],1000),b=bucketRates([second],'b',1000),c=bucketRates([second],'c',1000);
 assert.deepEqual(totals,[b[0]+c[0],b[1]+c[1]]);
+const {recordRateSnapshot}=await import('./dashboard/throughput.js');
+const burst={};
+for(let i=0;i<=300;i++)recordRateSnapshot(burst,{boot:'burst',captured:BigInt(i)*10000000n,io:{write:BigInt(Math.floor(i/30))*3000n},volumes:[],buckets:[]},i*10);
+assert.equal((await import('./dashboard/throughput.js')).nodeRate(burst,'write',3000),10000n);
+assert(burst.rateSamples.length<=32);
+recordRateSnapshot(burst,{boot:'next',captured:4000000000n,io:{write:0n},volumes:[],buckets:[]},4000);
+assert.equal(burst.previous,null);
