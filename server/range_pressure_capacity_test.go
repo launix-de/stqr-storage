@@ -86,6 +86,7 @@ func TestCapacityOverflowManyNewObjectsDoesNotChurnEmptyRanges(t *testing.T) {
 	for _, tx := range source.node.scopes.txns {
 		if tx.plan.Before.Bucket == client.ID(b.ID()) && tx.plan.Source == source.node.control.ledger.node {
 			moves++
+			t.Logf("capacity attempt prefix=%d physical=%d logical=%d aborted=%v committed=%v done=%v", tx.plan.Moving.PrefixBits, tx.plan.Physical, tx.logicalUsed, tx.aborted, tx.decision != nil, tx.sourceDone.RecordSequence != 0)
 		}
 	}
 	source.node.scopes.mu.Unlock()
