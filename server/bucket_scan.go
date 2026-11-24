@@ -48,14 +48,26 @@ func (s *Server) executeMaintenance(ctx context.Context, op *objectMutation, d *
 	if description.State != BucketActive || description.DesiredPolicy != nil {
 		return nil, 0, fail(409, "bucket lifecycle transition in progress")
 	}
-	if op.message.Opcode == client.BucketMaintenance {
+	if op.message.Opcode == client.BucketMaintenance || op.message.Opcode == client.BucketBlockMaintenance {
+		block := op.message.Opcode == client.BucketBlockMaintenance
+		readonly := false
+		if block {
+			readonly = d.Bool()
+		}
 		if view := s.currentSystem.Load(); view != nil && len(view.manifest.Membership.Members) > 1 {
 			return nil, 0, fail(501, "cluster-wide exclusive maintenance is not yet available")
 		}
 		if d.Done() != nil {
 			return nil, 0, fail(400, "invalid maintenance request")
 		}
-		if _, err = b.authorize(p, BucketDelete); err != nil {
+		permission := BucketDelete
+		if block {
+			permission = BucketRead
+			if !readonly {
+				permission = BucketWrite
+			}
+		}
+		if _, err = b.authorize(p, permission); err != nil {
 			return nil, 0, err
 		}
 		s.wsMu.Lock()
@@ -72,6 +84,8 @@ func (s *Server) executeMaintenance(ctx context.Context, op *objectMutation, d *
 		}
 		b.mu.Lock()
 		b.maintenance = ws.authorization
+		ws.authorization.blockDevice.Store(block)
+		ws.authorization.blockReadOnly.Store(block && readonly)
 		b.mu.Unlock()
 		return nil, 200, nil
 	}

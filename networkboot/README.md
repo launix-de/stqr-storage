@@ -46,7 +46,7 @@ networkboot/prepare-system \
   --disk-gib 32 --memory 4096 --cpus 2
 ```
 
-The command creates a new bucket and a sparse `disk.raw` filesystem inode, starts
+The command creates a new bucket and a sparse named `disk.raw` block device, starts
 an exclusive local Unix-socket NBD export and opens the installer in QEMU.
 The disk is already stored in STQR; there is no full local VM-disk copy.
 Rootfs archives still need staging space in `/var/tmp` (override `--work-dir`). Complete
@@ -72,13 +72,14 @@ A fixed manifest object atomically publishes checksummed `rootfs.tar`, `vmlinuz`
 extraction or publication leaves the previous published release unchanged.
 Changing the VM disk is deliberately independent from publishing it.
 
-A boot bucket contains both a native filesystem holding the disk and opaque
-release artifacts. **Do not run filesystem `--fsck` against a boot bucket**:
-that collector does not know the artifact manifest. The builder/editor instead run the bundle-aware `stqr-bootctl gc BUCKET` after
-successful publication. It acquires maintenance, validates the disk graph and
-keeps the manifest and all current artifact roots before removing obsolete
-objects. During a running VM, overwritten segments remain until this offline
-collection; provision physical headroom for installation writes and archives.
+A boot bucket contains named striped block devices and opaque release artifacts.
+**Do not run filesystem `--fsck` against a boot bucket**: it is not a native
+FUSE filesystem. The builder/editor run the bundle-aware `stqr-bootctl gc BUCKET`
+after successful publication. It preserves all device descriptors, their live
+stripes, the manifest and current artifact roots, removing obsolete artifacts
+and orphan stripes. Stripes are updated in place with ranged writes; no segment
+list or immutable per-write stripe chain is stored. Keep physical headroom for
+installation writes and rootfs archives.
 
 ## Change a template
 
@@ -118,8 +119,13 @@ hot-plug additional disks. Guest filesystems must be synced/unmounted before
 hot removal. This frontend is a userspace block-device adapter, not a new host
 kernel block module.
 
-The exporter uses the native filesystem's sparse file/chunk representation and
-explicit bucket durability barriers. It holds exclusive bucket maintenance;
+The exporter is implemented in [`qemu-plugin-nbd/`](../qemu-plugin-nbd/README.md).
+Each device has one binary descriptor and systematically addressed 1-MiB stripes,
+with small I/O dispatched directly through native ranged operations. There is no
+stripe list or client payload cache. All named devices in one bucket are separate
+NBD exports; the boot helper selects `disk.raw` by default (`--device` overrides).
+The standalone `stqr-nbd` CLI supports creating/listing named devices and serving
+them on one socket. The exporter uses explicit bucket durability barriers. It holds exclusive bucket maintenance;
 other clients cannot open the disk behind the writer. No second writer is
 permitted. A failed or lost exclusion session cannot reconnect and resume writes.
 

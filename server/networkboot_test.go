@@ -5,7 +5,10 @@ import (
 	"archive/tar"
 	"bytes"
 	"context"
+	wire "encoding/binary"
 	"encoding/json"
+	"io"
+	"net"
 	"net/http/httptest"
 	"os"
 	"os/exec"
@@ -104,6 +107,22 @@ func TestNetworkbootNBDWithQEMU(t *testing.T) {
 	}
 	run("create", "nbd-image")
 	run("--size", "4194304", "init-disk", "nbd-image")
+	nbdBinary := filepath.Join(dir, "stqr-nbd")
+	buildNBD := exec.Command("go", "build", "-buildvcs=false", "-race", "-o", nbdBinary, "./qemu-plugin-nbd/cmd/stqr-nbd")
+	buildNBD.Dir = ".."
+	if out, err := buildNBD.CombinedOutput(); err != nil {
+		t.Fatalf("build NBD: %v %s", err, out)
+	}
+	nbdCLI := func(args ...string) {
+		t.Helper()
+		out, err := exec.Command(nbdBinary, append([]string{"--config", cfg, "--bucket", "nbd-image"}, args...)...).CombinedOutput()
+		if err != nil {
+			t.Fatalf("NBD CLI: %v %s", err, out)
+		}
+	}
+	nbdCLI("--size", "8388608", "create", "data")
+	nbdCLI("--readonly", "list")
+	nbdCLI("--readonly", "info", "data")
 	serve := func(bucket string, write bool) {
 		t.Helper()
 		socket := filepath.Join(dir, bucket+".sock")
@@ -135,6 +154,46 @@ func TestNetworkbootNBDWithQEMU(t *testing.T) {
 				t.Fatal("NBD timeout")
 			}
 			time.Sleep(20 * time.Millisecond)
+		}
+		if bucket == "nbd-image" && write {
+			// Keep one device connected while QEMU opens a different named export.
+			hold, err := net.DialTimeout("unix", socket, time.Second)
+			if err != nil {
+				t.Fatal(err)
+			}
+			hold.SetDeadline(time.Now().Add(10 * time.Second))
+			hello := make([]byte, 18)
+			if _, err = io.ReadFull(hold, hello); err != nil {
+				t.Fatal(err)
+			}
+			for _, v := range []any{uint32(3), uint64(0x49484156454f5054), uint32(1), uint32(8), []byte("disk.raw")} {
+				if err = wire.Write(hold, wire.BigEndian, v); err != nil {
+					t.Fatal(err)
+				}
+			}
+			info := make([]byte, 10)
+			if _, err = io.ReadFull(hold, info); err != nil {
+				t.Fatal(err)
+			}
+			if wire.BigEndian.Uint64(info) != 4194304 {
+				t.Fatal("wrong default geometry")
+			}
+			ioCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			out, err := exec.CommandContext(ioCtx, "qemu-io", "-f", "raw", "-c", "write -P 0xa5 1048064 4096", "-c", "flush", "-c", "read -P 0xa5 1048064 4096", "nbd+unix:///data?socket="+socket).CombinedOutput()
+			cancel()
+			if err != nil {
+				t.Fatalf("parallel named QEMU export: %v %s", err, out)
+			}
+			// DISC closes the connection only after flushing and releasing the writer.
+			for _, v := range []any{uint32(0x25609513), uint16(0), uint16(2), uint64(0), uint64(0), uint32(0)} {
+				if err = wire.Write(hold, wire.BigEndian, v); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if _, err = hold.Read(make([]byte, 1)); err != io.EOF {
+				t.Fatal("disconnect", err)
+			}
+			hold.Close()
 		}
 		args := []string{"-f", "raw", "-c", "read -P 0x5a 0 4096"}
 		if write {

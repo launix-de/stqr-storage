@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/launix-de/stqr-storage/client"
+	nbd "github.com/launix-de/stqr-storage/qemu-plugin-nbd"
 )
 
 type config struct {
@@ -281,6 +282,7 @@ func run() error {
 	cfg := flags.String("config", "", "private JSON credentials file")
 	size := flags.Uint64("size", 32<<30, "virtual disk bytes")
 	socket := flags.String("socket", "", "NBD Unix socket")
+	device := flags.String("device", "disk.raw", "named block device/default export")
 	ro := flags.Bool("readonly", false, "readonly NBD export")
 	flags.Usage = func() {
 		fmt.Fprintln(flags.Output(), "Usage: stqr-bootctl --config FILE [--size BYTES|--socket PATH] COMMAND BUCKET [ARG]\nCommands: resolve, create, clear, delete, clone SOURCE DEST, publish BUCKET DIRECTORY, fetch BUCKET DIRECTORY, init-disk, nbd, gc")
@@ -389,57 +391,32 @@ func run() error {
 			}
 			roots = append(roots, a.ID)
 		}
-		result, err := conn.CheckFilesystemWithOpaqueRoots(ctx, roots)
+		result, err := nbd.NewCatalog(conn).Collect(ctx, roots)
 		if err != nil {
 			return err
 		}
 		return json.NewEncoder(os.Stdout).Encode(result)
 	case "init-disk", "nbd":
-		conn, err := connect(ctx, c, name)
+		id, err := resolve(ctx, c, name)
 		if err != nil {
 			return err
 		}
-		defer conn.Close()
-		if cmd == "nbd" {
-			if err := conn.BeginMaintenance(ctx); err != nil {
-				return err
-			}
-		}
-		store := client.NewSubscriptionStore(conn, 0)
-		defer store.Close()
-		store.EnableAcceptedWrites()
-		fs, err := client.OpenFilesystem(ctx, store, client.FSOptions{Create: cmd == "init-disk", ReadOnly: *ro && cmd == "nbd"})
+		b, err := nbd.Open(ctx, c.URI, c.Username, c.Password, id, *ro)
 		if err != nil {
 			return err
 		}
-		disk, err := fs.Lookup(ctx, client.FilesystemRootID(), "disk.raw")
+		defer b.Close()
 		if cmd == "init-disk" {
-			if err == nil {
-				return errors.New("disk.raw already exists")
+			if *ro {
+				return errors.New("readonly connection")
 			}
-			if !errors.Is(err, os.ErrNotExist) && !errors.Is(err, client.ErrNotFound) {
-				return err
-			}
-			if *size == 0 || *size%512 != 0 {
-				return errors.New("size must be a positive multiple of 512")
-			}
-			disk, err = fs.Create(ctx, client.FilesystemRootID(), "disk.raw", 0600, 0, 0, false)
-			if err != nil {
-				return err
-			}
-			_, err = fs.Truncate(ctx, disk.ID, *size)
-			if err != nil {
-				return err
-			}
-			return fs.Sync(ctx, disk.ID)
-		}
-		if err != nil {
+			_, err = b.Create(ctx, nbd.Metadata{Name: *device, Size: *size})
 			return err
 		}
 		if *socket == "" {
 			return errors.New("--socket required")
 		}
-		return serveNBD(ctx, *socket, fs, disk, *ro)
+		return nbd.Serve(ctx, *socket, b.Catalog, nbd.Options{DefaultExport: *device, ReadOnly: *ro})
 	}
 	return errors.New("unknown command")
 }

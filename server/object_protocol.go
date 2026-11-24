@@ -186,7 +186,7 @@ func (s *Server) executeObjects(m client.Message, ws *wsSession, p principal) ([
 	switch m.Opcode {
 	case client.BucketObjectList:
 		return s.executeObjectList(ctx, op, d, p, runtime)
-	case client.BucketMaintenance, client.BucketScan:
+	case client.BucketMaintenance, client.BucketBlockMaintenance, client.BucketScan:
 		return s.executeMaintenance(ctx, op, d, ws, p, runtime)
 	case 0x0100, 0x0101:
 		length := uint64(math.MaxUint64)

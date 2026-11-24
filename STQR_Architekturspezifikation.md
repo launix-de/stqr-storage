@@ -1242,6 +1242,7 @@ Normale Clients bekommen ausschließlich Objektzugriff und die dafür nötigen R
 | 0x0119 | BUCKET_SYNC / Q, Capability 1024 | `bucket:ID,mark:CommitMark` => bestätigter `CommitMark`; alter Boot => 410 |
 | 0x011a | DURABILITY_NOTICE / P, Capability 1024 | `mark:CommitMark`; vor einem Subscription-Update mit akzeptiertem Zustand |
 | 0x011b | BUCKET_STATFS / Q | `bucket:ID` => `used:u64,total:u64,free:u64,available:u64,quota:u64,quota_limited:Bool`; authentifizierter Bucket-Grant genügt; ohne Quota verfügbarer nutzbarer Cluster-Platz, mit Quota zusätzlich begrenzt; siehe `docs/space.md` |
+| 0x011c | BUCKET_BLOCK_MAINTENANCE / Q | `ObjectRef,readonly:Bool` => leer; exklusive socket-gebundene Blockdevice-Lease, READ sowie bei RW WRITE; erlaubt native PUT/PUT_RANGE zusätzlich zu Recovery-CAS/DELETE, RO verbietet alle Mutationen; kein Reconnect; derzeit Single-Node |
 
 CAS-Scope `0 RANGE,1 OBJECT`; OP_STATUS-State `0 UNKNOWN,1 PENDING,2 COMMITTED,3 FAILED,4 EXPIRED`. UNKNOWN/EXPIRED ist keine Zusicherung „nie ausgeführt“. ObjectUpdate-Change `0 REPLACE,1 RANGE_WRITE,2 APPEND,3 TRUNC,4 DELETE,5 RESYNC_REQUIRED`. SUBSCRIBE/UNSUBSCRIBE/ACK benötigen HELLO-Capability `512`; ohne Unterstützung gilt Q => 501 und F wird nicht gesendet. Die erste Implementierung publiziert vollständige Replacement-Snapshots, DELETE oder explizites RESYNC_REQUIRED; unvollständige oder unbekannte Teilupdate-Sätze invalidieren den Client-Snapshot.
 
@@ -1855,9 +1856,9 @@ Der aktuelle Single-Node-Transport kann bereits HELLO, Objekt-Wireformate, Chunk
 ### 14.3 C-/Rust-Anbindung und Blockdevice-Library
 
 - C erhält eine versionierte Handle-ABI mit expliziten Ownership-/Bufferregeln; Rust native Wrapper/async-Anbindung. Ob C auf Go-c-shared oder einen eigenen Codec setzt, bleibt eine Implementierungsentscheidung.
-- Die Blockdevice-Library ist ein Satz von Dateien im Go-Package `client` und später über die C-ABI einbindbar. Oberfläche: `ReadAt`, `WriteAt`, `Flush`, `Trim`, `Resize`, Größen-/Fehlerabfrage; später QEMU-Blockdriver, optional NBD-Adapter derselben Library.
-- Image = in normalen Objekten gespeichertes Manifest plus nummerierte **1-MiB-Datenobjekte**. Kleinere 512-B-/4-KiB-Blöcke verwenden GET_RANGE/PUT_RANGE; Grenzübertritte werden aufgeteilt. Ein 1-MiB-Objekt ist keine Mindest-I/O-Größe.
-- Manifeständerungen verwenden CAS. Verteilte partielle Updates erhalten die native Atomizität pro Objektoperation; mehrteilige Writes über mehrere Objekte sind keine native Multi-Object-Transaktion. `FLUSH` reicht bis zum Durable-ACK aller zuvor bestätigungspflichtigen Mutationen; `TRIM` und Vergrößerung müssen Null-Leseverhalten und physische Freigabe korrekt umsetzen.
+- Die Blockdevice-Library liegt im Go-Package `qemu-plugin-nbd` und nutzt die native Clientbibliothek. Implementiert sind `ReadAt`, `WriteAt`, `Sync`, benannte Geräte und Standard-NBD für QEMU; `Trim`, `Resize` sowie eine C-ABI bleiben Ausbau.
+- Gerät = genau ein binäres Metadatenobjekt plus systematisch adressierte **1-MiB-Datenobjekte**, ohne Segmentliste. Kleinere 512-B-/4-KiB-Blöcke verwenden GET_RANGE/PUT_RANGE; Grenzübertritte werden aufgeteilt. Ein 1-MiB-Objekt ist keine Mindest-I/O-Größe.
+- Das Metadatenobjekt wird über CAS angelegt. Verteilte partielle Updates erhalten die native Atomizität pro Objektoperation; mehrteilige Writes über mehrere Objekte sind keine native Multi-Object-Transaktion. `FLUSH` reicht bis zum Durable-ACK aller zuvor bestätigungspflichtigen Mutationen; `TRIM` und Vergrößerung müssen Null-Leseverhalten und physische Freigabe korrekt umsetzen.
 
 ### 14.4 FUSE auf mehreren Hosts
 
@@ -2394,4 +2395,4 @@ Die Bucket-Kontingentwahl verwendet dieselben dekadisch gestuften, bidirektional
 
 ### Networkboot- und QEMU-Frontend
 
-`networkboot/` enthält den separaten Boot-Gateway und NBD-Adapter. QEMU nutzt Standard-NBD ohne Neukompilierung; sparse Disks liegen als native Dateisystemdateien im Bucket. Exklusive NBD-Exports, Clear und Clone setzen bis zur Implementierung verteilter Maintenance eine Single-Node-Membership voraus. Der Bootpfad nutzt HTTP, NFSv3, SquashFS und ein privates temporäres ext4-Overlay auf einem NBD/STQR-Bucket (optional RAM); PAM aktiviert separat persönliche `username_home`-Buckets. Details, Metadatenvertrag und aktuelle Grenzen stehen in `networkboot/README.md`.
+`networkboot/` enthält den separaten Boot-Gateway; `qemu-plugin-nbd/` enthält die Blockdevice-Library, den NBD-Exporter und den Linux-NBD-Connector. QEMU nutzt Standard-NBD ohne Neukompilierung. Ein Bucket enthält beliebig viele benannte Geräte: genau ein binäres Metadatenobjekt je Gerät (Generation-ID, Größe, Name, Hersteller/Modell/Seriennummer) und systematisch adressierte 1-MiB-Stripes, ohne Segmentliste. Kleinere I/Os verwenden direkt GET_RANGE/PUT_RANGE ohne vollständiges Read-Modify-Write; fehlende Stripes liefern Nullen. Kein zusätzlicher Client-Datencache. Format und Adressberechnung stehen in `qemu-plugin-nbd/README.md`. Exklusive NBD-Exports, Clear und Clone setzen bis zur Implementierung verteilter Maintenance eine Single-Node-Membership voraus. Der Bootpfad nutzt HTTP, NFSv3, SquashFS und ein privates temporäres ext4-Overlay auf einem NBD/STQR-Bucket (optional RAM); PAM aktiviert separat persönliche `username_home`-Buckets. Details, Metadatenvertrag und aktuelle Grenzen stehen in `networkboot/README.md`.

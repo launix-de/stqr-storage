@@ -14,19 +14,20 @@ import (
 // Roles, bucket pointer and permissions are immutable; administrative changes
 // revoke the capability instead of making data requests reread account/ACL data.
 type connectionAuthorization struct {
-	admin, clusterPeer bool
-	offlineCopy        bool // private offline clear/clone owner; never accepted from wire
-	accountID          string
-	accountRevision    [32]byte
-	bucket             *Bucket
-	bucketID           volume.ID
-	permissions        BucketPermissions
-	frontendPermission BucketPermissions // private node frontend retains the original HTTP grant
-	frontendIssuer     client.ID
-	invalid            atomic.Bool
-	peerVerified       atomic.Bool
-	peerBoot           client.ID // fixed by NODE_HELLO before peerVerified publication
-	expires            time.Time
+	admin, clusterPeer         bool
+	blockDevice, blockReadOnly atomic.Bool
+	offlineCopy                bool // private offline clear/clone owner; never accepted from wire
+	accountID                  string
+	accountRevision            [32]byte
+	bucket                     *Bucket
+	bucketID                   volume.ID
+	permissions                BucketPermissions
+	frontendPermission         BucketPermissions // private node frontend retains the original HTTP grant
+	frontendIssuer             client.ID
+	invalid                    atomic.Bool
+	peerVerified               atomic.Bool
+	peerBoot                   client.ID // fixed by NODE_HELLO before peerVerified publication
+	expires                    time.Time
 }
 
 func (p principal) isAdmin() bool {

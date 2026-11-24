@@ -30,6 +30,16 @@ func (c *Client) CheckFilesystem(ctx context.Context) (FSCheckResult, error) {
 }
 
 func (c *Client) beginMaintenance(ctx context.Context) error {
+	return c.beginMaintenanceCommand(ctx, BucketMaintenance, false)
+}
+
+// BeginBlockMaintenance exclusively binds a bucket for direct ranged block I/O.
+// The lease is socket-scoped and cannot reconnect after loss.
+func (c *Client) BeginBlockMaintenance(ctx context.Context, readonly bool) error {
+	return c.beginMaintenanceCommand(ctx, BucketBlockMaintenance, readonly)
+}
+
+func (c *Client) beginMaintenanceCommand(ctx context.Context, opcode uint16, readonly bool) error {
 	t, err := c.connection(ctx)
 	if err != nil {
 		return err
@@ -43,7 +53,10 @@ func (c *Client) beginMaintenance(ctx context.Context) error {
 	c.mu.Unlock()
 	e := Encoder{}
 	c.objectRef(&e, ObjectID{})
-	r, err := c.do(ctx, BucketMaintenance, e.B, NewRequestID(), false, nil)
+	if opcode == BucketBlockMaintenance {
+		e.Bool(readonly)
+	}
+	r, err := c.do(ctx, opcode, e.B, NewRequestID(), false, nil)
 	defer r.close()
 	if err == nil && len(r.result) != 0 {
 		err = ErrProtocol

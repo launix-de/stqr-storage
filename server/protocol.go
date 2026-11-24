@@ -49,7 +49,7 @@ func (s *Server) dispatchAs(m client.Message, ws *wsSession, p principal) ([]byt
 		if p.connection.invalid.Load() {
 			return client.ResponseBody(403, nil, "connection authorization revoked"), 403
 		}
-		if p.connection.bucket != nil && m.Opcode != client.Hello && m.Opcode != client.Ping && !(m.Opcode >= 0x0100 && m.Opcode <= client.BucketObjectList || m.Opcode == client.ObjectAccepted || m.Opcode == client.BucketStatFS || m.Opcode == client.BucketSync) {
+		if p.connection.bucket != nil && m.Opcode != client.Hello && m.Opcode != client.Ping && !(m.Opcode >= 0x0100 && m.Opcode <= client.BucketObjectList || m.Opcode == client.ObjectAccepted || m.Opcode == client.BucketBlockMaintenance || m.Opcode == client.BucketStatFS || m.Opcode == client.BucketSync) {
 			return client.ResponseBody(403, nil, "bucket connection has no administrative privileges"), 403
 		}
 	}
@@ -286,7 +286,7 @@ func (s *Server) dispatchAs(m client.Message, ws *wsSession, p principal) ([]byt
 		return client.ResponseBody(403, nil, "cluster peer operation required"), 403
 	}
 
-	if !p.isAdmin() && m.Opcode != client.Hello && m.Opcode != client.Ping && !(m.Opcode >= 0x0100 && m.Opcode <= client.BucketObjectList || m.Opcode == client.ObjectAccepted || m.Opcode == client.BucketStatFS || m.Opcode == client.BucketSync) {
+	if !p.isAdmin() && m.Opcode != client.Hello && m.Opcode != client.Ping && !(m.Opcode >= 0x0100 && m.Opcode <= client.BucketObjectList || m.Opcode == client.ObjectAccepted || m.Opcode == client.BucketBlockMaintenance || m.Opcode == client.BucketStatFS || m.Opcode == client.BucketSync) {
 		return client.ResponseBody(403, nil, "administrator required"), 403
 	}
 	if s.clusterPaused() || s.forceFrozen() {
@@ -456,7 +456,7 @@ func (s *Server) dispatchAs(m client.Message, ws *wsSession, p principal) ([]byt
 		}
 		return client.ResponseBody(status, result, ""), status
 	}
-	if m.Opcode >= 0x0100 && m.Opcode <= 0x0108 || m.Opcode == client.ObjectAccepted || m.Opcode == client.BucketMaintenance || m.Opcode == client.BucketScan || m.Opcode == client.BucketObjectList {
+	if m.Opcode >= 0x0100 && m.Opcode <= 0x0108 || m.Opcode == client.ObjectAccepted || m.Opcode == client.BucketBlockMaintenance || m.Opcode == client.BucketMaintenance || m.Opcode == client.BucketScan || m.Opcode == client.BucketObjectList {
 		result, status, err := s.executeObjects(m, ws, p)
 		if errors.Is(err, errObjectStaged) {
 			return nil, 0

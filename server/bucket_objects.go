@@ -354,7 +354,10 @@ func (b *Bucket) mutate(ctx context.Context, p principal, id volume.ObjectID, op
 			return volume.Result{}, fail(501, "exclusive maintenance cannot mutate after multi-node admission")
 		}
 	}
-	if b.underMaintenance() && opcode != 0x0108 && opcode != 0x0106 && (p.connection == nil || !p.connection.offlineCopy) {
+	if b.underMaintenance() && p.connection != nil && p.connection.blockReadOnly.Load() {
+		return volume.Result{}, ErrBucketForbidden
+	}
+	if b.underMaintenance() && opcode != 0x0108 && opcode != 0x0106 && (p.connection == nil || !p.connection.offlineCopy && !(p.connection.blockDevice.Load() && (opcode == 0x0102 || opcode == 0x0103))) {
 		return volume.Result{}, fail(409, "maintenance permits only recovery CAS and DELETE")
 	}
 	s.mu.RLock()

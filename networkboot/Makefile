@@ -10,11 +10,13 @@ all:
 	mkdir -p bin
 	CGO_ENABLED=0 go build -buildvcs=false -o bin/stqr-bootctl ./cmd/stqr-bootctl
 	CGO_ENABLED=0 go build -buildvcs=false -o bin/stqr-boot-nfs ./cmd/stqr-boot-nfs
-	$(CC) -std=c11 -Wall -Wextra -Werror -static -O2 -o bin/stqr-nbd-client nbd-client.c
+	$(MAKE) -C ../qemu-plugin-nbd all
+	install -m 0755 ../qemu-plugin-nbd/bin/stqr-nbd-client bin/
 pam:
 	mkdir -p bin
 	$(CC) -std=c11 -Wall -Wextra -Werror -fPIC -shared -O2 $(PAM_CFLAGS) -o bin/pam_stqr.so pam/pam_stqr.c $(PAM_LIBS)
 check:
+	$(MAKE) -C ../qemu-plugin-nbd check
 	go test -race ./...
 	python3 -m unittest discover -s tests -v
 	sh -n initramfs/hooks/stqr initramfs/scripts/stqr
