@@ -47,6 +47,10 @@ func jsonText(v any) []byte {
 // Normal bucket connections can negotiate and use only object/routing messages.
 // This gate is shared by HTTP and WebSocket, not claimed by a client enum.
 func (s *Server) dispatchAs(m client.Message, ws *wsSession, p principal) ([]byte, int) {
+	if !p.ClusterPeer && m.Opcode >= 0x0100 && m.Opcode <= 0x01ff {
+		s.ioPriority.users.Add(1)
+		defer s.ioPriority.users.Add(-1)
+	}
 	if p.connection != nil {
 		if p.connection.invalid.Load() {
 			return client.ResponseBody(403, nil, "connection authorization revoked"), 403
