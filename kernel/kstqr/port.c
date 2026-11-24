@@ -2,6 +2,8 @@
 #include "port.h"
 #include <crypto/hash.h>
 #include <linux/in.h>
+#include <linux/delay.h>
+#include <linux/ktime.h>
 #include <linux/in6.h>
 #include <linux/inet.h>
 #include <linux/net.h>
@@ -151,3 +153,6 @@ int sq_wait(struct stqr_socket *s, unsigned ms)
 	remove_wait_queue(sk_sleep(s->sock->sk), &wait);
 	return ready ? 1 : signal_pending(current) ? -EINTR : 0;
 }
+
+stqr_u64 sq_now_ms(void) { return ktime_get_boottime_ns()/1000000; }
+int sq_pause(unsigned ms) { return msleep_interruptible(ms) ? -EINTR : 0; }
