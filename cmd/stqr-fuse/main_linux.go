@@ -5,6 +5,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"encoding/hex"
 	"errors"
@@ -13,6 +14,7 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -28,6 +30,7 @@ type options struct {
 	allowOther                                      bool
 	create, debug                                   bool
 	fsck                                            bool
+	passwordStdin                                   bool
 	connectTimeout                                  time.Duration
 	metadataCacheBytes                              uint64
 }
@@ -40,6 +43,7 @@ func parseOptions(args []string, out io.Writer) (options, error) {
 	flags.StringVar(&opt.uri, "uri", "", "STQR node URI (http://host:7419 or ws://host:7419/api/ws)")
 	flags.StringVar(&opt.username, "username", "", "STQR username")
 	flags.StringVar(&opt.password, "password", "", "STQR password")
+	flags.BoolVar(&opt.passwordStdin, "password-stdin", false, "read the STQR password from one line on standard input")
 	flags.StringVar(&bucket, "bucket", "", "bucket ID (32 hexadecimal characters)")
 	flags.StringVar(&readonlyBucket, "readonly-bucket", "", "readonly bucket ID; with -bucket, use it as the native overlay lower")
 	flags.StringVar(&opt.readonlyURI, "readonly-uri", "", "readonly node URI (defaults to -uri)")
@@ -53,14 +57,17 @@ func parseOptions(args []string, out io.Writer) (options, error) {
 	flags.Uint64Var(&opt.metadataCacheBytes, "metadata-cache-bytes", 32<<20, "subscription-backed metadata cache budget per bucket in bytes; 0 disables caching")
 	flags.DurationVar(&opt.connectTimeout, "connect-timeout", 30*time.Second, "connection and filesystem initialization timeout")
 	flags.Usage = func() {
-		fmt.Fprintln(out, "Usage: stqr-fuse -uri URI -username USER -password PASSWORD [-readonly-bucket ID] [-bucket ID] [-init] MOUNTPOINT\n       stqr-fuse -uri URI -username USER -password PASSWORD -bucket ID [-readonly-bucket ID] --fsck [MOUNTPOINT]\nOnly -readonly-bucket: readonly; only -bucket: read/write; both: native overlay.")
+		fmt.Fprintln(out, "Usage: stqr-fuse -uri URI -username USER {-password PASSWORD | -password-stdin} [-readonly-bucket ID] [-bucket ID] [-init] MOUNTPOINT\n       stqr-fuse -uri URI -username USER {-password PASSWORD | -password-stdin} -bucket ID [-readonly-bucket ID] --fsck [MOUNTPOINT]\nOnly -readonly-bucket: readonly; only -bucket: read/write; both: native overlay.")
 		flags.PrintDefaults()
 	}
 	if err := flags.Parse(args); err != nil {
 		return opt, err
 	}
-	if (!opt.fsck && flags.NArg() != 1 || opt.fsck && flags.NArg() > 1) || opt.uri == "" || opt.username == "" || opt.password == "" {
+	if (!opt.fsck && flags.NArg() != 1 || opt.fsck && flags.NArg() > 1) || opt.uri == "" || opt.username == "" || opt.password == "" && !opt.passwordStdin {
 		return opt, errors.New("URI, username, password and bucket ID are required; supply one mountpoint unless using --fsck (see -help)")
+	}
+	if opt.passwordStdin && opt.password != "" {
+		return opt, errors.New("use -password or -password-stdin, not both")
 	}
 	if opt.fsck && opt.create {
 		return opt, errors.New("--fsck and -init cannot be combined")
@@ -247,6 +254,21 @@ func main() {
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "stqr-fuse:", err)
 		os.Exit(2)
+	}
+	if opt.passwordStdin {
+		line, e := bufio.NewReaderSize(io.LimitReader(os.Stdin, 4098), 4098).ReadString('\n')
+		if e != nil && !errors.Is(e, io.EOF) || len(line) > 4096 {
+			fmt.Fprintln(os.Stderr, "stqr-fuse: cannot read bounded password line")
+			os.Exit(2)
+		}
+		opt.password = strings.TrimSuffix(strings.TrimSuffix(line, "\n"), "\r")
+		if opt.password == "" {
+			fmt.Fprintln(os.Stderr, "stqr-fuse: empty password")
+			os.Exit(2)
+		}
+		if opt.readonlyPassword == "" {
+			opt.readonlyPassword = opt.password
+		}
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
