@@ -21,9 +21,9 @@ qemu-plugin-nbd/bin/stqr-nbd --config /private/credentials.json \
   --bucket vm-disks --socket /private/vm-disks.sock serve
 
 qemu-system-x86_64 \
-  -blockdev '{"driver":"nbd","server":{"type":"unix","path":"/private/vm-disks.sock"},"export":"system","node-name":"system"}' \
+  -blockdev '{"driver":"nbd","server":{"type":"unix","path":"/private/vm-disks.sock"},"export":"system","node-name":"system","discard":"unmap"}' \
   -device virtio-blk-pci,drive=system \
-  -blockdev '{"driver":"nbd","server":{"type":"unix","path":"/private/vm-disks.sock"},"export":"data","node-name":"data"}' \
+  -blockdev '{"driver":"nbd","server":{"type":"unix","path":"/private/vm-disks.sock"},"export":"data","node-name":"data","discard":"unmap"}' \
   -device virtio-blk-pci,drive=data
 ```
 
@@ -90,6 +90,21 @@ waits through retryable responses and continues the same request after handoff.
 Placement classes/groups still apply, and genuine cluster exhaustion returns a
 capacity error. Private clear/clone and filesystem-maintenance leases retain
 their placement fence so an offline inventory cannot change underneath them.
+
+Writable exports advertise NBD TRIM. Enable `discard=unmap` on QEMU's NBD block
+node (the networkboot builder does this automatically), then run `fstrim` inside
+the guest. A discarded complete 1-MiB stripe is deleted as a native object,
+returning its payload allocation to STQR. Partial stripes are zeroed through
+PUT_RANGE; adjacent data survives. Missing stripes and sparse tails remain
+unallocated. Repeated partial discards do not accumulate a bitmap: only a single
+request covering a complete stripe deletes that stripe. FLUSH/FUA also persist
+discard operations. Readonly exports reject TRIM.
+
+Native READ+WRITE block grants cover deleting stripes during an exclusive RW
+lease. Ordinary object DELETE still requires its separate DELETE grant. TRIM
+releases space inside STQR volumes; it does not shrink the configured volume file
+or promise a physical SSD discard through the host storage stack. WRITE_ZEROES,
+online resize and structured allocation-status replies remain unimplemented.
 
 Clean close sends `BUCKET_MAINTENANCE_END` (`0x011d`) before disconnecting.
 Journal epochs, monotonically increasing sequences and fresh server-generated

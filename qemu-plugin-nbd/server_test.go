@@ -38,6 +38,9 @@ func TestNBDBoundsReadonlyAndFlush(t *testing.T) {
 			if _, e = io.ReadFull(b, export); e != nil {
 				t.Fatal(e)
 			}
+			if (binary.BigEndian.Uint16(export[8:])&32 != 0) == ro {
+				t.Fatal("TRIM must be advertised only for writable exports")
+			}
 			transact := func(cmd, flags uint16, off uint64, payload []byte) uint32 {
 				t.Helper()
 				if e := send(b, uint32(0x25609513), flags, cmd, uint64(7), off, uint32(len(payload))); e != nil {
@@ -63,6 +66,18 @@ func TestNBDBoundsReadonlyAndFlush(t *testing.T) {
 			}
 			if got := transact(1, 0, 4096, make([]byte, 512)); got != 22 {
 				t.Fatal("out of bounds", got)
+			}
+			if got := transact(4, 1, 0, make([]byte, 512)); got != want {
+				t.Fatal("trim/FUA", got, want)
+			}
+			if got := transact(4, 0, 4096, make([]byte, 512)); got != 22 {
+				t.Fatal("trim bounds", got)
+			}
+			if got := transact(4, 0, 1, make([]byte, 512)); got != 22 {
+				t.Fatal("trim alignment", got)
+			}
+			if got := transact(4, 0, 0, nil); got != 22 {
+				t.Fatal("zero-length trim", got)
 			}
 			if got := transact(3, 0, 0, nil); got != 0 {
 				t.Fatal("flush", got)

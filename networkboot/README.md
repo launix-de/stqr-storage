@@ -118,8 +118,10 @@ qemu-system-x86_64 \
   -device virtio-blk-pci,drive=stqr
 ```
 
-Standard fixed-newstyle NBD is implemented: READ, WRITE, FLUSH, FUA and clean
-disconnect, with bounds checks and readonly exports. Trim, write-zeroes,
+Standard fixed-newstyle NBD is implemented: READ, WRITE, FLUSH, FUA, TRIM and clean
+disconnect, with bounds checks and readonly exports. The image builder enables
+QEMU `discard=unmap`, so guest `fstrim` can discard unused blocks. Whole 1-MiB
+stripes are deleted; boundary ranges are zeroed with ranged writes. Write-zeroes,
 structured replies and multi-connection exports are not advertised. QEMU does
 not need recompilation; its existing QMP blockdev-add/device_add mechanisms can
 hot-plug additional disks. Guest filesystems must be synced/unmounted before

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"time"
 )
 
 // FSCheckResult counts live bucket objects, not volume tombstones or retry
@@ -60,7 +61,28 @@ func (c *Client) beginMaintenanceCommand(ctx context.Context, opcode uint16, rea
 	c.mu.Lock()
 	c.maintenanceToken = token
 	c.mu.Unlock()
-	r, err := c.do(ctx, opcode, e.B, token, false, nil)
+	var r wireReply
+	for {
+		r, err = c.do(ctx, opcode, e.B, token, false, nil)
+		var status *StatusError
+		if !errors.As(err, &status) || status.Status != 503 {
+			break
+		}
+		r.close()
+		// A scoped handoff/control barrier must finish before acquiring a
+		// lease. Keep the same original socket and logical request, rather
+		// than making an otherwise healthy export fail during balancing.
+		timer := time.NewTimer(100 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-c.done:
+			timer.Stop()
+			return ErrClosed
+		case <-timer.C:
+		}
+	}
 	defer r.close()
 	if err == nil {
 		if len(r.result) == 17 && r.result[0] == 1 {

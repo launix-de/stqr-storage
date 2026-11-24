@@ -256,6 +256,48 @@ func (c *Catalog) WriteAt(ctx context.Context, m Metadata, data []byte, off uint
 }
 func (c *Catalog) Sync(ctx context.Context) error { return c.store.Sync(ctx) }
 
+// Trim deletes complete 1-MiB stripes and zeroes only the stored portion of
+// boundary stripes. Missing objects/tails already read as zero and stay sparse.
+// As with WriteAt, the caller uses Sync for FLUSH/FUA durability.
+func (c *Catalog) Trim(ctx context.Context, m Metadata, off, length uint64) error {
+	if off > m.Size || length > m.Size-off {
+		return client.ErrRange
+	}
+	var zeros []byte
+	for length > 0 {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		at := off % StripeSize
+		n := min(length, StripeSize-at)
+		id := StripeID(m.ID, off/StripeSize)
+		info, err := c.store.Stat(ctx, id)
+		if err != nil && !errors.Is(err, client.ErrNotFound) {
+			return err
+		}
+		if err == nil {
+			if at == 0 && n == StripeSize {
+				err = c.store.Delete(ctx, id, client.DeleteOptions{Accepted: true, RequestID: client.NewRequestID()})
+				if errors.Is(err, client.ErrNotFound) {
+					err = nil
+				}
+			} else if at < info.Length {
+				count := min(n, info.Length-at)
+				if uint64(len(zeros)) < count {
+					zeros = make([]byte, count)
+				}
+				_, err = c.store.PutRange(ctx, id, at, zeros[:count], client.PutOptions{Accepted: true, RequestID: client.NewRequestID()})
+			}
+			if err != nil {
+				return err
+			}
+		}
+		off += n
+		length -= n
+	}
+	return nil
+}
+
 // Collect keeps named device metadata/current stripes plus application-owned
 // opaque roots. Acquire maintenance and read the application manifest first.
 // Memory is bounded by device metadata and one native scan page, not disk size.

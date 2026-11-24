@@ -42,6 +42,8 @@ func nbdNegotiate(ctx context.Context, c net.Conn, catalog *Catalog, opt Options
 	flags := uint16(1 | 4 | 8)
 	if opt.ReadOnly {
 		flags |= 2
+	} else {
+		flags |= 32 // NBD_FLAG_SEND_TRIM
 	}
 	if err := send(c, uint64(0x4e42444d41474943), nbdOptionMagic, uint16(3)); err != nil {
 		return Metadata{}, nil, err
@@ -211,10 +213,13 @@ func nbdSession(ctx context.Context, c net.Conn, catalog *Catalog, opt Options) 
 		handle := binary.BigEndian.Uint64(req[8:])
 		off := binary.BigEndian.Uint64(req[16:])
 		length := binary.BigEndian.Uint32(req[24:])
-		if length > 32<<20 {
+		if (cmd == 0 || cmd == 1) && length > 32<<20 {
 			return errors.New("NBD request exceeds negotiated maximum")
 		}
-		payload := make([]byte, length)
+		var payload []byte
+		if cmd == 0 || cmd == 1 {
+			payload = make([]byte, length)
+		}
 		if cmd == 1 {
 			if _, err := io.ReadFull(c, payload); err != nil {
 				return err
@@ -225,11 +230,14 @@ func nbdSession(ctx context.Context, c net.Conn, catalog *Catalog, opt Options) 
 		}
 		code := uint32(0)
 		var err error
-		if flags&^uint16(1) != 0 || (flags != 0 && cmd != 1) {
+		if flags&^uint16(1) != 0 {
 			code = 22
 		}
-		if cmd == 0 || cmd == 1 {
+		if cmd == 0 || cmd == 1 || cmd == 4 {
 			if off > disk.Size || uint64(length) > disk.Size-off || off%512 != 0 || length%512 != 0 {
+				code = 22
+			}
+			if cmd == 4 && length == 0 {
 				code = 22
 			}
 		}
@@ -251,6 +259,15 @@ func nbdSession(ctx context.Context, c net.Conn, catalog *Catalog, opt Options) 
 					code = 22
 				} else {
 					err = catalog.Sync(ctx)
+				}
+			case 4: // NBD_CMD_TRIM has no payload.
+				if readonly {
+					code = 30
+				} else {
+					err = catalog.Trim(ctx, disk, off, uint64(length))
+					if err == nil && flags&1 != 0 {
+						err = catalog.Sync(ctx)
+					}
 				}
 			default:
 				code = 22

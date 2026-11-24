@@ -62,7 +62,7 @@ def guest(socket, *commands, readonly=False, **kwargs):
     return run(*args, '-a', f'nbd:///?socket={socket}', '-i', *commands, **kwargs)
 
 def qemu(socket, args, installer=None):
-    block = {'driver': 'nbd', 'server': {'type': 'unix', 'path': str(socket)}, 'node-name': 'stqr-disk'}
+    block = {'driver': 'nbd', 'server': {'type': 'unix', 'path': str(socket)}, 'node-name': 'stqr-disk', 'discard': 'unmap'}
     command = ['qemu-system-x86_64', '-name', 'STQR image builder', '-m', str(args.memory),
                '-smp', str(args.cpus), '-machine', 'accel=kvm:tcg', '-netdev', 'user,id=net0',
                '-device', 'virtio-net-pci,netdev=net0', '-blockdev', json.dumps(block),
