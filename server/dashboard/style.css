@@ -20,6 +20,7 @@
 
 .maintenance-dialog{width:620px}.maintenance-options{display:grid;gap:14px}.maintenance-option{border:1px solid var(--border);border-radius:10px;padding:18px}.maintenance-option h3{font-size:13px;margin:0 0 9px;font-weight:600}.maintenance-option p{font-size:12px;line-height:1.7;color:var(--muted);margin:0 0 14px}.maintenance-option .field-note{font-size:11px;margin:10px 0 0}.maintenance-option button{white-space:normal;text-align:left;max-width:100%}.maintenance-danger{border-color:#eadadd;background:#fffafb}.maintenance-danger h3{color:#995f62}
 
+.join-cluster-card{display:flex;align-items:center;justify-content:space-between;gap:24px;padding:28px;margin-bottom:24px;background:var(--panel,#fff);border:1px solid var(--border,#dce3ea);border-left:4px solid #26835e;border-radius:16px}.join-cluster-card[hidden]{display:none}.join-cluster-card h2{margin:6px 0 8px}.join-cluster-card p{margin:0;color:#64748b}.join-cluster-card .primary{min-width:190px;min-height:50px}#join-progress:empty{display:none}@media(max-width:700px){.join-cluster-card{align-items:stretch;flex-direction:column}}
 /* Mixed software versions remain visible even without peer statistics. */
 .node-row.version-warning{background:#401e27}.node-row.version-warning .node-name,.node-row.version-warning .state-badge{color:#ff8c9e}.node-row.version-warning .state-badge i{background:#ff5d79}
 

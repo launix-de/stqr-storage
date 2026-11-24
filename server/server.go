@@ -27,6 +27,9 @@ type managedVolume struct {
 // Server currently owns one node. opMu serializes local administrative commits;
 // it is not a distributed lock or a substitute for placement authority.
 type Server struct {
+	joinHosted      bool
+	joinRequested   atomic.Bool
+	joinSignal      chan struct{}
 	leaseGate       chan struct{}
 	copyCoordinator sync.Mutex
 	cow             cowTransfers
@@ -121,6 +124,9 @@ func Open(opts Options) (s *Server, err error) {
 			s.Close()
 		}
 	}()
+	if e = resumeClusterJoin(path); e != nil {
+		return s, e
+	}
 	c, e := loadConfig(path, opts)
 	if e != nil {
 		return s, e
@@ -245,6 +251,11 @@ func Open(opts Options) (s *Server, err error) {
 		s.system = v
 		s.volumes[id] = &managedVolume{config: vc, store: v}
 		s.cfg.Volumes = append(s.cfg.Volumes, vc)
+	}
+	// Dashboard joins precreate an empty, identity-bound admin volume in their
+	// private metadata directory while preserving the ordinary volume directory.
+	if s.cfg.JoinPending && s.cfg.ControlVersion == 0 && s.system.Stats().Objects == 0 {
+		newSystem = true
 	}
 	if e = s.openStagedRecoveryVolumes(); e != nil {
 		return s, e
@@ -417,17 +428,30 @@ func (s *Server) Close() error {
 	return result
 }
 func Run(ctx context.Context, opts Options, output io.Writer) error {
+	for {
+		restart, err := runNode(ctx, opts, output)
+		if err != nil || !restart {
+			return err
+		}
+		// The persisted join configuration replaces the original startup overrides.
+		opts.values = nil
+	}
+}
+
+func runNode(ctx context.Context, opts Options, output io.Writer) (restart bool, err error) {
 	s, e := Open(opts)
 	if errors.Is(e, ErrNodeDrained) {
-		return nil
+		return false, nil
 	}
 	if e != nil {
-		return e
+		return false, e
 	}
 	defer s.Close()
+	s.joinHosted = true
+	s.joinSignal = make(chan struct{}, 1)
 	ln, e := net.Listen("tcp", s.running.Node.Listen)
 	if e != nil {
-		return e
+		return false, e
 	}
 	fmt.Fprintf(output, "STQR listening on http://%s · config %s\n", ln.Addr(), s.configPath)
 	fmt.Fprintln(output, "Bootstrap credentials are in the auth.bootstrap_admin section of the config file.")
@@ -435,20 +459,33 @@ func Run(ctx context.Context, opts Options, output io.Writer) error {
 	done := make(chan error, 1)
 	go func() { done <- h.Serve(ln) }()
 	select {
+	case <-s.joinSignal:
+		s.cancel()
+		if e = s.Close(); e != nil {
+			h.Close()
+			return false, e
+		}
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if e = h.Shutdown(shutdownCtx); e != nil {
+			h.Close()
+			return false, e
+		}
+		return true, nil
 	case e = <-done:
 		if errors.Is(e, http.ErrServerClosed) {
-			return nil
+			return false, nil
 		}
-		return e
+		return false, e
 	case <-s.stopRequest:
 		s.cancel()
-		return h.Shutdown(context.Background())
+		return false, h.Shutdown(context.Background())
 	case <-ctx.Done():
 		// Process/supervisor/system shutdown is always SHORT (wait for return).
 		// Never infer a drain from cancellation; only explicit admin intent may
 		// initiate evacuation. An existing persisted drain remains resumable.
 		if err := s.prepareShortShutdown(context.Background()); err != nil {
-			return err
+			return false, err
 		}
 		s.cancel()
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -456,6 +493,6 @@ func Run(ctx context.Context, opts Options, output io.Writer) error {
 		if e = h.Shutdown(shutdownCtx); e != nil {
 			h.Close()
 		}
-		return e
+		return false, e
 	}
 }

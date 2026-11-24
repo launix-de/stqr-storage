@@ -987,3 +987,42 @@ unpinned local cohorts keep selecting the original writer until explicit target
 placement commits. Bulk snapshot completion preflights the physical budget before
 source fencing; an impossible 507 cancels the unfenced handoff. The final READY
 and COMMIT checks still enforce the exact resulting quota after codec/layout changes.
+
+## Join a cluster from the dashboard
+
+A standalone daemon with no application buckets offers **Join cluster** on its
+volume overview. Its automatic system bucket does not count; zero or more active,
+empty data volumes are allowed. Supply an existing cluster node's HTTP URI and
+administrator credentials. The dashboard checks the target, prepares the local
+transition and logs in with the target account once membership and system state
+have committed. Accounts, PGs and grants come from the target cluster. The
+candidate keeps its node ID, configured volume directory and prepared data
+volume IDs, paths and sizes.
+
+Eligibility is checked by the server, including retained records/provenance,
+pending control work and recovery. Cluster members and nodes with application
+buckets cannot use this flow. Empty volumes change cluster identity without
+reformatting. A private durable join intent makes this resumable after a process
+loss between volume transitions. The old configuration is retained in the private
+`.before-join` file; old admin storage/journals remain in their original directory.
+The new cluster uses a separate metadata directory. A failed preflight leaves the
+standalone configuration active. Once the intent is published, restart completes
+the same join rather than starting another standalone cluster.
+
+The target administrator password is used only for the authenticated exchange;
+it is not saved in configuration or browser storage. The exchanged cluster token
+is kept in private mode-0600 configuration. A loopback-default listener is made
+reachable on the joining node's routed interface; explicit advertised addresses
+are retained. Existing peer-address IPs are added to the candidate's allowlist.
+The target must already permit the candidate's source address, and advertised
+addresses must be mutually reachable. An offline required member leaves admission
+pending; it does not change membership or redundancy by timeout.
+
+Native administrator requests use `0x203b` (eligibility: empty → Bool, Text),
+`0x203c` (target bootstrap: candidate node ID → cluster ID, node ID, token Text, u32 count and
+address Texts), and `0x203d` (prepare: URI Text, username Text, password Text →
+cluster-ID Text). Preparation uses `/api/message` with the existing binary
+envelope, session/CSRF and administrator checks; its response is flushed before
+the daemon reopens under the prepared configuration. Bucket-bound connections
+cannot request join information. The target seed must advertise revision 1 of these optional operations in its
+compatibility profile; an unsupported bootstrap is rejected before local changes.
