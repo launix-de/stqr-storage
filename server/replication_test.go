@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -478,5 +479,68 @@ func TestDaemonPrimaryRestartAbortsOrphanedPrepareWithoutLosingAcknowledgedData(
 	data, _, err = follower.Get(ctx, actor, id)
 	if err != nil || string(data) != "base!" {
 		t.Fatal("follower did not reconcile abort/new write", string(data), err)
+	}
+}
+
+func TestDaemonReplicaSetDoesNotWaitForUnrelatedOfflineThirdMember(t *testing.T) {
+	source, target := startAutomaticDaemonPair(t, false)
+	cfg := copyConfig(source.node.cfg)
+	cfg.Node.ID = newID()
+	cfg.Node.Name = "metadata-only-third"
+	cfg.Node.DataDir = "."
+	cfg.Volumes = nil
+	cfg.Peers = []PeerConfig{{NodeID: source.node.cfg.Node.ID, URL: source.node.cfg.Node.Advertise}}
+	cfg.ControlVersion = 0
+	cfg.RangeVersion = 0
+	cfg.QuotaVersion = 0
+	cfg.PeerDirectoryVersion = 0
+	cfg.BucketCatalogVersion = 0
+	cfg.PlacementGroupsVersion = 0
+	cfg.JoinPending = true
+	cfg.Auth.BootstrapAdmin = BootstrapAdmin{}
+	third := startDaemonTestNode(t, filepath.Join(t.TempDir(), "third.yaml"), &cfg, false)
+	deadline := time.Now().Add(15 * time.Second)
+	for {
+		view := source.node.currentSystem.Load()
+		if view != nil && len(view.manifest.Membership.Members) == 3 && third.node.currentSystem.Load() != nil && third.node.currentSystem.Load().root == view.root {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("third member did not join")
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	addTestVolume(t, source.node, "data", "hdd", 8<<20)
+	addTestVolume(t, target.node, "data", "hdd", 8<<20)
+	deadline = time.Now().Add(10 * time.Second)
+	for {
+		dest, _ := source.node.scopes.destinations(BucketDescription{Policy: DefaultBucketPolicy()})
+		if len(dest) >= 2 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("missing data volumes")
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	group := volume.ID(client.NewRequestID())
+	storage := storagePolicy(DefaultBucketPolicy())
+	storage.Redundancy = BucketRedundancy{Mode: "replication", Replicas: 2, ACK: "all"}
+	centralPGRequest(t, source.node, group, 0, PlacementMask{NodeSelection: "all", Storage: &storage})
+	b := replicaTestBucket(t, source.node, group, "required-subset")
+	third.close()
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	actor := userPrincipal(t, source.node)
+	if _, err := b.Put(ctx, actor, volume.ObjectID{1}, []byte("two required copies, three members"), volume.Options{RequestID: volume.ID(client.NewRequestID())}); err != nil {
+		t.Fatal("data ALL waited for an unrelated member", err)
+	}
+	if len(source.node.currentSystem.Load().manifest.Membership.Members) != 3 {
+		t.Fatal("offline member was removed")
+	}
+	follower, _ := target.node.Bucket(b.ID())
+	data, _, err := follower.Get(ctx, actor, volume.ObjectID{1})
+	if err != nil || string(data) != "two required copies, three members" {
+		t.Fatal(string(data), err)
 	}
 }
