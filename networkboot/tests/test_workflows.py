@@ -117,13 +117,29 @@ class Workflows(unittest.TestCase):
         self.assertEqual(stopped.exception.code,7)
     def test_diskless_pxe_command(self):
         script = load('test-boot')
-        with patch.object(sys, 'argv', ['test-boot']), patch.object(script, 'boot_network', return_value=('eth0', '192.0.2.10', '192.0.2.0/24')), patch.object(script.shutil, 'which', return_value='/usr/bin/qemu-system-x86_64'), patch.object(script, 'run') as run, contextlib.redirect_stdout(io.StringIO()):
+        with patch.object(sys, 'argv', ['test-boot']), patch.object(script, 'boot_network', return_value=('eth0', '192.0.2.10', '192.0.2.0/24')), patch.object(script.shutil, 'which', return_value='/usr/bin/qemu-system-x86_64'), patch.object(script, 'wait_for_gateway') as ready, patch.object(script, 'run') as run, contextlib.redirect_stdout(io.StringIO()):
             script.main()
+        ready.assert_called_once_with('http://192.0.2.10:8088/boot.ipxe')
         args = run.call_args.args
         self.assertIn('user,model=virtio-net-pci,bootfile=http://192.0.2.10:8088/boot.ipxe', args)
         self.assertIn('n', args)
         self.assertNotIn('-drive', args)
         self.assertNotIn('-blockdev', args)
+
+    def test_pxe_waits_for_gateway_before_launch(self):
+        script = load('test-boot')
+        response = unittest.mock.MagicMock(status=200)
+        response.read.return_value = b'#!ipxe\necho ready\n'
+        response.__enter__.return_value = response
+        with patch.object(script.urllib.request, 'urlopen', side_effect=[ConnectionRefusedError(), response]) as probe, patch.object(script.time, 'sleep'), contextlib.redirect_stdout(io.StringIO()):
+            script.wait_for_gateway('http://192.0.2.10:8088/boot.ipxe')
+        self.assertEqual(probe.call_count, 2)
+
+    def test_pxe_gateway_timeout_does_not_launch_vm(self):
+        script = load('test-boot')
+        with patch.object(sys, 'argv', ['test-boot', '--server', '192.0.2.10']), patch.object(script.shutil, 'which', return_value='/qemu'), patch.object(script, 'wait_for_gateway', side_effect=RuntimeError('not ready')), patch.object(script, 'run') as qemu, self.assertRaisesRegex(RuntimeError, 'not ready'):
+            script.main()
+        qemu.assert_not_called()
 
     def test_failed_staging_retains_archive_and_restores_environment(self):
         import common

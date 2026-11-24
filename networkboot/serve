@@ -48,10 +48,12 @@ tftp-root={tftp}
 def cache_release(args):
     with tempfile.TemporaryDirectory(prefix='release-',dir=args.cache) as temporary:
         work=Path(temporary)
+        print(f'Fetching and verifying boot artifacts for {args.base_bucket}...', flush=True)
         ctl(args.config, 'fetch', args.base_bucket, work)
         digest = hashlib.sha256((work / 'manifest.json').read_bytes()).hexdigest()
         release = args.cache / digest
         if not release.exists():
+            print('Preparing the local root filesystem cache...', flush=True)
             root = work / 'root'
             root.mkdir()
             # Only administrator-published images are accepted. GNU tar refuses
@@ -64,6 +66,7 @@ def cache_release(args):
                 '--numeric-owner', '--same-owner', '--acls', '--xattrs', '--xattrs-include=*')
             export = work / 'export'
             export.mkdir()
+            print('Building the boot SquashFS image...', flush=True)
             run('mksquashfs', root, export / 'rootfs.squashfs', '-noappend', '-comp', 'gzip', '-no-progress')
             shutil.rmtree(root)
             (work / 'rootfs.tar').unlink()
@@ -194,7 +197,7 @@ def main():
                 conf.write_text(dnsmasq_config(args.server, args.interface, args.clients, tftp, args.http_port))
                 run('dnsmasq', '--test', '--conf-file=' + str(conf))
                 children.append(subprocess.Popen(['dnsmasq', '--keep-in-foreground', '--conf-file=' + str(conf), '--pid-file=']))
-            print(f'Serving {args.base_bucket}, immutable release {digest}', flush=True)
+            print(f'Serving {args.base_bucket}, immutable release {digest}; PXE ready at http://{args.server}:{args.http_port}/boot.ipxe', flush=True)
             while not stop.wait(.5):
                 if reload_release.is_set():
                     reload_release.clear()

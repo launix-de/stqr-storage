@@ -214,6 +214,10 @@ sudo networkboot/serve ubuntu-desktop-v2 --no-dhcp
 networkboot/test-boot
 ```
 
+The test launcher waits up to 15 minutes for a valid HTTP boot script before
+opening QEMU. First gateway startup downloads and verifies the image, extracts
+its root and builds SquashFS; the `PXE ready` line marks readiness.
+
 QEMU supplies private DHCP/NAT and its iPXE ROM loads the HTTP boot script.
 This tests the published release and network root without a guest hard disk or
 changes to LAN DHCP. The default is 4 GiB RAM and two vCPUs;

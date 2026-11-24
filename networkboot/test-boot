@@ -4,7 +4,28 @@
 import argparse
 import ipaddress
 import shutil
+import time
+import urllib.error
+import urllib.request
 from common import boot_network, cli, run
+
+
+def wait_for_gateway(url, timeout=900):
+    deadline = time.monotonic() + timeout
+    announced = False
+    while True:
+        try:
+            with urllib.request.urlopen(url, timeout=min(5, max(.1, deadline-time.monotonic()))) as reply:
+                if reply.status == 200 and reply.read(4096).startswith(b'#!ipxe'):
+                    return
+                raise RuntimeError('Boot gateway returned an invalid iPXE script')
+        except (OSError, urllib.error.URLError) as error:
+            if time.monotonic() >= deadline:
+                raise RuntimeError(f'Boot gateway not ready at {url}: {error}. Check the serve terminal.') from None
+        if not announced:
+            print(f'Waiting for boot gateway at {url}; first startup downloads and prepares the image...', flush=True)
+            announced = True
+        time.sleep(min(1, max(0, deadline-time.monotonic())))
 
 
 def main():
@@ -23,6 +44,7 @@ def main():
     if not shutil.which('qemu-system-x86_64'):
         raise RuntimeError('Missing dependency: qemu-system-x86_64')
     url = f'http://{server}:{args.http_port}/boot.ipxe'
+    wait_for_gateway(url)
     print(f'PXE boot from {url}; the gateway selects the published base bucket.', flush=True)
     run('qemu-system-x86_64', '-name', 'STQR PXE test', '-machine', 'accel=kvm:tcg',
         '-m', args.memory, '-smp', args.cpus, '-boot', 'n',
