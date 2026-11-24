@@ -1,0 +1,8 @@
+{
+  "name": "stqr-ci-browser",
+  "private": true,
+  "version": "1.0.0",
+  "devDependencies": {
+    "playwright": "1.65.1"
+  }
+}
