@@ -103,6 +103,7 @@ jobs:
           test -r /dev/fuse -a -w /dev/fuse
       - run: make -C client/c all check
       - run: make -C qemu-plugin-nbd all
+      - run: make -C networkboot all
       - name: Real native clients against disposable localhost fixtures
         # Kernel here means FUSE/VFS mounts, not loading the kstqr module.
         run: go test -race ./client ./server -p=1 -run 'Test(CClient|.*Networkboot.*|.*Kernel.*|.*Rsync.*|BucketNativeOverlayPHPCluster)$' -count=1 -v -timeout=15m
