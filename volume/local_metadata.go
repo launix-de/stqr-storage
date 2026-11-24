@@ -107,6 +107,15 @@ func (v *Volume) setLocalMetadataLocked(data []byte, options Options, node *ID) 
 		diskOrder.PutUint32(b[32:], uint32(n))
 		copy(b[40:], data[from:from+n])
 		diskOrder.PutUint32(b[PageSize-4:], checksum(b[:PageSize-4]))
+		if i < len(pages) {
+			previous, err := v.readPage(off)
+			if err != nil {
+				return err
+			}
+			if bytes.Equal(previous, b) {
+				continue
+			}
+		}
 		t.pages[off] = b
 	}
 	for _, off := range pages[min(count, len(pages)):] {
