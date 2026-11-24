@@ -96,7 +96,7 @@ func (r *rangeManager) planReplicaAdd(d BucketDescription) (rangePlan, bool) {
 	if d.DesiredPolicy != nil {
 		goal = *d.DesiredPolicy
 	}
-	if goal.Redundancy.Mode != "replication" || goal.StorageStrategy == "ram" || goal.StorageStrategy != d.Policy.StorageStrategy || goal.Compression != d.Policy.Compression {
+	if goal.Redundancy.Mode != "replication" || goal.StorageStrategy == "ram" || goal.StorageStrategy != d.Policy.StorageStrategy {
 		return rangePlan{}, false
 	}
 	need := r.server.requiredReplicas(goal, r.server.currentSystem.Load().manifest.Membership)
@@ -128,19 +128,19 @@ func (r *rangeManager) planReplicaAdd(d BucketDescription) (rangePlan, bool) {
 			if present {
 				continue
 			}
-			cost, _, err := r.policyPlacementCost(before, entry, destination.node, volume.ID(destination.volume.ID), bucketCodec(goal))
+			cost, _, err := r.policyPlacementCost(before, entry, destination.node, volume.ID(destination.volume.ID), bucketCodec(d.Policy))
 			if err != nil || cost > destination.free {
 				continue
 			}
 			next := entry
 			next.OwnerEpoch++
 			next.Locations = append(append([]client.Location(nil), entry.Locations...), client.Location{Node: destination.node, Volume: destination.volume.ID, Role: 1, Class: destination.volume.Class})
-			if len(next.Locations) == need {
+			if len(next.Locations) == need && goal.Compression == d.Policy.Compression {
 				next.PolicyVersion = goal.Version
 			}
 			after := before
 			after.Entries = []client.RangeEntry{next}
-			p := rangePlan{Attempt: client.NewRequestID(), Before: before, After: after, Source: r.node, Target: destination.node, Volume: volume.ID(destination.volume.ID), Moving: entry, Compression: bucketCodec(goal), Physical: cost, ReplicaAdd: true}
+			p := rangePlan{Attempt: client.NewRequestID(), Before: before, After: after, Source: r.node, Target: destination.node, Volume: volume.ID(destination.volume.ID), Moving: entry, Compression: bucketCodec(d.Policy), Physical: cost, ReplicaAdd: true}
 			if p.validate() == nil {
 				return p, true
 			}

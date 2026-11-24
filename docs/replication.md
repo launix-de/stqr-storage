@@ -22,9 +22,11 @@ writes; transport failure never changes placement or elects another writer.
    COMMIT. The primary publishes only after every required peer has replied.
 4. The client receives success only after primary publication. Losing a reply
    or restarting a process does not execute the mutation again. The recovery
-   worker replays decided commits; undecided prepares retain their original
-   binding and resume when the original request is retried. Client cancellation
-   does not abort or reduce the required set.
+   worker replays decided commits. While the primary is alive, undecided prepares
+   resume when the original request is retried. After a primary process restart,
+   an orphaned prepare without a durable commit decision receives an explicit
+   durable abort and its original failure is retained. Such a request was never
+   acknowledged. Client cancellation does not abort or reduce the required set.
 
 A definitive capacity/precondition rejection before ALL-READY takes the explicit
 abort path. The primary persists the failure and frees private staging, then

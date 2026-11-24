@@ -141,6 +141,43 @@ func (s *Server) initReplicas() error {
 		if err != nil {
 			return err
 		}
+		// A restored PREPARED primary has no durable COMMIT decision and could
+		// never have acknowledged this request. Explicitly abort that orphan;
+		// do not strand the object/lease waiting for a client that may be gone.
+		// Followers wait for their primary's decision, and decided writes finish.
+		h, err = v.Open(false)
+		if err != nil {
+			return err
+		}
+		var orphaned []volume.ReplicaRecord
+		err = h.ScanPendingReplicas(func(x volume.ReplicaRecord) error {
+			if x.State == volume.ReplicaPrepared {
+				entry, ok := s.placement.Load().lookup(client.ID(x.Request.Key.Bucket), client.ObjectID(x.Request.Key.Object))
+				if ok && s.control != nil && len(entry.Locations) > 1 && entry.Locations[0].Node == s.control.ledger.node && replicaSetHash(x.Request.Key.Bucket, entry) == x.Binding.SetHash {
+					orphaned = append(orphaned, x)
+				}
+			}
+			return nil
+		})
+		h.Close()
+		if err != nil {
+			return err
+		}
+		if len(orphaned) > 0 {
+			h, err = v.Open(true)
+			if err != nil {
+				return err
+			}
+			for _, x := range orphaned {
+				if err = h.AbortReplicaPending(x.Request.ID, x.Binding, 409); err != nil {
+					break
+				}
+			}
+			h.Close()
+			if err != nil {
+				return err
+			}
+		}
 	}
 	s.replicas = r
 	return nil

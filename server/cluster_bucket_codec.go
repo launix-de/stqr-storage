@@ -29,6 +29,18 @@ func (c *clusterController) finishBucketPolicies(ctx context.Context) {
 		if description.DesiredPolicy == nil || description.State == BucketDeleting {
 			continue
 		}
+		id, _ := bucketID(description.ID)
+		need := s.requiredReplicas(*description.DesiredPolicy, s.currentSystem.Load().manifest.Membership)
+		countsReady := true
+		for _, entry := range s.placement.Load().bucketEntries(client.ID(id)) {
+			if len(entry.Locations) != need {
+				countsReady = false
+				break
+			}
+		}
+		if !countsReady {
+			continue
+		}
 		if !samePlacementPolicy(description.Policy, *description.DesiredPolicy) && !s.replicaPolicyInPlace(description) {
 			if err := s.scopes.syncArchives(ctx); err != nil {
 				return

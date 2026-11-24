@@ -451,6 +451,13 @@ func (b *Bucket) mutate(ctx context.Context, p principal, id volume.ObjectID, op
 	var replicatedEntry client.RangeEntry
 	if s.controller != nil {
 		entry, known := s.placement.Load().lookup(client.ID(b.ID()), client.ObjectID(id))
+		if known && d.DesiredPolicy != nil {
+			if entry.PolicyVersion == d.DesiredPolicy.Version {
+				d.Policy = *d.DesiredPolicy
+			} else if s.requiredReplicas(*d.DesiredPolicy, s.currentSystem.Load().manifest.Membership) == 1 && bucketCodec(d.Policy) != bucketCodec(*d.DesiredPolicy) {
+				return volume.Result{}, fail(503, "bucket codec conversion is in progress")
+			}
+		}
 		if known && len(entry.Locations) > 1 {
 			replicatedEntry = entry
 		}

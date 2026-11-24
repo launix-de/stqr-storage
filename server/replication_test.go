@@ -176,6 +176,7 @@ func TestDaemonReplicaAddPreservesPrimaryDataAndOriginalReceipts(t *testing.T) {
 		t.Fatal(err)
 	}
 	storage.Redundancy = BucketRedundancy{Mode: "replication", Replicas: 2, ACK: "all"}
+	storage.Compression = "gzip"
 	centralPGRequest(t, source.node, group, 1, PlacementMask{NodeSelection: "all", Storage: &storage})
 	deadline := time.Now().Add(10 * time.Second)
 	var plan rangePlan
@@ -215,6 +216,9 @@ func TestDaemonReplicaAddPreservesPrimaryDataAndOriginalReceipts(t *testing.T) {
 		t.Fatalf("active replica %q %v", data, err)
 	}
 	awaitPGVersion(t, source.node, group, 2)
+	if _, info, e := follower.Get(ctx, actor, id); e != nil || info.Compression != volume.Gzip {
+		t.Fatalf("combined replica/codec transition %+v %v", info, e)
+	}
 	storage.Redundancy = BucketRedundancy{Mode: "single", Replicas: 1, ACK: "all"}
 	var revision uint64
 	for _, g := range source.node.placementGroups.Load().object.Groups {
@@ -398,5 +402,81 @@ func TestDaemonReplicaCapacityRejectionAbortsAndReleasesPrimary(t *testing.T) {
 	}
 	if _, err = b.Put(ctx, actor, id, payload, request); statusOf(err) != 507 {
 		t.Fatal("failed request lost its durable outcome", err)
+	}
+}
+
+func TestDaemonPrimaryRestartAbortsOrphanedPrepareWithoutLosingAcknowledgedData(t *testing.T) {
+	source, target := startAutomaticDaemonPair(t, false)
+	left := addTestVolume(t, source.node, "data", "hdd", 8<<20)
+	right := addTestVolume(t, target.node, "data", "hdd", 8<<20)
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		dest, _ := source.node.scopes.destinations(BucketDescription{Policy: DefaultBucketPolicy()})
+		if len(dest) >= 2 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("missing replica volume")
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	group := volume.ID(client.NewRequestID())
+	storage := storagePolicy(DefaultBucketPolicy())
+	storage.Redundancy = BucketRedundancy{Mode: "replication", Replicas: 2, ACK: "all"}
+	centralPGRequest(t, source.node, group, 0, PlacementMask{NodeSelection: "all", Storage: &storage})
+	b := replicaTestBucket(t, source.node, group, "orphan-recovery")
+	actor := userPrincipal(t, source.node)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	id := volume.ObjectID{3}
+	if _, err := b.Put(ctx, actor, id, []byte("base"), volume.Options{RequestID: volume.ID(client.NewRequestID())}); err != nil {
+		t.Fatal(err)
+	}
+	entry, _ := source.node.placement.Load().lookup(client.ID(b.ID()), client.ObjectID(id))
+	binding := volume.ReplicaBinding{Epoch: entry.OwnerEpoch, Sequence: 100, SetHash: replicaSetHash(b.ID(), entry)}
+	request := volume.Options{RequestID: volume.ID(client.NewRequestID()), Compression: volume.Codec(volume.Raw)}
+	for i, node := range []*Server{source.node, target.node} {
+		vid := left.VolumeID
+		if i == 1 {
+			vid = right.VolumeID
+		}
+		node.mu.RLock()
+		store := node.volumes[vid].store
+		node.mu.RUnlock()
+		h, err := store.Open(true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = h.PrepareMutation(3, volume.Key{Bucket: b.ID(), Object: id}, 0, 1, bytes.NewBufferString("?"), nil, request, binding)
+		h.Close()
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	source = restartDaemonTestNode(t, source)
+	b, _ = source.node.Bucket(b.ID())
+	if _, err := b.Append(ctx, actor, id, []byte("?"), request); statusOf(err) != 409 {
+		t.Fatal("orphan did not retain its abort outcome", err)
+	}
+	data, _, err := b.Get(ctx, actor, id)
+	if err != nil || string(data) != "base" {
+		t.Fatal("unacknowledged prepare overwrote confirmed data", string(data), err)
+	}
+	next := volume.Options{RequestID: volume.ID(client.NewRequestID())}
+	deadline = time.Now().Add(10 * time.Second)
+	for {
+		_, err = b.Append(ctx, actor, id, []byte("!"), next)
+		if err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("orphan blocked subsequent writes", err)
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	follower, _ := target.node.Bucket(b.ID())
+	data, _, err = follower.Get(ctx, actor, id)
+	if err != nil || string(data) != "base!" {
+		t.Fatal("follower did not reconcile abort/new write", string(data), err)
 	}
 }
