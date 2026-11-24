@@ -2,3 +2,5 @@
 /* Compile the exact C library protocol core against the kernel port. */
 #include "../../client/c/src/core.c"
 #include "objects.c"
+
+#include "overlay.c"

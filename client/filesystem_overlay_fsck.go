@@ -199,14 +199,23 @@ func markOverlay(ctx context.Context, o *OverlayFilesystem, store fsCheckStore, 
 	dirs := map[ObjectID]bool{}
 	var walk func(ObjectID, int) error
 	walk = func(id ObjectID, depth int) error {
-		if depth > 1024 || seen[id] {
+		if depth > 1024 {
 			return ErrFSFormat
 		}
-		seen[id] = true
 		info, err := o.stat(ctx, s, version, id)
 		if err != nil {
 			return err
 		}
+		if seen[id] {
+			if info.Directory {
+				return ErrFSFormat
+			}
+			if _, upper := inventory[id]; upper {
+				return ErrFSFormat
+			}
+			return nil
+		}
+		seen[id] = true
 		if info.Removed {
 			return ErrFSFormat
 		}

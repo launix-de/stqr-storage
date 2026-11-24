@@ -130,3 +130,14 @@ all observed pending writes on the connection. `stqr_pending_mark()` and
 bucket. Receipt observation also covers reads and subscription notices. Marks
 survive reconnect; an unconfirmed lost incarnation yields `-ESTALE`. Close alone
 is not a sync. See [the complete contract](../../docs/durability.md).
+
+## Cluster routing
+
+Reads and inline mutations (up to 1 MiB per payload, including native filesystem
+segments) follow authoritative range-owner redirects. The client validates the
+bucket/range and primary node in the returned map patch, flushes accepted writes
+before switching its serial connection, reauthenticates and retries with the same
+request ID. Reconnecting invalidates outstanding subscription coverage. There is
+no per-node connection pool or automatic alternate-address failover. Chunked
+mutations larger than 1 MiB still require connecting to their correct owner; use
+bounded ranged writes for the native filesystem path.

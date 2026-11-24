@@ -224,7 +224,12 @@ func (o *OverlayFilesystem) RenameWithFlags(ctx context.Context, parent ObjectID
 				if e != nil {
 					return e
 				}
-				n.blob = fsBlob{length: n.blob.length, source: item.id, sourceVersion: base.Version}
+				if n.kind == fsFile {
+					if fsLinks(n) > 1 {
+						return syscall.EOPNOTSUPP
+					}
+					n.blob = fsBlob{length: n.blob.length, source: item.id, sourceVersion: base.Version}
+				}
 				n.writePath = item.p
 				_, e = o.upper.store.CAS(ctx, item.id, 0, nil, encodeFSNode(n), CASOptions{Scope: CASObject, MutationOptions: MutationOptions{RequestID: NewRequestID(), Absent: true}})
 				if e != nil && !errors.Is(e, ErrPrecondition) {

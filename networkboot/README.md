@@ -12,9 +12,9 @@ Secure-Boot configuration is already supported.
 
 ## Build
 
-Install Go 1.24+, Python 3, QEMU (`qemu-system-x86_64`, `qemu-io`), libguestfs
-(`guestfish`), dnsmasq, standalone iPXE BIOS/EFI loaders, GNU tar and
-squashfs-tools. PAM development headers and a C compiler are needed for the PAM
+Install Go 1.24+, Python 3.12+, QEMU (`qemu-system-x86_64`, `qemu-io`), libguestfs
+(`guestfish`), dnsmasq, standalone iPXE BIOS/EFI loaders and GNU tar.
+The host compiler/build tools and the guest's matching kernel headers build kstqr. PAM development headers and a C compiler are needed for the PAM
 module. `ip` (iproute2) is used to detect the boot network. This directory is its
 own Go module, with the parent STQR checkout as its SDK dependency.
 
@@ -56,8 +56,7 @@ retained and their path is printed. A completed export can be uploaded again wit
 Artifacts transfer in bounded 64-MiB ranges, so large Ubuntu images do not depend
 on a whole-file protocol transfer or a large `/tmp` RAM quota. Interrupted artifact
 uploads resume only after validating the stored prefix; downloads pin one object
-version and verify the full checksum. The manifest format and object IDs stay
-unchanged. Complete
+version and verify the full checksum. Complete
 the installation, then shut down the VM cleanly. The first installer reboot exits
 QEMU so extraction can start. Closing an unfinished installation produces an
 error rather than publishing a usable release; the disk remains in the bucket.
@@ -88,17 +87,24 @@ After QEMU exits, libguestfs mounts the disk offline, installs the networkboot
 initramfs hook, enables broad module inclusion and builds a separate `/boot/initrd.stqr-VERSION` using `mkinitramfs` from
 `initramfs-tools-core`. This also handles Ubuntu installations whose
 `update-initramfs` command delegates to Dracut: the ordinary VM-boot initrd stays
-untouched. The builder checks that the generated network initrd contains the STQR
-script before publishing.
+untouched. The builder exports the installed kernel headers, compiles kstqr with the host
+toolchain, installs the module and one-shot mount helpers into the image, and
+checks that both the module and STQR boot script are in the network initrd.
+Install `linux-headers-VERSION` in the VM if its installer did not include them.
 It selects a matching `/boot/vmlinuz-VERSION` and `initrd.img-VERSION` pair;
 `--kernel-version` can select explicitly. It then extracts a numeric-owner tar
-archive retaining ACLs, xattrs, security labels, hardlinks and device metadata.
+archive retaining modes, numeric owners, timestamps, xattrs (including file
+capabilities), hardlinks, symlinks and FIFOs. The native importer rejects unsupported
+POSIX ACLs and device nodes rather than silently dropping their metadata.
 Runtime trees and `/home/*` are excluded: homes belong in their own buckets.
 The root archive has networkboot fstab configuration; the VM disk's original
 fstab is restored so the template can still boot as a normal VM.
 
-A fixed manifest object atomically publishes checksummed `rootfs.tar`, `vmlinuz`,
-`initrd.img` and `release.json` artifacts only after all uploads succeed. A failed
+The archive is imported into a **new native filesystem release bucket**. The
+release bucket is then locked against writes. A schema-2 manifest atomically
+publishes its bucket ID and checksummed `vmlinuz`, `initrd.img` and `release.json`
+artifacts after import and synchronization succeed. The archive is local staging
+only; boot gateways do not download or reconstruct the root tree. A failed
 extraction or publication leaves the previous published release unchanged.
 Changing the VM disk is deliberately independent from publishing it.
 
@@ -109,7 +115,9 @@ after successful publication. It preserves all device descriptors, their live
 stripes, the manifest and current artifact roots, removing obsolete artifacts
 and orphan stripes. Stripes are updated in place with ranged writes; no segment
 list or immutable per-write stripe chain is stored. Keep physical headroom for
-installation writes and rootfs archives.
+the installation disk and native release trees. Failed imports report their
+release bucket ID for explicit cleanup; old release buckets remain available
+while existing clients use them. GC of the builder bucket does not delete them.
 
 ## Change a template
 
@@ -122,9 +130,9 @@ networkboot/edit-image ubuntu-desktop-v2
 ```
 
 Install packages or apply updates in the QEMU window, then shut down. Extraction
-and atomic publication run again. Existing boot sessions keep their pinned local release. Send SIGHUP to the
+and atomic publication run again. Existing boot sessions keep their pinned native release bucket. Send SIGHUP to the
 gateway to activate the newly published manifest for subsequent boots; versioned
-HTTP URLs and NFS handles keep already booted systems on their previous release.
+HTTP URLs and immutable root bucket IDs keep already booted systems on their previous release.
 A failed reload leaves the active release unchanged.
 Use a new bucket for a release you want to retain or roll back to.
 
@@ -181,7 +189,8 @@ operation ID; a response is not a multi-object transaction.
 NBD, GC, clear and clone use **durable exclusive leases across all admitted
 cluster members**. All members must be reachable and upgraded; existing clients
 of the affected bucket must disconnect. A read-only preflight checks member
-support before the builder or STQR-upper gateway allocates buckets. Data I/O
+support before the image builder allocates buckets. Native root mounts do not take
+exclusive bucket-maintenance leases. Data I/O
 continues directly to the committed object owners. Handoffs of a leased bucket
 and ordinary membership changes wait until the lease is released; unrelated
 bucket data operations continue normally.
@@ -203,7 +212,7 @@ The gateway detects the interface on the IPv4 default route, its IPv4 address
 and the matching client subnet. It prints the selected network before startup.
 If the machine has an ambiguous network configuration, it asks for explicit
 `--interface` / `--server` overrides rather than selecting an arbitrary LAN.
-Loader paths, ports, `--upper` (default `stqr`) and upper size (default 4 GiB)
+Loader paths, the HTTP port and upper quota (default 4 GiB)
 already have defaults. No network settings need to be added to `stqr.yaml`.
 
 For a local QEMU PXE test, the gateway can run without LAN DHCP/TFTP:
@@ -214,9 +223,12 @@ sudo networkboot/serve ubuntu-desktop-v2 --no-dhcp
 networkboot/test-boot
 ```
 
+For an unprivileged HTTP-only gateway, also choose a private writable cache with
+`--cache PATH`. It must belong to the gateway user and be inaccessible for writes
+by other users.
+
 The test launcher waits up to 15 minutes for a valid HTTP boot script before
-opening QEMU. First gateway startup downloads and verifies the image, extracts
-its root and builds SquashFS; the `PXE ready` line marks readiness.
+opening QEMU. Gateway startup downloads and verifies only the kernel, initramfs and release metadata; the `PXE ready` line marks readiness.
 
 QEMU supplies private DHCP/NAT and its iPXE ROM loads the HTTP boot script.
 This tests the published release and network root without a guest hard disk or
@@ -225,64 +237,60 @@ changes to LAN DHCP. The default is 4 GiB RAM and two vCPUs;
 
 `--check` resolves the bucket and checks configuration/dependencies without
 starting services. `--no-dhcp` uses an existing externally configured PXE setup.
-Ports default to HTTP 8088 and NFS/MOUNT TCP 2049; dnsmasq provides Proxy-DHCP
-and TFTP while the existing DHCP server continues assigning addresses. DNS is
-disabled (`port=0`). Standalone loader files are required, not QEMU option ROMs.
-The example `systemd/stqr-networkboot.service` runs the supervisor in the
-foreground and maps `systemctl reload` to SIGHUP. It is not enabled by installation.
-The supervisor stops its own children on shutdown or failure; it never edits the
-system dnsmasq configuration or starts a system-wide kernel NFS server.
-
-Artifacts are checksum-verified and extracted into a root-owned local cache.
-The gateway converts the root into a readonly SquashFS image, preserving Linux
-metadata. Its userspace NFSv3 server exports that image to the configured client
-CIDR. Boot clients use:
+The HTTP port defaults to 8088; dnsmasq provides Proxy-DHCP and TFTP while the
+existing DHCP server continues assigning addresses. DNS is disabled (`port=0`).
+Standalone loader files are required, not QEMU option ROMs. The example
+`systemd/stqr-networkboot.service` runs the supervisor in the foreground and maps
+`systemctl reload` to SIGHUP. Installation does not enable it or change host services.
 
 ```text
-PXE -> iPXE -> HTTP kernel + initramfs
-                 -> NFS /release-digest/rootfs.squashfs
-                     -> loop-mounted SquashFS lower
-                         -> private ext4 upper on STQR/NBD -> switch_root
+PXE -> iPXE -> HTTP kernel + initramfs (includes matching kstqr.ko)
+                 -> temporary boot identity
+                     -> one native kstqr overlay mount
+                         lower: readonly STFS release bucket
+                         upper: temporary STOR/STOM bucket
+                     -> switch_root
+login -> PAM -> persistent username_home bucket at /home/username
 ```
 
-The default writable root is a **private temporary bucket per MAC and boot**.
-The gateway allocates a sparse disk, starts a private NBD export and gives that
-client an IP-scoped TCP endpoint. The initramfs connector attaches `/dev/nbd0`,
-formats ext4 and uses it as the Linux overlay upper/work filesystem. The static
-connector waits for the expected kernel block capacity, then exits. Its
-root-storage mode attaches through generic netlink, so the kernel maintains the
-connection without a userspace handler that systemd could interrupt during
-shutdown. No QEMU
-recompilation or proprietary QEMU driver is needed.
+The kernel uses our native Go/FUSE-compatible STOR/STOM overlay format:
+deletion markers live in directory records, metadata overrides preserve the
+original content, and range writes retain references to unchanged lower data.
+Overlay uppers cannot be mounted alone. There is no SquashFS, Linux OverlayFS,
+NFS root or NBD root upper in this boot path. QEMU's builder disk still uses the
+independent NBD frontend.
 
-When that NBD connection ends, the gateway checkpoints/stops the export, clears
-and deletes the temporary bucket. Pending clients that never attach expire after
-one hour. `--max-sessions` bounds concurrent allocations (default 64). The NBD
-ports are dynamically allocated TCP ports on the gateway address. Cleanup failures and gateway crashes leave private recovery markers in
-`CACHE/uppers`; inspect those before manually clearing/deleting their buckets.
-MACs are selectors, not authentication; only the IP that requested a boot may
-connect to that session port. This is intended for a trusted boot LAN.
+Each MAC and boot gets a temporary STQR user with **read-only permission on the
+pinned lower** and read/write permission on its own upper. The kernel command line
+contains a one-use, IP-scoped claim token, never the administrator password. A
+one-shot initramfs helper claims boot credentials over HTTP, mounts the native overlay,
+removes its private credential file and exits. The kernel retains reconnect
+credentials. A separate control socket is held by the upper superblock until
+unmount; no resident client helper is needed. Object I/O goes directly to STQR.
 
-`--upper ram` selects the simpler per-boot client tmpfs upper and does not need
-exclusive bucket maintenance. STQR uppers and the image-builder writer require
-all admitted members to be available for lease acquisition. A read-only preflight
-checks support before allocating anything. Logout alone does not clear a running
-system; shutdown/reboot disconnects its root upper. Personal home buckets remain
-persistent and independent. Machine ID, random seed and SSH host keys are
-regenerated in the private upper.
+On disconnect the gateway revokes the lower grant, deletes the temporary user
+(closing authenticated connections), then schedules deletion of the upper.
+The cluster persists that intent and purges its data in batches; an extra
+object-by-object clear is unnecessary. Unclaimed
+sessions expire after an hour; `--max-sessions` defaults to 64. Cleanup failures
+or gateway crashes leave password-free, private JSON recovery markers in
+`CACHE/uppers`. To retry a recorded cleanup:
 
-Published images are administrator-trusted and readable by the allowed boot
-network; do not put client secrets into a shared system image. The gateway has
-no per-client cryptographic boot authentication or Secure-Boot enrollment.
-For provisioning, a MAC may select a boot configuration but is not a credential.
+```sh
+networkboot/bin/stqr-bootctl boot-session-delete USER_ID UPPER_ID LOWER_ID
+```
 
-Old exported release images remain in the local cache. Their NFS handles derive
-from stable release paths and a fixed namespace, so a gateway restart serving a
-new release can still resolve the old cached release handles. Keep the cache
-intact while clients use those releases. Prefer SIGHUP for updates: restarting the
-gateway disconnects active temporary NBD uppers even though the readonly release
-handles remain reconstructible. No automatic live-kernel update or
-migration of persistent native STQR uppers is performed.
+Inspect that the recorded client is stopped before manual recovery. MAC addresses
+are selectors, not authentication; claim tokens and boot credentials travel over
+HTTP on the trusted boot LAN. Published system images must not contain client or
+administrator secrets. Secure-Boot enrollment and cryptographic boot-client
+attestation are separate deployment work.
+
+Logout does not clear a running machine's root. Shutdown/reboot releases its
+upper; personal homes remain persistent and independent. Machine ID, random seed
+and SSH host keys are regenerated in the private upper. Use SIGHUP for release
+updates: restarting the gateway deliberately revokes its active boot sessions.
+Keep old native release buckets while clients still use them.
 
 ## PAM homes
 
@@ -331,15 +339,17 @@ encryption or protection from local root.
 make -C networkboot check
 STQR_TEST_NETWORKBOOT=1 go test -race ./server \
   -run '^Test(BucketClearCloneOfflineAndReplay|NetworkbootNBDWithQEMU)$' -count=1
-STQR_TEST_NBD_UPPER=1 STQR_KERNEL_IMAGE=/path/to/vmlinuz STQR_KERNEL_VERSION=matching-release \
-  python3 networkboot/tests/networkboot_vm.py
+STQR_TEST_KERNEL=1 STQR_KERNEL_OVERLAY=1 STQR_KERNEL_IMAGE=/path/to/vmlinuz \
+  go test ./server -run '^TestKSTQRVirtualMachine$' -count=1
 ```
 
 Tests cover actual QEMU NBD read/write/flush, cloned disk readback, clear replay,
 NBD bounds/readonly behavior, NFS RPC reads/write rejection, Proxy-DHCP config,
 CLI help, and a PAM ABI harness with a test-only helper/password conversation.
-The isolated kernel VM boots from NFS/SquashFS and switches root with either a
-RAM upper or a kernel-NBD/ext4 upper. The per-MAC session test separately exercises
-the STQR-backed TCP export and automatic clear/delete on disconnect. No production bucket, LAN DHCP or host PAM configuration is used.
-A full interactive Ubuntu installation and real desktop/PAM home lifecycle have
-not been run automatically; those remain deployment acceptance tests.
+The isolated kernel VM exercises native kstqr lower/upper mounts, copy-up,
+whiteouts, chmod, inherited hardlinks, range copy-up, whitelist enforcement,
+external-client invalidation, rename, remount, the one-shot credential claim and
+control-socket lifetime through unmount. Fixtures use disposable servers/buckets;
+no LAN DHCP or host PAM configuration is used. The older NFS fixture is retained
+only as a legacy regression test. A full desktop login/PAM home lifecycle remains
+a deployment acceptance test with the site's Unix accounts and grants.

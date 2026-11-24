@@ -408,3 +408,19 @@ func TestOverlayNamespaceCrashCutpoints(t *testing.T) {
 		}
 	}
 }
+
+func TestOverlayRenameInheritedSymlinkPreservesInlineTarget(t *testing.T) {
+	ctx := context.Background()
+	lower, o, _, _, _, _ := overlayFixture(t, nil)
+	link, err := lower.Symlink(ctx, FilesystemRootID(), "original-link", "conf.json", 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = o.Rename(ctx, FilesystemRootID(), "original-link", FilesystemRootID(), "moved-link"); err != nil {
+		t.Fatal(err)
+	}
+	target, err := o.Readlink(ctx, link.ID)
+	if err != nil || string(target) != "conf.json" {
+		t.Fatal(string(target), err)
+	}
+}

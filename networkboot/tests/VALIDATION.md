@@ -115,3 +115,26 @@ journal abort or NBD write error occurred in the final test.
 The boot tests did not exercise graphical desktop login, PAM home mounts,
 physical LAN Proxy-DHCP/TFTP, Secure Boot or UEFI firmware. The template does not
 automatically install/enable STQR PAM homes or provision Unix accounts.
+
+## Native STOR/STOM kernel root, 2026-11-24
+
+The current gateway boots one native kstqr overlay mount. It imports an immutable STFS release
+bucket and provisions a temporary STOR/STOM upper using the same format as
+Go/FUSE. The root's TCP credentials are claimed once; no userspace filesystem
+process remains after the mount helper exits.
+
+Disposable QEMU kernel fixtures pass with the race detector. They cover a
+Go-created upper read and modified by the kernel, kernel-created upper
+initialization, matching/mismatched persisted whitelists, inherited hardlink
+reads, range copy-up and mmap/msync, metadata and xattrs, deletion markers,
+rename, symlinks, remount, and changes from external Go lower/upper clients.
+Go reads the resulting upper and validates it with the overlay fsck. The boot
+claim/control socket remains open until the kernel superblock is released.
+The ordinary standalone kstqr filesystem fixture also passes.
+
+The C client's range-owner redirects have a separate two-daemon integration
+fixture, including accepted writes and Sync across owners. Tar import tests
+check bounded concurrent publication, sparse content, hardlinks, metadata,
+xattrs, invalid paths and failed stream verification before root publication.
+Gateway/PAM Python tests and the networkboot Go tests pass. Physical PXE,
+Secure Boot and a graphical STQR/PAM login remain deployment acceptance tests.

@@ -156,13 +156,36 @@ class Workflows(unittest.TestCase):
     def test_initrds_missing_boot_hook_are_rejected(self):
         import common
         from types import SimpleNamespace
-        def guest(socket, command, *args, **kwargs):
+        def guest(socket, command=None, *args, **kwargs):
             output = 'vmlinuz-7.0.0-44-generic\ninitrd.img-7.0.0-44-generic\n' if command == 'ls' else 'true\n'
             return SimpleNamespace(stdout=output)
-        with tempfile.TemporaryDirectory() as work, patch.object(common, 'guest', side_effect=guest), patch.object(common, 'run', return_value=SimpleNamespace(stdout='etc/dracut\n')), contextlib.redirect_stdout(io.StringIO()), self.assertRaisesRegex(RuntimeError, 'missing the STQR boot script'):
+        with tempfile.TemporaryDirectory() as work, patch.object(common, 'guest', side_effect=guest), patch.object(common, 'install_native_kernel'), patch.object(common, 'run', return_value=SimpleNamespace(stdout='etc/dracut\n')), contextlib.redirect_stdout(io.StringIO()), self.assertRaisesRegex(RuntimeError, 'missing the STQR boot script'):
             common.extract('/private/disk.sock', work)
 
     def test_help_has_no_side_effects(self):
         for script in ['prepare-system', 'edit-image', 'serve', 'test-boot', 'pam/stqr-home']:
             result = subprocess.run([sys.executable, str(ROOT / script), '--help'], capture_output=True)
             self.assertEqual(result.returncode, 0, result.stderr)
+
+class NativePackaging(unittest.TestCase):
+    def test_kernel_sources_are_self_contained_and_exclude_build_products(self):
+        import common
+        import tarfile
+        with tempfile.TemporaryDirectory() as directory:
+            bundle=Path(directory)/'sources.tar'
+            common.source_archive(bundle)
+            with tarfile.open(bundle) as archive:
+                names=set(archive.getnames())
+            self.assertTrue({'kernel/kstqr/Makefile','kernel/kstqr/vfs.c',
+                             'client/c/src/core.c','client/c/src/port.h',
+                             'client/c/include/stqr.h'} <= names)
+            self.assertFalse(any(name.endswith(('.mod.c','.o','.ko')) for name in names))
+            self.assertFalse(any('..' in Path(name).parts for name in names))
+
+    def test_batch_guest_arguments_cannot_insert_commands(self):
+        import common
+        with patch.object(common,'guest') as guest:
+            common.guest_many('/private/disk.sock',[('upload','/tmp/file"\nshutdown','/etc/target')])
+        text=guest.call_args.kwargs['input']
+        self.assertEqual(text.count('\n'),1)
+        self.assertIn('\\nshutdown',text)

@@ -37,6 +37,16 @@ int main(void) {
     CHECK(!stqr_parse_id(getenv("STQR_TEST_BUCKET"), &bucket));
     CHECK(!stqr_parse_object_id("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", &id));
     CHECK(!stqr_dial(&c, url, getenv("STQR_TEST_USER"), getenv("STQR_TEST_PASSWORD"), bucket, 3000));
+    if (mode && !strcmp(mode,"routing")) {
+        for (unsigned step=0;step<8;step++) {
+            memset(&id,0,sizeof(id)); id.bytes[0]=(step&1)?0x81:1;
+            o=fresh();o.accepted=1;
+            CHECK(!stqr_put(c,id,"routed",6,&o,&info));
+            CHECK(!stqr_get(c,id,&data,&n,&info));
+            CHECK(n==6 && !memcmp(data,"routed",6));stqr_free(data);
+        }
+        CHECK(!stqr_sync(c));stqr_close(c);puts("cluster routing passed");return 0;
+    }
     if (mode) {
         if (!strcmp(mode,"disconnect")) {
             o = fresh(); CHECK(stqr_append(c,id,"x",1,&o,&info,&offset) == -EINPROGRESS);

@@ -2,6 +2,7 @@
 package server
 
 import (
+	"archive/tar"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -102,6 +103,20 @@ func TestClusterNetworkbootNBDWithQEMU(t *testing.T) {
 		if e := os.WriteFile(filepath.Join(artifacts, name), []byte("fixture"), 0600); e != nil {
 			t.Fatal(e)
 		}
+	}
+	var archive bytes.Buffer
+	writer := tar.NewWriter(&archive)
+	if e := writer.WriteHeader(&tar.Header{Name: "marker", Mode: 0644, Size: 7}); e != nil {
+		t.Fatal(e)
+	}
+	if _, e := writer.Write([]byte("fixture")); e != nil {
+		t.Fatal(e)
+	}
+	if e := writer.Close(); e != nil {
+		t.Fatal(e)
+	}
+	if e := os.WriteFile(filepath.Join(artifacts, "rootfs.tar"), archive.Bytes(), 0600); e != nil {
+		t.Fatal(e)
 	}
 	run("publish", "image", artifacts)
 	if out, e := exec.CommandContext(ctx, binary, "--config", cfg, "--size", "4194304", "check-install-disk", "image").CombinedOutput(); e == nil || !bytes.Contains(out, []byte("already published")) {

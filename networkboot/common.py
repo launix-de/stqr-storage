@@ -10,6 +10,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import tarfile
 
 HERE = Path(__file__).resolve().parent
 BIN = HERE / 'bin'
@@ -83,6 +84,13 @@ def guest(socket, *commands, readonly=False, **kwargs):
     # otherwise invokes qemu-img info for readonly NBD accesses.
     return run(*args, '--format=raw', '-a', f'nbd:///?socket={socket}', '-i', *commands, **kwargs)
 
+def guest_many(socket, commands, readonly=False):
+    # Reuse one libguestfs appliance for a sequence of bounded offline changes.
+    text = ''.join(command[0] + ' ' + ' '.join(json.dumps(str(value), ensure_ascii=False)
+                    for value in command[1:]) + '\n' for command in commands)
+    return guest(socket, readonly=readonly, input=text, text=True)
+
+
 def qemu(socket, args, installer=None):
     block = {'driver': 'nbd', 'server': {'type': 'unix', 'path': str(socket)}, 'node-name': 'stqr-disk', 'discard': 'unmap'}
     command = ['qemu-system-x86_64', '-name', 'STQR image builder', '-m', str(args.memory),
@@ -95,20 +103,64 @@ def qemu(socket, args, installer=None):
         command += ['-blockdev', json.dumps({'driver': 'raw', 'file': {'driver': 'file', 'filename': str(Path(installer).resolve())}, 'node-name': 'installer', 'read-only': True}), '-device', 'ide-cd,drive=installer,bootindex=1', '-no-reboot']
     run(*command)
 
+def source_archive(destination):
+    """Ship exactly the sources matching the built mount helpers."""
+    with tarfile.open(destination, 'w') as archive:
+        for relative in ('kernel/kstqr', 'client/c/include', 'client/c/src'):
+            for item in (HERE.parent / relative).iterdir():
+                if item.is_file() and (item.suffix in ('.c', '.h') and not item.name.endswith('.mod.c') or item.name == 'Makefile'):
+                    archive.add(item, arcname=str(Path(relative) / item.name), recursive=False)
+
+
+def install_native_kernel(socket, work, version):
+    """Build outside the guest, against its exact installed kernel headers."""
+    require('make', 'cc')
+    if not all((BIN / name).is_file() for name in ('stqr-boot-root', 'mount.kstqr')):
+        raise RuntimeError('Run make -C networkboot to build native boot helpers')
+    headers = Path(work) / 'headers'
+    headers.mkdir(exist_ok=True)
+    print(f'Exporting kernel headers for {version}...', flush=True)
+    kdir = headers / ('linux-headers-' + version)
+    if not (kdir / 'Makefile').is_file():
+        archive = Path(work) / 'headers.tar'
+        guest(socket, 'tar-out', '/usr/src', archive, readonly=True)
+        with tarfile.open(archive) as source:
+            source.extractall(headers, filter='data')
+        archive.unlink()
+    if not (kdir / 'Makefile').is_file():
+        raise RuntimeError(f'Install linux-headers-{version} in the builder VM before publishing')
+    source = Path(work) / 'module-source'
+    source.mkdir(exist_ok=True)
+    bundle = BIN / 'kstqr-source.tar'
+    if not bundle.is_file():
+        raise RuntimeError('Run make -C networkboot to package the matching kernel sources')
+    with tarfile.open(bundle) as archive:
+        archive.extractall(source, filter='data')
+    module = source / 'kernel/kstqr'
+    print(f'Building kstqr for {version}...', flush=True)
+    run('make', '-C', module, 'KDIR=' + str(kdir.resolve()), '-j' + str(min(4, os.cpu_count() or 1)))
+    commands = []
+    for directory in ('/usr/lib/stqr-networkboot', '/etc/initramfs-tools/scripts',
+                      '/etc/initramfs-tools/hooks', '/etc/initramfs-tools/conf.d',
+                      f'/lib/modules/{version}/extra'):
+        commands.append(('mkdir-p', directory))
+    for origin, target, mode in (
+        (module / 'kstqr.ko', f'/lib/modules/{version}/extra/kstqr.ko', '0644'),
+        (BIN / 'stqr-boot-root', '/usr/lib/stqr-networkboot/boot-root', '0755'),
+        (BIN / 'mount.kstqr', '/sbin/mount.kstqr', '0755'),
+        (HERE / 'initramfs/scripts/stqr', '/etc/initramfs-tools/scripts/stqr', '0755'),
+        (HERE / 'initramfs/hooks/stqr', '/etc/initramfs-tools/hooks/stqr', '0755'),
+        (HERE / 'initramfs/modules.conf', '/etc/initramfs-tools/conf.d/stqr', '0644'),
+    ):
+        commands.append(('upload', origin, target))
+        commands.append(('chmod', mode, target))
+    commands.append(('command', f'/sbin/depmod -a {version}'))
+    guest_many(socket, commands)
+
+
 def extract(socket, work, kernel_version=None):
     """Install boot support offline, then archive root with all Linux metadata."""
     work = Path(work)
-    guest(socket, 'mkdir-p', '/usr/lib/stqr-networkboot')
-    guest(socket, 'upload', BIN / 'stqr-nbd-client', '/usr/lib/stqr-networkboot/nbd-client')
-    guest(socket, 'chmod', '0755', '/usr/lib/stqr-networkboot/nbd-client')
-    guest(socket, 'mkdir-p', '/etc/initramfs-tools/scripts')
-    guest(socket, 'upload', HERE / 'initramfs/scripts/stqr', '/etc/initramfs-tools/scripts/stqr')
-    guest(socket, 'chmod', '0755', '/etc/initramfs-tools/scripts/stqr')
-    guest(socket, 'mkdir-p', '/etc/initramfs-tools/hooks')
-    guest(socket, 'mkdir-p', '/etc/initramfs-tools/conf.d')
-    guest(socket, 'upload', HERE / 'initramfs/modules.conf', '/etc/initramfs-tools/conf.d/stqr')
-    guest(socket, 'upload', HERE / 'initramfs/hooks/stqr', '/etc/initramfs-tools/hooks/stqr')
-    guest(socket, 'chmod', '0755', '/etc/initramfs-tools/hooks/stqr')
     listing = guest(socket, 'ls', '/boot', readonly=True,
                     capture_output=True, text=True).stdout.splitlines()
     versions = [p[len('vmlinuz-'):] for p in listing if p.startswith('vmlinuz-') and 'initrd.img-' + p[len('vmlinuz-'):] in listing]
@@ -127,14 +179,17 @@ def extract(socket, work, kernel_version=None):
                       capture_output=True, text=True).stdout.strip()
     if available != 'true':
         raise RuntimeError('Networkboot preparation requires initramfs-tools-core (mkinitramfs) in the installed image')
+    install_native_kernel(socket, work, version)
     print('Generating dedicated networkboot initramfs...', flush=True)
     network_initrd = '/boot/initrd.stqr-' + version
     guest(socket, 'command', f'/usr/sbin/mkinitramfs -o {network_initrd} {version}')
-    guest(socket, 'download', '/boot/vmlinuz-' + version, work / 'vmlinuz', readonly=True)
-    guest(socket, 'download', network_initrd, work / 'initrd.img', readonly=True)
+    guest_many(socket, [('download', '/boot/vmlinuz-' + version, work / 'vmlinuz'),
+                        ('download', network_initrd, work / 'initrd.img')], readonly=True)
     contents = run('lsinitramfs', work / 'initrd.img', capture_output=True, text=True).stdout.splitlines()
     if not any(p.lstrip('./') == 'scripts/stqr' for p in contents):
         raise RuntimeError('Generated initramfs is missing the STQR boot script; image not published')
+    if not any(p.endswith('/kstqr.ko') for p in contents):
+        raise RuntimeError('Generated initramfs is missing the matching kstqr module; image not published')
     # Work on the disk itself only after the VM has disconnected. Replace disk
     # fstab entries for network root, while preserving the original for editing.
     guest(socket, 'sh', 'cp -p /etc/fstab /etc/fstab.stqr-original; printf "# STQR network root\\n" > /etc/fstab')
@@ -146,7 +201,7 @@ def extract(socket, work, kernel_version=None):
     finally:
         guest(socket, 'command', '/bin/cp -p /etc/fstab.stqr-original /etc/fstab')
     (work / 'release.json').write_text(json.dumps({'schema': 1, 'kernel': version,
-        'boot': 'nfs3-readonly-with-tmpfs-overlay', 'architecture': 'x86_64'}))
+        'boot': 'kstqr-overlay', 'architecture': 'x86_64'}))
 
 
 def cli(main):

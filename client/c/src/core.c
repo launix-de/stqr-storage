@@ -15,6 +15,11 @@ struct stqr_client {
     void *update_arg;
     stqr_commit_mark pending_mark, synced_mark;
     int durability_lost;
+    char redirect[512];
+    stqr_object_id query;
+    int query_valid;
+    stqr_u64 redirect_revision, redirect_epoch;
+    stqr_id redirect_runtime;
 };
 struct buf { stqr_u8 *p; size_t n, cap, pos; int err; };
 static int zero(const void *v, size_t n) {
@@ -312,6 +317,8 @@ static int info_decode(struct buf *d, stqr_info *info) {
     return d->err;
 }
 static int accept_info(stqr_client *c, const stqr_info *info) {
+    /* Cluster runtimes belong to individual ranges, never the whole bucket. */
+    if (c->capabilities & 8) return 0;
     if (!zero(c->runtime.bytes, 16) && memcmp(c->runtime.bytes, info->runtime.bytes, 16)) return -ESTALE;
     c->runtime = info->runtime; return 0;
 }
@@ -395,6 +402,56 @@ static int dispatch_update(stqr_client *c, unsigned opcode, struct buf *m) {
     }
     return err;
 }
+/* The node supplies one authoritative range in a redirect. Validate the
+ * bucket/range before selecting its primary address; never guess another node. */
+static int redirect_patch(stqr_client *c, const stqr_u8 *raw, size_t size) {
+    struct buf d = {.p = (stqr_u8 *)raw, .n = size};
+    const stqr_u8 *p, *start; stqr_id owner = {{0}};
+    stqr_u64 n, j; unsigned bits; char endpoint[512] = {0};
+    if (!c->query_valid) return -EPROTO;
+    if (!readnum(&d,8) || !readnum(&d,8)) return -EPROTO;
+    c->redirect_revision = readnum(&d,8);
+    p = take(&d,16);
+    if (!p || memcmp(p,c->bucket.bytes,16)) return -EPROTO;
+    take(&d,32); boolean(&d); take(&d,32);
+    if (readvar(&d) != 1) return -EPROTO;
+    start = take(&d,32); bits = (unsigned)readnum(&d,2);
+    readnum(&d,8); c->redirect_epoch = readnum(&d,8); readnum(&d,1);
+    p = take(&d,16); if (p) memcpy(c->redirect_runtime.bytes,p,16);
+    if (!start || bits>256 || !c->redirect_epoch || !c->redirect_revision) return -EPROTO;
+    for (unsigned bit=0;bit<bits;bit++)
+        if ((start[bit/8] ^ c->query.bytes[bit/8]) & (128>>(bit%8))) return -EPROTO;
+    n = readvar(&d); if (!n || n>256) return -EPROTO;
+    for (j=0;j<n && !d.err;j++) {
+        const stqr_u8 *node = take(&d,16); take(&d,16);
+        unsigned role = (unsigned)readnum(&d,1);
+        readnum(&d,1); readnum(&d,2); readnum(&d,4);
+        if (role==0 && node) {
+            if (!zero(owner.bytes,16)) return -EPROTO;
+            memcpy(owner.bytes,node,16);
+        }
+    }
+    if (zero(owner.bytes,16)) return -EPROTO;
+    n=readvar(&d); if (n>10000) return -EPROTO;
+    for (j=0;j<n && !d.err;j++) {
+        const stqr_u8 *node=take(&d,16); stqr_u64 addresses=readvar(&d);
+        int selected=node && !memcmp(node,owner.bytes,16);
+        if (addresses>64) return -EPROTO;
+        for (stqr_u64 a=0;a<addresses && !d.err;a++) {
+            size_t length; p=readblob(&d,&length);
+            if (!p || !length || length>4096) return -EPROTO;
+            if (selected && !endpoint[0]) {
+                if (length>=sizeof(endpoint) || memchr(p,0,length)) return -E2BIG;
+                memcpy(endpoint,p,length); endpoint[length]=0;
+            }
+        }
+    }
+    /* Direct routing patches do not contain policy descriptors. */
+    if (readvar(&d)!=0 || done(&d) || !endpoint[0]) return -EPROTO;
+    /* parse_url validates schemes/authority when the redirect is followed. */
+    memcpy(c->redirect,endpoint,sizeof(endpoint));
+    return 0;
+}
 static int reply(stqr_client *c, unsigned op, stqr_id id, struct buf *result, struct download *stream) {
     unsigned skipped = 0;
     for (;;) {
@@ -430,6 +487,10 @@ static int reply(stqr_client *c, unsigned op, stqr_id id, struct buf *result, st
               tags[i] = readvar(&headers);
               for (j = 0; j < i; j++) if (tags[j] == tags[i]) headers.err = -EPROTO;
               { const stqr_u8 *value = readblob(&headers, &n);
+                if (tags[i] == 2 && (c->status == 301 || c->status == 302) && !headers.err) {
+                    int decoded = redirect_patch(c,value,n);
+                    if (decoded) headers.err = decoded;
+                }
                 if (tags[i] == 48 && !headers.err) {
                     struct buf mark = {.p = (stqr_u8 *)value, .n = n};
                     int observed = observe_mark(c, &mark);
@@ -448,23 +509,47 @@ static void broken(stqr_client *c) {
     if (c->update) c->update(c->update_arg, NULL);
 }
 static int request(stqr_client *c, unsigned op, struct buf *body, stqr_id id, int mutation, struct buf *result, struct download *s) {
-    int err; struct buf wrapped = {0}; unsigned wire_op = op; struct buf *wire_body = body;
+    int err;
     if (!c || !c->socket) return -ENOTCONN;
     if (mutation && c->durability_lost) return -ESTALE;
-    c->status = 0;
     if (body->err) return body->err;
-    if (zero(id.bytes, 16)) { if (mutation) return -EINVAL; if ((err = stqr_request_id(&id))) return err; }
-    if (mutation > 1 && (c->capabilities & STQR_CAP_DURABILITY)) {
-        if (body->n < 80) return -EINVAL;
-        put(&wrapped, body->p, 80); number(&wrapped, op, 2); put(&wrapped, body->p+80, body->n-80);
-        wire_op = 0x118; wire_body = &wrapped;
+    if (zero(id.bytes,16)) { if (mutation) return -EINVAL; if ((err=stqr_request_id(&id))) return err; }
+    for (unsigned attempt=0;attempt<16;attempt++) {
+        struct buf wrapped={0}; unsigned wire_op=op; struct buf *wire_body=body;
+        c->status=0; c->redirect[0]=0;
+        c->query_valid=op>=0x100 && op<=0x110 && body->n>=80;
+        if (c->query_valid) memcpy(c->query.bytes,body->p+16,32);
+        if (mutation>1 && (c->capabilities & STQR_CAP_DURABILITY)) {
+            if (body->n<80) return -EINVAL;
+            put(&wrapped,body->p,80); number(&wrapped,op,2); put(&wrapped,body->p+80,body->n-80);
+            wire_op=0x118; wire_body=&wrapped;
+        }
+        err=message_send(c,1,wire_op,id,wire_body);
+        if (!err) err=reply(c,wire_op,id,result,s);
+        drop(&wrapped);
+        if (err && (c->status==301 || c->status==302) && c->redirect[0]) {
+            char endpoint[512]; stqr_u64 revision=c->redirect_revision, epoch=c->redirect_epoch;
+            stqr_id runtime=c->redirect_runtime;
+            memcpy(endpoint,c->redirect,sizeof(endpoint));
+            /* Accepted writes are node-local. Flush the old node before moving
+             * this serial connection, so a later sync cannot lose its prefix. */
+            err=stqr_sync(c); if (err) return err;
+            err=parse_url(c,endpoint); if (err) return err;
+            memset(&c->runtime,0,sizeof(c->runtime));
+            memset(&c->pending_mark,0,sizeof(c->pending_mark));
+            memset(&c->synced_mark,0,sizeof(c->synced_mark));
+            err=stqr_reconnect(c); if (err) return err;
+            for (unsigned k=0;k<8;k++) { body->p[48+k]=(stqr_u8)(revision>>(k*8)); body->p[56+k]=(stqr_u8)(epoch>>(k*8)); }
+            memcpy(body->p+64,runtime.bytes,16);
+            drop(result);
+            if (s) { drop(&s->data); memset(s,0,sizeof(*s)); }
+            continue;
+        }
+        if (err && !c->status) { broken(c); return mutation ? -EINPROGRESS : err; }
+        if (err==-EPROTO || err==-EBADMSG) broken(c);
+        return err;
     }
-    err = message_send(c, 1, wire_op, id, wire_body);
-    if (!err) err = reply(c, wire_op, id, result, s);
-    drop(&wrapped);
-    if (err && !c->status) { broken(c); return mutation ? -EINPROGRESS : err; }
-    if (err == -EPROTO || err == -EBADMSG) broken(c);
-    return err;
+    return -ELOOP;
 }
 int stqr_reconnect(stqr_client *c) {
     struct buf body = {0}, result = {0}; stqr_id id = {{0}}; int err;

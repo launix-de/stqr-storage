@@ -367,15 +367,21 @@ func (o *OverlayFilesystem) path(ctx context.Context, s *overlayState, version u
 	seen := map[ObjectID]bool{}
 	var walk func(ObjectID, string, int) error
 	walk = func(id ObjectID, p string, depth int) error {
-		if depth > 1024 || seen[id] {
+		if depth > 1024 {
 			return ErrFSFormat
 		}
-		seen[id] = true
-		paths[id] = p
 		info, err := o.stat(ctx, s, version, id)
 		if err != nil {
 			return err
 		}
+		if seen[id] {
+			if info.Directory {
+				return ErrFSFormat
+			}
+			return nil
+		}
+		seen[id] = true
+		paths[id] = p
 		if !info.Directory {
 			return nil
 		}

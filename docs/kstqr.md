@@ -92,8 +92,12 @@ per-local-user STQR login.
 
 The kernel socket adapter supports numeric IPv4/IPv6 endpoints in the host network
 namespace. The helper resolves hostnames at mount time; reconnect uses that same
-resolved address. Other network namespaces, address failover and cluster routing
-are not implemented. Transport is plain HTTP/WebSocket, matching the current
+resolved address. Object operations follow validated range-owner redirects;
+cluster nodes must advertise numeric addresses usable by the kernel. Before a
+serial RPC connection changes owner, it synchronizes accepted writes to its old
+node. Each RPC slot and the subscription connection has its own durability
+barrier. Other network namespaces and automatic address failover are not
+implemented. Transport is plain HTTP/WebSocket, matching the current
 server; use it on loopback or an appropriately protected network.
 
 ## Filesystem behavior
@@ -192,10 +196,11 @@ send operation to avoid delaying a small payload behind its separate header.
 
 - **This is not yet a complete developer-home filesystem.** POSIX ACLs and broader
   application compatibility testing remain. User/trusted xattrs
-  work; security/capability xattrs and device nodes are not implemented. Keep a
+  and security/capability xattrs work; device nodes are not implemented. Keep a
   real home on its existing filesystem while evaluating this client.
-- Native overlay buckets require lower/upper handling and are currently rejected
-  by the kernel client. Use `stqr-fuse` for overlays.
+- Native overlays use the same STOR/STOM format as Go/FUSE. Hardlink creation
+  through an overlay is unsupported; untouched hardlinks in the lower remain
+  readable. Copy-up or rename of a multiply linked lower file is rejected.
 - Namespace editing materializes directory contents, limited to 16 MiB per
   directory; an intent is limited to 1 MiB and 1024 participants. Very large
   edits can fail with `E2BIG`. Index flattening needs further performance work.
@@ -282,3 +287,36 @@ The [explicit durability contract](durability.md) describes accepted writes,
 checkpoint bounds, cross-volume ordering and unconfirmed marks after server loss.
 After a rollback, inode versions/sizes can decrease to the recovered checkpoint;
 reads refresh that state, while fsync of the lost incarnation reports ESTALE.
+
+## Native networkboot root
+
+The kernel reads and writes the same STOR/STOM overlay format as Go/FUSE. A
+single mount merges an STFS lower bucket with an STOR upper bucket:
+
+```sh
+mount.kstqr --credentials /run/stqr/credentials --bucket UPPER_ID \
+  --readonly-bucket LOWER_ID --init /mnt/root
+```
+
+`--init` initializes a fresh upper; existing uppers retain their stored lower ID
+and whitelist. An upper cannot be mounted alone. `--whitelist conf.json,work/`
+restricts changes, including metadata and writable mmap. On remount an explicitly
+supplied whitelist must match the stored policy. With only `--readonly-bucket`,
+the helper mounts the lower read-only without an overlay.
+
+Directory records contain deletion markers and metadata overrides. File copy-up
+retains immutable references to unchanged lower content, so changing one range
+does not copy the entire file. Changing the lower can invalidate those pinned
+versions and return `ESTALE`; boot releases therefore use an immutable lower.
+Each bucket has its own RPC connections and subscription cache. Changes from
+other clients invalidate the merged namespace and cached file data.
+
+The networkboot adapter builds the module for the installed guest kernel. Its
+one-shot helper mounts the immutable release and temporary upper directly as
+one native kstqr root, without a resident userspace filesystem client.
+
+The internal `--boot-lifetime-fd FD` mount-helper option passes a connected
+socket into the upper superblock. The kernel holds it until unmount, after data
+connections have closed, so the gateway can revoke and collect the temporary
+identity/bucket without a resident userspace root client. It is not a data proxy.
+See [networkboot](../networkboot/README.md) for provisioning and recovery.

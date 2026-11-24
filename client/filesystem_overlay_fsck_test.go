@@ -327,3 +327,24 @@ func TestOverlayFsckPreservesUpperWhenOfflineLowerGcLostSource(t *testing.T) {
 		t.Fatal("missing lower source caused upper deletion", result, err)
 	}
 }
+
+func TestOverlayInheritedHardlinksPermitUnrelatedWritesAndFsck(t *testing.T) {
+	ctx := context.Background()
+	lower, o, _, upper, conf, _ := overlayFixture(t, nil)
+	if _, err := lower.Link(ctx, FilesystemRootID(), "config-alias", conf.ID); err != nil {
+		t.Fatal(err)
+	}
+	created, err := o.Create(ctx, FilesystemRootID(), "new-file", 0600, 0, 0, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = o.WriteAt(ctx, created.ID, []byte("independent"), 0); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = checkOverlayFilesystem(ctx, o, &fsckMemory{MemoryFilesystemStore: upper}); err != nil {
+		t.Fatal(err)
+	}
+	if got := readOverlayFile(t, o, created.ID); string(got) != "independent" {
+		t.Fatal(string(got))
+	}
+}

@@ -354,3 +354,15 @@ void ks_cache_note_durable(struct ks_fs *f, const stqr_commit_mark *m)
 	stqr_note_durable(c->client, m);
 	mutex_unlock(&c->wire);
 }
+
+int ks_cache_sync(struct ks_fs *f)
+{
+	struct ks_cache *c = f->cache;
+	int err = 0;
+	if (!c)
+		return 0;
+	mutex_lock(&c->wire);
+	err = stqr_sync(c->client);
+	mutex_unlock(&c->wire);
+	return err;
+}
