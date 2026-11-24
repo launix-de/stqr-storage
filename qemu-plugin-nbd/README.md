@@ -41,6 +41,20 @@ guest-facing hardware properties separately when a guest needs a specific vendor
 
 ## Growing devices
 
+In the dashboard, open **Buckets → Disks** on the desired bucket. The device
+list shows each disk's virtual capacity and identity, supports search and loads
+additional pages while scrolling. **Vergrößern** opens the same size controls as
+the rest of the dashboard: unit input, a discrete slider, quick increments and a
+before/after preview. Readonly exporters have the action disabled.
+
+The dashboard also works when the exporter runs on another machine. An updated
+exporter registers a bounded native control handler on its original STQR lease
+socket; the cluster forwards the administrator's request to that owner. It does
+not open the private Unix socket remotely, release the lease or permit a second
+writer. Without an exporter, the dashboard acquires its own ordinary exclusive
+block lease for the operation. An old/unreachable lease owner remains fenced and
+produces an explicit error rather than being bypassed.
+
 Grow a device while its exporter is stopped, using the usual bucket credentials:
 
 ```sh
@@ -77,7 +91,8 @@ provide automatic live capacity notifications to QEMU/the Linux NBD client.
 Each device has exactly one binary metadata object: `STNBD001`, version u16=1,
 stripe size u32=1048576, virtual byte size u64, generation ID (16 bytes), followed
 by native Text fields for name, manufacturer, model and serial. Integers are
-big endian. Device sizes must be positive multiples of 512 bytes.
+little endian, as in the shared native codec. Device sizes must be positive
+multiples of 512 bytes.
 
 Metadata addresses have eight zero bytes followed by the first 24 bytes of
 SHA-256(`"STQR NBD metadata v1\0" + name`). A sorted object scan lists descriptors
