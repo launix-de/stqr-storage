@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 import assert from 'node:assert/strict';
-import {entityRate,bucketThroughput} from './throughput.js';
+import {entityRate,bucketThroughput} from './dashboard/throughput.js';
 const entry={received:1000,snapshot:{boot:'a',captured:4000000000n,volumes:[{id:'v',io:{read:7000n}}],buckets:[{id:'b',io:{logicalRead:9000n,logicalWrite:15000n}}]},previous:{boot:'a',captured:1000000000n,volumes:[{id:'v',io:{read:1000n}}],buckets:[{id:'b',io:{logicalRead:0n,logicalWrite:3000n}}]}};
 assert.equal(entityRate(entry,'volumes','v','read',1000),2000n);
 assert.equal(entityRate(entry,'volumes','v','read',11000),null);
