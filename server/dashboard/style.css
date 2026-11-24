@@ -17,3 +17,5 @@
 .bucket-usage{min-width:140px;max-width:230px}.bucket-usage .usage-label{margin-bottom:8px}.bucket-usage .usage-track{width:100%}
 
 .endless-status{overflow-anchor:none;padding:18px 24px;color:var(--muted,#667085);font-size:13px;min-height:28px;text-align:center}.endless-status button{margin-left:8px}
+
+.maintenance-dialog{width:620px}.maintenance-options{display:grid;gap:14px}.maintenance-option{border:1px solid var(--border);border-radius:10px;padding:18px}.maintenance-option h3{font-size:13px;margin:0 0 9px;font-weight:600}.maintenance-option p{font-size:12px;line-height:1.7;color:var(--muted);margin:0 0 14px}.maintenance-option .field-note{font-size:11px;margin:10px 0 0}.maintenance-option button{white-space:normal;text-align:left;max-width:100%}.maintenance-danger{border-color:#eadadd;background:#fffafb}.maintenance-danger h3{color:#995f62}

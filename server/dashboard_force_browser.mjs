@@ -10,7 +10,9 @@ try{
  const row=page.locator(`tr.node-row[data-node="${config.target}"]`);
  await row.waitFor();
  if(!await row.textContent().then(s=>s.includes('Noch keine Statistiken')))throw Error('Offline committed member must remain visible.');
- await row.locator('[data-node-force]').click();
+ await row.locator('[data-node-maintenance]').click();
+ if(await page.locator('#maintenance-short').isEnabled()||await page.locator('#maintenance-drain').isEnabled())throw Error('Offline node must not offer shutdown or drain.');
+ await page.locator('#maintenance-force').click();
  if(await page.locator('#force-submit').isEnabled())throw Error('Missing fencing and loss confirmations.');
  await page.locator('#force-fenced').check();
  if(await page.locator('#force-submit').isEnabled())throw Error('Missing loss confirmation.');
@@ -18,7 +20,7 @@ try{
  await page.waitForFunction(()=>!document.querySelector('#force-dialog').open);
  await page.waitForFunction(()=>document.querySelector('#node-count').textContent==='1 Node');
  await row.getByText('Ausgeschlossen',{exact:true}).waitFor();
- if(await row.locator('[data-node-force]').count())throw Error('Excluded member is still offered for exclusion.');
+ if(await row.locator('[data-node-maintenance]').isEnabled())throw Error('Excluded member must not offer maintenance actions.');
  if(errors.length)throw Error(errors.join('; '));
  console.log('Offline committed row, native exclusion, both confirmations and refreshed membership verified in browser.');
 }finally{await browser.close()}

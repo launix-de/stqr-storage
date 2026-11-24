@@ -12,6 +12,19 @@ try{
  await page.locator('#username').fill(config.username);await page.locator('#password').fill(config.password);
  await page.locator('#login-form button[type=submit]').click();
  await page.waitForFunction(()=>document.querySelectorAll('.node-row').length===2);
+ const row=page.locator(`tr.node-row[data-node="${config.target}"]`);
+ if(await row.locator('.row-actions button').count()!==1)throw Error('Node row must offer only the maintenance button.');
+ for(const [kind,dialog]of [['short','node-action-dialog'],['drain','node-action-dialog'],['replace','recovery-node-dialog'],['force','force-dialog']]){
+  await page.locator('tr.node-row').first().locator('[data-node-maintenance]').click();
+  if(await page.locator('#node-maintenance-dialog .maintenance-option').count()!==4)throw Error('Expected four explained maintenance actions.');
+  if(!await page.locator('#maintenance-'+kind).isEnabled()){
+   if(!await page.locator('#maintenance-'+kind+'-note').isVisible())throw Error('Disabled maintenance action needs an explanation.');
+   await page.locator('[data-close="node-maintenance-dialog"]').first().click();continue;
+  }
+  await page.locator('#maintenance-'+kind).click();
+  if(!await page.locator('#'+dialog).evaluate(e=>e.open))throw Error('Maintenance action did not open its confirmation: '+kind);
+  await page.locator(`#${dialog} [data-close="${dialog}"]`).first().click();
+ }
  const add=page.locator(`[data-add-node="${config.target}"]`);await add.waitFor();
  await add.click();await page.locator('#volume-name').fill('browser-remote');
  await page.locator('#volume-size').fill('1M');await page.locator('#add-submit').click();
