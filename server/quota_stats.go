@@ -49,7 +49,13 @@ func (s *Server) collectQuotaStats(snap *client.StatsSnapshot, filter client.Sta
 		if p.Limits.Accounting == "physical" {
 			accounting = 1
 		}
-		snap.Buckets = append(snap.Buckets, client.BucketStats{ID: client.ID(id), Accounting: accounting, Strategy: uint8(bucketClass(p)), LogicalBytes: u.Logical, AttributedPhysical: u.Physical, ObjectCount: u.Objects, Guaranteed: p.Limits.Guaranteed, Absolute: p.Limits.Absolute, AbsoluteUnlimited: p.Limits.Unlimited, GuaranteedReservedPhysical: reserved[client.ID(id)]})
+		var traffic client.IOStats
+		s.bucketMu.RLock()
+		if b := s.bucketsByID[id]; b != nil {
+			traffic = b.ioSnapshot()
+		}
+		s.bucketMu.RUnlock()
+		snap.Buckets = append(snap.Buckets, client.BucketStats{ID: client.ID(id), IO: traffic, Accounting: accounting, Strategy: uint8(bucketClass(p)), LogicalBytes: u.Logical, AttributedPhysical: u.Physical, ObjectCount: u.Objects, Guaranteed: p.Limits.Guaranteed, Absolute: p.Limits.Absolute, AbsoluteUnlimited: p.Limits.Unlimited, GuaranteedReservedPhysical: reserved[client.ID(id)]})
 	}
 }
 

@@ -258,7 +258,7 @@ func (b *Bucket) scanLogicalUsage() (uint64, error) {
 func (b *Bucket) Get(ctx context.Context, p principal, id volume.ObjectID) ([]byte, volume.Info, error) {
 	return b.GetRange(ctx, p, id, 0, math.MaxUint64)
 }
-func (b *Bucket) GetRange(ctx context.Context, p principal, id volume.ObjectID, offset, length uint64) ([]byte, volume.Info, error) {
+func (b *Bucket) getRange(ctx context.Context, p principal, id volume.ObjectID, offset, length uint64) ([]byte, volume.Info, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, volume.Info{}, err
 	}
@@ -294,7 +294,7 @@ func (b *Bucket) CopyTo(ctx context.Context, p principal, id volume.ObjectID, of
 }
 
 // Check while holding the same native read handle that copies the data.
-func (b *Bucket) copyToVersion(ctx context.Context, p principal, id volume.ObjectID, offset, length uint64, dst io.Writer, version *uint64) (volume.Info, uint64, error) {
+func (b *Bucket) copyToVersionUnmetered(ctx context.Context, p principal, id volume.ObjectID, offset, length uint64, dst io.Writer, version *uint64) (volume.Info, uint64, error) {
 	if err := ctx.Err(); err != nil {
 		return volume.Info{}, 0, err
 	}
@@ -375,7 +375,7 @@ func (b *Bucket) Stat(ctx context.Context, p principal, id volume.ObjectID) (vol
 	}
 	return info, b.absenceError(id, info, err)
 }
-func (b *Bucket) mutate(ctx context.Context, p principal, id volume.ObjectID, opcode uint16, offset, length uint64, src io.Reader, expected []byte, opt volume.Options) (volume.Result, error) {
+func (b *Bucket) mutateUnmetered(ctx context.Context, p principal, id volume.ObjectID, opcode uint16, offset, length uint64, src io.Reader, expected []byte, opt volume.Options) (volume.Result, error) {
 	if b.server == nil {
 		return volume.Result{}, fail(503, "bucket not attached")
 	}
