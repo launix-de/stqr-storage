@@ -31,7 +31,7 @@ def main():
     args.install_image = args.image or args.install_image
     if not args.install_image and not args.publish_only:
         p.error('installer ISO required')
-    require('guestfish', 'sort', *([] if args.publish_only else ['qemu-system-x86_64']))
+    require('guestfish', 'sort', 'lsinitramfs', *([] if args.publish_only else ['qemu-system-x86_64']))
     ctl(args.config, 'check-exclusive', args.bucket)
     if args.memory<512 or args.cpus<1:
         p.error("memory must be at least 512 MiB and CPU count positive")

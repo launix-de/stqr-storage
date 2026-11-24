@@ -21,7 +21,7 @@ def main():
     args.bucket = args.bucket_name or args.bucket
     if not args.bucket:
         p.error('bucket name required')
-    require('qemu-system-x86_64', 'guestfish', 'sort')
+    require('qemu-system-x86_64', 'guestfish', 'sort', 'lsinitramfs')
     ctl(args.config, 'check-exclusive', args.bucket)
     if args.memory<512 or args.cpus<1:
         p.error("memory must be at least 512 MiB and CPU count positive")

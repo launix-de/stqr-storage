@@ -85,7 +85,11 @@ monolithic OVMF firmware; firmware variables are not persisted in this version,
 so the disk needs a working EFI fallback loader for subsequent edits.
 
 After QEMU exits, libguestfs mounts the disk offline, installs the networkboot
-initramfs hook, enables broad module inclusion and regenerates initramfs images.
+initramfs hook, enables broad module inclusion and builds a separate `/boot/initrd.stqr-VERSION` using `mkinitramfs` from
+`initramfs-tools-core`. This also handles Ubuntu installations whose
+`update-initramfs` command delegates to Dracut: the ordinary VM-boot initrd stays
+untouched. The builder checks that the generated network initrd contains the STQR
+script before publishing.
 It selects a matching `/boot/vmlinuz-VERSION` and `initrd.img-VERSION` pair;
 `--kernel-version` can select explicitly. It then extracts a numeric-owner tar
 archive retaining ACLs, xattrs, security labels, hardlinks and device metadata.
@@ -241,8 +245,10 @@ The default writable root is a **private temporary bucket per MAC and boot**.
 The gateway allocates a sparse disk, starts a private NBD export and gives that
 client an IP-scoped TCP endpoint. The initramfs connector attaches `/dev/nbd0`,
 formats ext4 and uses it as the Linux overlay upper/work filesystem. The static
-connector waits for kernel activation before returning; a minimal process remains
-blocked in the kernel's NBD handler for the connection lifetime. No QEMU
+connector waits for the expected kernel block capacity, then exits. Its
+root-storage mode attaches through generic netlink, so the kernel maintains the
+connection without a userspace handler that systemd could interrupt during
+shutdown. No QEMU
 recompilation or proprietary QEMU driver is needed.
 
 When that NBD connection ends, the gateway checkpoints/stops the export, clears

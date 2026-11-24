@@ -88,3 +88,30 @@ production daemon fixtures now pass:
 
 An interactive Ubuntu installer and physical PXE firmware remain outside this
 fixture. The scripts do not hide those untested end-to-end steps.
+
+## 2026-11-24: installed Ubuntu 26.04.1 image
+
+A user-installed Ubuntu 26.04.1 image (Linux 7.0.0-44-generic) was inspected and
+published on the two-node deployment. The 12,254,074,880-byte root archive and
+other artifacts round-tripped with full SHA-256 verification using bounded
+64-MiB ranged transfers. Failed export/upload staging is retained for retry.
+
+Real QEMU iPXE boot was exercised over private DHCP/NAT, with HTTP kernel/initrd
+loading and a userspace NFS/SquashFS lower. Both a RAM upper and a temporary
+STQR/NBD upper booted the actual installed root, verified its package database
+and GNOME binary, and wrote/read a file through the overlay. A further boot
+started systemd to the multi-user target and powered off without NBD I/O errors.
+All temporary STQR upper buckets from these tests were deleted after disconnect.
+
+Ubuntu's update-initramfs shim uses Dracut, so it does not execute our
+initramfs-tools hook. The builder now explicitly creates a separate network
+initrd with mkinitramfs and verifies that it contains scripts/stqr. The ordinary
+VM initrd remains separate. Root-storage NBD uses generic netlink, allowing the
+connector to exit after the kernel confirms capacity. This avoids legacy ioctl
+handlers being interrupted by systemd's global SIGSTOP/SIGCONT shutdown pass.
+Readonly lower/NFS mounts can remain busy until kernel poweroff; no shutdown
+journal abort or NBD write error occurred in the final test.
+
+The boot tests did not exercise graphical desktop login, PAM home mounts,
+physical LAN Proxy-DHCP/TFTP, Secure Boot or UEFI firmware. The template does not
+automatically install/enable STQR PAM homes or provision Unix accounts.

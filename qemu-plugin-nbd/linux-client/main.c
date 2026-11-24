@@ -5,6 +5,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <linux/nbd.h>
+#include <linux/fs.h>
 #include <netinet/in.h>
 #include <signal.h>
 #include <stdint.h>
@@ -20,6 +21,8 @@ static void fail(const char *what) {
   perror(what);
   exit(1);
 }
+#include "netlink.h"
+
 static void readall(int fd, void *p, size_t n) {
   while (n) {
     ssize_t r = read(fd, p, n);
@@ -45,8 +48,9 @@ static void writeall(int fd, const void *p, size_t n) {
   }
 }
 int main(int argc, char **argv) {
-  if (argc != 4) {
-    fputs("Usage: stqr-nbd-client IPv4 PORT /dev/nbdN\n", stderr);
+  int root_storage = argc == 5 && strcmp(argv[4], "--root-storage") == 0;
+  if (argc != 4 && !root_storage) {
+    fputs("Usage: stqr-nbd-client IPv4 PORT /dev/nbdN [--root-storage]\n", stderr);
     return 2;
   }
   char *end;
@@ -86,6 +90,11 @@ int main(int argc, char **argv) {
     fputs("invalid writable NBD export\n", stderr);
     return 1;
   }
+  if (root_storage) {
+    root_netlink_attach(sock, argv[3], size, flags);
+    close(sock);
+    return 0;
+  }
   int dev = open(argv[3], O_RDWR | O_CLOEXEC);
   if (dev < 0)
     fail("open NBD device");
@@ -108,7 +117,11 @@ int main(int argc, char **argv) {
         close(f);
         if (count > 0) {
           data[count] = 0;
-          if (strtol(data, NULL, 10) > 0) {
+          uint64_t capacity = 0;
+          /* The handler PID becomes visible before the disk capacity. Do not
+           * let mkfs race that asynchronous activation. */
+          if (strtol(data, NULL, 10) > 0 &&
+              ioctl(dev, BLKGETSIZE64, &capacity) == 0 && capacity == size) {
             close(dev);
             close(sock);
             return 0;

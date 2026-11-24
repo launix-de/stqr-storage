@@ -30,7 +30,7 @@ mountroot() {
     if [ -n "$stqr_upper_port" ]; then
         modprobe nbd nbds_max=4 max_part=0
         modprobe ext4
-        /bin/stqr-nbd-client "$stqr_server" "$stqr_upper_port" /dev/nbd0 || panic "STQR upper connection failed"
+        /bin/stqr-nbd-client "$stqr_server" "$stqr_upper_port" /dev/nbd0 --root-storage || panic "STQR upper connection failed"
         /sbin/mkfs.ext4 -q -F /dev/nbd0 || panic "STQR upper format failed"
         mount -t ext4 /dev/nbd0 /run/stqr/ram || panic "STQR upper mount failed"
     else

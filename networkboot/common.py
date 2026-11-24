@@ -2,6 +2,7 @@
 import contextlib
 import json
 import ipaddress
+import re
 import os
 from pathlib import Path
 import shutil
@@ -108,9 +109,6 @@ def extract(socket, work, kernel_version=None):
     guest(socket, 'upload', HERE / 'initramfs/modules.conf', '/etc/initramfs-tools/conf.d/stqr')
     guest(socket, 'upload', HERE / 'initramfs/hooks/stqr', '/etc/initramfs-tools/hooks/stqr')
     guest(socket, 'chmod', '0755', '/etc/initramfs-tools/hooks/stqr')
-    print('Generating networkboot initramfs files...', flush=True)
-    # Fail rather than publishing a disk with an unbootable, mismatched initramfs.
-    guest(socket, 'command', '/usr/sbin/update-initramfs -u -k all')
     listing = guest(socket, 'ls', '/boot', readonly=True,
                     capture_output=True, text=True).stdout.splitlines()
     versions = [p[len('vmlinuz-'):] for p in listing if p.startswith('vmlinuz-') and 'initrd.img-' + p[len('vmlinuz-'):] in listing]
@@ -120,8 +118,23 @@ def extract(socket, work, kernel_version=None):
         raise RuntimeError('No matching Ubuntu/Debian vmlinuz and initrd.img in /boot; use --kernel-version')
     version = subprocess.run(['sort', '-V'], input='\n'.join(versions), text=True,
                              capture_output=True, check=True).stdout.splitlines()[-1]
+    if not re.fullmatch(r'[0-9][a-zA-Z0-9_.+\-]*', version):
+        raise RuntimeError('Invalid kernel version in /boot')
+    # Ubuntu can provide a Dracut-backed update-initramfs shim alongside
+    # mkinitramfs. Build a separate network initrd using our supported hooks;
+    # leave the distribution's ordinary VM-boot initrd untouched.
+    available = guest(socket, 'is-file', '/usr/sbin/mkinitramfs', readonly=True,
+                      capture_output=True, text=True).stdout.strip()
+    if available != 'true':
+        raise RuntimeError('Networkboot preparation requires initramfs-tools-core (mkinitramfs) in the installed image')
+    print('Generating dedicated networkboot initramfs...', flush=True)
+    network_initrd = '/boot/initrd.stqr-' + version
+    guest(socket, 'command', f'/usr/sbin/mkinitramfs -o {network_initrd} {version}')
     guest(socket, 'download', '/boot/vmlinuz-' + version, work / 'vmlinuz', readonly=True)
-    guest(socket, 'download', '/boot/initrd.img-' + version, work / 'initrd.img', readonly=True)
+    guest(socket, 'download', network_initrd, work / 'initrd.img', readonly=True)
+    contents = run('lsinitramfs', work / 'initrd.img', capture_output=True, text=True).stdout.splitlines()
+    if not any(p.lstrip('./') == 'scripts/stqr' for p in contents):
+        raise RuntimeError('Generated initramfs is missing the STQR boot script; image not published')
     # Work on the disk itself only after the VM has disconnected. Replace disk
     # fstab entries for network root, while preserving the original for editing.
     guest(socket, 'sh', 'cp -p /etc/fstab /etc/fstab.stqr-original; printf "# STQR network root\\n" > /etc/fstab')

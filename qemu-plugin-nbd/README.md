@@ -119,7 +119,13 @@ Export old disks with the previous version and copy into a fresh striped bucket.
 A block-device bucket is not a native FUSE filesystem: do not mount it with FUSE
 or run filesystem `--fsck` on it. Networkboot's bundle-aware collector preserves
 all named devices and current boot artifacts. The static Linux NBD connector
-used by the networkboot initramfs lives in `linux-client/`.
+used by the networkboot initramfs lives in `linux-client/`. It waits for the
+expected block capacity before returning. The boot hook passes `--root-storage`
+to attach through generic netlink: the kernel owns the connection after setup,
+with no userspace handler for systemd to interrupt during shutdown. This mode
+requires a kernel with NBD generic-netlink support. Ordinary attaches keep the
+legacy ioctl path for compatibility.
+
 
 Run `make -C qemu-plugin-nbd check` for range/sparse/format/NBD tests. The real
 STQR/QEMU integration is `STQR_TEST_NETWORKBOOT=1 go test ./server -run

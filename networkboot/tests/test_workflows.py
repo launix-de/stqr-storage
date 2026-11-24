@@ -137,6 +137,15 @@ class Workflows(unittest.TestCase):
             self.assertEqual(os.environ['TMPDIR'], '/previous')
             self.assertEqual(Path(work, 'rootfs.tar').read_bytes(), b'finished archive')
 
+    def test_initrds_missing_boot_hook_are_rejected(self):
+        import common
+        from types import SimpleNamespace
+        def guest(socket, command, *args, **kwargs):
+            output = 'vmlinuz-7.0.0-44-generic\ninitrd.img-7.0.0-44-generic\n' if command == 'ls' else 'true\n'
+            return SimpleNamespace(stdout=output)
+        with tempfile.TemporaryDirectory() as work, patch.object(common, 'guest', side_effect=guest), patch.object(common, 'run', return_value=SimpleNamespace(stdout='etc/dracut\n')), contextlib.redirect_stdout(io.StringIO()), self.assertRaisesRegex(RuntimeError, 'missing the STQR boot script'):
+            common.extract('/private/disk.sock', work)
+
     def test_help_has_no_side_effects(self):
         for script in ['prepare-system', 'edit-image', 'serve', 'test-boot', 'pam/stqr-home']:
             result = subprocess.run([sys.executable, str(ROOT / script), '--help'], capture_output=True)
