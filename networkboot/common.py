@@ -16,6 +16,25 @@ BIN = HERE / 'bin'
 def run(*args, **kwargs):
     return subprocess.run([str(a) for a in args], check=True, **kwargs)
 
+@contextlib.contextmanager
+def staging(base, prefix):
+    """Keep failed exports for retry; put bounded SDK spools on the work disk."""
+    work = tempfile.mkdtemp(prefix=prefix, dir=base)
+    old = os.environ.get('TMPDIR')
+    os.environ['TMPDIR'] = str(Path(work).resolve())
+    try:
+        yield work
+    except BaseException:
+        print(f'Failed; staging retained at {work}', file=sys.stderr)
+        raise
+    else:
+        shutil.rmtree(work)
+    finally:
+        if old is None:
+            os.environ.pop('TMPDIR', None)
+        else:
+            os.environ['TMPDIR'] = old
+
 def ctl(config, *args, capture=False):
     result = run(BIN / 'stqr-bootctl', '--config', config, *args,
                  stdout=subprocess.PIPE if capture else None, text=True)

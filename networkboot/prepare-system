@@ -2,8 +2,7 @@
 # SPDX-License-Identifier: GPL-3.0-only
 import argparse
 from pathlib import Path
-import tempfile
-from common import cli, ctl, extract, nbd, qemu, require
+from common import cli, ctl, extract, nbd, qemu, require, staging
 
 def main():
     p = argparse.ArgumentParser(description='Install a Linux VM directly on a bucket-backed NBD disk, then publish its rootfs')
@@ -42,7 +41,7 @@ def main():
     elif not args.publish_only:
         ctl(args.config, 'create', args.bucket)
         ctl(args.config, '--size', str(args.disk_gib << 30), 'init-disk', args.bucket)
-    with tempfile.TemporaryDirectory(prefix='stqr-prepare-', dir=args.work_dir) as work:
+    with staging(args.work_dir, 'stqr-prepare-') as work:
         with nbd(args.config, args.bucket, work) as socket:
             if not args.publish_only:
                 qemu(socket, args, args.install_image)

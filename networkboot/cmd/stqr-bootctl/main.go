@@ -181,16 +181,9 @@ func publish(ctx context.Context, c config, bucket, dir string) error {
 		digest := h.Sum(nil)
 		var id client.ObjectID
 		copy(id[:], digest)
-		_, err = conn.PutFrom(ctx, id, f, uint64(n), client.PutOptions{Absent: true, RequestID: client.NewRequestID()})
+		fmt.Fprintf(os.Stderr, "Publishing %s (%d bytes)\n", name, n)
+		_, err = uploadArtifact(ctx, conn, id, f, uint64(n), artifactTransferBytes)
 		f.Close()
-		if errors.Is(err, client.ErrPrecondition) {
-			check := sha256.New()
-			var got client.ObjectInfo
-			got, err = conn.GetTo(ctx, id, check)
-			if err == nil && (got.Length != uint64(n) || !bytes.Equal(check.Sum(nil), digest)) {
-				err = client.ErrProtocol
-			}
-		}
 		if err != nil {
 			return err
 		}
@@ -239,7 +232,7 @@ func fetch(ctx context.Context, c config, bucket, dir string) error {
 			return err
 		}
 		h := sha256.New()
-		info, err := conn.GetTo(ctx, a.ID, io.MultiWriter(f, h))
+		info, err := copyArtifact(ctx, conn, a.ID, a.Size, artifactTransferBytes, io.MultiWriter(f, h))
 		closeErr := f.Close()
 		if err == nil {
 			err = closeErr

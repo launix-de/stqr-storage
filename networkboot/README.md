@@ -48,7 +48,16 @@ can override them.
 The command creates a new bucket and a sparse named `disk.raw` block device, starts
 an exclusive local Unix-socket NBD export and opens the installer in QEMU.
 The disk is already stored in STQR; there is no full local VM-disk copy.
-Rootfs archives still need staging space in `/var/tmp` (override `--work-dir`). Complete
+Rootfs archives still need staging space in `/var/tmp` (override `--work-dir`).
+SDK transfer spools use that work directory too; failed staging directories are
+retained and their path is printed. A completed export can be uploaded again with
+`networkboot/bin/stqr-bootctl --config stqr.yaml publish BUCKET DIRECTORY`, then
+`networkboot/bin/stqr-bootctl --config stqr.yaml gc BUCKET`.
+Artifacts transfer in bounded 64-MiB ranges, so large Ubuntu images do not depend
+on a whole-file protocol transfer or a large `/tmp` RAM quota. Interrupted artifact
+uploads resume only after validating the stored prefix; downloads pin one object
+version and verify the full checksum. The manifest format and object IDs stay
+unchanged. Complete
 the installation, then shut down the VM cleanly. The first installer reboot exits
 QEMU so extraction can start. Closing an unfinished installation produces an
 error rather than publishing a usable release; the disk remains in the bucket.

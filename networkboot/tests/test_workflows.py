@@ -114,6 +114,18 @@ class Workflows(unittest.TestCase):
         self.assertNotIn('-drive', args)
         self.assertNotIn('-blockdev', args)
 
+    def test_failed_staging_retains_archive_and_restores_environment(self):
+        import common
+        import os
+        with tempfile.TemporaryDirectory() as parent, patch.dict(os.environ, {'TMPDIR': '/previous'}):
+            with self.assertRaises(RuntimeError), contextlib.redirect_stderr(io.StringIO()):
+                with common.staging(parent, 'failed-') as work:
+                    self.assertEqual(os.environ['TMPDIR'], work)
+                    Path(work, 'rootfs.tar').write_bytes(b'finished archive')
+                    raise RuntimeError('upload failed')
+            self.assertEqual(os.environ['TMPDIR'], '/previous')
+            self.assertEqual(Path(work, 'rootfs.tar').read_bytes(), b'finished archive')
+
     def test_help_has_no_side_effects(self):
         for script in ['prepare-system', 'edit-image', 'serve', 'test-boot', 'pam/stqr-home']:
             result = subprocess.run([sys.executable, str(ROOT / script), '--help'], capture_output=True)

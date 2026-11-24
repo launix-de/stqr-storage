@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-3.0-only
 import argparse
-import tempfile
-from common import cli, ctl, extract, nbd, qemu, require
+from common import cli, ctl, extract, nbd, qemu, require, staging
 
 def main():
     p = argparse.ArgumentParser(description='Boot an existing bucket disk in QEMU; optionally clone before editing')
@@ -29,7 +28,7 @@ def main():
     if args.to_bucket:
         ctl(args.config, 'create', target)
         ctl(args.config, 'clone', args.bucket, target)
-    with tempfile.TemporaryDirectory(prefix='stqr-edit-', dir=args.work_dir) as work:
+    with staging(args.work_dir, 'stqr-edit-') as work:
         with nbd(args.config, target, work) as socket:
             qemu(socket, args)
             extract(socket, work, args.kernel_version)
