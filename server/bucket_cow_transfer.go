@@ -232,6 +232,9 @@ func (s *Server) cowCaptureLocal(ctx context.Context, bucket volume.ID, object v
 	if err != nil {
 		return nil, err
 	}
+	if ranges, ok := ctx.Value(cowCaptureRangesKey{}).([]volume.Extent); ok {
+		extents = cowReadExtents(extents, ranges)
+	}
 	packed := &cowPackedReader{file: file, length: info.Length}
 	var kept []volume.Extent
 	var physical uint64
@@ -331,6 +334,16 @@ func (s *Server) cowPeerMessage(ctx context.Context, m client.Message) ([]byte, 
 	if m.Opcode == peerCowCapture {
 		metadata := d.Bool()
 		replicaRead := d.Bool()
+		if len(d.B) != 0 {
+			var ranges []volume.Extent
+			for n := d.Count(2); n > 0; n-- {
+				ranges = append(ranges, volume.Extent{Offset: d.U64(), Length: d.U64()})
+			}
+			if metadata || len(ranges) == 0 {
+				return nil, client.ErrProtocol
+			}
+			ctx = context.WithValue(ctx, cowCaptureRangesKey{}, ranges)
+		}
 		if d.Done() != nil || bucket == systemBucket {
 			return nil, client.ErrProtocol
 		}
@@ -476,4 +489,36 @@ func (s *Server) cowGraphDigest(g cowGraph, bucket volume.ID) ([32]byte, error) 
 		e.ID(client.ID{})
 	}
 	return sha256.Sum256(e.B), nil
+}
+
+// cowReadExtents clips the snapshot to a read and its optional byte condition.
+// Zero holes remain implicit; intersecting observations are copied only once.
+func cowReadExtents(extents, ranges []volume.Extent) []volume.Extent {
+	var out []volume.Extent
+	for _, extent := range extents {
+		if extent.Zero {
+			continue
+		}
+		for _, r := range ranges {
+			start := max(extent.Offset, r.Offset)
+			if start < extent.Offset || start-extent.Offset >= extent.Length || start < r.Offset || start-r.Offset >= r.Length {
+				continue
+			}
+			n := min(extent.Length-(start-extent.Offset), r.Length-(start-r.Offset))
+			out = append(out, volume.Extent{Offset: start, Length: n})
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Offset < out[j].Offset })
+	merged := out[:0]
+	for _, e := range out {
+		if len(merged) > 0 {
+			last := &merged[len(merged)-1]
+			if e.Offset <= last.Offset+last.Length {
+				last.Length = max(last.Length, e.Offset-last.Offset+e.Length)
+				continue
+			}
+		}
+		merged = append(merged, e)
+	}
+	return merged
 }

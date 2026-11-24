@@ -2,10 +2,14 @@
 package server
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
 	"fmt"
+	"github.com/gorilla/websocket"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -243,5 +247,82 @@ func TestNodeVersionsSubscriptionIsOptIn(t *testing.T) {
 	_, status = s.dispatchAs(client.Message{Kind: client.Request, Opcode: nodeVersionsMessage, Body: []byte{1}}, ws, principal{connection: &connectionAuthorization{}})
 	if status != 403 {
 		t.Fatal("non-admin received version telemetry", status)
+	}
+}
+
+// Old peers deliberately send the unchanged v1 handshake without a profile.
+// They can remain visible and useful without receiving changed object bodies.
+func TestLegacyPeerV1BootstrapAndSemanticFence(t *testing.T) {
+	target := testServer(t)
+	source := peerTestNode(t, target.cfg)
+	host := httptest.NewServer(target.Handler())
+	defer host.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	header := http.Header{}
+	header.Set("Authorization", "Basic "+base64.StdEncoding.EncodeToString([]byte("node-"+source.cfg.Node.ID+":"+source.cfg.Auth.ClusterToken)))
+	dialer := websocket.Dialer{Subprotocols: []string{"stqr.v1"}}
+	conn, _, err := dialer.DialContext(ctx, "ws"+strings.TrimPrefix(host.URL, "http")+"/api/ws", header)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	conn.SetReadDeadline(time.Now().Add(8 * time.Second))
+	request := func(op uint16, body []byte) ([]byte, error) {
+		id := client.NewRequestID()
+		if err := conn.WriteMessage(websocket.BinaryMessage, client.EncodeMessage(client.Message{Kind: client.Request, Opcode: op, ID: id, Body: body})); err != nil {
+			return nil, err
+		}
+		for {
+			_, raw, err := conn.ReadMessage()
+			if err != nil {
+				return nil, err
+			}
+			m, err := client.DecodeMessage(raw)
+			if err != nil {
+				return nil, err
+			}
+			if m.Kind == client.Response && m.ID == id {
+				r := decodePeerReply(m, op)
+				return r.body, r.err
+			}
+		}
+	}
+	hello := client.Encoder{}
+	hello.U16(1)
+	hello.U16(1)
+	hello.U64(client.CapabilityPeerTransport)
+	hello.Text("legacy-v1")
+	raw, err := request(client.Hello, hello.B)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := client.Decoder{B: raw}
+	if d.U16() != 1 {
+		t.Fatal("legacy protocol was not negotiated")
+	}
+	cluster, _ := parseID(source.cfg.ClusterID)
+	node, _ := parseID(source.cfg.Node.ID)
+	body, err := (client.NodeHello{Cluster: client.ID(cluster), Node: client.ID(node), Membership: 1, Boot: source.boot}).MarshalBinary()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = request(client.NodeHelloMessage, body); err != nil {
+		t.Fatal(err)
+	}
+	ping := client.Encoder{}
+	ping.U64(99)
+	if raw, err = request(client.Ping, ping.B); err != nil || !bytes.Equal(raw, ping.B) {
+		t.Fatal(raw, err)
+	}
+	if _, err = request(peerReplicaPrepare, nil); statusOf(err) != 426 {
+		t.Fatal("changed replica semantics reached body decoder", err)
+	}
+	if _, err = request(peerCowCapture, nil); statusOf(err) != 426 {
+		t.Fatal("unknown COW reached body decoder", err)
+	}
+	local, _ := parseID(target.cfg.Node.ID)
+	if err = checkPeerOperation(target.protocolVersion(), target.issuerProfile(client.ID(local)), 0x0101); err != nil {
+		t.Fatal("local frontend mistaken for legacy peer", err)
 	}
 }

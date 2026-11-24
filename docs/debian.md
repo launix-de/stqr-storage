@@ -65,3 +65,9 @@ Nach `true` folgen Push-Nachrichten desselben Opcodes mit `Text(JSON(...))`;
 `false` beendet sie. Normales STQR-Envelope, keine separate JSON-Verbindung.
 Der Server pusht nur Änderungen, spätestens beim nächsten Statistikzyklus.
 `NODE_CONFIG_GET` enthält dieselbe Ansicht bereits als `node_versions`.
+
+Das aktuelle Profil behält die Nachrichtenhülle 1 bei. Öffentliche Objektclients
+verwenden `stqr.v2`; `stqr.v1` bleibt nur für den unveränderten Peer-Bootstrap und
+kompatible Diagnoseoperationen zugelassen. Unversionierte Objekt-Bodies,
+Replikation und migrationsrelevante Kontrolldaten erfordern die passende
+Opcode-Semantik. Release-Nummern allein erteilen keine Schreibberechtigung.

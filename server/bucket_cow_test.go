@@ -905,3 +905,140 @@ func TestBucketCOWCloneLogicalQuotaAndCachedMaterialization(t *testing.T) {
 		})
 	}
 }
+
+func TestBucketCOWRecursiveRangeReadCopiesOnlyObservedBytes(t *testing.T) {
+	s := testServer(t)
+	addTestVolume(t, s, "cow-ranges", "hdd", 32<<20)
+	ctx := context.Background()
+	actor := userPrincipal(t, s)
+	a, _ := createProtocolBucket(t, s, "range-source")
+	b, _ := createProtocolBucket(t, s, "range-child")
+	c, _ := createProtocolBucket(t, s, "range-grandchild")
+	id := volume.ObjectID{43}
+	payload := bytes.Repeat([]byte("0123456789abcdef"), 256<<10)
+	if _, err := a.Put(ctx, actor, id, payload, volume.Options{RequestID: volume.ID(client.NewRequestID())}); err != nil {
+		t.Fatal(err)
+	}
+	for _, pair := range [][2]*Bucket{{a, b}, {b, c}} {
+		e := client.Encoder{}
+		e.ID(client.ID(pair[0].ID()))
+		e.ID(client.ID(pair[1].ID()))
+		if _, err := s.executeBucketCopy(ctx, client.Message{Kind: client.Request, Opcode: client.BucketClone, ID: client.NewRequestID(), Body: e.B}, actor); err != nil {
+			t.Fatal(err)
+		}
+	}
+	reads := func() uint64 {
+		var n uint64
+		for _, v := range a.allVolumes() {
+			n += v.IOStats().ReadBytes
+		}
+		return n
+	}
+	before := reads()
+	data, _, err := c.GetRange(ctx, actor, id, 12345, 19)
+	if err != nil || !bytes.Equal(data, payload[12345:12364]) {
+		t.Fatal(string(data), err)
+	}
+	if n := reads() - before; n >= uint64(len(payload))/2 {
+		t.Fatalf("19-byte recursive read copied %d bytes from a %d-byte object", n, len(payload))
+	}
+	// Both disjoint and overlapping byte conditions must be captured correctly.
+	for _, off := range []uint64{1, 12350} {
+		var dst bytes.Buffer
+		_, n, err := c.cowCopyTo(ctx, id, 12345, 19, &dst, &volume.Options{CompareOffset: off, Compare: payload[off : off+9]})
+		if err != nil || n != 19 || !bytes.Equal(dst.Bytes(), data) {
+			t.Fatal(n, err)
+		}
+	}
+	for _, v := range c.allVolumes() {
+		h, err := v.Open(false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		records, err := h.ScanBucketObjects(c.ID(), nil, 1)
+		h.Close()
+		if err != nil || len(records) != 0 {
+			t.Fatal("read materialized clone", err)
+		}
+	}
+}
+
+func TestBucketCOWRecursiveNativeMutations(t *testing.T) {
+	s := testServer(t)
+	addTestVolume(t, s, "recursive-native", "hdd", 16<<20)
+	ctx := context.Background()
+	actor := userPrincipal(t, s)
+	var buckets []*Bucket
+	for _, name := range []string{"a", "b", "c", "d", "fork"} {
+		b, _ := createProtocolBucket(t, s, "recursive-"+name)
+		buckets = append(buckets, b)
+	}
+	opt := func() volume.Options { return volume.Options{RequestID: volume.ID(client.NewRequestID())} }
+	for i := byte(1); i <= 6; i++ {
+		if _, err := buckets[0].Put(ctx, actor, volume.ObjectID{i}, []byte("original"), opt()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, edge := range [][2]int{{0, 1}, {1, 2}, {2, 3}, {1, 4}} {
+		e := client.Encoder{}
+		e.ID(client.ID(buckets[edge[0]].ID()))
+		e.ID(client.ID(buckets[edge[1]].ID()))
+		if _, err := s.executeBucketCopy(ctx, client.Message{Kind: client.Request, Opcode: client.BucketClone, ID: client.NewRequestID(), Body: e.B}, actor); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i := byte(1); i <= 6; i++ {
+		target := int(i) % len(buckets)
+		b := buckets[target]
+		id := volume.ObjectID{i}
+		want := ""
+		var err error
+		switch i {
+		case 1:
+			_, err = b.Put(ctx, actor, id, []byte("new"), opt())
+			want = "new"
+		case 2:
+			_, err = b.PutRange(ctx, actor, id, 1, []byte("X"), opt())
+			want = "oXiginal"
+		case 3:
+			_, err = b.Append(ctx, actor, id, []byte("!"), opt())
+			want = "original!"
+		case 4:
+			_, err = b.Trunc(ctx, actor, id, 3, opt())
+			want = "ori"
+		case 5:
+			_, err = b.CAS(ctx, actor, id, 0, []byte("original"), []byte("cas"), opt())
+			want = "cas"
+		case 6:
+			err = b.Delete(ctx, actor, id, opt())
+		}
+		if err != nil {
+			t.Fatal(i, err)
+		}
+		for j, other := range buckets {
+			data, _, err := other.Get(ctx, actor, id)
+			if j == target && i == 6 {
+				if !errors.Is(err, volume.ErrNotFound) {
+					t.Fatal("delete leaked", err)
+				}
+				continue
+			}
+			expected := "original"
+			if j == target {
+				expected = want
+			}
+			if err != nil || string(data) != expected {
+				t.Fatalf("op=%d bucket=%d got=%q want=%q error=%v", i, j, data, expected, err)
+			}
+		}
+	}
+	// A newly created object must not appear in any transitively linked clone.
+	if _, err := buckets[0].Put(ctx, actor, volume.ObjectID{99}, []byte("new-object"), opt()); err != nil {
+		t.Fatal(err)
+	}
+	for _, b := range buckets[1:] {
+		if _, _, err := b.Get(ctx, actor, volume.ObjectID{99}); !errors.Is(err, volume.ErrNotFound) {
+			t.Fatal("new object leaked", err)
+		}
+	}
+}

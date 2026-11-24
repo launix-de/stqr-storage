@@ -115,8 +115,8 @@ replicas, private metadata and staged allocations to their actual volumes.
 ## Compatibility and remaining work
 
 Volume format 5 retains private replica records without object-content counters.
-Readers accept formats 2/3/5; format 4 is explicitly rejected. Existing format-4
-installations require a separate, verified migration before upgrade. The system manifest
+Readers accept known formats 2/3/4/5 and write format 5 on mutation; legacy
+counter slots are ignored. Unknown formats are rejected without reformatting. The system manifest
 retains replication protocol marker 2 (marker 1 remains readable) even after the
 last replicated bucket is deleted, so older peers cannot join a cluster with incompatible range history.
 

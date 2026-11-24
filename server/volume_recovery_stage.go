@@ -2,7 +2,6 @@
 package server
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"path/filepath"
@@ -304,7 +303,11 @@ func (s *Server) activateRecoveredVolumesLocked(view *systemView) error {
 				}
 				record.Entries = append(kept, volumeAuthorityEntry{Bucket: origin.Before.Bucket, Entry: origin.After, Cohort: origin.Volumes, Active: true})
 			}
-			raw, err := json.Marshal(record)
+			compact, err := authorityEncodingForStore(store, s.compactAuthorityReady())
+			if err != nil {
+				return err
+			}
+			raw, err := marshalVolumeAuthority(record, compact)
 			if err != nil {
 				return err
 			}

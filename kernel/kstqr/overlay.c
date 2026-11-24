@@ -291,8 +291,9 @@ static int ov_encode(struct ks_overlay_state *s, struct buf *b)
 	}
 	return b->err;
 }
-static int ov_state(struct ks_fs *f, struct ks_overlay_state **out)
+static int ov_state_once(struct ks_fs *f, struct ks_overlay_state **out)
 {
+	struct ks_snapshot root = {0};
 	struct buf raw = {0}, d;
 	stqr_info info;
 	struct ks_node content;
@@ -301,18 +302,21 @@ static int ov_state(struct ks_fs *f, struct ks_overlay_state **out)
 	void *data = NULL;
 	struct ks_overlay_state *s = NULL;
 	int err;
-	err = ks_cache_get(f, ks_root_id, (void **)&raw.p, &raw.n, &info);
-	if (err == -ENODATA)
-		err = get_object(f, ks_root_id, (void **)&raw.p, &raw.n, &info);
+	// Resolve the same STFL/STFT intent as ordinary inode readers. A read-only
+	// mount observes committed redo virtually; a writer can finish the intent.
+	err = ks_plain_snapshot(f, ks_root_id, &root);
 	if (err)
 		return err;
+	raw.p = root.raw;
+	raw.n = root.raw_len;
+	info = root.info;
 	mutex_lock(&f->overlay_cache_lock);
 	s = f->overlay_state;
 	if (s && s->root_head.n == raw.n && !memcmp(s->root_head.p, raw.p, raw.n) &&
 	    !memcmp(s->info.runtime.bytes, info.runtime.bytes, 16)) {
 		refcount_inc(&s->refs);
 		mutex_unlock(&f->overlay_cache_lock);
-		drop(&raw);
+		ks_snapshot_free(&root);
 		*out = s;
 		return 0;
 	}
@@ -340,7 +344,32 @@ static int ov_state(struct ks_fs *f, struct ks_overlay_state **out)
 		err = -ENOMEM;
 		goto done;
 	}
-	err = ks_read(f, &content, data, content.size, 0);
+	content = root.node;
+	err = read_node(f, &content, data, content.size, 0);
+	{
+		struct buf observed = {0};
+		stqr_info oi;
+		u8 digest[32];
+		int guard = get_object(f, nullid(content.guard) ? ks_root_id : content.guard,
+				       (void **)&observed.p, &observed.n, &oi);
+		if (!guard)
+			guard = sq_hash(256, observed.p, observed.n, digest);
+		drop(&observed);
+		if (!guard &&
+		    memcmp(digest,
+			   nullid(content.guard) ? content.head_digest : content.guard_digest,
+			   32)) {
+			ks_cache_forget(f, ks_root_id);
+			err = -EAGAIN;
+		} else if (guard)
+			err = guard;
+	}
+	if (!err && !zero(content.digest, 32)) {
+		u8 digest[32];
+		err = sq_hash(256, data, content.size, digest);
+		if (!err && memcmp(digest, content.digest, 32))
+			err = -EUCLEAN;
+	}
 	if (err)
 		goto done;
 	err = ov_decode(data, content.size, &s);
@@ -363,8 +392,18 @@ static int ov_state(struct ks_fs *f, struct ks_overlay_state **out)
 	*out = s;
 done:
 	sq_free(data);
-	drop(&raw);
+	ks_snapshot_free(&root);
 	return err;
+}
+static int ov_state(struct ks_fs *f, struct ks_overlay_state **out)
+{
+	for (unsigned attempt = 0; attempt < 128; attempt++) {
+		int err = ov_state_once(f, out);
+		if (err != -EAGAIN)
+			return err;
+		cond_resched();
+	}
+	return -EAGAIN;
 }
 static int ov_edit(struct ks_fs *f, struct ks_overlay_state **out)
 {

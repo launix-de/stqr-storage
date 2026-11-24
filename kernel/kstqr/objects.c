@@ -23,6 +23,7 @@ struct segments {
 struct member {
 	stqr_object_id id;
 	struct buf before, after, writes;
+	bool writes_legacy;
 };
 static bool eqid(stqr_object_id a, stqr_object_id b)
 {
@@ -361,6 +362,7 @@ static int tx_decode(struct buf *raw, stqr_object_id txid, struct member **out, 
 		p = readblob(&d, &n);
 		m[i].after.p = (u8 *)p;
 		m[i].after.n = n;
+		m[i].writes_legacy = raw->p[4] < 3;
 		if (raw->p[4] >= 2 && skip_edits(&d, &m[i].writes, raw->p[4] < 3))
 			goto bad;
 		if (d.err || validate_tx_image(m[i].id, p, n, &check) || nullid(m[i].id) ||
@@ -437,7 +439,8 @@ static int help_tx(struct ks_fs *f, stqr_object_id first)
 							if (scan.n)
 								index += readnum(&scan, 4);
 						}
-						err = apply_edits(f, id, &m[i].writes, &index);
+						err = apply_edits(f, id, &m[i].writes,
+								  m[i].writes_legacy, &index);
 						if (err) {
 							struct buf observed = {0};
 							stqr_info oi;
@@ -559,7 +562,7 @@ int ks_plain_snapshot(struct ks_fs *f, stqr_object_id id, struct ks_snapshot *s)
 		if (err)
 			return err;
 		if (!marker(s->raw, s->raw_len, &txid)) {
-			err = decode_node(s->raw, s->raw_len, &s->node);
+			err = validate_tx_image(id, s->raw, s->raw_len, &s->node);
 			if (err)
 				ks_snapshot_free(s);
 			else {
@@ -576,6 +579,7 @@ int ks_plain_snapshot(struct ks_fs *f, stqr_object_id id, struct ks_snapshot *s)
 			unsigned n, state, i;
 			struct buf selected = {0};
 			u8 guard_digest[32];
+			bool legacy = false;
 			err = intent_get(f, txid, &raw, &journal, &info);
 			if (!err && raw.n == 7 && !memcmp(raw.p, "STFD\1\0", 6)) {
 				drop(&raw);
@@ -593,6 +597,7 @@ int ks_plain_snapshot(struct ks_fs *f, stqr_object_id id, struct ks_snapshot *s)
 						struct buf *image =
 						    state == 1 ? &m[i].after : &m[i].before;
 						put(&selected, image->p, image->n);
+						legacy = m[i].writes_legacy;
 						if (state == 1 && m[i].writes.n)
 							put(&view, m[i].writes.p, m[i].writes.n);
 						err = selected.err ? selected.err : view.err;
@@ -607,11 +612,12 @@ int ks_plain_snapshot(struct ks_fs *f, stqr_object_id id, struct ks_snapshot *s)
 			s->raw = selected.p;
 			s->raw_len = selected.n;
 			if (!err)
-				err = decode_node(s->raw, s->raw_len, &s->node);
+				err = validate_tx_image(id, s->raw, s->raw_len, &s->node);
 			if (!err) {
 				s->view = view.p;
 				s->node.view = view.p;
 				s->node.view_size = view.n;
+				s->node.view_legacy = legacy;
 				s->node.identity = id;
 				sq_hash(256, s->raw, s->raw_len, s->node.head_digest);
 				s->node.guard = txid;
@@ -904,15 +910,18 @@ static int build_segments(struct ks_fs *f, struct ks_node *node, struct segments
 			struct buf b = {0};
 			struct segment part = {0};
 			size_t j, count = min_t(size_t, 1024, s->n - i);
-			bool modern=false;for(size_t k=i;k<i+count;k++)modern|=s->p[k].lower;
- put(&b, "STIX", 4);
- number(&b, modern?3:1, 2);
+			bool modern = false;
+			for (size_t k = i; k < i + count; k++)
+				modern |= s->p[k].lower;
+			put(&b, "STIX", 4);
+			number(&b, modern ? 3 : 1, 2);
 			number(&b, count, 4);
 			for (j = i; j < i + count; j++) {
 				number(&b, s->p[j].length, 8);
 				put(&b, s->p[j].id.bytes, 32);
-				number(&b,s->p[j].offset,modern?8:4);
- if(modern)number(&b,s->p[j].lower,1);
+				number(&b, s->p[j].offset, modern ? 8 : 4);
+				if (modern)
+					number(&b, s->p[j].lower, 1);
 				part.length += s->p[j].length;
 			}
 			err = b.err ? b.err

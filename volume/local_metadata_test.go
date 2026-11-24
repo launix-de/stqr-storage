@@ -249,3 +249,57 @@ func TestAtomicOwnerAndMetadataAtEveryCrashStep(t *testing.T) {
 		}
 	}
 }
+
+// A handoff must be able to fence a small part of a large authority record
+// without borrowing other buckets' reserves for redo of unchanged pages.
+func TestLocalMetadataSmallUpdateWithNoUnreservedSpace(t *testing.T) {
+	disk := newCrash(2 << 20)
+	v, err := Format(disk, FormatOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	original := bytes.Repeat([]byte("a"), 60<<10)
+	h, err := v.Open(true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = h.SetLocalMetadata(original); err != nil {
+		t.Fatal(err)
+	}
+	h.Close()
+	free := v.Stats().AdmissionFreePhysical
+	if err = v.SetGuaranteedReserve(free); err != nil {
+		t.Fatal(err)
+	}
+	updated := bytes.Clone(original)
+	updated[len(updated)-64] = 'b'
+	h, err = v.Open(true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = h.SetLocalMetadata(updated)
+	h.Close()
+	if err != nil {
+		t.Fatal("small authority update needs additional journal space", err)
+	}
+	if v.Stats().GuaranteedRemainingPhysical != free {
+		t.Fatal("metadata update consumed protected quota")
+	}
+	reopened, err := Open(disk.crash(), OpenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	h, err = reopened.Open(false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := h.LocalMetadata()
+	h.Close()
+	if err != nil || !bytes.Equal(got, updated) {
+		t.Fatal("metadata update lost after restart", err)
+	}
+	if err = reopened.Scrub(); err != nil {
+		t.Fatal(err)
+	}
+}

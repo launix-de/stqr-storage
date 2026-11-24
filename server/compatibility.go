@@ -269,6 +269,9 @@ func checkPeerMessage(local, remote protocolProfile, m client.Message) error {
 }
 
 func (s *Server) issuerProfile(id client.ID) protocolProfile {
+	if id.String() == s.running.Node.ID {
+		return s.protocolVersion()
+	}
 	s.versions.Lock()
 	defer s.versions.Unlock()
 	if p, ok := s.versions.peers[id.String()]; ok {
@@ -320,11 +323,10 @@ func baselineOpcode(op uint16) bool {
 // Safe unchanged messages (PING, stats, directory, config) remain revision 1.
 func currentOperationSemantics() map[string]operationSemantics {
 	result := map[string]operationSemantics{}
-	for op := uint16(0x0100); op <= 0x011d; op++ {
-		if baselineOpcode(op) {
-			result[fmt.Sprintf("%04x", op)] = operationSemantics{Emit: 2, Min: 2, Max: 2}
-		}
+	for _, op := range []uint16{0x0100, 0x0101, 0x0102, 0x0103, 0x0104, 0x0105, 0x0106, 0x0107, 0x0108, client.ObjectSubscribe, client.ObjectUpdateMessage, client.BucketScan, client.BucketObjectList, client.ObjectAccepted} {
+		result[fmt.Sprintf("%04x", op)] = operationSemantics{Emit: 2, Min: 2, Max: 2}
 	}
+
 	for _, op := range []uint16{client.BucketClone, client.BucketClear, client.BucketCreate, client.BucketCreateInGroup, client.BucketSetPolicy, client.BucketDelete, client.PeerControlReserve, client.PeerControlPrepare, client.PeerControlCommit, client.PeerControlApply, client.PeerControlRelease, client.PeerControlAbort, peerControlInfo, peerSystemChunk, peerRangeObject, peerRangeProbe, peerRangeReceipts, peerReplicaPrepare, peerReplicaReady, peerReplicaCommit, peerReplicaCommitted, peerReplicaAbort, peerReplicaChunk} {
 		result[fmt.Sprintf("%04x", op)] = operationSemantics{Emit: 2, Min: 2, Max: 2}
 	}
@@ -337,5 +339,6 @@ func currentOperationSemantics() map[string]operationSemantics {
 	for op := peerCowCapture; op <= peerCowSync; op++ {
 		result[fmt.Sprintf("%04x", op)] = operationSemantics{Emit: 1, Min: 1, Max: 1}
 	}
+	result[fmt.Sprintf("%04x", peerCowCapture)] = operationSemantics{Emit: 2, Min: 2, Max: 2}
 	return result
 }

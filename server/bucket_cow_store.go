@@ -15,6 +15,7 @@ import (
 	"github.com/launix-de/stqr-storage/volume"
 )
 
+type cowCaptureRangesKey struct{}
 type cowProofKey struct{}
 type cowLeaseKey struct{}
 type cowLocalOwnerKey struct{}
@@ -41,12 +42,20 @@ func (store cowServerObjects) capture(ctx context.Context, bucket volume.ID, obj
 	e.ID(client.ID(bucket))
 	e.B = append(e.B, object[:]...)
 	e.Bool(store.metadata)
+	replicaFlag := len(e.B)
 	e.Bool(false)
+	if ranges, ok := ctx.Value(cowCaptureRangesKey{}).([]volume.Extent); ok && !store.metadata {
+		e.V(uint64(len(ranges)))
+		for _, r := range ranges {
+			e.U64(r.Offset)
+			e.U64(r.Length)
+		}
+	}
 	body, err := s.cowCall(ctx, owner, peerCowCapture, e.B)
 	if err != nil && store.readReplica && s.controller != nil && ctx.Err() == nil {
 		entry, known := s.placement.Load().lookup(client.ID(bucket), client.ObjectID(object))
 		if known {
-			e.B[len(e.B)-1] = 1
+			e.B[replicaFlag] = 1
 			for _, location := range entry.Locations {
 				if location.Role != 1 || location.Node == owner {
 					continue

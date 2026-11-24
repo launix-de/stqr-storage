@@ -24,6 +24,7 @@ struct ks_node {
 	stqr_object_id guard;
 	const void *view;
 	size_t view_size;
+	bool view_legacy;
 	struct ks_edit *edits;
 	unsigned kind, mode, uid, gid, depth;
 	u64 size, mtime, atime, ctime;

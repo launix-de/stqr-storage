@@ -103,9 +103,9 @@ server; use it on loopback or an appropriately protected network.
 ## Filesystem behavior
 
 The module reads and writes the normal Go/FUSE filesystem format: `STFS` inodes,
-`STDR` directories, `STIX` immutable segment indexes and `STFT`/`STFL` namespace
+`STDR` directories, `STIX` segment indexes and `STFT`/`STFL` namespace
 intents. No import/conversion is needed between upgraded normal FUSE and kernel mounts.
-STFS v6 includes node types, link counts, xattrs and immutable lower references:
+STFS v7 includes node types, link counts, xattrs and read-only lower references:
 **upgrade all clients before writing v6 metadata**. See the [format and semantics guide](filesystem-posix.md).
 
 Implemented operations include regular files, directories, symlinks, hardlinks,
@@ -305,11 +305,11 @@ supplied whitelist must match the stored policy. With only `--readonly-bucket`,
 the helper mounts the lower read-only without an overlay.
 
 Directory records contain deletion markers and metadata overrides. File copy-up
-retains immutable references to unchanged lower content, so changing one range
-does not copy the entire file. These references name
-immutable data/index objects. Copy-up retains those IDs when a lower inode
-is later updated. Missing referenced data is an error. Offline lower garbage
-collection still requires coordination with dependent upper buckets.
+retains references to unchanged read-only lower content, so a ranged change does
+not copy the entire file. A writable origin needs a separate COW bucket as its
+lower. Data fingerprints reject violations of that contract with `ESTALE`.
+Ordinary own data/index blocks retain their IDs across writes. Missing lower
+data is an error; lower garbage collection must respect dependent upper buckets.
 Each bucket has its own RPC connections and subscription cache. Changes from
 other clients invalidate the merged namespace and cached file data.
 
@@ -324,7 +324,10 @@ identity/bucket without a resident userspace root client. It is not a data proxy
 See [networkboot](../networkboot/README.md) for provisioning and recovery.
 
 The current native wire schema is `stqr.v2`; object contents have no version
-counter. STFS v6 stores immutable lower index references, STIX v3 stores explicit
-lower-data flags, and STFT v2 compares complete before/after inode images. Legacy
-STFS v3–v5 lower-inode references and STIX v2 lower references require an explicit
-conversion or a recreated upper. Ordinary older inode formats remain readable.
+counter. STFS v7 stores representation flags, namespace integrity digests and
+optional read-only lower anchors. STIX v3 uses explicit lower-data flags.
+STFT v3 compares exact before/after metadata and records idempotent in-place edits.
+Both normal inode and STOR namespace readers resolve interrupted intents;
+read-only mounts apply committed edits virtually. Ordinary older inode layouts
+remain readable. Old lower-inode references require verified conversion or a
+recreated upper before kernel use. See [the shared contract](filesystem-posix.md).

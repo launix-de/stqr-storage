@@ -3,6 +3,7 @@ package server
 
 import (
 	"bytes"
+	"log"
 	"sort"
 	"time"
 
@@ -24,6 +25,8 @@ func (r *rangeManager) start() {
 		defer s.workers.Done()
 		ticker := time.NewTicker(750 * time.Millisecond)
 		defer ticker.Stop()
+		var reported string
+		var reportedAt time.Time
 		for {
 			select {
 			case <-s.ctx.Done():
@@ -63,6 +66,16 @@ func (r *rangeManager) start() {
 			r.lastError = stepErr
 			r.mu.Unlock()
 			r.work.Unlock()
+			if stepErr != nil {
+				message := stepErr.Error()
+				if message != reported || time.Since(reportedAt) >= 30*time.Second {
+					log.Printf("STQR range worker node=%s: %s", r.node, message)
+					reported, reportedAt = message, time.Now()
+				}
+			} else {
+				reported = ""
+			}
+
 		}
 	}()
 }

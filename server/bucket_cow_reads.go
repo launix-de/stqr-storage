@@ -42,6 +42,13 @@ func (s *Server) cowLogicalSnapshot(ctx context.Context, bucket volume.ID, objec
 	return nil, fail(503, "clone graph changed repeatedly during read")
 }
 func (b *Bucket) cowCopyTo(ctx context.Context, id volume.ObjectID, offset, length uint64, dst io.Writer, condition *volume.Options) (volume.Info, uint64, error) {
+	// Preserve only the bytes this read can observe, under the volume's read
+	// lock. Write preservation never sets this key and still captures all data.
+	ranges := []volume.Extent{{Offset: offset, Length: length}}
+	if condition != nil && len(condition.Compare) != 0 {
+		ranges = append(ranges, volume.Extent{Offset: condition.CompareOffset, Length: uint64(len(condition.Compare))})
+	}
+	ctx = context.WithValue(ctx, cowCaptureRangesKey{}, ranges)
 	snapshot, err := b.server.cowLogicalSnapshot(ctx, b.ID(), id, false)
 	if err != nil {
 		return volume.Info{}, 0, err

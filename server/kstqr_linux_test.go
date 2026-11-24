@@ -380,7 +380,7 @@ func TestKSTQRVirtualMachine(t *testing.T) {
 			copy(transaction[i*16:], id[:])
 		}
 		descriptor := client.Encoder{B: []byte("STFT")}
-		descriptor.U16(2)
+		descriptor.U16(3)
 		descriptor.U8(0)
 		descriptor.U32(uint32(len(members)))
 		var rootRaw []byte
@@ -393,6 +393,7 @@ func TestKSTQRVirtualMachine(t *testing.T) {
 			descriptor.B = append(descriptor.B, members[i].id[:]...)
 			descriptor.Blob(raw)
 			descriptor.Blob(raw)
+			descriptor.U32(0) // no staged payload edits
 			if members[i].id == client.FilesystemRootID() {
 				rootRaw = raw
 			}

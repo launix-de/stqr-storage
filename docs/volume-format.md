@@ -122,9 +122,11 @@ Prepared payload is not reachable through the visible kind-0 object record.
 Publication replaces the object pointer and installs its kind-1 retry receipt in
 one transaction. Unchanged encoded allocations remain shared until retirement;
 allocation accounting and freeing use the union of referenced intervals.
-Readers accept formats 2/3/5 and upgrade older accepted formats on their next
-write. Format 4 is rejected because its object descriptors contain counters.
-A separate verified migration is required; a downgrade is unsupported.
+Readers accept known formats 2/3/4/5 and write format 5 on the next mutation.
+Obsolete counter slots in old records are ignored, never used as mutation
+conditions. Legacy completed receipts remain recognizable for idempotent retries.
+Unknown formats are rejected without reformatting. Downgrades are unsupported;
+format 5 fences binaries which do not understand the unversioned record contract.
 
 The physical layout starts with two alternating 4096-byte superblocks, two
 commit-anchor pages and eight redo scratch pages (32 KiB). The initial object
@@ -328,3 +330,28 @@ an absolute quota, including restart before COMMIT. Public object Info and the
 native object wire format stay unchanged. Whole-volume Export/Import preserves
 both marker types and replaces initialized accounting counters atomically with
 the imported root; omitted frame fields are reset before decoding the next frame.
+
+
+### Compact range-authority metadata
+
+The server reads the legacy schema-1 JSON management record and the compact
+`STVA` encoding. New compact records begin with `STVA`, encoding revision
+`u16=1`, cluster/node/volume IDs and a `u32` entry count. Each entry contains its
+bucket ID, range start/prefix, policy and owner epochs, state/runtime, `u16`
+location count and locations, `u16` cohort count and volume IDs, `active:Bool` and
+a 32-byte handoff fence. Fixed-width fields use the normal little-endian codec.
+Only these format/placement identifiers are present; no new object-content
+counter is introduced.
+
+The active flag and fence have a constant encoded size. Fencing one range
+therefore changes only its pages instead of shifting the remainder of a JSON
+document and requiring a large temporary redo allocation on a full source disk.
+The native volume format remains unchanged. Existing JSON records are converted
+atomically by the normal metadata transaction, and compact records are never
+expanded back to JSON on a peer disconnect.
+
+Initial conversion waits until every admitted member is online and advertises
+`CapabilityCompactAuthority` (32768). Upgrade all nodes before activation. Older
+binaries cannot interpret compact authority metadata and reject that metadata;
+downgrading after conversion requires a separate verified conversion rather
+than silently reusing old recovery proofs.

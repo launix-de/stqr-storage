@@ -308,7 +308,7 @@ Normal filesystem views expose `Symlink`/`Readlink`, `Link`, `Mknod` for regular
 files/FIFOs/Unix sockets, and `GetXattr`, `SetXattr`, `ListXattr`, `RemoveXattr`.
 `FSInfo.Kind` distinguishes node types, and `FSInfo.Nlink` reports link counts.
 The FUSE adapter implements the corresponding Linux operations. These changes
-use STFS v6 and require upgrading every client accessing a bucket; see the
+use STFS v7 and require upgrading every client accessing a bucket; see the
 [shared format and semantics guide](filesystem-posix.md) before deploying them.
 
 ## Explicit durability

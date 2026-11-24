@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-only
-/* Shared wire contract: client/filesystem_redo.go (STFT v2 / STFJ / STFD). */
+/* Shared wire contract: client/filesystem_redo.go (STFT v3 / STFJ / STFD). */
 struct ks_edit {
 	struct ks_edit *next;
 	stqr_object_id id;
@@ -180,7 +180,8 @@ static int redo_request(stqr_object_id tx, u64 index, stqr_id *rid)
 	drop(&b);
 	return err;
 }
-static int apply_edits(struct ks_fs *f, stqr_object_id tx, const struct buf *encoded, u64 *index)
+static int apply_edits(struct ks_fs *f, stqr_object_id tx, const struct buf *encoded, bool legacy,
+		       u64 *index)
 {
 	struct buf d = *encoded;
 	unsigned count = readnum(&d, 4), i;
@@ -197,12 +198,14 @@ static int apply_edits(struct ks_fs *f, stqr_object_id tx, const struct buf *enc
 		if (!p)
 			return -EUCLEAN;
 		memcpy(id.bytes, p, 32);
+		if (legacy)
+			readnum(&d, 8); /* obsolete counter: decode only */
 		opt.absent = boolean(&d);
 		full = boolean(&d);
 		remove = boolean(&d);
 		off = readnum(&d, 8);
 		data = readblob(&d, &n);
-		{
+		if (!legacy) {
 			size_t ignored;
 			readblob(&d, &ignored);
 		}
@@ -378,12 +381,14 @@ static int get_view_object(struct ks_fs *f, const struct ks_node *node, stqr_obj
 	for (i = 0; i < count; i++) {
 		const u8 *key = take(&d, 32), *data;
 		u64 off;
+		if (node->view_legacy)
+			readnum(&d, 8); /* obsolete counter: decode only */
 		bool absent = boolean(&d), full = boolean(&d), remove = boolean(&d);
 		size_t n;
 		u8 *body;
 		off = readnum(&d, 8);
 		data = readblob(&d, &n);
-		{
+		if (!node->view_legacy) {
 			size_t ignored;
 			readblob(&d, &ignored);
 		}

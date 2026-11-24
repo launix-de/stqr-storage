@@ -35,17 +35,25 @@ are covered by the kernel smoke test; an rsync run in a kernel VM is separate.
 
 ## Format and upgrade
 
-**Upgrade every filesystem client before using these changes.** Writers use
-**STFS v6**, **STIX v3** and **STFT v2**. Ordinary older inode layouts remain
-readable, but older overlay layouts containing content-version-pinned lower
-inode references are rejected and need verified conversion or recreation.
-The native transport is `stqr.v2` and the volume format is 5; existing format-4
-volumes require a separate migration. Bucket IDs and data addressing remain
-unchanged. Run offline fsck with the upgraded client before returning a
-previously shared bucket to service.
+**Upgrade all mounts before enabling the new writer.** Writers use
+**STFS v7**, **STIX v3** and **STFT v3** over `stqr.v2`. Data and index block IDs
+remain stable during ordinary writes. Inode intents publish exact before/after
+metadata bytes and replay bounded in-place payload edits; they are temporary
+recovery state, not object revisions. Format 7 resolves the conflicting format-6
+layouts used by two development branches. Known old layouts remain decoder-only;
+legacy lower inode references must be converted before a new-format write.
 
-STFS v6 retains extended node metadata and uses immutable lower index/data IDs
-instead of lower inode content counters. Its extended metadata contains:
+Native volumes accept known formats 2/3/4/5 and write format 5. This compatibility
+is exercised against every format-checkpoint tag, including repeated restarts.
+Do not downgrade volumes or mix filesystem writers with incompatible codecs.
+
+An overlay lower is read-only for the lifetime of its inherited references.
+Create a COW bucket when the source must remain writable. New copy-ups record a
+lower data fingerprint; violating the read-only contract reports `ESTALE` rather
+than silently exposing changed contents. Link-count-only updates do not change
+that fingerprint. Bucket COW preserves the actual object bytes recursively.
+
+Extended inode metadata contains:
 
 ```text
 links:u32
@@ -108,8 +116,8 @@ abort before deletion; this version does not guess a repair. This validation
 applies to normal buckets, not the merged namespace of native overlay buckets.
 
 Link-count updates compare and replace actual inode bytes under the volume
-lock. An overlay's metadata-only copy-up retains immutable data/index references,
-so a later lower hardlink update does not retarget its inherited payload.
+lock. An overlay's metadata-only copy-up retains references to its read-only lower;
+a lower hardlink-count update does not change the data fingerprint.
 Referenced lower objects must remain available; lower fsck cannot discover
 an offline upper's dependencies automatically.
 

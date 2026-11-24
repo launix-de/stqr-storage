@@ -22,16 +22,21 @@ package client
 // and files share the same inline/index representation. The fixed root ID is
 // SHA-256("STQR filesystem root v1"); all other object IDs are random.
 //
-// Data and index objects are immutable, including after unlink/truncate. A byte
-// CAS atomically publishes the complete inode head. Every stored object is at
-// most 1 MiB. The filesystem format version is independent of object contents.
-// STFS v6 retains removed/write_path, atime/ctime, links and xattrs. Layout 2
-// stores a lower immutable index root (depth:u8, root:OID), not a mutable inode.
-// STIX v3 uses source_offset:u64 and a lower:Bool per leaf reference. Legacy
-// versioned lower references from STFS v3-v5/STIX v2 are explicitly rejected.
-// Ordinary older inode layouts remain readable; timestamps default to mtime.
-// Namespace intents use STFT v2, state:u8 (pending=0, committed=1, aborted=2),
-// count:u32 and (inode:OID, before:Blob, after:Blob)* in OID order. Locked heads
+// Ordinary data/index blocks retain their IDs and are modified in place under
+// recoverable inode intents. Objects are at most 1 MiB. Fresh inode IDs are
+// random; mutable block IDs derive from inode/kind/level/slot (mutable.go).
+// STFS v7 retains removed/write_path, atime/ctime, links and xattrs, followed by
+// mutable:Bool, digest:Bytes32, hasLowerAnchor:Bool and optionally
+// lowerOwner:OID, lowerDigest:Bytes32. These are representation/integrity fields,
+// never content counters. Namespace caches use actual inode metadata hashes.
+// Layout 2 stores a lower index root (depth:u8, root:OID). Lower data must remain
+// read-only; a writable origin requires a separate COW bucket. STIX v3 records
+// source_offset:u64 and lower:Bool. Known old layouts are decoder-only; legacy
+// lower inode references are materialized before writing the new format.
+// Namespace intents use STFT v3, state:u8 (pending=0, committed=1, aborted=2),
+// count:u32 and (inode:OID, before:Blob, after:Blob, writes:Vec)* in OID order.
+// Writes contain id:OID, absent/full/remove:Bool, offset:u64, data:Blob,
+// before:Blob (the preimage is used by CAS-only backends). Locked heads
 // contain STFL v1 plus descriptor:OID. Helpers compare the actual head bytes,
 // durably decide the intent, and then publish its before/after images. Read-only
 // readers resolve the logical image without writing. Upgrade all mounts together.
@@ -67,7 +72,7 @@ type fsSegment struct {
 	length        uint64
 	id            ObjectID
 	offset        uint64
-	lower         bool   // immutable data object in the lower bucket
+	lower         bool   // data object in the read-only lower bucket
 	legacyVersion uint64 // legacy lower inode reference; decode only
 }
 type fsBlob struct {
