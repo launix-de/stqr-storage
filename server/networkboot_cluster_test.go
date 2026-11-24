@@ -49,6 +49,9 @@ func TestClusterNetworkbootNBDWithQEMU(t *testing.T) {
 	run("create", "image")
 	run("--size", "4194304", "init-disk", "image")
 	run("--size", "4194304", "check-install-disk", "image")
+	if out, e := exec.CommandContext(ctx, binary, "--config", cfg, "--size", "8388608", "check-install-disk", "image").CombinedOutput(); e == nil || !bytes.Contains(out, []byte("requested")) {
+		t.Fatal("resume must reject a different disk size", e, string(out))
+	}
 	socket := filepath.Join(dir, "disk.sock")
 	cmd := exec.CommandContext(ctx, binary, "--config", cfg, "--socket", socket, "nbd", "image")
 	var logs bytes.Buffer
@@ -80,7 +83,7 @@ func TestClusterNetworkbootNBDWithQEMU(t *testing.T) {
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	args := []string{"-f", "raw", "-c", "write -P 0x5a 1048064 4096", "-c", "flush", "-c", "read -P 0x5a 1048064 4096", "nbd+unix:///?socket=" + socket}
+	args := []string{"-f", "raw", "-d", "unmap", "-c", "write -P 0x5a 1048064 4096", "-c", "flush", "-c", "read -P 0x5a 1048064 4096", "-c", "write -P 0x77 2097152 1048576", "-c", "discard 2097152 1048576", "-c", "discard 1048576 512", "-c", "flush", "-c", "read -P 0 2097152 1048576", "-c", "read -P 0 1048576 512", "-c", "read -P 0x5a 1048064 512", "nbd+unix:///?socket=" + socket}
 	if out, e := exec.CommandContext(ctx, "qemu-io", args...).CombinedOutput(); e != nil {
 		t.Fatalf("QEMU: %v %s", e, out)
 	}
@@ -101,6 +104,9 @@ func TestClusterNetworkbootNBDWithQEMU(t *testing.T) {
 		}
 	}
 	run("publish", "image", artifacts)
+	if out, e := exec.CommandContext(ctx, binary, "--config", cfg, "--size", "4194304", "check-install-disk", "image").CombinedOutput(); e == nil || !bytes.Contains(out, []byte("already published")) {
+		t.Fatal("resume must reject a published image", e, string(out))
+	}
 	run("gc", "image")
 	run("fetch", "image", filepath.Join(dir, "fetched"))
 	run("create", "copy")

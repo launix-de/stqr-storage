@@ -391,7 +391,7 @@ func (b *Bucket) mutate(ctx context.Context, p principal, id volume.ObjectID, op
 		permission = BucketAppend
 	}
 	if opcode == 0x0106 {
-		permission = BucketDelete
+		permission = blockDeletePermission(p)
 	}
 	d, err := b.authorize(p, permission)
 	if err != nil {
@@ -739,6 +739,17 @@ func (b *Bucket) mutate(ctx context.Context, p principal, id volume.ObjectID, op
 		}
 	}
 	return result, err
+}
+
+// Discarding stripes is a write operation on an exclusively held native block
+// device. Ordinary object clients and private clear/clone frontends retain the
+// separate DELETE grant; authorize still validates the active lease token.
+func blockDeletePermission(p principal) BucketPermissions {
+	a := p.connection
+	if a != nil && a.frontendPermission == 0 && a.blockDevice.Load() && !a.blockReadOnly.Load() {
+		return BucketWrite
+	}
+	return BucketDelete
 }
 func (b *Bucket) Put(ctx context.Context, p principal, id volume.ObjectID, data []byte, opt volume.Options) (volume.Info, error) {
 	return b.PutReader(ctx, p, id, bytes.NewReader(data), uint64(len(data)), opt)

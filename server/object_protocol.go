@@ -114,7 +114,7 @@ func (s *Server) parseObject(m client.Message, ws *wsSession, p principal) (*obj
 		case 0x0104:
 			permission = BucketAppend
 		case 0x0106:
-			permission = BucketDelete
+			permission = blockDeletePermission(p)
 		}
 		if _, err := b.authorize(p, permission); err != nil {
 			return nil, d, err

@@ -180,3 +180,43 @@ func TestOfflineInventoriesKeepPlacementFence(t *testing.T) {
 	}
 	check()
 }
+
+func TestBlockLeaseWaitsForExistingHandoff(t *testing.T) {
+	source, target := startAutomaticDaemonPair(t, false)
+	addTestVolume(t, source.node, "data", "hdd", 8<<20)
+	b, _ := createProtocolBucket(t, source.node, "lease-after-handoff")
+	remote := addTestVolume(t, target.node, "data", "hdd", 8<<20)
+	vid, _ := parseID(remote.VolumeID)
+	before, _ := source.node.routingPatch(b.ID(), volume.ObjectID{})
+	plan, err := planRangeMove(before, before.Entries[0], target.node.control.ledger.node, vid, uint8(volume.HDD), volume.Raw, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = source.node.scopes.reserve(plan); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	a := source.node.cfg.Auth.BootstrapAdmin
+	c, err := client.Dial(ctx, source.node.cfg.Node.Advertise, a.Username, a.Password, client.ID(b.ID()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	done := make(chan error, 1)
+	go func() { done <- c.BeginBlockMaintenance(ctx, false) }()
+	select {
+	case err := <-done:
+		t.Fatal("handoff should delay lease acquisition", err)
+	case <-time.After(250 * time.Millisecond):
+	}
+	_ = source.node.scopes.cancelBeforeFence(ctx, plan, errors.New("release test handoff"))
+	select {
+	case err = <-done:
+		if err != nil {
+			t.Fatal("lease did not resume", err)
+		}
+	case <-ctx.Done():
+		t.Fatal(ctx.Err())
+	}
+}

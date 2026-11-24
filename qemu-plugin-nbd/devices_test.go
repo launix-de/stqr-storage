@@ -4,6 +4,7 @@ package nbd
 import (
 	"bytes"
 	"context"
+	"errors"
 	"github.com/launix-de/stqr-storage/client"
 	"sort"
 	"sync"
@@ -14,6 +15,62 @@ type testObject struct {
 	data    []byte
 	version uint64
 }
+
+func TestTrimDeletesWholeStripesAndZeroesEdges(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore()
+	c := NewCatalog(s)
+	m, err := c.Create(ctx, Metadata{Name: "trim", Size: 4*StripeSize + 512})
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload := bytes.Repeat([]byte{0x5a}, int(3*StripeSize))
+	if err = c.WriteAt(ctx, m, payload, 0); err != nil {
+		t.Fatal(err)
+	}
+	if err = c.Trim(ctx, m, 512, 3*StripeSize-1024); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err = s.Get(ctx, StripeID(m.ID, 1)); !errors.Is(err, client.ErrNotFound) {
+		t.Fatal("full stripe retained", err)
+	}
+	got := make([]byte, len(payload))
+	if err = c.ReadAt(ctx, m, got, 0); err != nil {
+		t.Fatal(err)
+	}
+	want := make([]byte, len(payload))
+	copy(want[:512], payload[:512])
+	copy(want[len(want)-512:], payload[:512])
+	if !bytes.Equal(got, want) {
+		t.Fatal("trim damaged adjacent bytes or left discarded data")
+	}
+	if s.rangedPut != 2 || s.put != 3 {
+		t.Fatal("trim must zero edges with ranged writes", s.rangedPut, s.put)
+	}
+	// Entirely sparse and repeated discards must not allocate new stripe objects.
+	if err = c.Trim(ctx, m, 0, m.Size); err != nil {
+		t.Fatal(err)
+	}
+	if err = c.Trim(ctx, m, 0, m.Size); err != nil {
+		t.Fatal(err)
+	}
+	if len(s.objects) != 1 {
+		t.Fatal("discard recreated sparse stripes", len(s.objects))
+	}
+	if err = c.WriteAt(ctx, m, []byte{7}, 3*StripeSize); err != nil {
+		t.Fatal(err)
+	}
+	if err = c.Trim(ctx, m, 3*StripeSize+512, 512); err != nil {
+		t.Fatal(err)
+	}
+	if info, err := s.Stat(ctx, StripeID(m.ID, 3)); err != nil || info.Length != 1 {
+		t.Fatal("zeroing sparse tail grew stripe", info, err)
+	}
+	if err = c.Trim(ctx, m, m.Size-512, ^uint64(0)); !errors.Is(err, client.ErrRange) {
+		t.Fatal("trim overflow", err)
+	}
+}
+
 type testStore struct {
 	mu                                    sync.Mutex
 	objects                               map[client.ObjectID]testObject
