@@ -1,0 +1,16 @@
+Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
+Upstream-Name: STQR
+Source: https://github.com/launix-de/stqr-storage
+
+Files: *
+Copyright: 2026 STQR contributors
+License: GPL-3
+ This program is free software: you can redistribute it and/or modify
+ it under the terms of the GNU General Public License version 3.
+ .
+ On Debian systems the complete license is available in
+ /usr/share/common-licenses/GPL-3.
+Comment: The source uses SPDX-License-Identifier: GPL-3.0-only.
+ The binary also contains Go and third-party libraries. Their original
+ copyright and license notices are included under third-party/ beside
+ this file.

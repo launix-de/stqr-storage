@@ -1,0 +1,3 @@
+# Go intentionally builds with CGO_ENABLED=0 for portable amd64/arm64 packages.
+# There are no external libc dependencies; upstream notices ship under doc/stqr.
+stqr: statically-linked-binary

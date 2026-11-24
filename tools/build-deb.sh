@@ -28,7 +28,26 @@ mkdir -p "$stage/DEBIAN" "$stage/usr/bin" "$stage/usr/lib/systemd/system" "$stag
 cd "$root"
 CGO_ENABLED=0 GOOS=linux GOARCH="$goarch" "${GO:-go}" build -buildvcs=false -trimpath -ldflags "-s -w -X github.com/launix-de/stqr-storage/server.SoftwareVersion=$version -X github.com/launix-de/stqr-storage/server.SoftwareRevision=$revision -X github.com/launix-de/stqr-storage/server.SoftwareRelease=$release" -o "$stage/usr/bin/stqr" .
 cp packaging/debian/stqr.service "$stage/usr/lib/systemd/system/"
-cp LICENSE.md "$stage/usr/share/doc/stqr/copyright"
+cp packaging/debian/copyright "$stage/usr/share/doc/stqr/copyright"
+mkdir -p "$stage/usr/share/man/man1" "$stage/usr/share/lintian/overrides"
+gzip -n -9 -c packaging/debian/stqr.1 > "$stage/usr/share/man/man1/stqr.1.gz"
+cp packaging/debian/lintian-overrides "$stage/usr/share/lintian/overrides/stqr"
+# Retain the actual linked dependencies' notices, including the Go runtime.
+mkdir -p "$stage/usr/share/doc/stqr/third-party/go"
+install -m 0644 "$("${GO:-go}" env GOROOT)/LICENSE" "$stage/usr/share/doc/stqr/third-party/go/"
+GOOS=linux GOARCH="$goarch" "${GO:-go}" list -buildvcs=false -deps -f '{{with .Module}}{{.Path}}|{{.Dir}}{{end}}' . | sort -u > "$stage/modules"
+while IFS='|' read -r module module_dir; do
+    if [ -z "$module" ] || [ "$module" = github.com/launix-de/stqr-storage ]; then continue; fi
+    for notice in "$module_dir"/LICENSE "$module_dir"/LICENSE.* "$module_dir"/COPYING "$module_dir"/COPYING.* "$module_dir"/NOTICE "$module_dir"/NOTICE.*; do
+        if [ -f "$notice" ]; then
+            mkdir -p "$stage/usr/share/doc/stqr/third-party/$module"
+            install -m 0644 "$notice" "$stage/usr/share/doc/stqr/third-party/$module/"
+        fi
+    done
+done < "$stage/modules"
+rm "$stage/modules"
+changelog_date=$(git -C "$root" show -s --format=%aD HEAD)
+printf 'stqr (%s) unstable; urgency=medium\n\n  * Build revision %s.\n\n -- Launix <info@launix.de>  %s\n' "$version" "$revision" "$changelog_date" | gzip -n -9 > "$stage/usr/share/doc/stqr/changelog.gz"
 cp docs/debian.md "$stage/usr/share/doc/stqr/"
 for script in preinst postinst prerm postrm; do
     cp "packaging/debian/$script" "$stage/DEBIAN/$script"
@@ -45,7 +64,7 @@ Depends: adduser, init-system-helpers (>= 1.54~)
 Recommends: systemd
 Installed-Size: $(du -sk "$stage/usr" | awk '{print $1}')
 Homepage: https://github.com/launix-de/stqr-storage
-Description: STQR object storage node and administrative dashboard
+Description: Distributed object storage node and administrative dashboard
  Native HTTP/WebSocket storage daemon, managed by stqr.service.
 CONTROL
 # SOURCE_DATE_EPOCH also makes repeated builds from the same source reproducible.

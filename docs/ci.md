@@ -11,7 +11,7 @@ are needed.
 | Go / server shards 0–3 | Complete automatically discovered server tests/examples/fuzz seeds, including operations, localhost clusters, quotas and migrations, partitioned into disjoint processes with race detector; avoids one long bcrypt-heavy package exceeding its job budget |
 | Go / networkboot | Independent Go module with race detector, static helpers, PAM build and real private PAM harness, Python workflows and shell syntax |
 | Go / windows | Portable filesystem and settings tests with race detector on Linux |
-| Debian | Real `.deb` build/extraction, embedded version, isolated upgrade/abort/failure hooks; no host installation |
+| Debian | Real `.deb` build/extraction, Lintian, embedded version, isolated upgrade/abort/failure hooks; no host installation |
 | Dashboard | JavaScript tests and all existing browser acceptance tests with a pinned Playwright Chromium |
 | Linux integration | C library/parser and live client with ASan/UBSan, actual FUSE mounts/PHP/rsync, QEMU NBD and localhost cluster interoperability |
 | Windows | Native Windows callbacks, registry/DPAPI setup, lifecycle tests and executable build; no driver mount is claimed |

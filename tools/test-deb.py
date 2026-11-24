@@ -9,6 +9,7 @@ dpkg extraction and the resulting daemon executable are real.
 import os
 from pathlib import Path
 import subprocess
+import shutil
 import tempfile
 import unittest
 
@@ -48,6 +49,10 @@ class DebianPackage(unittest.TestCase):
         self.assertNotIn("drain", unit.lower())
         for hook in ("preinst", "postinst", "prerm", "postrm"):
             subprocess.run(["sh", "-n", str(self.control / hook)], check=True)
+
+    @unittest.skipUnless(shutil.which("lintian"), "lintian not installed")
+    def test_debian_policy(self):
+        subprocess.run(["lintian", str(self.package)], check=True)
 
     def host(self, folder):
         folder.mkdir()

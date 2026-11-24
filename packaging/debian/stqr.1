@@ -1,0 +1,70 @@
+.\" SPDX-License-Identifier: GPL-3.0-only
+.TH STQR 1 "November 2026" "STQR" "System Administration"
+.SH NAME
+stqr \- distributed object storage daemon
+.SH SYNOPSIS
+.B stqr
+.RI [ options ]
+.SH DESCRIPTION
+STQR serves object storage, its administrative dashboard and the native
+WebSocket protocol on a shared HTTP listener. Administration uses the dashboard;
+there are no administrative CLI subcommands. TLS is not provided; use an SSH
+tunnel for remote administration.
+.SH OPTIONS
+.TP
+.BI --config " path"
+YAML configuration. The Debian service uses /etc/stqr/stqr.yaml.
+.TP
+.BI --listen " address"
+HTTP bind address (default :7419).
+.TP
+.BI --port " number"
+Override the port while preserving the configured listen host.
+.TP
+.BI --name " name"
+Node display name.
+.TP
+.BI --advertise " URL"
+Contact address published to peers.
+.TP
+.BI --connect " URL"
+First-contact helper for an existing cluster. Discovered peers remain authoritative.
+.TP
+.BI --data-dir " path"
+Local data directory, resolved relative to the configuration directory.
+.TP
+.BI --volumes-dir " path"
+Directory for file volumes, resolved relative to the data directory.
+.TP
+.BI --system-volume-bytes " bytes"
+Initial admin-volume capacity (default 1048576); it grows on demand.
+.TP
+.BI --ram-bytes " bytes"
+RAM-volume budget; zero uses available system RAM.
+.TP
+.BI --ramcache-bytes " bytes"
+Reserved for the later read-cache implementation.
+.TP
+.BI --allow-subnet " CIDR,CIDR"
+Allowed IPv4/IPv6 source networks. Default: loopback only. Empty allows all.
+.TP
+.B --version
+Print software version and Git revision, then exit.
+.TP
+.B --help
+Print available options.
+.SH SIGNALS
+SIGTERM and SIGINT perform SHORT shutdown: preserve data and ownership, inform
+peers to wait for this node, and flush before exiting. Draining requires an
+explicit administrative command.
+.SH FILES
+.TP
+.I /etc/stqr/stqr.yaml
+Node configuration and initial credentials; mode 0600. The daemon updates it.
+.TP
+.I /var/lib/stqr
+Default data directory of the Debian service.
+.SH SEE ALSO
+.BR systemctl (1)
+.PP
+/usr/share/doc/stqr/debian.md
