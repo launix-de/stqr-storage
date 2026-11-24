@@ -132,7 +132,7 @@ func (s *Server) dialPeer(ctx context.Context, address string, expected client.I
 	s.mu.RUnlock()
 	headers := http.Header{"Authorization": []string{"Basic " + base64.StdEncoding.EncodeToString([]byte("node-"+node.String()+":"+token))}}
 	headers.Set(compatibilityHeader, profileHeader(s.protocolVersion()))
-	dialer := websocket.Dialer{Subprotocols: []string{"stqr.v1"}, HandshakeTimeout: 10 * time.Second, EnableCompression: false}
+	dialer := websocket.Dialer{Subprotocols: []string{"stqr.v2", "stqr.v1"}, HandshakeTimeout: 10 * time.Second, EnableCompression: false}
 	conn, response, err := dialer.DialContext(ctx, u.String(), headers)
 	if err != nil {
 		if response != nil {
@@ -172,7 +172,7 @@ func (s *Server) dialPeer(ctx context.Context, address string, expected client.I
 	}()
 	e := client.Encoder{}
 	e.U16(1)
-	e.U16(1)
+	e.U16(2)
 	e.U64(client.CapabilityPeerTransport)
 	e.Text("stqr-peer")
 	result, err := p.request(ctx, client.Hello, e.B)
@@ -184,7 +184,7 @@ func (s *Server) dialPeer(ctx context.Context, address string, expected client.I
 	remoteNode, remoteCluster := d.ID(), d.ID()
 	membership := d.U64()
 	d.U64()
-	if d.Done() != nil || version != 1 || capabilities&client.CapabilityPeerTransport == 0 || remoteCluster != client.ID(cluster) || remoteNode == (client.ID{}) || remoteNode == client.ID(node) || (expected != (client.ID{}) && remoteNode != expected) {
+	if d.Done() != nil || (version != 1 && version != 2) || capabilities&client.CapabilityPeerTransport == 0 || remoteCluster != client.ID(cluster) || remoteNode == (client.ID{}) || remoteNode == client.ID(node) || (expected != (client.ID{}) && remoteNode != expected) {
 		return nil, fail(409, "peer identity/cluster/capability mismatch")
 	}
 	addresses := []string{}

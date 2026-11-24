@@ -29,14 +29,14 @@ func TestDashboardPeerVolumesBrowser(t *testing.T) {
 	// the older LOCAL node in red without disabling its ordinary administration.
 	profile := target.protocolVersion()
 	profile.Version = "browser-newer"
-	profile.Release = 2
+	profile.Release = source.protocolVersion().Release + 1
 	target.compatibility.Store(&profile)
 	source.peerStatsMu.RLock()
 	connection := source.peerStats[client.ID(id)].connection
 	source.peerStatsMu.RUnlock()
 	connection.close()
 	awaitPeerObservation(t, source, client.ID(id), func(o *peerObservation) bool {
-		return o.online && o.snapshot != nil && o.connection.Profile.Release == 2
+		return o.online && o.snapshot != nil && o.connection.Profile.Release == profile.Release
 	})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)

@@ -11,7 +11,7 @@ import (
 )
 
 // SubscriptionStore caches ordinary object snapshots only while an active
-// subscription proves their version. It does not use a time-based validity TTL.
+// subscription proves their freshness. It does not use a time-based validity TTL.
 // Native CAS remains authoritative; mutations never trust a cached precondition.
 // Payload range reads keep the streaming/range path rather than populating a
 // second whole-file cache beside the kernel page cache.
@@ -291,7 +291,7 @@ func (c *SubscriptionStore) WatchUpdates(fn func(ObjectID)) func() {
 	c.mu.Unlock()
 	return func() { c.mu.Lock(); delete(c.updateObservers, token); c.mu.Unlock() }
 }
-func (c *SubscriptionStore) subscribed(id ObjectID, version uint64) bool {
+func (c *SubscriptionStore) subscribed(id ObjectID, proof SnapshotProof) bool {
 	c.mu.Lock()
 	el := c.entries[id]
 	var sub *Subscription
@@ -312,7 +312,7 @@ func (c *SubscriptionStore) subscribed(id ObjectID, version uint64) bool {
 		return false
 	default:
 	}
-	return sub.valid && !sub.closed && sub.err == nil && sub.info.Version == version
+	return sub.valid && !sub.closed && sub.err == nil && proof.Subscription == sub.id && proof.Cursor == sub.cursor
 }
 func (c *SubscriptionStore) CAS(ctx context.Context, id ObjectID, off uint64, expected, replacement []byte, opt CASOptions) (ObjectInfo, error) {
 	ctx, release, err := c.backend(ctx)
@@ -341,13 +341,13 @@ func (c *SubscriptionStore) GetRange(ctx context.Context, id ObjectID, off, n ui
 	defer release()
 	return c.client.GetRange(ctx, id, off, n)
 }
-func (c *SubscriptionStore) GetRangeToVersion(ctx context.Context, id ObjectID, off, n, version uint64, dst io.Writer) (ObjectInfo, error) {
+func (c *SubscriptionStore) GetRangeToMatching(ctx context.Context, id ObjectID, off, n uint64, condition ReadCondition, dst io.Writer) (ObjectInfo, error) {
 	ctx, release, err := c.backend(ctx)
 	if err != nil {
 		return ObjectInfo{}, err
 	}
 	defer release()
-	return c.client.GetRangeToVersion(ctx, id, off, n, version, dst)
+	return c.client.GetRangeToMatching(ctx, id, off, n, condition, dst)
 }
 func (c *SubscriptionStore) Close() {
 	c.mu.Lock()
@@ -389,7 +389,7 @@ func (s *Subscription) discard() {
 // The FUSE adapter uses these optional hooks to invalidate its page cache.
 type filesystemChangeStore interface {
 	watchChanges(func(ObjectID)) func()
-	subscribed(ObjectID, uint64) bool
+	subscribed(ObjectID, SnapshotProof) bool
 }
 
 func (f *Filesystem) watchChanges(fn func(ObjectID)) (func(), bool) {
@@ -398,9 +398,9 @@ func (f *Filesystem) watchChanges(fn func(ObjectID)) (func(), bool) {
 	}
 	return func() {}, false
 }
-func (f *Filesystem) subscribed(id ObjectID, version uint64) bool {
+func (f *Filesystem) subscribed(id ObjectID, proof SnapshotProof) bool {
 	if s, ok := f.store.(filesystemChangeStore); ok {
-		return s.subscribed(id, version)
+		return s.subscribed(id, proof)
 	}
 	return false
 }
@@ -409,8 +409,8 @@ func (o *OverlayFilesystem) watchChanges(fn func(ObjectID)) (func(), bool) {
 	b, bb := o.lower.watchChanges(fn)
 	return func() { a(); b() }, aa && bb
 }
-func (o *OverlayFilesystem) subscribed(id ObjectID, version uint64) bool {
-	return o.upper.subscribed(id, version) || o.lower.subscribed(id, version)
+func (o *OverlayFilesystem) subscribed(id ObjectID, proof SnapshotProof) bool {
+	return o.upper.subscribed(id, proof) || o.lower.subscribed(id, proof)
 }
 
 // EnableAcceptedWrites opts this filesystem wrapper into weaker write ACKs.

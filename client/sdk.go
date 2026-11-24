@@ -100,7 +100,7 @@ func (c *Client) connectEndpoint(ctx context.Context, endpoint string) (*objectT
 		headers.Set("X-STQR-Maintenance", token.String())
 	}
 	headers.Set("Authorization", "Basic "+base64.StdEncoding.EncodeToString([]byte(c.username+":"+c.password)))
-	dialer := websocket.Dialer{Subprotocols: []string{"stqr.v1"}, EnableCompression: false, HandshakeTimeout: 0}
+	dialer := websocket.Dialer{Subprotocols: []string{"stqr.v2"}, EnableCompression: false, HandshakeTimeout: 0}
 	var stopSocket func() bool
 	defer func() {
 		if stopSocket != nil {
@@ -124,14 +124,14 @@ func (c *Client) connectEndpoint(ctx context.Context, endpoint string) (*objectT
 		}
 		return nil, e
 	}
-	if conn.Subprotocol() != "stqr.v1" {
+	if conn.Subprotocol() != "stqr.v2" {
 		conn.Close()
 		return nil, ErrProtocol
 	}
 	t := newObjectTransport(conn, c, func(m Message) error { return c.learnGoAway(endpoint, m) })
 	hello := Encoder{}
-	hello.U16(1)
-	hello.U16(1)
+	hello.U16(2)
+	hello.U16(2)
 	hello.U64(CapabilityDurability)
 	hello.Text("stqr-go")
 	r, e := t.roundTrip(ctx, Message{Kind: Request, Opcode: Hello, ID: NewRequestID(), Body: hello.B}, false, nil)
@@ -145,7 +145,7 @@ func (c *Client) connectEndpoint(ctx context.Context, endpoint string) (*objectT
 		cluster := d.ID()
 		membership := d.U64()
 		d.U64()
-		if d.Done() != nil || version != 1 {
+		if d.Done() != nil || version != 2 {
 			e = ErrProtocol
 		}
 		c.mu.Lock()

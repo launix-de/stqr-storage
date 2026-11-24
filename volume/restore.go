@@ -2,8 +2,8 @@
 package volume
 
 import (
+	"errors"
 	"io"
-	"os"
 )
 
 type ExtentSource func(yield func(offset uint64, data io.Reader, length uint64) error) error
@@ -15,12 +15,25 @@ type RequestRecord struct {
 }
 
 func (v *Volume) restoreLocked(k Key, info Info, source ExtentSource, opts Options, replayable bool) error {
+	var prepared ReplicaRecord
+	var havePrepared bool
+	if opts.prepare != nil {
+		if opts.RequestID == (ID{}) || opts.prepare.Epoch == 0 || opts.prepare.Sequence == 0 || opts.prepare.SetHash == ([32]byte{}) {
+			return ErrRange
+		}
+		var err error
+		prepared, havePrepared, err = v.loadReplica(opts.RequestID)
+		if err != nil {
+			return err
+		}
+	}
+
 	if busy, err := v.pending(k); err != nil {
 		return err
-	} else if busy {
+	} else if busy && !havePrepared {
 		return ErrBusy
 	}
-	if info.Version == 0 || !info.Compression.valid() || info.Deleted && info.Length != 0 || opts.Compression != nil && *opts.Compression != info.Compression {
+	if !info.Compression.valid() || info.Deleted && info.Length != 0 || opts.Compression != nil && *opts.Compression != info.Compression {
 		return ErrRange
 	}
 	old, e := v.loadObject(k)
@@ -33,25 +46,19 @@ func (v *Volume) restoreLocked(k Key, info Info, source ExtentSource, opts Optio
 	if e != nil {
 		return e
 	}
-	if !retry {
-		if e = precondition(old, opts); e != nil {
+	if !retry && !havePrepared {
+		if e = v.precondition(old, opts); e != nil {
 			return e
-		}
-		if old != nil && (old.Info.Version > info.Version || old.Info.Version == info.Version && !opts.restoreSameVersion) {
-			return ErrPrecondition
 		}
 	}
 	// Trusted migration sources need not be seekable. Stage logical payload only,
 	// never sparse zero ranges, then allocate its final packed region exactly once.
-	var spool *os.File
+	var spool *encodedSpool
 	if !replayable {
-		spool, e = os.CreateTemp("", "stqr-restore-*")
-		if e != nil {
-			return e
-		}
-		defer func() { name := spool.Name(); spool.Close(); os.Remove(name) }()
+		spool = &encodedSpool{noSpill: v.sb.Identity.Class == RAM}
+		defer spool.Close()
 	}
-	h := fingerprint(opSnapshot, k, info.Version, info.Length, opts, nil)
+	h := fingerprint(opSnapshot, k, 0, info.Length, opts, nil)
 	flags := byte(0)
 	if info.Deleted {
 		flags = 1
@@ -103,6 +110,15 @@ func (v *Volume) restoreLocked(k Key, info Info, source ExtentSource, opts Optio
 	}
 	var fp [32]byte
 	copy(fp[:], h.Sum(nil))
+	if havePrepared {
+		if prepared.Request.Key != k || prepared.Request.Fingerprint != fp || prepared.Binding != *opts.prepare || prepared.Request.Result.Info != info {
+			return ErrRequestID
+		}
+		if prepared.State == ReplicaAborted {
+			return &ReplicaAbortError{Status: prepared.AbortStatus}
+		}
+		return nil
+	}
 	if retry {
 		if prior.Key != k || prior.Fingerprint != fp {
 			return ErrRequestID
@@ -116,6 +132,28 @@ func (v *Volume) restoreLocked(k Key, info Info, source ExtentSource, opts Optio
 		return e
 	}
 	o := &object{importShadow: opts.ImportShadow, Info: info, Spans: spans, Segmented: opts.restoreSegmented}
+	if opts.prepare != nil {
+		if e = t.writeObject(o); e != nil {
+			return e
+		}
+		result := Result{Info: info}
+		record := ReplicaRecord{Request: RequestRecord{ID: opts.RequestID, Key: k, Fingerprint: fp, Result: result}, Binding: *opts.prepare, State: ReplicaPrepared, object: o.Base, operation: opSnapshot}
+		if old != nil && !old.Info.Deleted {
+			record.PreviousLength = old.Info.Length
+		}
+		record.receipt, e = t.writeReceipt(dedupe{Key: k, Fingerprint: fp, Result: result})
+		if e != nil {
+			return e
+		}
+		if e = t.saveReplica(&record); e != nil {
+			return e
+		}
+		if e = t.set(&t.sb.ObjectRoot, pendingKey(k), record.base); e != nil {
+			return e
+		}
+		return t.commitReserved(opts.UseGuaranteed, opts.InFlightAllowance, opts.GuaranteedAllowance)
+	}
+
 	if old != nil {
 		o.Base, o.Size = old.Base, old.Size
 	}
@@ -181,5 +219,19 @@ func (v *Volume) scanRequestsLocked(fn func(RequestRecord) error) error {
 			return ErrCorrupt
 		}
 		return fn(RequestRecord{ID: id, Key: d.Key, Fingerprint: d.Fingerprint, Result: d.Result})
+	})
+}
+
+// PrepareRestore stages a sparse trusted snapshot using the same durable ALL
+// decision protocol as ordinary mutations. No content becomes visible at prepare.
+func (h *Handle) PrepareRestore(k Key, info Info, source ExtentSource, opts Options, binding ReplicaBinding) (Result, error) {
+	return withHandle(h, true, func(v *Volume) (Result, error) {
+		opts.prepare = &binding
+		opts.Accepted = false
+		err := v.restoreLocked(k, info, source, opts, false)
+		if errors.Is(err, ErrBusy) {
+			return Result{}, err
+		}
+		return Result{Info: info}, err
 	})
 }

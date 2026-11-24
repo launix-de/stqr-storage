@@ -268,8 +268,8 @@ func TestNetworkbootNBDWithQEMU(t *testing.T) {
 	run("gc", "nbd-image")
 	run("fetch", "nbd-image", fetched)
 
-	if err := exec.Command("unshare", "--user", "--map-root-user", "true").Run(); err == nil {
-		gateway := exec.Command("unshare", "--user", "--map-root-user", "python3", "-c", `
+	{
+		gateway := exec.Command("python3", "-c", `
 import os,re,signal,socket,subprocess,sys,tempfile,time,urllib.request
 from pathlib import Path
 sys.path.insert(0,sys.argv[1])
@@ -277,13 +277,13 @@ from common import ctl
 def port():
     s=socket.socket();s.bind(('127.0.0.1',0));n=s.getsockname()[1];s.close();return n
 with tempfile.TemporaryDirectory(prefix='stqr-gateway-') as work:
-    hp,np=port(),port()
-    p=subprocess.Popen([sys.executable,str(Path(sys.argv[1])/'serve'),'--config',sys.argv[2],'--base-bucket','nbd-image','--server','127.0.0.1','--interface','lo','--clients','127.0.0.0/8','--no-dhcp','--upper','ram','--cache',work,'--http-port',str(hp),'--nfs-port',str(np)])
+    hp=port()
+    p=subprocess.Popen([sys.executable,str(Path(sys.argv[1])/'serve'),'--config',sys.argv[2],'--base-bucket','nbd-image','--server','127.0.0.1','--interface','lo','--clients','127.0.0.0/8','--no-dhcp','--cache',work,'--http-port',str(hp)])
     try:
         url=f'http://127.0.0.1:{hp}/session.ipxe?mac=001122334455'
         deadline=time.monotonic()+20
         while True:
-            try:old=urllib.request.urlopen(url,timeout=1).read().decode();break
+            try:old=urllib.request.urlopen(url,timeout=15).read().decode();break
             except OSError:
                 assert p.poll() is None,'gateway exited'
                 if time.monotonic()>deadline:raise
@@ -294,9 +294,12 @@ with tempfile.TemporaryDirectory(prefix='stqr-gateway-') as work:
         ctl(sys.argv[2],'publish','nbd-image',sys.argv[3])
         os.kill(p.pid,signal.SIGHUP)
         deadline=time.monotonic()+20
+        next_mac=0x1122334466
         while True:
-            new=urllib.request.urlopen(url).read().decode()
-            if new!=old:break
+            assert urllib.request.urlopen(url).read().decode()==old,'pending boot changed its release'
+            new=urllib.request.urlopen(url.replace('001122334455',f'{next_mac:012x}')).read().decode()
+            next_mac+=1
+            if re.search(r'kernel (http://\S+)',new).group(1)!=oldurl:break
             assert time.monotonic()<deadline,'release reload timeout'
             time.sleep(.1)
         newurl=re.search(r'kernel (http://\S+)',new).group(1)
@@ -310,9 +313,39 @@ with tempfile.TemporaryDirectory(prefix='stqr-gateway-') as work:
 		}
 	}
 
-	if got, err := os.ReadFile(filepath.Join(fetched, "rootfs.tar")); err != nil || !bytes.Equal(got, rootArchive) {
-		t.Fatal("artifact roundtrip", err)
+	manifestRaw, err := os.ReadFile(filepath.Join(fetched, "manifest.json"))
+	if err != nil {
+		t.Fatal(err)
 	}
+	var nativeManifest struct {
+		Schema     int       `json:"schema"`
+		RootBucket client.ID `json:"root_bucket"`
+	}
+	if err := json.Unmarshal(manifestRaw, &nativeManifest); err != nil || nativeManifest.Schema != 2 {
+		t.Fatal("native manifest", err)
+	}
+	ctx := context.Background()
+	lower, err := client.Dial(ctx, host.URL, a.Username, a.Password, nativeManifest.RootBucket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lowerFS, err := client.OpenFilesystem(ctx, lower, client.FSOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	etc, err := lowerFS.Lookup(ctx, client.FilesystemRootID(), "etc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	marker, err := lowerFS.Lookup(ctx, etc.ID, "marker")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := make([]byte, len(payload))
+	if n, err := lowerFS.ReadAt(ctx, marker.ID, got, 0); err != nil || n != len(got) || !bytes.Equal(got, payload) {
+		t.Fatal("native root roundtrip", n, err)
+	}
+	lower.Close()
 
 	run("create", "nbd-clone")
 	run("clone", "nbd-image", "nbd-clone")

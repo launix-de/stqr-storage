@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -109,7 +110,39 @@ func TestKSTQRVirtualMachine(t *testing.T) {
 	checkpointImages := map[string][]byte{}
 	var checkpointMu sync.Mutex
 	var subscriptionFS *client.Filesystem
+	var nativeOverlay atomic.Pointer[client.OverlayFilesystem]
 	host := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/__kstqr_test/native-upper" || r.URL.Path == "/__kstqr_test/native-lower" {
+			var err error
+			if strings.HasSuffix(r.URL.Path, "upper") {
+				o := nativeOverlay.Load()
+				if o == nil {
+					http.Error(w, "overlay not ready", 503)
+					return
+				}
+				file, e := o.Lookup(r.Context(), client.FilesystemRootID(), "go-created")
+				err = e
+				if err == nil {
+					_, err = o.WriteAt(r.Context(), file.ID, []byte("new-go!"), 0)
+				}
+				if err == nil {
+					_, err = o.Create(r.Context(), client.FilesystemRootID(), "external", 0600, 0, 0, false)
+				}
+			} else {
+				file, e := subscriptionFS.Lookup(r.Context(), client.FilesystemRootID(), "allowed")
+				err = e
+				if err == nil {
+					_, err = subscriptionFS.WriteAt(r.Context(), file.ID, []byte("lower-live"), 0)
+				}
+			}
+			if err != nil {
+				http.Error(w, err.Error(), 500)
+			} else {
+				w.WriteHeader(200)
+			}
+			return
+		}
+
 		if r.URL.Path == "/__kstqr_test/checkpoint-image" {
 			checkpointMu.Lock()
 			defer checkpointMu.Unlock()
@@ -332,13 +365,12 @@ func TestKSTQRVirtualMachine(t *testing.T) {
 	if err = fs.SetXattr(ctx, file.ID, "user.from-go", []byte("Go metadata"), 0); err != nil {
 		t.Fatal(err)
 	}
-	if !benchmark {
+	if !benchmark && os.Getenv("STQR_KERNEL_OVERLAY") != "1" {
 		// Leave a valid interrupted multi-inode operation for the kernel to read
 		// without writes on the RO mount, and then finish on the RW mount.
 		type participant struct {
-			id      client.ObjectID
-			raw     []byte
-			version uint64
+			id  client.ObjectID
+			raw []byte
 		}
 		members := []participant{{id: client.FilesystemRootID()}, {id: file.ID}}
 		sort.Slice(members, func(i, j int) bool { return bytes.Compare(members[i].id[:], members[j].id[:]) < 0 })
@@ -348,30 +380,28 @@ func TestKSTQRVirtualMachine(t *testing.T) {
 			copy(transaction[i*16:], id[:])
 		}
 		descriptor := client.Encoder{B: []byte("STFT")}
-		descriptor.U16(1)
+		descriptor.U16(2)
 		descriptor.U8(0)
 		descriptor.U32(uint32(len(members)))
-		var rootVersion uint64
+		var rootRaw []byte
 		for i := range members {
-			raw, info, e := conn.Get(ctx, members[i].id)
+			raw, _, e := conn.Get(ctx, members[i].id)
 			if e != nil {
 				t.Fatal(e)
 			}
 			members[i].raw = raw
-			members[i].version = info.Version
 			descriptor.B = append(descriptor.B, members[i].id[:]...)
-			descriptor.U64(info.Version)
 			descriptor.Blob(raw)
 			descriptor.Blob(raw)
 			if members[i].id == client.FilesystemRootID() {
-				rootVersion = info.Version
+				rootRaw = raw
 			}
 		}
 		if _, err = conn.CAS(ctx, transaction, 0, nil, descriptor.B, client.CASOptions{Scope: client.CASObject, MutationOptions: client.MutationOptions{RequestID: client.NewRequestID(), Absent: true}}); err != nil {
 			t.Fatal(err)
 		}
 		marker := append([]byte("STFL\x01\x00"), transaction[:]...)
-		if _, err = conn.CAS(ctx, client.FilesystemRootID(), 0, nil, marker, client.CASOptions{Scope: client.CASObject, MutationOptions: client.MutationOptions{RequestID: client.NewRequestID(), ExpectedVersion: &rootVersion}}); err != nil {
+		if _, err = conn.CAS(ctx, client.FilesystemRootID(), 0, rootRaw, marker, client.CASOptions{Scope: client.CASObject, MutationOptions: client.MutationOptions{RequestID: client.NewRequestID()}}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -467,6 +497,182 @@ rmmod kstqr
 		init = init[:begin] + script + init[end:]
 	}
 
+	var nativeUpperID client.ID
+	var watcher *client.Client
+	if os.Getenv("STQR_KERNEL_OVERLAY") == "1" {
+		source, e := fs.Create(ctx, client.FilesystemRootID(), "overlay-source", 0644, 0, 0, false)
+		if e != nil {
+			t.Fatal(e)
+		}
+		for off := int64(0); off < 2<<20; off += 1 << 20 {
+			if _, e = fs.WriteAt(ctx, source.ID, bytes.Repeat([]byte("L"), 1<<20), off); e != nil {
+				t.Fatal(e)
+			}
+		}
+		allowed, e := fs.Create(ctx, client.FilesystemRootID(), "allowed", 0644, 0, 0, false)
+		if e != nil {
+			t.Fatal(e)
+		}
+		_ = allowed
+		makeUpper := func(name string, policy []string) client.ID {
+			upper, _ := createProtocolBucket(t, s, name)
+			id := client.ID(upper.ID())
+			uc, e := client.Dial(ctx, host.URL, admin.Username, admin.Password, id)
+			if e != nil {
+				t.Fatal(e)
+			}
+			o, e := client.OpenOverlayFilesystem(ctx, conn, uc, client.OverlayOptions{Create: true, LowerBucketID: client.ID(b.ID()), Whitelist: policy})
+			if e != nil {
+				t.Fatal(e)
+			}
+			if policy == nil {
+				file, e := o.Create(ctx, client.FilesystemRootID(), "go-created", 0644, 0, 0, false)
+				if e != nil {
+					t.Fatal(e)
+				}
+				if _, e = o.WriteAt(ctx, file.ID, []byte("from-go"), 0); e != nil {
+					t.Fatal(e)
+				}
+			}
+			if e = uc.Sync(ctx); e != nil {
+				t.Fatal(e)
+			}
+			uc.Close()
+			return id
+		}
+		nativeUpperID = makeUpper("native-upper", nil)
+		watcher, e = client.Dial(ctx, host.URL, admin.Username, admin.Password, nativeUpperID)
+		if e != nil {
+			t.Fatal(e)
+		}
+		defer watcher.Close()
+		watchOverlay, e := client.OpenOverlayFilesystem(ctx, conn, watcher, client.OverlayOptions{LowerBucketID: client.ID(b.ID())})
+		if e != nil {
+			t.Fatal(e)
+		}
+		nativeOverlay.Store(watchOverlay)
+
+		policyID := makeUpper("native-policy", []string{"allowed", "work/"})
+		handshake := makeUpper("native-boot-upper", nil)
+		var held atomic.Bool
+		control := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/status" {
+				fmt.Fprintf(w, "%t", held.Load())
+				return
+			}
+			if r.URL.Path != "/claim/"+strings.Repeat("a", 64) {
+				http.NotFound(w, r)
+				return
+			}
+			wire, buffer, e := w.(http.Hijacker).Hijack()
+			if e != nil {
+				return
+			}
+			defer wire.Close()
+			payload := fmt.Sprintf("STQR-BOOT-1\nuri=%s\nusername=%s\npassword=%s\nlower=%s\nupper=%s\n\n", endpoint, admin.Username, admin.Password, client.ID(b.ID()).String(), handshake.String())
+			held.Store(true)
+			defer held.Store(false)
+			fmt.Fprintf(buffer, "HTTP/1.1 200 OK\r\nContent-Length: %d\r\n\r\n%s", len(payload), payload)
+			buffer.Flush()
+			io.Copy(io.Discard, buffer)
+		}))
+		defer control.Close()
+		controlURL, _ := url.Parse(control.URL)
+		copyFile("../networkboot/bin/stqr-boot-root", "bin/stqr-boot-root", 0755)
+		copyFile("../networkboot/bin/mount.kstqr", "bin/mount.kstqr", 0755)
+		run("cc", "-static", "-O2", "-Wall", "-Wextra", "-Werror", "-o", filepath.Join(initrdRoot, "overlay-test"), filepath.Join(root, "tests/overlay.c"))
+
+		init = fmt.Sprintf(`#!/bin/sh
+set -eu
+export PATH=/bin
+/bin/busybox --install -s /bin
+trap 'echo KSTQR_VM_FAIL; poweroff -f' EXIT
+mount -t proc proc /proc
+mount -t sysfs sys /sys
+mount -t devtmpfs dev /dev
+ip link set lo up
+ip link set eth0 up
+ip addr add 10.0.2.15/24 dev eth0
+ip route add default via 10.0.2.2
+insmod /kstqr.ko
+if /mount.kstqr --uri %[1]s --bucket %[2]s --credentials /credentials /mnt; then exit 1; fi
+/mount.kstqr --uri %[1]s --bucket %[3]s --credentials /credentials --readonly /readonly
+/mount.kstqr --uri %[1]s --bucket %[2]s --readonly-bucket %[3]s --credentials /credentials /mnt
+test "$(stat -f -c %%t /mnt)" = 53545152
+test "$(cat /mnt/go-created)" = from-go
+wget -qO- %[1]s/__kstqr_test/native-upper
+for attempt in 1 2 3 4 5; do test "$(cat /mnt/go-created)" = 'new-go!' && break; sleep 1; done
+test "$(cat /mnt/go-created)" = 'new-go!'
+test -f /mnt/external
+cat /mnt/allowed
+wget -qO- %[1]s/__kstqr_test/native-lower
+for attempt in 1 2 3 4 5; do test "$(cat /mnt/allowed)" = lower-live && break; sleep 1; done
+test "$(cat /mnt/allowed)" = lower-live
+test "$(readlink /mnt/go-link)" = go.txt
+chmod 0600 /mnt/overlay-source
+printf Q | dd of=/mnt/overlay-source bs=1 seek=1048580 count=1 conv=notrunc
+rm /mnt/go-link
+test ! -L /mnt/go-link
+ln -s overlay-source /mnt/new-link
+mkdir /mnt/directory
+echo kernel > /mnt/directory/new
+mv /mnt/directory /mnt/moved-directory
+test "$(cat /mnt/moved-directory/new)" = kernel
+rm /mnt/moved-directory/new
+rmdir /mnt/moved-directory
+echo kernel-created > /mnt/new-file
+chmod 0700 /mnt
+sync
+umount /mnt
+/mount.kstqr --uri %[1]s --bucket %[2]s --readonly-bucket %[3]s --credentials /credentials /mnt
+test "$(cat /mnt/new-file)" = kernel-created
+test ! -L /mnt/go-link
+test "$(readlink /mnt/new-link)" = overlay-source
+test "$(stat -c %%a /mnt)" = 700
+test "$(dd if=/readonly/overlay-source bs=1 skip=1048580 count=1)" = L
+test "$(dd if=/mnt/overlay-source bs=1 skip=1048580 count=1)" = Q
+umount /mnt
+if /mount.kstqr --uri %[1]s --bucket %[4]s --readonly-bucket %[3]s --whitelist other --credentials /credentials /fresh; then exit 1; fi
+/mount.kstqr --uri %[1]s --bucket %[4]s --readonly-bucket %[3]s --whitelist allowed,work/ --credentials /credentials /fresh
+if echo blocked > /fresh/go.txt; then exit 1; fi
+if chmod 0600 /fresh/go.txt; then exit 1; fi
+echo allowed > /fresh/allowed
+mkdir /fresh/work
+echo allowed > /fresh/work/new
+if mkdir /fresh/other; then exit 1; fi
+/mount.kstqr --uri %[1]s --bucket %[2]s --readonly-bucket %[3]s --credentials /credentials /mnt
+/overlay-test
+umount /mnt
+umount /fresh
+umount /readonly
+mkdir /run
+mount -t tmpfs tmpfs /run
+/bin/stqr-boot-root 10.0.2.2 %[5]s %[6]s /mnt
+test "$(stat -f -c %%t /mnt)" = 53545152
+echo boot-handshake > /mnt/handshake
+if pidof stqr-boot-root mount.kstqr; then exit 1; fi
+test "$(wget -qO- http://10.0.2.2:%[5]s/status)" = true
+sync
+umount /mnt
+for attempt in 1 2 3 4 5; do test "$(wget -qO- http://10.0.2.2:%[5]s/status)" = false && break; sleep 1; done
+test "$(wget -qO- http://10.0.2.2:%[5]s/status)" = false
+umount /run
+/mount.kstqr --uri %[1]s --bucket %[7]s --readonly-bucket %[3]s --init --whitelist work/,allowed,allowed --credentials /credentials /fresh
+mkdir /fresh/work
+echo initialized > /fresh/work/native
+umount /fresh
+if /mount.kstqr --uri %[1]s --bucket %[7]s --readonly-bucket %[3]s --whitelist wrong --credentials /credentials /fresh; then exit 1; fi
+/mount.kstqr --uri %[1]s --bucket %[7]s --readonly-bucket %[3]s --whitelist allowed,work/ --credentials /credentials /fresh
+test "$(cat /fresh/work/native)" = initialized
+umount /fresh
+rmmod kstqr
+if dmesg | grep -E 'BUG:|WARNING: CPU:|Oops:|KASAN:'; then exit 1; fi
+echo KSTQR_VM_PASS
+trap - EXIT
+poweroff -f
+`, endpoint, nativeUpperID.String(), client.ID(b.ID()).String(), policyID.String(), controlURL.Port(), strings.Repeat("a", 64), client.ID(empty.ID()).String())
+	}
+
 	if err = os.WriteFile(filepath.Join(initrdRoot, "init"), []byte(init), 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -497,6 +703,68 @@ rmmod kstqr
 	if err != nil || !strings.Contains(string(output), "KSTQR_VM_PASS") || strings.Contains(string(output), "KSTQR_VM_FAIL") {
 		t.Fatalf("kernel VM: %v\n%s", err, output)
 	}
+	if os.Getenv("STQR_KERNEL_OVERLAY") == "1" {
+		uc, e := client.Dial(ctx, host.URL, admin.Username, admin.Password, nativeUpperID)
+		if e != nil {
+			t.Fatal(e)
+		}
+		o, e := client.OpenOverlayFilesystem(ctx, conn, uc, client.OverlayOptions{LowerBucketID: client.ID(b.ID())})
+		if e != nil {
+			t.Fatal(e)
+		}
+		file, e := o.Lookup(ctx, client.FilesystemRootID(), "overlay-source")
+		if e != nil {
+			t.Fatal(e)
+		}
+		data := make([]byte, 2<<20)
+		if n, e := o.ReadAt(ctx, file.ID, data, 0); e != nil || n != len(data) {
+			t.Fatal(n, e)
+		}
+		expected := bytes.Repeat([]byte("L"), 2<<20)
+		expected[1048580] = 'Q'
+		expected[4096] = 'M'
+		expected[4097] = 'M'
+		if !bytes.Equal(data, expected) {
+			t.Fatal("partial lower references changed unrelated content")
+		}
+		if _, e = o.Lookup(ctx, client.FilesystemRootID(), "go-link"); e == nil {
+			t.Fatal("whiteout missing")
+		}
+		link, e := o.Lookup(ctx, client.FilesystemRootID(), "new-link")
+		if e != nil {
+			t.Fatal(e)
+		}
+		if target, e := o.Readlink(ctx, link.ID); e != nil || string(target) != "overlay-source" {
+			t.Fatal(string(target), e)
+		}
+		if x, e := o.GetXattr(ctx, client.FilesystemRootID(), "user.native"); e != nil || string(x) != "directory" {
+			t.Fatal("directory xattr", string(x), e)
+		}
+		watcher.Close()
+		deadline := time.Now().Add(3 * time.Second)
+		for {
+			s.wsMu.Lock()
+			connected := 0
+			for ws := range s.sockets {
+				if ws.authorization != nil && ws.authorization.bucket != nil && ws.authorization.bucket.ID() == volume.ID(nativeUpperID) {
+					connected++
+				}
+			}
+			s.wsMu.Unlock()
+			if connected <= 1 || time.Now().After(deadline) {
+				break
+			}
+			time.Sleep(time.Millisecond)
+		}
+		if _, e := uc.CheckOverlayFilesystem(ctx, conn, client.ID(b.ID())); e != nil {
+			t.Fatal("native overlay fsck", e)
+		}
+
+		uc.Close()
+		t.Log("Native STOR/STOM kernel overlay, lazy range copy-up, whitelist, Go compatibility and boot lifetime passed")
+		return
+	}
+
 	if benchmark {
 		for _, line := range strings.Split(string(output), "\n") {
 			if strings.Contains(line, "KSTQR_BENCH ") || strings.Contains(line, "KSTQR_WRITE_BENCH ") || strings.Contains(line, "stqr: cache_hits=") {

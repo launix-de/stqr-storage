@@ -31,9 +31,9 @@ func TestFilesystemMutablePagesKeepIdentity(t *testing.T) {
 	if len(parts) != 3 {
 		t.Fatal(len(parts))
 	}
-	infos := make([]ObjectInfo, len(parts))
+	infos := make([][]byte, len(parts))
 	for i, p := range parts {
-		infos[i], err = store.Stat(ctx, p.id)
+		infos[i], _, err = store.Get(ctx, p.id)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -58,11 +58,11 @@ func TestFilesystemMutablePagesKeepIdentity(t *testing.T) {
 		if p.id != parts[i].id {
 			t.Fatal("payload identity changed")
 		}
-		info, err := store.Stat(ctx, p.id)
+		data, _, err := store.Get(ctx, p.id)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if i != 1 && info.Version != infos[i].Version {
+		if i != 1 && !bytes.Equal(data, infos[i]) {
 			t.Fatal("unchanged payload rewritten")
 		}
 	}

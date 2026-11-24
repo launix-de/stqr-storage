@@ -141,6 +141,19 @@ func (s *Server) dispatchAs(m client.Message, ws *wsSession, p principal) ([]byt
 			}
 			return client.ResponseBody(200, result, ""), 200
 		}
+		if m.Opcode >= peerCowCapture && m.Opcode <= peerCowSync {
+			actor, _ := parseID(p.User.ID)
+			view := s.currentSystem.Load()
+			if view == nil || !hasControlNode(membershipIDs(view.manifest.Membership), client.ID(actor)) {
+				return client.ResponseBody(403, nil, "admitted clone peer required"), 403
+			}
+			result, err := s.cowPeerMessage(s.ctx, m)
+			if err != nil {
+				status := statusOf(err)
+				return client.ResponseBody(status, nil, err.Error()), status
+			}
+			return client.ResponseBody(200, result, ""), 200
+		}
 		if m.Opcode == peerBucketCopy {
 			actor, _ := parseID(p.User.ID)
 			result, err := s.receiveBucketCopy(s.ctx, m.Body, client.ID(actor))
@@ -595,14 +608,18 @@ func (s *Server) execute(m client.Message, ws *wsSession) ([]byte, int, error) {
 		if e := guard(); e != nil {
 			return nil, 0, e
 		}
-		if min > 1 || max < 1 {
+		if min > 2 || max < 1 || (max < 2 && (ws == nil || ws.authorization == nil || !ws.authorization.clusterPeer)) {
 			return nil, 0, fail(400, "no compatible protocol version")
 		}
 		s.mu.RLock()
 		c := s.cfg
 		s.mu.RUnlock()
 		e := client.Encoder{}
-		e.U16(1)
+		if max >= 2 {
+			e.U16(2)
+		} else {
+			e.U16(1)
+		}
 		caps, membership, revision := client.CapabilityPeerTransport|client.CapabilityNodeAdmin|client.CapabilityObjectSubscriptions|client.CapabilityDurability, uint64(1), c.Generation
 		if s.control != nil {
 			caps |= client.CapabilityClusterControl

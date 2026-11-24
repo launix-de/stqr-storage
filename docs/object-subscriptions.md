@@ -6,8 +6,7 @@ the existing authenticated bucket connection; READ permission is required.
 No second listener process or per-read communication through stored objects is
 introduced.
 
-The initial response contains a consistent snapshot, its native version, a
-subscription ID and a cursor. Snapshot copying and listener registration use the
+The initial response contains a consistent snapshot, a subscription ID and a cursor. Snapshot copying and listener registration use the
 same native volume read handle. Mutations publish their update under the write
 handle which committed them, so there is no GET-to-registration gap. Disk ACKs
 retain the native durability contract. A slow reader never holds up a mutation
@@ -20,14 +19,14 @@ defer sub.Close(ctx)
 
 bytes, info, cursor, err := sub.Snapshot()
 // Wait on sub.Changes(), then take another Snapshot(). Changes coalesce;
-// Snapshot returns the latest complete version rather than individual deltas.
+// Snapshot returns the latest complete contents rather than individual deltas.
 ```
 
 `SubscribeOptions` also supports a byte window and an optional resume cursor.
 The server currently sends complete replacement windows and DELETE events,
 using the specified OBJECT_UPDATE wire format. Full subscriptions receive whole
 object snapshots; a ranged subscription retains its original offset and length.
-The SDK checks cursors and previous/new versions, rejects incomplete update sets
+The SDK checks subscription identity and cursor continuity, rejects incomplete update sets
 and validates payload hashes before publishing a snapshot.
 
 The native snapshot transfer streams when necessary. The buffered Go subscription
@@ -47,7 +46,7 @@ larger updates require resynchronization. There are at most 2,048 subscriptions
 per socket and 16,384 per node. The SDK sends cumulative SUBSCRIPTION_ACK frames.
 A retention overflow sends RESYNC_REQUIRED and releases that descriptor. A full
 socket send queue closes the socket; it never drops a change while leaving its
-snapshot apparently valid. Unexpected cursor/version gaps also invalidate the
+snapshot apparently valid. Unexpected cursor gaps also invalidate the
 SDK snapshot.
 
 A range fence ends affected source subscriptions with RESYNC_REQUIRED before
@@ -96,8 +95,8 @@ the kernel page cache remains the main file-content cache.
 
 Kernel entry, attribute and negative lookup timeouts remain zero: no blind TTL
 is used to hide metadata changes. Readonly opens can keep page-cache data only
-when their inode version is covered by a live subscription and matches the
-previous open. Changing versions drops that cache. Updates and subscription
+when the same live subscription ID and cursor cover both opens. A changed
+subscription or cursor drops that cache. Updates and subscription
 loss also invalidate live FUSE inodes through a bounded notification worker;
 root/overlay namespace changes conservatively invalidate all live nodes.
 Callbacks never block the WebSocket reader on a kernel notification.
@@ -108,9 +107,9 @@ reduce per-chunk protocol and commit overhead; buffered reads can use kernel
 readahead. Writeback caching is not enabled.
 
 Overlay readers reuse a decoded manifest only while its freshly obtained root
-version/runtime and root bytes match. The manifest is immutable to readers;
+subscription ID/cursor and root bytes match. The manifest is immutable to readers;
 namespace edits and fsck work on copies. The retained decoded manifest is limited
-to a 1 MiB encoded body. Existing lower-content version checks remain in force.
+to a 1 MiB encoded body. Copied-up lower ranges reference immutable data/index object IDs.
 Subscriptions do not rebase an overlay after maintenance rewrites its lower.
 
 ## C and kernel clients
@@ -118,7 +117,7 @@ Subscriptions do not rebase an overlay after maintenance rewrites its lower.
 The C library now implements the same subscription/snapshot/update/ACK commands
 through an explicitly polled callback API; it creates no background userspace
 thread. The standalone kernel adapter uses that API on a dedicated connection,
-with a bounded metadata LRU, version-proved dentry reuse and asynchronous
+with a bounded metadata LRU, subscription-proved dentry reuse and asynchronous
 invalidation of clean page-cache/mmap data. See [the kernel guide](kstqr.md) for
 budgets, reconnect behavior, fallback boundaries and isolated VM tests. The C and
 kernel adapters still do not follow cluster redirects; subscriptions do not add

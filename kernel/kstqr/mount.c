@@ -18,6 +18,7 @@ static void usage(FILE *out)
           "MOUNTPOINT\n"
           "       mount -t kstqr URI MOUNTPOINT -o bucket=ID,credentials=FILE[,init][,ro]\n"
           "Options: --timeout-ms N; --metadata-cache-bytes N (default 8388608, 0 disables).\n"
+          "Overlay: --readonly-bucket LOWER_ID [--whitelist paths].\n"
           "Credentials file: username=... and password=... on separate lines, mode 0600.\n"
           "This helper exits after mounting; the kernel maintains the connection.\n",
           out);
@@ -113,8 +114,10 @@ static int resolve(const char *url, char out[512])
 }
 int main(int argc, char **argv)
 {
-    const char *uri = NULL, *bucket = NULL, *path = NULL, *target = NULL, *timeout = "30000", *cache_bytes = NULL;
+    const char *uri = NULL, *bucket = NULL, *path = NULL, *target = NULL, *timeout = "30000",
+               *cache_bytes = NULL, *lower = NULL, *whitelist = NULL;
     char *option_text = NULL, resolved[512];
+    int lifetime = -1;
     int create = 0, readonly = 0, opt, fsfd = -1, cred = -1, mountfd = -1, result = 1;
     unsigned attrs = 0;
     static const struct option opts[] = {{"uri", required_argument, NULL, 'u'},
@@ -122,12 +125,31 @@ int main(int argc, char **argv)
                                          {"credentials", required_argument, NULL, 'c'},
                                          {"init", no_argument, NULL, 'i'},
                                          {"readonly", no_argument, NULL, 'r'},
+                                         {"readonly-bucket", required_argument, NULL, 1000},
+                                         {"whitelist", required_argument, NULL, 1001},
+                                         {"boot-lifetime-fd", required_argument, NULL, 1002},
                                          {"timeout-ms", required_argument, NULL, 't'},
                                          {"metadata-cache-bytes", required_argument, NULL, 'm'},
                                          {"help", no_argument, NULL, 'h'},
                                          {NULL, 0, NULL, 0}};
     while ((opt = getopt_long(argc, argv, "o:h", opts, NULL)) != -1) {
         switch (opt) {
+        case 1000:
+            lower = optarg;
+            break;
+        case 1001:
+            whitelist = optarg;
+            break;
+        case 1002: {
+            char *end;
+            long fd = strtol(optarg, &end, 10);
+            if (end == optarg || *end || fd < 0 || fd > 1048576) {
+                errno = EINVAL;
+                goto fail;
+            }
+            lifetime = (int)fd;
+            break;
+        }
         case 'u':
             uri = optarg;
             break;
@@ -172,6 +194,10 @@ int main(int argc, char **argv)
         while ((token = strsep(&cursor, ","))) {
             if (!strncmp(token, "bucket=", 7))
                 bucket = token + 7;
+            else if (!strncmp(token, "readonly_bucket=", 16))
+                lower = token + 16;
+            else if (!strncmp(token, "whitelist=", 10))
+                whitelist = token + 10;
             else if (!strncmp(token, "credentials=", 12))
                 path = token + 12;
             else if (!strncmp(token, "timeout_ms=", 11))
@@ -201,7 +227,9 @@ int main(int argc, char **argv)
         uri = argv[optind++];
     if (argc - optind == 1)
         target = argv[optind];
-    if (!uri || !bucket || !path || !target || strlen(bucket) != 32 || (create && readonly)) {
+    if(lower&&!bucket){bucket=lower;lower=NULL;readonly=1;}
+    if (!uri || !bucket || !path || !target || strlen(bucket) != 32 || (create && readonly) ||
+        (lower && strlen(lower) != 32) || (whitelist && !lower)) {
         usage(stderr);
         goto out;
     }
@@ -231,6 +259,9 @@ int main(int argc, char **argv)
         configure(fsfd, FSCONFIG_SET_FD, "credentials", NULL, cred) ||
         (create && configure(fsfd, FSCONFIG_SET_FLAG, "init", NULL, 0)) ||
         (readonly && configure(fsfd, FSCONFIG_SET_FLAG, "readonly", NULL, 0)) ||
+        (lower && configure(fsfd, FSCONFIG_SET_STRING, "readonly_bucket", lower, 0)) ||
+        (whitelist && configure(fsfd, FSCONFIG_SET_STRING, "whitelist", whitelist, 0)) ||
+        (lifetime >= 0 && configure(fsfd, FSCONFIG_SET_FD, "boot_lifetime", NULL, lifetime)) ||
         configure(fsfd, FSCONFIG_CMD_CREATE, NULL, NULL, 0))
         goto fail;
     if (readonly)

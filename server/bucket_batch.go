@@ -19,7 +19,7 @@ func (c *BucketCatalog) saveBatch(changes []BucketDescription) error {
 		return nil
 	}
 	for attempt := 0; attempt < 64; attempt++ {
-		hashes, current, version, err := c.load()
+		hashes, current, before, err := c.load()
 		if err != nil {
 			return err
 		}
@@ -79,7 +79,7 @@ func (c *BucketCatalog) saveBatch(changes []BucketDescription) error {
 			list = append(list, hash[:]...)
 		}
 		err = c.write(func(h *volume.Handle) error {
-			_, err := h.CAS(BucketCatalogKey(), 0, nil, list, volume.Options{WholeObject: true, ExpectedVersion: &version})
+			_, err := h.CAS(BucketCatalogKey(), 0, before, list, volume.Options{WholeObject: true})
 			return err
 		})
 		if errors.Is(err, volume.ErrPrecondition) {

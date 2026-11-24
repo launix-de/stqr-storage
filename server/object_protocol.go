@@ -35,7 +35,6 @@ func objectStatus(err error) int {
 	return statusOf(err)
 }
 func encodeObjectInfo(e *client.Encoder, info volume.Info, runtime client.ID) {
-	e.U64(info.Version)
 	e.U64(info.Length)
 	e.Bool(false)
 	e.U32(0)
@@ -47,15 +46,15 @@ func decodeObjectOptions(d *client.Decoder, id client.ID) volume.Options {
 	opt := volume.Options{RequestID: volume.ID(id)}
 	if d.Bool() {
 		v := d.U64()
-		opt.ExpectedVersion = &v
-	}
-	if d.Bool() {
-		v := d.U64()
 		opt.ExpectedLength = &v
 	}
 	opt.CreateOnly = d.Bool()
-	if opt.CreateOnly && opt.ExpectedVersion != nil {
-		d.Err = volume.ErrRange
+	if d.Bool() {
+		opt.CompareOffset = d.U64()
+		opt.Compare = append([]byte{}, d.Blob()...)
+		if len(opt.Compare) > 1<<20 {
+			d.Err = volume.ErrRange
+		}
 	}
 	return opt
 }
@@ -201,6 +200,19 @@ func (s *Server) executeObjects(m client.Message, ws *wsSession, p principal) ([
 				return nil, 0, volume.ErrRange
 			}
 		}
+		var condition *volume.Options
+		if d.Bool() {
+			condition = &volume.Options{}
+			if d.Bool() {
+				n := d.U64()
+				condition.ExpectedLength = &n
+			}
+			condition.CompareOffset = d.U64()
+			condition.Compare = append([]byte{}, d.Blob()...)
+			if len(condition.Compare) > 1<<20 {
+				d.Err = volume.ErrRange
+			}
+		}
 		if d.Done() != nil {
 			return nil, 0, fail(400, "invalid GET body")
 		}
@@ -212,7 +224,7 @@ func (s *Server) executeObjects(m client.Message, ws *wsSession, p principal) ([
 		}
 		defer func() { file.Close(); os.Remove(file.Name()) }()
 		hash := sha256.New()
-		info, n, err := op.bucket.CopyTo(ctx, p, op.object, op.offset, length, &objectBudgetWriter{dst: io.MultiWriter(file, hash), remaining: maxObjectStagingBytes})
+		info, n, err := op.bucket.copyToChecked(ctx, p, op.object, op.offset, length, &objectBudgetWriter{dst: io.MultiWriter(file, hash), remaining: maxObjectStagingBytes}, condition)
 		if err != nil {
 			return nil, 0, err
 		}

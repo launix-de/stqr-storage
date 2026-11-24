@@ -67,7 +67,7 @@ func TestDaemonClusterShutdownAndReverseRestart(t *testing.T) {
 	}
 	source = restartDaemonTestNode(t, source)
 	got, info, err := c.Get(ctx, oid)
-	if err != nil || !bytes.Equal(got, payload) || info.Version != before.Version {
+	if err != nil || !bytes.Equal(got, payload) || info.Length != before.Length {
 		t.Fatal("cluster restart lost data/version", err)
 	}
 	if source.node.currentSystem.Load().manifest.Membership.Epoch != view.manifest.Membership.Epoch || len(source.node.currentSystem.Load().manifest.Membership.Members) != 2 {

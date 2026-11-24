@@ -87,7 +87,7 @@ func (s *testStore) Get(_ context.Context, id client.ObjectID) ([]byte, client.O
 	if !ok {
 		return nil, client.ObjectInfo{}, client.ErrNotFound
 	}
-	return bytes.Clone(o.data), client.ObjectInfo{Length: uint64(len(o.data)), Version: o.version}, nil
+	return bytes.Clone(o.data), client.ObjectInfo{Length: uint64(len(o.data))}, nil
 }
 func (s *testStore) GetRange(_ context.Context, id client.ObjectID, off, n uint64) ([]byte, client.ObjectInfo, error) {
 	s.mu.Lock()
@@ -99,7 +99,7 @@ func (s *testStore) GetRange(_ context.Context, id client.ObjectID, off, n uint6
 	}
 	end := min(off+n, uint64(len(o.data)))
 	off = min(off, end)
-	return bytes.Clone(o.data[off:end]), client.ObjectInfo{Length: uint64(len(o.data)), Version: o.version}, nil
+	return bytes.Clone(o.data[off:end]), client.ObjectInfo{Length: uint64(len(o.data))}, nil
 }
 func (s *testStore) Put(_ context.Context, id client.ObjectID, data []byte, _ client.PutOptions) (client.ObjectInfo, error) {
 	s.mu.Lock()
@@ -107,7 +107,7 @@ func (s *testStore) Put(_ context.Context, id client.ObjectID, data []byte, _ cl
 	s.put++
 	o := testObject{bytes.Clone(data), s.objects[id].version + 1}
 	s.objects[id] = o
-	return client.ObjectInfo{Length: uint64(len(o.data)), Version: o.version}, nil
+	return client.ObjectInfo{Length: uint64(len(o.data))}, nil
 }
 func (s *testStore) PutRange(_ context.Context, id client.ObjectID, off uint64, data []byte, _ client.PutOptions) (client.ObjectInfo, error) {
 	s.mu.Lock()
@@ -121,7 +121,7 @@ func (s *testStore) PutRange(_ context.Context, id client.ObjectID, off uint64, 
 	copy(o.data[off:], data)
 	o.version++
 	s.objects[id] = o
-	return client.ObjectInfo{Length: uint64(len(o.data)), Version: o.version}, nil
+	return client.ObjectInfo{Length: uint64(len(o.data))}, nil
 }
 func (s *testStore) CAS(ctx context.Context, id client.ObjectID, _ uint64, _, data []byte, opt client.CASOptions) (client.ObjectInfo, error) {
 	s.mu.Lock()
@@ -132,7 +132,7 @@ func (s *testStore) CAS(ctx context.Context, id client.ObjectID, _ uint64, _, da
 	}
 	o = testObject{bytes.Clone(data), o.version + 1}
 	s.objects[id] = o
-	return client.ObjectInfo{Length: uint64(len(o.data)), Version: o.version}, nil
+	return client.ObjectInfo{Length: uint64(len(o.data))}, nil
 }
 func (s *testStore) Stat(ctx context.Context, id client.ObjectID) (client.ObjectInfo, error) {
 	_, i, e := s.Get(ctx, id)
@@ -141,12 +141,9 @@ func (s *testStore) Stat(ctx context.Context, id client.ObjectID) (client.Object
 func (s *testStore) Delete(_ context.Context, id client.ObjectID, opt client.DeleteOptions) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	o, ok := s.objects[id]
+	_, ok := s.objects[id]
 	if !ok {
 		return client.ErrNotFound
-	}
-	if opt.ExpectedVersion != nil && o.version != *opt.ExpectedVersion {
-		return client.ErrPrecondition
 	}
 	delete(s.objects, id)
 	return nil
@@ -170,7 +167,7 @@ func (s *testStore) ScanObjects(_ context.Context, after *client.ObjectID, limit
 	out := make([]client.ObjectEntry, len(ids))
 	for i, id := range ids {
 		o := s.objects[id]
-		out[i] = client.ObjectEntry{ID: id, Info: client.ObjectInfo{Length: uint64(len(o.data)), Version: o.version}}
+		out[i] = client.ObjectEntry{ID: id, Info: client.ObjectInfo{Length: uint64(len(o.data))}}
 	}
 	return out, next, nil
 }

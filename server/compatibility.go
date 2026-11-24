@@ -43,15 +43,16 @@ import (
 //   - This gate must ship BEFORE the first incompatible change: software predating
 //     it cannot be made safe retroactively. Fence such binaries before activation.
 //
-// The default profile below is the pre-COW baseline, NOT an implementation of COW.
-// Future format changes must implement their storage gates as well as this policy.
+// baselineOpcode freezes pre-COW semantics. currentOperationSemantics explicitly
+// advertises the unversioned/COW changes; future formats must extend both their
+// real decoder/activation gates and these per-message declarations.
 const compatibilityHeader = "X-STQR-Compatibility"
 const nodeVersionsMessage uint16 = 0x203a
 
 // Set by the Debian build script through -ldflags. Developer builds remain usable.
 var SoftwareVersion = "dev"
 var SoftwareRevision = "unknown"
-var SoftwareRelease = "1"
+var SoftwareRelease = "2"
 
 type operationSemantics struct {
 	Emit uint16 `json:"emit"`
@@ -88,7 +89,7 @@ func (s *Server) protocolVersion() protocolProfile {
 		return *p
 	}
 	release, _ := strconv.ParseUint(SoftwareRelease, 10, 64)
-	return protocolProfile{Version: SoftwareVersion, Revision: SoftwareRevision, Release: release, WireMin: 1, WireMax: 1}
+	return protocolProfile{Version: SoftwareVersion, Revision: SoftwareRevision, Release: release, WireMin: 1, WireMax: 1, Operations: currentOperationSemantics()}
 }
 func profileHeader(p protocolProfile) string { b, _ := json.Marshal(p); return string(b) }
 func decodeProfile(h http.Header) (protocolProfile, error) {
@@ -241,6 +242,11 @@ func checkPeerMessage(local, remote protocolProfile, m client.Message) error {
 		d.ID()
 		inner = d.U16()
 		d.Blob()
+	case peerForceScopeEnvelope:
+		d.U16()
+		d.Blob()
+		inner = d.U16()
+		d.Blob()
 	case peerForceAdmin:
 		schema := d.U16()
 		inner = client.ForceDisconnect
@@ -307,4 +313,29 @@ func baselineOpcode(op uint16) bool {
 		return true
 	}
 	return false
+}
+
+// The envelope and discovery remain v1. Unversioned object payloads, byte CAS,
+// clone-aware control/state transfer and subscriptions use semantics revision 2.
+// Safe unchanged messages (PING, stats, directory, config) remain revision 1.
+func currentOperationSemantics() map[string]operationSemantics {
+	result := map[string]operationSemantics{}
+	for op := uint16(0x0100); op <= 0x011d; op++ {
+		if baselineOpcode(op) {
+			result[fmt.Sprintf("%04x", op)] = operationSemantics{Emit: 2, Min: 2, Max: 2}
+		}
+	}
+	for _, op := range []uint16{client.BucketClone, client.BucketClear, client.BucketCreate, client.BucketCreateInGroup, client.BucketSetPolicy, client.BucketDelete, client.PeerControlReserve, client.PeerControlPrepare, client.PeerControlCommit, client.PeerControlApply, client.PeerControlRelease, client.PeerControlAbort, peerControlInfo, peerSystemChunk, peerRangeObject, peerRangeProbe, peerRangeReceipts, peerReplicaPrepare, peerReplicaReady, peerReplicaCommit, peerReplicaCommitted, peerReplicaAbort, peerReplicaChunk} {
+		result[fmt.Sprintf("%04x", op)] = operationSemantics{Emit: 2, Min: 2, Max: 2}
+	}
+	for op := uint16(0x1050); op <= 0x105f; op++ {
+		result[fmt.Sprintf("%04x", op)] = operationSemantics{Emit: 2, Min: 2, Max: 2}
+	}
+	for _, op := range []uint16{peerBucketPurge, peerBucketCodec, peerBucketInventory, peerReplicaTopologyReady, peerReplicaTopologyCleanup, peerReplicaAbortHistory, peerBucketLease, peerForceAdmin, peerForceScopeEnvelope, peerForceScopes, peerForceControlState, peerForceConstruction, peerForceAdoptCommit, peerRecoveryReady} {
+		result[fmt.Sprintf("%04x", op)] = operationSemantics{Emit: 2, Min: 2, Max: 2}
+	}
+	for op := peerCowCapture; op <= peerCowSync; op++ {
+		result[fmt.Sprintf("%04x", op)] = operationSemantics{Emit: 1, Min: 1, Max: 1}
+	}
+	return result
 }

@@ -2,6 +2,7 @@
 package client
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"math"
@@ -150,7 +151,7 @@ func (f *Filesystem) unlinkNode(ctx context.Context, parent ObjectID, name strin
 			if e != nil {
 				return e
 			}
-			if fresh.info.Version != p.info.Version {
+			if !bytes.Equal(fresh.raw, p.raw) {
 				continue
 			}
 			return ErrFSFormat
@@ -306,6 +307,21 @@ func (o *OverlayFilesystem) GetXattr(ctx context.Context, id ObjectID, name stri
 	if err := xattrName(name); err != nil {
 		return nil, err
 	}
+	s, _, _, err := o.state(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if d := s.dirs[id]; d != nil && (d.metadata || d.opaque) {
+		if d.node.removed {
+			return nil, syscall.ENOENT
+		}
+		v, ok := d.node.xattrs[name]
+		if !ok {
+			return nil, syscall.ENODATA
+		}
+		return append([]byte(nil), v...), nil
+	}
+
 	f, source, err := o.posixSource(ctx, id)
 	if err != nil {
 		return nil, err
@@ -316,6 +332,22 @@ func (o *OverlayFilesystem) GetXattr(ctx context.Context, id ObjectID, name stri
 	return f.GetXattr(ctx, source, name)
 }
 func (o *OverlayFilesystem) ListXattr(ctx context.Context, id ObjectID) ([]string, error) {
+	s, _, _, err := o.state(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if d := s.dirs[id]; d != nil && (d.metadata || d.opaque) {
+		if d.node.removed {
+			return nil, syscall.ENOENT
+		}
+		names := make([]string, 0, len(d.node.xattrs))
+		for name := range d.node.xattrs {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		return names, nil
+	}
+
 	f, source, err := o.posixSource(ctx, id)
 	if err != nil {
 		return nil, err

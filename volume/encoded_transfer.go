@@ -86,7 +86,7 @@ func (h *Handle) ExportEncoded(k Key, yield func(EncodedChunk) error) (Info, err
 // This trusted migration API requires ImportShadow and no request receipt.
 func (h *Handle) RestoreEncoded(k Key, info Info, source EncodedSource, opts Options) error {
 	return h.do(true, func(v *Volume) error {
-		if !opts.ImportShadow || opts.RequestID != (ID{}) || info.Version == 0 || !info.Compression.valid() || info.Deleted && info.Length != 0 || opts.Compression != nil && *opts.Compression != info.Compression || source == nil {
+		if !opts.ImportShadow || opts.RequestID != (ID{}) || !info.Compression.valid() || info.Deleted && info.Length != 0 || opts.Compression != nil && *opts.Compression != info.Compression || source == nil {
 			return ErrRange
 		}
 		if busy, err := v.pending(k); err != nil {
@@ -100,10 +100,10 @@ func (h *Handle) RestoreEncoded(k Key, info Info, source EncodedSource, opts Opt
 		} else if err != nil {
 			return err
 		}
-		if err = precondition(old, opts); err != nil {
+		if err = v.precondition(old, opts); err != nil {
 			return err
 		}
-		if old != nil && (!old.importShadow || old.Info.Version >= info.Version) {
+		if old != nil && !old.importShadow {
 			return ErrPrecondition
 		}
 		type descriptor struct {

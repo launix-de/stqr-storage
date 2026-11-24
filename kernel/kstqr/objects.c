@@ -6,12 +6,14 @@
 #include <linux/sort.h>
 #include <linux/xattr.h>
 static bool valid_name(const char *);
+static int ks_overlay_node_cas(struct ks_fs *, const struct ks_snapshot *, const struct ks_node *);
 const stqr_object_id ks_root_id = {{0x3f, 0xda, 0xbc, 0x50, 0xba, 0xc2, 0xa0, 0xe8,
 				    0x3a, 0x0a, 0x4b, 0x32, 0x46, 0xca, 0x79, 0xbe,
 				    0x13, 0x7a, 0x00, 0x19, 0x40, 0x39, 0x44, 0x2a,
 				    0x8d, 0x27, 0x51, 0x1e, 0x3b, 0x14, 0x21, 0xbe}};
 struct segment {
 	u64 length, offset;
+	bool lower;
 	stqr_object_id id;
 };
 struct segments {
@@ -20,11 +22,16 @@ struct segments {
 };
 struct member {
 	stqr_object_id id;
-	u64 version;
 	struct buf before, after, writes;
 };
-static bool eqid(stqr_object_id a, stqr_object_id b) { return !memcmp(a.bytes, b.bytes, 32); }
-static bool nullid(stqr_object_id id) { return zero(id.bytes, 32); }
+static bool eqid(stqr_object_id a, stqr_object_id b)
+{
+	return !memcmp(a.bytes, b.bytes, 32);
+}
+static bool nullid(stqr_object_id id)
+{
+	return zero(id.bytes, 32);
+}
 struct ks_rpc *ks_rpc_lock(struct ks_fs *f, stqr_object_id id)
 {
 	unsigned slot = (id.bytes[0] ^ id.bytes[7] ^ id.bytes[19] ^ id.bytes[31]) % KS_RPC_SLOTS;
@@ -47,8 +54,8 @@ static int get_object(struct ks_fs *f, stqr_object_id id, void **p, size_t *n, s
 	mutex_unlock(&rpc->lock);
 	return err;
 }
-static int cas_object(struct ks_fs *f, stqr_object_id id, const void *p, size_t n, u64 version,
-		      bool absent)
+static int cas_object(struct ks_fs *f, stqr_object_id id, const void *p, size_t n,
+		      const void *expected, size_t expected_size, bool absent)
 {
 	struct ks_rpc *rpc;
 	stqr_options o = {0};
@@ -57,8 +64,6 @@ static int cas_object(struct ks_fs *f, stqr_object_id id, const void *p, size_t 
 	if (f->readonly)
 		return -EROFS;
 	o.accepted = 0;
-	o.has_version = !absent;
-	o.version = version;
 	o.absent = absent;
 	err = stqr_request_id(&o.request_id);
 	if (err)
@@ -66,12 +71,13 @@ static int cas_object(struct ks_fs *f, stqr_object_id id, const void *p, size_t 
 	rpc = ks_rpc_lock(f, id);
 	ks_cache_forget(f, id);
 	atomic64_inc(&f->rpc_cas);
-	err = stqr_cas(rpc->client, id, 1, 0, NULL, 0, p, n, &o, &info);
+	err = stqr_cas(rpc->client, id, 1, 0, expected, expected_size, p, n, &o, &info);
 	if (err == -EINPROGRESS || err == -EACCES) {
 		// A bucket unlock/grant change may leave this socket with its old
 		// read-only capability. Reauthenticate before one same-ID retry.
 		if (!stqr_reconnect(rpc->client))
-			err = stqr_cas(rpc->client, id, 1, 0, NULL, 0, p, n, &o, &info);
+			err = stqr_cas(rpc->client, id, 1, 0, expected, expected_size, p, n, &o,
+				       &info);
 		if (err == -EINPROGRESS)
 			err = -EIO;
 	}
@@ -84,10 +90,10 @@ static int immutable(struct ks_fs *f, const void *p, size_t n, stqr_object_id *i
 	if (n > SQ_CHUNK)
 		return -E2BIG;
 	sq_random(id->bytes, 32);
-	return cas_object(f, *id, p, n, 0, true);
+	return cas_object(f, *id, p, n, NULL, 0, true);
 }
 #include "redo.c"
-static int decode_node(const void *p, size_t n, struct ks_node *node)
+static int decode_node_format(const void *p, size_t n, struct ks_node *node, bool cow_six)
 {
 	struct buf d = {.p = (u8 *)p, .n = n};
 	const u8 *v;
@@ -98,7 +104,7 @@ static int decode_node(const void *p, size_t n, struct ks_node *node)
 		return -EUCLEAN;
 	take(&d, 4);
 	version = readnum(&d, 2);
-	if (version < 1 || version > 6)
+	if (version < 1 || version > 7)
 		return -EOPNOTSUPP;
 	node->kind = readnum(&d, 1);
 	node->mode = readnum(&d, 4);
@@ -118,8 +124,17 @@ static int decode_node(const void *p, size_t n, struct ks_node *node)
 			memcpy(node->root.bytes, v, 32);
 		if (!node->depth || node->depth > 16 || nullid(node->root) || !node->size)
 			return -EUCLEAN;
+	} else if (layout == 2 && (version == 7 || version == 6 && cow_six)) {
+		node->lower = true;
+		node->depth = readnum(&d, 1);
+		v = take(&d, 32);
+		if (v)
+			memcpy(node->root.bytes, v, 32);
+		if (!node->depth || node->depth > 16 || nullid(node->root) || !node->size ||
+		    node->kind != 1)
+			return -EUCLEAN;
 	} else
-		return -EOPNOTSUPP; /* Overlay roots/content require a lower connection. */
+		return -EUCLEAN;
 	if (version == 2) {
 		node->removed = boolean(&d);
 		if (!node->removed)
@@ -127,9 +142,10 @@ static int decode_node(const void *p, size_t n, struct ks_node *node)
 	}
 	if (version >= 3) {
 		node->removed = boolean(&d);
-		readblob(&d, &length);
-		if (length)
-			return -EOPNOTSUPP;
+		node->write_path = readblob(&d, &node->write_path_len);
+		if (d.err || node->write_path_len > 4096 ||
+		    (node->write_path_len && memchr(node->write_path, 0, node->write_path_len)))
+			return -EUCLEAN;
 	}
 	if (version >= 4) {
 		node->atime = readnum(&d, 8);
@@ -174,11 +190,29 @@ static int decode_node(const void *p, size_t n, struct ks_node *node)
 	}
 	if (version >= 5 && node->kind == 2 && !node->removed && !node->links)
 		return -EUCLEAN;
-	if (version >= 6) {
-		node->stamp = readnum(&d, 8);
-		if (!node->stamp)
+	if (version == 6 && !cow_six) {
+		node->mutable = readnum(&d, 8) != 0;
+		if (!node->mutable)
 			return -EUCLEAN;
 	}
+	if (version >= 7) {
+		const u8 *digest;
+		node->mutable = boolean(&d);
+		digest = take(&d, 32);
+		if (digest)
+			memcpy(node->digest, digest, 32);
+		if (boolean(&d)) {
+			digest = take(&d, 32);
+			if (digest)
+				memcpy(node->lower_owner.bytes, digest, 32);
+			digest = take(&d, 32);
+			if (digest)
+				memcpy(node->lower_digest, digest, 32);
+			if (nullid(node->lower_owner))
+				return -EUCLEAN;
+		}
+	}
+
 	if (done(&d) || node->kind < 1 || node->kind > 5 || (node->kind > 2 && version < 5) ||
 	    (node->removed && node->kind != 2) || (node->mode & ~07777U) || node->size > S64_MAX ||
 	    node->atime > S64_MAX || node->mtime > S64_MAX || node->ctime > S64_MAX)
@@ -190,24 +224,63 @@ static int decode_node(const void *p, size_t n, struct ks_node *node)
 		return -EUCLEAN;
 	return 0;
 }
+static int decode_node(const void *p, size_t n, struct ks_node *node)
+{
+	int err = decode_node_format(p, n, node, false);
+	if (err && n >= 6 && !memcmp(p, "STFS\6\0", 6))
+		return decode_node_format(p, n, node, true);
+	return err;
+}
+
+static int lower_fingerprint(const struct ks_node *n, u8 digest[32])
+{
+	struct buf b = {0};
+	int err;
+	put(&b, "STQR readonly lower data v1\0", sizeof("STQR readonly lower data v1\0") - 1);
+	number(&b, n->mtime, 8);
+	number(&b, n->size, 8);
+	put(&b, n->root.bytes, 32);
+	number(&b, n->depth, 1);
+	blob(&b, n->inline_data, n->depth ? 0 : n->size);
+	err = b.err ? b.err : sq_hash(256, b.p, b.n, digest);
+	drop(&b);
+	return err;
+}
+static int check_lower_anchor(struct ks_fs *f, const struct ks_node *n)
+{
+	struct ks_snapshot lower = {0};
+	u8 digest[32];
+	int err;
+	if (nullid(n->lower_owner))
+		return 0;
+	if (!f->lower)
+		return -EUCLEAN;
+	err = ks_plain_snapshot(f->lower, n->lower_owner, &lower);
+	if (!err)
+		err = lower_fingerprint(&lower.node, digest);
+	if (!err && memcmp(digest, n->lower_digest, 32))
+		err = -ESTALE;
+	ks_snapshot_free(&lower);
+	return err;
+}
 static void encode_node(struct buf *b, const struct ks_node *node)
 {
 	put(b, "STFS", 4);
-	number(b, node->stamp ? 6 : 5, 2);
+	number(b, 7, 2);
 	number(b, node->kind, 1);
 	number(b, node->mode, 4);
 	number(b, node->uid, 4);
 	number(b, node->gid, 4);
 	number(b, node->mtime, 8);
 	number(b, node->size, 8);
-	number(b, node->depth ? 1 : 0, 1);
+	number(b, node->lower ? 2 : node->depth ? 1 : 0, 1);
 	if (node->depth) {
 		number(b, node->depth, 1);
 		put(b, node->root.bytes, 32);
 	} else
 		blob(b, node->inline_data, node->size);
 	number(b, node->removed, 1);
-	blob(b, NULL, 0);
+	blob(b, node->write_path, node->write_path_len);
 	number(b, node->atime, 8);
 	number(b, node->ctime, 8);
 	number(b, node->removed ? 0 : node->links, 4);
@@ -215,11 +288,17 @@ static void encode_node(struct buf *b, const struct ks_node *node)
 		put(b, node->xattrs, node->xattrs_size);
 	else
 		number(b, 0, 4);
-	if (node->stamp)
-		number(b, node->stamp, 8);
+	number(b, node->mutable, 1);
+	put(b, node->digest, 32);
+	number(b, !nullid(node->lower_owner), 1);
+	if (!nullid(node->lower_owner)) {
+		put(b, node->lower_owner.bytes, 32);
+		put(b, node->lower_digest, 32);
+	}
 }
 void ks_snapshot_free(struct ks_snapshot *s)
 {
+	sq_free(s->namespace_head);
 	sq_free(s->raw);
 	sq_free(s->view);
 	memset(s, 0, sizeof(*s));
@@ -231,6 +310,23 @@ static bool marker(const void *raw, size_t n, stqr_object_id *id)
 	memcpy(id->bytes, (const u8 *)raw + 6, 32);
 	return !nullid(*id);
 }
+
+static int validate_tx_image(stqr_object_id id, const void *raw, size_t len, struct ks_node *node)
+{
+	struct buf d = {.p = (u8 *)raw, .n = len};
+	const u8 *image;
+	size_t size;
+	if (len < 4 || memcmp(raw, "STOR", 4))
+		return decode_node(raw, len, node);
+	if (!eqid(id, ks_root_id))
+		return -EUCLEAN;
+	take(&d, 4);
+	if (readnum(&d, 2) != 1)
+		return -EOPNOTSUPP;
+	take(&d, 16);
+	image = readblob(&d, &size);
+	return d.err ? d.err : done(&d) ? -EUCLEAN : decode_node(image, size, node);
+}
 static int tx_decode(struct buf *raw, stqr_object_id txid, struct member **out, unsigned *count,
 		     unsigned *state)
 {
@@ -240,7 +336,7 @@ static int tx_decode(struct buf *raw, stqr_object_id txid, struct member **out, 
 	const u8 *p;
 	size_t n;
 	if (raw->n < 11 || raw->n > (128U << 20) ||
-	    (memcmp(raw->p, "STFT", 4) || raw->p[5] || raw->p[4] < 1 || raw->p[4] > 2))
+	    (memcmp(raw->p, "STFT", 4) || raw->p[5] || raw->p[4] < 1 || raw->p[4] > 3))
 		return -EUCLEAN;
 	take(&d, 6);
 	*state = readnum(&d, 1);
@@ -255,18 +351,19 @@ static int tx_decode(struct buf *raw, stqr_object_id txid, struct member **out, 
 		p = take(&d, 32);
 		if (p)
 			memcpy(m[i].id.bytes, p, 32);
-		m[i].version = readnum(&d, 8);
+		if (raw->p[4] < 3)
+			readnum(&d, 8);
 		p = readblob(&d, &n);
 		m[i].before.p = (u8 *)p;
 		m[i].before.n = n;
-		if (d.err || decode_node(p, n, &check))
+		if (d.err || validate_tx_image(m[i].id, p, n, &check))
 			goto bad;
 		p = readblob(&d, &n);
 		m[i].after.p = (u8 *)p;
 		m[i].after.n = n;
-		if (raw->p[4] >= 2 && skip_edits(&d, &m[i].writes))
+		if (raw->p[4] >= 2 && skip_edits(&d, &m[i].writes, raw->p[4] < 3))
 			goto bad;
-		if (d.err || decode_node(p, n, &check) || !m[i].version || nullid(m[i].id) ||
+		if (d.err || validate_tx_image(m[i].id, p, n, &check) || nullid(m[i].id) ||
 		    eqid(txid, m[i].id) || (i && memcmp(m[i - 1].id.bytes, m[i].id.bytes, 32) >= 0))
 			goto bad;
 	}
@@ -356,8 +453,8 @@ static int help_tx(struct ks_fs *f, stqr_object_id first)
 							break;
 						}
 					}
-					err = cas_object(f, m[i].id, image->p, image->n, ci.version,
-							 false);
+					err = cas_object(f, m[i].id, image->p, image->n, head.p,
+							 head.n, false);
 					if (err == -EAGAIN) {
 						err = 0;
 						decision = 0;
@@ -376,13 +473,14 @@ static int help_tx(struct ks_fs *f, stqr_object_id first)
 					drop(&head);
 					break;
 				}
-				if (ci.version != m[i].version || head.n != m[i].before.n ||
+				if (head.n != m[i].before.n ||
 				    memcmp(head.p, m[i].before.p, head.n)) {
 					decision = 2;
 					drop(&head);
 					break;
 				}
-				err = cas_object(f, m[i].id, mark, sizeof(mark), ci.version, false);
+				err = cas_object(f, m[i].id, mark, sizeof(mark), head.p, head.n,
+						 false);
 				if (err == -EAGAIN) {
 					err = 0;
 					decision = 0;
@@ -401,8 +499,17 @@ static int help_tx(struct ks_fs *f, stqr_object_id first)
 			else
 				depth--;
 		} else if (!err && !state && decision > 0) {
-			journal.p[6] = decision;
-			err = cas_object(f, id, journal.p, journal.n, info.version, false);
+			{
+				struct buf next = {0};
+				put(&next, journal.p, journal.n);
+				if (!next.err) {
+					next.p[6] = decision;
+					err = cas_object(f, id, next.p, next.n, journal.p,
+							 journal.n, false);
+				} else
+					err = next.err;
+				drop(&next);
+			}
 			if (err == -EAGAIN)
 				err = 0;
 		}
@@ -418,6 +525,8 @@ static int help_tx(struct ks_fs *f, stqr_object_id first)
 }
 int ks_snapshot_cached(struct ks_fs *f, stqr_object_id id, struct ks_snapshot *s)
 {
+	if (f->lower)
+		return ks_overlay_snapshot(f, id, s);
 	int err;
 	memset(s, 0, sizeof(*s));
 	s->id = id;
@@ -428,11 +537,15 @@ int ks_snapshot_cached(struct ks_fs *f, stqr_object_id id, struct ks_snapshot *s
 		ks_snapshot_free(s);
 	else {
 		s->node.identity = id;
-		s->node.version = s->info.version;
+		sq_hash(256, s->raw, s->raw_len, s->node.head_digest);
 	}
 	return err;
 }
 int ks_snapshot(struct ks_fs *f, stqr_object_id id, struct ks_snapshot *s)
+{
+	return f->lower ? ks_overlay_snapshot(f, id, s) : ks_plain_snapshot(f, id, s);
+}
+int ks_plain_snapshot(struct ks_fs *f, stqr_object_id id, struct ks_snapshot *s)
 {
 	unsigned attempt;
 	int err;
@@ -451,7 +564,7 @@ int ks_snapshot(struct ks_fs *f, stqr_object_id id, struct ks_snapshot *s)
 				ks_snapshot_free(s);
 			else {
 				s->node.identity = id;
-				s->node.version = s->info.version;
+				sq_hash(256, s->raw, s->raw_len, s->node.head_digest);
 			}
 			return err;
 		}
@@ -462,6 +575,7 @@ int ks_snapshot(struct ks_fs *f, stqr_object_id id, struct ks_snapshot *s)
 			struct member *m = NULL;
 			unsigned n, state, i;
 			struct buf selected = {0};
+			u8 guard_digest[32];
 			err = intent_get(f, txid, &raw, &journal, &info);
 			if (!err && raw.n == 7 && !memcmp(raw.p, "STFD\1\0", 6)) {
 				drop(&raw);
@@ -485,6 +599,7 @@ int ks_snapshot(struct ks_fs *f, stqr_object_id id, struct ks_snapshot *s)
 						break;
 					}
 			}
+			sq_hash(256, journal.p, journal.n, guard_digest);
 			sq_free(m);
 			drop(&raw);
 			drop(&journal);
@@ -498,9 +613,10 @@ int ks_snapshot(struct ks_fs *f, stqr_object_id id, struct ks_snapshot *s)
 				s->node.view = view.p;
 				s->node.view_size = view.n;
 				s->node.identity = id;
-				s->node.version = s->info.version;
+				sq_hash(256, s->raw, s->raw_len, s->node.head_digest);
 				s->node.guard = txid;
-				s->node.guard_version = info.version;
+				memcpy(s->node.guard_digest, guard_digest, 32);
+				/* guard is checked by actual journal bytes below */
 			} else {
 				drop(&view);
 				ks_snapshot_free(s);
@@ -559,32 +675,29 @@ static int index_segments_view(struct ks_fs *f, const struct ks_node *view, stqr
 	take(&b, 4);
 	version = readnum(&b, 2);
 	count = readnum(&b, 4);
-	if ((version != 1 && version != 2) || !count || count > 1024) {
+	if ((version != 1 && version != 3) || !count || count > 1024) {
 		err = -EUCLEAN;
 		goto out;
 	}
 	for (i = 0; i < count; i++) {
 		struct segment s = {0};
 		const u8 *p;
-		u64 lower = 0;
+		bool lower = false;
 		s.length = readnum(&b, 8);
 		p = take(&b, 32);
 		if (p)
 			memcpy(s.id.bytes, p, 32);
 		s.offset = readnum(&b, version == 1 ? 4 : 8);
-		if (version == 2)
-			lower = readnum(&b, 8);
+		if (version == 3)
+			lower = boolean(&b);
 		if (b.err || !s.length || total > length || s.length > length - total ||
 		    s.offset > S64_MAX || s.length > S64_MAX - s.offset ||
 		    (depth > 1 && (s.offset || lower)) || (nullid(s.id) && (s.offset || lower)) ||
-		    (depth == 1 && !nullid(s.id) && !lower && s.offset + s.length > SQ_CHUNK)) {
+		    (depth == 1 && !nullid(s.id) && s.offset + s.length > SQ_CHUNK)) {
 			err = -EUCLEAN;
 			goto out;
 		}
-		if (lower) {
-			err = -EOPNOTSUPP;
-			goto out;
-		}
+		s.lower = lower;
 		total += s.length;
 		if (depth > 1 && !nullid(s.id))
 			err = index_segments_view(f, view, s.id, s.length, depth - 1, out);
@@ -623,12 +736,18 @@ static int index_read(struct ks_fs *f, const struct ks_node *view, stqr_object_i
 		n = min_t(u64, count, p->length - offset);
 		if (nullid(p->id))
 			memset(dst, 0, n);
+
 		else {
 			void *data = NULL;
 			size_t actual;
 			stqr_info info;
 			struct ks_rpc *rpc;
-			if (view && view->view) {
+			struct ks_fs *store = p->lower ? f->lower : f;
+			if (!store) {
+				err = -EUCLEAN;
+				goto out;
+			}
+			if (!p->lower && view && view->view) {
 				size_t size;
 				err = get_view_object(f, view, p->id, &data, &size, &info);
 				if (!err) {
@@ -643,7 +762,7 @@ static int index_read(struct ks_fs *f, const struct ks_node *view, stqr_object_i
 					goto out;
 				goto copied;
 			}
-			rpc = ks_rpc_lock(f, p->id);
+			rpc = ks_rpc_lock(store, p->id);
 			atomic64_inc(&f->rpc_ranges);
 			err = stqr_get_range(rpc->client, p->id, p->offset + offset, n, &data,
 					     &actual, &info);
@@ -676,6 +795,23 @@ out:
 }
 static int read_node(struct ks_fs *f, const struct ks_node *n, void *dst, size_t count, u64 offset)
 {
+	if (n->inherited) {
+		if (!f->lower)
+			return -EUCLEAN;
+		struct ks_node local = *n;
+		local.inherited = false;
+		return ks_read(f->lower, &local, dst, count, offset);
+	}
+	if (n->lower) {
+		struct ks_node local = *n;
+		if (!f->lower)
+			return -EUCLEAN;
+		local.lower = false;
+		memset(&local.lower_owner, 0, sizeof(local.lower_owner));
+		memset(&local.identity, 0, sizeof(local.identity));
+		return ks_read(f->lower, &local, dst, count, offset);
+	}
+
 	if (offset > n->size || count > n->size - offset)
 		return -EAGAIN;
 	if (!count)
@@ -694,16 +830,30 @@ int ks_read(struct ks_fs *f, const struct ks_node *node, void *dst, size_t count
 	int err = 0;
 	for (attempt = 0; attempt < 128; attempt++) {
 		stqr_info observed;
-		int readerr = read_node(f, n, dst, count, offset);
+		int readerr = check_lower_anchor(f, n);
+		if (!readerr)
+			readerr = read_node(f, n, dst, count, offset);
+		if (!readerr)
+			readerr = check_lower_anchor(f, n);
 		if (!n->depth || nullid(n->identity)) {
 			err = readerr;
 			break;
 		}
-		err = object_stat(f, nullid(n->guard) ? n->identity : n->guard, &observed);
-		if (!err &&
-		    observed.version == (nullid(n->guard) ? n->version : n->guard_version)) {
-			err = readerr;
-			break;
+		{
+			void *raw = NULL;
+			size_t len = 0;
+			u8 digest[32];
+			err = get_object(f, nullid(n->guard) ? n->identity : n->guard, &raw, &len,
+					 &observed);
+			if (!err)
+				err = sq_hash(256, raw, len, digest);
+			sq_free(raw);
+			if (!err &&
+			    !memcmp(digest, nullid(n->guard) ? n->head_digest : n->guard_digest,
+				    32)) {
+				err = readerr;
+				break;
+			}
 		}
 		if (err && err != -ENOENT)
 			break;
@@ -725,6 +875,12 @@ int ks_read(struct ks_fs *f, const struct ks_node *node, void *dst, size_t count
 }
 static int build_segments(struct ks_fs *f, struct ks_node *node, struct segments *s)
 {
+	node->lower = false;
+	bool inherited = false;
+	for (size_t j = 0; j < s->n; j++)
+		inherited |= s->p[j].lower;
+	if (!inherited)
+		memset(&node->lower_owner, 0, sizeof(node->lower_owner));
 	unsigned depth = 0;
 	int err = 0;
 	u64 length = 0;
@@ -735,6 +891,7 @@ static int build_segments(struct ks_fs *f, struct ks_node *node, struct segments
 		length += s->p[i].length;
 	}
 	if (!length) {
+		node->lower = false;
 		node->size = 0;
 		node->depth = 0;
 		node->inline_data = NULL;
@@ -747,14 +904,15 @@ static int build_segments(struct ks_fs *f, struct ks_node *node, struct segments
 			struct buf b = {0};
 			struct segment part = {0};
 			size_t j, count = min_t(size_t, 1024, s->n - i);
-			put(&b, "STIX", 4);
-			number(&b, 2, 2);
+			bool modern=false;for(size_t k=i;k<i+count;k++)modern|=s->p[k].lower;
+ put(&b, "STIX", 4);
+ number(&b, modern?3:1, 2);
 			number(&b, count, 4);
 			for (j = i; j < i + count; j++) {
 				number(&b, s->p[j].length, 8);
 				put(&b, s->p[j].id.bytes, 32);
-				number(&b, s->p[j].offset, 8);
-				number(&b, 0, 8);
+				number(&b,s->p[j].offset,modern?8:4);
+ if(modern)number(&b,s->p[j].lower,1);
 				part.length += s->p[j].length;
 			}
 			err = b.err ? b.err
@@ -783,11 +941,12 @@ static int build_segments(struct ks_fs *f, struct ks_node *node, struct segments
 }
 static int blob_bytes(struct ks_fs *f, struct ks_node *node, const void *data, size_t n)
 {
+	node->lower = false;
 	struct segments s = {0};
 	size_t pos, unit = node->kind == 2 ? 4096 : SQ_CHUNK;
 	int err = 0;
 	if (n <= 4096) {
-		node->stamp = node->version + 1;
+		node->mutable = true;
 		node->size = n;
 		node->depth = 0;
 		node->inline_data = data;
@@ -836,6 +995,9 @@ static void member_free(struct member *);
 static int transact(struct ks_fs *, struct member *, unsigned);
 static int node_cas(struct ks_fs *f, struct ks_snapshot *old, struct ks_node *next)
 {
+	if (f->lower && old->node.kind == 2)
+		return ks_overlay_node_cas(f, old, next);
+
 	struct buf b = {0};
 	int err;
 	if (next->edits) {
@@ -849,17 +1011,22 @@ static int node_cas(struct ks_fs *f, struct ks_snapshot *old, struct ks_node *ne
 		return err;
 	}
 	encode_node(&b, next);
-	err = b.err ? b.err : cas_object(f, old->id, b.p, b.n, old->info.version, false);
+	err = b.err ? b.err : cas_object(f, old->id, b.p, b.n, old->raw, old->raw_len, false);
 	drop(&b);
 	return err;
 }
 #include "mutable.c"
 static bool snapshot_changed(struct ks_fs *f, const struct ks_snapshot *old)
 {
-	stqr_info observed;
-	return !nullid(old->id) && !object_stat(f, old->id, &observed) &&
-	       observed.version != old->info.version;
+	struct buf raw = {0};
+	stqr_info info;
+	bool changed = false;
+	if (!nullid(old->id) && !get_object(f, old->id, (void **)&raw.p, &raw.n, &info))
+		changed = raw.n != old->raw_len || memcmp(raw.p, old->raw, raw.n);
+	drop(&raw);
+	return changed;
 }
+
 int ks_write(struct ks_fs *f, stqr_object_id id, u64 *position, const void *data, size_t count,
 	     bool append)
 {
@@ -867,13 +1034,19 @@ int ks_write(struct ks_fs *f, stqr_object_id id, u64 *position, const void *data
 	int err;
 	if (f->readonly)
 		return -EROFS;
+	if (f->lower) {
+		err = ks_overlay_copyup(f, id);
+		if (err)
+			return err;
+	}
+
 	for (attempt = 0; attempt < 128; attempt++) {
 		struct ks_snapshot old;
 		struct ks_node next;
 		struct segments before = {0}, after = {0};
 		u64 off, end, phase = ktime_get_ns();
 		u8 *small = NULL;
-		err = ks_snapshot(f, id, &old);
+		err = ks_plain_snapshot(f, id, &old);
 		atomic64_add(ktime_get_ns() - phase, &f->write_snapshot_ns);
 		phase = ktime_get_ns();
 		if (err)
@@ -924,7 +1097,7 @@ int ks_write(struct ks_fs *f, stqr_object_id id, u64 *position, const void *data
 	}
 	return -EAGAIN;
 }
-int ks_setattr(struct ks_fs *f, stqr_object_id id, struct iattr *attr)
+static int ks_plain_setattr(struct ks_fs *f, stqr_object_id id, struct iattr *attr)
 {
 	unsigned attempt;
 	int err;
@@ -1170,7 +1343,7 @@ int ks_initialize(struct ks_fs *f, u32 uid, u32 gid)
 	node.size = content.n;
 	node.inline_data = content.p;
 	encode_node(&raw, &node);
-	err = raw.err ? raw.err : cas_object(f, ks_root_id, raw.p, raw.n, 0, true);
+	err = raw.err ? raw.err : cas_object(f, ks_root_id, raw.p, raw.n, NULL, 0, true);
 	drop(&content);
 	drop(&raw);
 	return err;
@@ -1183,6 +1356,9 @@ int ks_create(struct ks_fs *f, stqr_object_id parent, const char *name, unsigned
 int ks_newnode(struct ks_fs *f, stqr_object_id parent, const char *name, unsigned mode, u32 uid,
 	       u32 gid, unsigned kind, const char *target, stqr_object_id *created)
 {
+	if (f->lower)
+		return ks_overlay_newnode(f, parent, name, mode, uid, gid, kind, target, created);
+
 	unsigned attempt;
 	int err;
 	bool made = false;
@@ -1257,7 +1433,6 @@ static void member_free(struct member *m)
 static int member_set(struct member *m, struct ks_snapshot *s, const struct ks_node *after)
 {
 	m->id = s->id;
-	m->version = s->info.version;
 	put(&m->before, s->raw, s->raw_len);
 	encode_node(&m->after, after);
 	encode_edits(&m->writes, after);
@@ -1279,7 +1454,7 @@ static int transact(struct ks_fs *f, struct member *m, unsigned count)
 	if (!count || count > 1024)
 		return -E2BIG;
 	sort(m, count, sizeof(*m), member_cmp, NULL);
-	put(&b, "STFT\2\0", 6);
+	put(&b, "STFT\3\0", 6);
 	number(&b, 0, 1);
 	number(&b, count, 4);
 	for (i = 0; i < count; i++) {
@@ -1288,7 +1463,6 @@ static int transact(struct ks_fs *f, struct member *m, unsigned count)
 			return -EINVAL;
 		}
 		put(&b, m[i].id.bytes, 32);
-		number(&b, m[i].version, 8);
 		blob(&b, m[i].before.p, m[i].before.n);
 		blob(&b, m[i].after.p, m[i].after.n);
 		if (m[i].writes.n)
@@ -1302,6 +1476,9 @@ static int transact(struct ks_fs *f, struct member *m, unsigned count)
 }
 int ks_remove(struct ks_fs *f, stqr_object_id parent, const char *name, bool dir)
 {
+	if (f->lower)
+		return ks_overlay_remove(f, parent, name, dir);
+
 	unsigned attempt;
 	int err;
 	if (f->readonly)
@@ -1337,27 +1514,26 @@ int ks_remove(struct ks_fs *f, stqr_object_id parent, const char *name, bool dir
 			err = directory_image(f, &next, entries, n, &content);
 		}
 		if (!err) {
-			struct ks_node removed = child.node;
-			if (dir)
-				removed.removed = true;
-			else if (!removed.links)
-				err = -EAGAIN;
-			else {
-				removed.links--;
-				removed.ctime = ktime_get_real_ns();
-			}
 			members = sq_alloc(2 * sizeof(*members));
 			if (!members)
 				err = -ENOMEM;
+			if (!err)
+				err = member_set(&members[0], &old, &next);
+			next = child.node;
+			if (dir)
+				next.removed = true;
+			else if (!next.links)
+				err = -EAGAIN;
 			else {
-				if (!err)
-					err = member_set(&members[0], &old, &next);
-				if (!err)
-					err = member_set(&members[1], &child, &removed);
-				if (!err)
-					err = transact(f, members, 2);
+				next.links--;
+				next.ctime = ktime_get_real_ns();
 			}
+			if (!err)
+				err = member_set(&members[1], &child, &next);
+			if (!err)
+				err = transact(f, members, 2);
 		}
+
 		if (members) {
 			member_free(&members[0]);
 			member_free(&members[1]);
@@ -1433,6 +1609,9 @@ int ks_rename(struct ks_fs *f, stqr_object_id from, const char *name, stqr_objec
 	      const char *newname, unsigned flags, const stqr_object_id *from_path,
 	      size_t from_length, const stqr_object_id *to_path, size_t to_length)
 {
+	if (f->lower)
+		return ks_overlay_rename(f, from, name, to, newname, flags);
+
 	unsigned attempt;
 	int err;
 	if (f->readonly)
@@ -1577,6 +1756,9 @@ int ks_rename(struct ks_fs *f, stqr_object_id from, const char *name, stqr_objec
 
 int ks_link(struct ks_fs *f, stqr_object_id parent, const char *name, stqr_object_id target)
 {
+	if (f->lower)
+		return -EOPNOTSUPP; /* same restriction as the Go overlay API */
+
 	unsigned attempt;
 	if (f->readonly)
 		return -EROFS;
@@ -1641,7 +1823,8 @@ static int xattr_name(const char *name)
 	size_t length = strlen(name);
 	if (!valid_name(name) || !strchr(name, '.') || name[0] == '.' || name[length - 1] == '.')
 		return -EINVAL;
-	if (strncmp(name, "user.", 5) && strncmp(name, "trusted.", 8))
+	if (strncmp(name, "user.", 5) && strncmp(name, "trusted.", 8) &&
+	    strncmp(name, "security.", 9))
 		return -EOPNOTSUPP;
 	return 0;
 }
@@ -1723,8 +1906,8 @@ out:
 	ks_snapshot_free(&s);
 	return err;
 }
-int ks_setxattr(struct ks_fs *f, stqr_object_id id, const char *name, const void *value,
-		size_t size, int flags)
+static int ks_plain_setxattr(struct ks_fs *f, stqr_object_id id, const char *name,
+			     const void *value, size_t size, int flags)
 {
 	unsigned attempt;
 	int err = xattr_name(name);
@@ -1817,55 +2000,37 @@ int ks_setxattr(struct ks_fs *f, stqr_object_id id, const char *name, const void
 	return -EAGAIN;
 }
 
-static int merge_mark(stqr_commit_mark *latest, const stqr_commit_mark *m)
-{
-	if (!m->sequence)
-		return 0;
-	if (latest->sequence && memcmp(latest->boot.bytes, m->boot.bytes, 16))
-		return -ESTALE;
-	if (m->sequence > latest->sequence)
-		*latest = *m;
-	return 0;
-}
 int ks_checkpoint(struct ks_fs *f)
 {
-	stqr_commit_mark latest = {0}, m = {0}, durable = {0};
 	int err = 0;
 	mutex_lock(&f->sync_lock);
 	for (unsigned n = 0; n < KS_RPC_SLOTS && !err; n++) {
 		mutex_lock(&f->rpc[n].lock);
-		err = f->rpc[n].client ? stqr_pending_mark(f->rpc[n].client, &m) : 0;
-		mutex_unlock(&f->rpc[n].lock);
-		if (!err)
-			err = merge_mark(&latest, &m);
-	}
-	if (!err)
-		err = ks_cache_mark(f, &m);
-	if (!err)
-		err = merge_mark(&latest, &m);
-	if (err || !latest.sequence)
-		goto out;
-	if (!memcmp(f->durable.boot.bytes, latest.boot.bytes, 16) &&
-	    latest.sequence <= f->durable.sequence)
-		goto out;
-	mutex_lock(&f->rpc[0].lock);
-	err = stqr_sync_through(f->rpc[0].client, &latest, &durable);
-	if (err == -ENOTCONN || err == -ECONNRESET || err == -EPIPE || err == -ETIMEDOUT) {
-		err = stqr_reconnect(f->rpc[0].client);
-		if (!err)
-			err = stqr_sync_through(f->rpc[0].client, &latest, &durable);
-	}
-	mutex_unlock(&f->rpc[0].lock);
-	if (!err) {
-		f->durable = durable;
-		for (unsigned n = 0; n < KS_RPC_SLOTS; n++) {
-			mutex_lock(&f->rpc[n].lock);
-			stqr_note_durable(f->rpc[n].client, &durable);
-			mutex_unlock(&f->rpc[n].lock);
+		if (f->rpc[n].client) {
+			err = stqr_sync(f->rpc[n].client);
+			if (err == -ENOTCONN || err == -ECONNRESET || err == -EPIPE ||
+			    err == -ETIMEDOUT) {
+				err = stqr_reconnect(f->rpc[n].client);
+				if (!err)
+					err = stqr_sync(f->rpc[n].client);
+			}
 		}
-		ks_cache_note_durable(f, &durable);
+		mutex_unlock(&f->rpc[n].lock);
 	}
-out:
+	if (!err)
+		err = ks_cache_sync(f);
 	mutex_unlock(&f->sync_lock);
 	return err;
+}
+
+int ks_setattr(struct ks_fs *f, stqr_object_id id, struct iattr *a)
+{
+	return f->lower ? ks_overlay_setattr(f, id, a) : ks_plain_setattr(f, id, a);
+}
+
+int ks_setxattr(struct ks_fs *f, stqr_object_id id, const char *n, const void *v, size_t z,
+		int flags)
+{
+	return f->lower ? ks_overlay_setxattr(f, id, n, v, z, flags)
+			: ks_plain_setxattr(f, id, n, v, z, flags);
 }

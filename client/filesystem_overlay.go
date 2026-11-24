@@ -4,6 +4,7 @@ package client
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"errors"
 	"io"
 	"sort"
@@ -22,6 +23,7 @@ type OverlayOptions struct {
 type OverlayFilesystem struct {
 	absentMu     sync.Mutex
 	absentInfo   ObjectInfo
+	absentRoot   string
 	absentUpper  map[ObjectID]bool
 	stateMu      sync.Mutex
 	cachedState  *overlayState
@@ -30,7 +32,7 @@ type OverlayFilesystem struct {
 	upper, lower *Filesystem
 	lowerID      BucketID
 	mu           sync.Mutex
-	cacheVersion uint64
+	cacheRoot    string
 	paths        map[ObjectID]string
 }
 
@@ -139,9 +141,9 @@ func (o *OverlayFilesystem) readState(ctx context.Context) (*overlayState, Objec
 	if err != nil {
 		return nil, info, fsBlob{}, err
 	}
-	o.resetAbsent(info)
+	o.resetAbsent(info, raw)
 	o.stateMu.Lock()
-	if o.cachedState != nil && o.cachedInfo.Version == info.Version && o.cachedInfo.RuntimeID == info.RuntimeID && bytes.Equal(o.cachedRoot, raw) {
+	if o.cachedState != nil && o.cachedInfo.RuntimeID == info.RuntimeID && bytes.Equal(o.cachedRoot, raw) {
 		s := o.cachedState
 		o.stateMu.Unlock()
 		_, blob, e := decodeOverlayRoot(raw)
@@ -164,6 +166,9 @@ func (o *OverlayFilesystem) readState(ctx context.Context) (*overlayState, Objec
 		return nil, info, blob, err
 	}
 	s, err := decodeOverlayState(data)
+	if err == nil {
+		s.rootRaw = bytes.Clone(raw)
+	}
 	if e := o.upper.checkNodeView(ctx, guard); e != nil {
 		return nil, info, blob, e
 	}
@@ -176,7 +181,7 @@ func (o *OverlayFilesystem) readState(ctx context.Context) (*overlayState, Objec
 	}
 	return s, info, blob, err
 }
-func (o *OverlayFilesystem) publish(ctx context.Context, s *overlayState, version uint64) error {
+func (o *OverlayFilesystem) publish(ctx context.Context, s *overlayState) error {
 	body, err := encodeOverlayState(s)
 	if err != nil {
 		return err
@@ -184,27 +189,28 @@ func (o *OverlayFilesystem) publish(ctx context.Context, s *overlayState, versio
 	if uint64(len(body)) > o.upper.directoryMemoryLimit {
 		return syscall.ENOMEM
 	}
-	raw, info, guard, err := o.upper.overlayRootImage(ctx)
+	raw, _, guard, err := o.upper.overlayRootImage(ctx)
 	if err != nil {
 		return err
 	}
-	if info.Version != version {
+	if !bytes.Equal(raw, s.rootRaw) {
 		return ErrPrecondition
 	}
 	_, old, err := decodeOverlayRoot(raw)
 	if err != nil {
 		return err
 	}
-	n := fsNode{identity: FilesystemRootID(), version: info.Version, kind: fsDirectory, blob: old}
+	n := fsNode{identity: FilesystemRootID(), head: bytes.Clone(raw), kind: fsDirectory, blob: old}
 	if err = o.upper.stableBody(ctx, &n, body); err != nil {
 		return err
 	}
 	if err = o.upper.checkNodeView(ctx, guard); err != nil {
 		return err
 	}
+	n.blob.digest = sha256.Sum256(body)
 	after := encodeOverlayRoot(o.lowerID, n.blob)
 	if len(n.edits) > 0 {
-		committed, e := o.upper.transact(ctx, []fsTxMember{{id: FilesystemRootID(), version: info.Version, before: raw, after: after, writes: n.edits}})
+		committed, e := o.upper.transact(ctx, []fsTxMember{{id: FilesystemRootID(), before: raw, after: after, writes: n.edits}})
 		if e != nil {
 			return e
 		}
@@ -213,12 +219,12 @@ func (o *OverlayFilesystem) publish(ctx context.Context, s *overlayState, versio
 		}
 		return nil
 	}
-	_, err = o.upper.store.CAS(ctx, FilesystemRootID(), 0, nil, after, CASOptions{Scope: CASObject, MutationOptions: MutationOptions{RequestID: NewRequestID(), ExpectedVersion: &version}})
+	_, err = o.upper.store.CAS(ctx, FilesystemRootID(), 0, raw, after, CASOptions{Scope: CASObject, MutationOptions: MutationOptions{RequestID: NewRequestID()}})
 	return err
 }
 func (o *OverlayFilesystem) edit(ctx context.Context, fn func(*overlayState) error) error {
 	for attempt := 0; attempt < 128; attempt++ {
-		s, info, _, err := o.state(ctx)
+		s, _, _, err := o.state(ctx)
 		if err != nil {
 			return err
 		}
@@ -228,7 +234,7 @@ func (o *OverlayFilesystem) edit(ctx context.Context, fn func(*overlayState) err
 		} else if err != nil {
 			return err
 		}
-		err = o.publish(ctx, s, info.Version)
+		err = o.publish(ctx, s)
 		if errors.Is(err, ErrPrecondition) {
 			continue
 		}
@@ -236,7 +242,7 @@ func (o *OverlayFilesystem) edit(ctx context.Context, fn func(*overlayState) err
 	}
 	return syscall.EAGAIN
 }
-func (o *OverlayFilesystem) stat(ctx context.Context, s *overlayState, version uint64, id ObjectID) (FSInfo, error) {
+func (o *OverlayFilesystem) stat(ctx context.Context, s *overlayState, rootKey string, id ObjectID) (FSInfo, error) {
 	if dir := s.dirs[id]; dir != nil {
 		n := dir.node
 		if !dir.metadata && !dir.opaque && !n.removed {
@@ -247,9 +253,9 @@ func (o *OverlayFilesystem) stat(ctx context.Context, s *overlayState, version u
 			n.mode, n.uid, n.gid, n.mtime = base.mode, base.uid, base.gid, base.mtime
 			n.atime, n.ctime = base.atime, base.ctime
 		}
-		return fsInfo(id, n, ObjectInfo{Version: version}), nil
+		return fsInfo(id, n, ObjectInfo{}), nil
 	}
-	if !overlayUpperReference(s, id) && o.upperMissing(id, version, false) {
+	if !overlayUpperReference(s, id) && o.upperMissing(id, rootKey, false) {
 		return o.lower.Stat(ctx, id)
 	}
 	n, info, err := o.upper.load(ctx, id)
@@ -257,7 +263,7 @@ func (o *OverlayFilesystem) stat(ctx context.Context, s *overlayState, version u
 		if overlayUpperReference(s, id) {
 			return FSInfo{}, ErrNotFound
 		}
-		o.upperMissing(id, version, true)
+		o.upperMissing(id, rootKey, true)
 		return o.lower.Stat(ctx, id)
 	}
 	if err != nil {
@@ -386,13 +392,13 @@ func (o *OverlayFilesystem) pathID(ctx context.Context, s *overlayState, p strin
 	}
 	return id, nil
 }
-func (o *OverlayFilesystem) path(ctx context.Context, s *overlayState, version uint64, target ObjectID) (string, error) {
+func (o *OverlayFilesystem) path(ctx context.Context, s *overlayState, rootKey string, target ObjectID) (string, error) {
 	if target == FilesystemRootID() {
 		return "", nil
 	}
 	o.mu.Lock()
 	cached, ok := o.paths[target]
-	if o.cacheVersion != version {
+	if o.cacheRoot != rootKey {
 		ok = false
 	}
 	o.mu.Unlock()
@@ -405,15 +411,21 @@ func (o *OverlayFilesystem) path(ctx context.Context, s *overlayState, version u
 	seen := map[ObjectID]bool{}
 	var walk func(ObjectID, string, int) error
 	walk = func(id ObjectID, p string, depth int) error {
-		if depth > 1024 || seen[id] {
+		if depth > 1024 {
 			return ErrFSFormat
 		}
-		seen[id] = true
-		paths[id] = p
-		info, err := o.stat(ctx, s, version, id)
+		info, err := o.stat(ctx, s, rootKey, id)
 		if err != nil {
 			return err
 		}
+		if seen[id] {
+			if info.Directory {
+				return ErrFSFormat
+			}
+			return nil
+		}
+		seen[id] = true
+		paths[id] = p
 		if !info.Directory {
 			return nil
 		}
@@ -436,7 +448,7 @@ func (o *OverlayFilesystem) path(ctx context.Context, s *overlayState, version u
 		return "", err
 	}
 	o.mu.Lock()
-	o.cacheVersion = version
+	o.cacheRoot = rootKey
 	o.paths = paths
 	o.mu.Unlock()
 	p, ok := paths[target]
@@ -451,15 +463,15 @@ func overlayChildPath(parent, name string) string {
 	}
 	return parent + "/" + name
 }
-func (o *OverlayFilesystem) writable(ctx context.Context, s *overlayState, version uint64, id ObjectID) (string, error) {
-	info, err := o.stat(ctx, s, version, id)
+func (o *OverlayFilesystem) writable(ctx context.Context, s *overlayState, rootKey string, id ObjectID) (string, error) {
+	info, err := o.stat(ctx, s, rootKey, id)
 	if err != nil {
 		return "", err
 	}
 	if info.Removed {
 		return "", syscall.ENOENT
 	}
-	p, err := o.path(ctx, s, version, id)
+	p, err := o.path(ctx, s, rootKey, id)
 	if errors.Is(err, syscall.ENOENT) && !info.Directory {
 		n, _, e := o.upper.load(ctx, id)
 		if e == nil && n.writePath != "" && overlayAllowed(s.policy, n.writePath, false) {
@@ -475,19 +487,19 @@ func (o *OverlayFilesystem) writable(ctx context.Context, s *overlayState, versi
 	return p, nil
 }
 func (o *OverlayFilesystem) CheckWrite(ctx context.Context, id ObjectID) error {
-	s, info, _, err := o.state(ctx)
+	s, _, _, err := o.state(ctx)
 	if err != nil {
 		return err
 	}
-	_, err = o.writable(ctx, s, info.Version, id)
+	_, err = o.writable(ctx, s, string(s.rootRaw), id)
 	return err
 }
 func (o *OverlayFilesystem) Stat(ctx context.Context, id ObjectID) (FSInfo, error) {
-	s, info, _, err := o.state(ctx)
+	s, _, _, err := o.state(ctx)
 	if err != nil {
 		return FSInfo{}, err
 	}
-	return o.stat(ctx, s, info.Version, id)
+	return o.stat(ctx, s, string(s.rootRaw), id)
 }
 func (o *OverlayFilesystem) ReadDir(ctx context.Context, id ObjectID) ([]FSEntry, error) {
 	s, _, _, err := o.state(ctx)
@@ -497,7 +509,7 @@ func (o *OverlayFilesystem) ReadDir(ctx context.Context, id ObjectID) ([]FSEntry
 	return o.entries(ctx, s, id)
 }
 func (o *OverlayFilesystem) Lookup(ctx context.Context, parent ObjectID, name string) (FSInfo, error) {
-	s, info, _, err := o.state(ctx)
+	s, _, _, err := o.state(ctx)
 	if err != nil {
 		return FSInfo{}, err
 	}
@@ -505,7 +517,7 @@ func (o *OverlayFilesystem) Lookup(ctx context.Context, parent ObjectID, name st
 	if err != nil {
 		return FSInfo{}, err
 	}
-	return o.stat(ctx, s, info.Version, id)
+	return o.stat(ctx, s, string(s.rootRaw), id)
 }
 func (o *OverlayFilesystem) ReadAt(ctx context.Context, id ObjectID, dst []byte, offset int64) (int, error) {
 	if offset < 0 {
@@ -515,14 +527,13 @@ func (o *OverlayFilesystem) ReadAt(ctx context.Context, id ObjectID, dst []byte,
 		return 0, syscall.EISDIR
 	}
 	var state *overlayState
-	var head ObjectInfo
 	if _, ok := o.upper.store.(filesystemChangeStore); ok {
 		var err error
-		state, head, _, err = o.state(ctx)
+		state, _, _, err = o.state(ctx)
 		if err != nil {
 			return 0, err
 		}
-		if !overlayUpperReference(state, id) && o.upperMissing(id, head.Version, false) {
+		if !overlayUpperReference(state, id) && o.upperMissing(id, string(state.rootRaw), false) {
 			return o.lower.ReadAt(ctx, id, dst, offset)
 		}
 	}
@@ -531,7 +542,7 @@ func (o *OverlayFilesystem) ReadAt(ctx context.Context, id ObjectID, dst []byte,
 		s := state
 		if s == nil {
 			var e error
-			s, head, _, e = o.state(ctx)
+			s, _, _, e = o.state(ctx)
 			if e != nil {
 				return 0, e
 			}
@@ -539,7 +550,7 @@ func (o *OverlayFilesystem) ReadAt(ctx context.Context, id ObjectID, dst []byte,
 		if overlayUpperReference(s, id) {
 			return 0, ErrNotFound
 		}
-		o.upperMissing(id, head.Version, true)
+		o.upperMissing(id, string(s.rootRaw), true)
 		return o.lower.ReadAt(ctx, id, dst, offset)
 	}
 	if err != nil {
@@ -572,15 +583,15 @@ func (o *OverlayFilesystem) Sync(ctx context.Context, id ObjectID) error {
 }
 
 func (o *OverlayFilesystem) copyUp(ctx context.Context, id ObjectID) error {
-	s, info, _, err := o.state(ctx)
+	s, _, _, err := o.state(ctx)
 	if err != nil {
 		return err
 	}
-	p, err := o.writable(ctx, s, info.Version, id)
+	p, err := o.writable(ctx, s, string(s.rootRaw), id)
 	if err != nil {
 		return err
 	}
-	visible, err := o.stat(ctx, s, info.Version, id)
+	visible, err := o.stat(ctx, s, string(s.rootRaw), id)
 	if err != nil {
 		return err
 	}
@@ -596,7 +607,7 @@ func (o *OverlayFilesystem) copyUp(ctx context.Context, id ObjectID) error {
 	}
 	_, _, err = o.upper.store.Get(ctx, id)
 	if errors.Is(err, ErrNotFound) {
-		n, base, err := o.lower.load(ctx, id)
+		n, _, err := o.lower.load(ctx, id)
 		if err != nil {
 			return err
 		}
@@ -608,7 +619,11 @@ func (o *OverlayFilesystem) copyUp(ctx context.Context, id ObjectID) error {
 				return err
 			}
 		}
-		n.blob = fsBlob{length: n.blob.length, source: id, sourceVersion: base.Version}
+		n.blob.lower = n.blob.root != (ObjectID{})
+		if n.blob.lower {
+			n.blob.lowerOwner = id
+			n.blob.lowerDigest = lowerDataFingerprint(n)
+		}
 		n.writePath = p
 		_, err = o.upper.store.CAS(ctx, id, 0, nil, encodeFSNode(n), CASOptions{Scope: CASObject, MutationOptions: MutationOptions{RequestID: NewRequestID(), Absent: true}})
 		if err != nil && !errors.Is(err, ErrPrecondition) {
@@ -713,7 +728,7 @@ func (o *OverlayFilesystem) SetAttributes(ctx context.Context, id ObjectID, a FS
 		return FSInfo{}, syscall.EISDIR
 	}
 	err = o.edit(ctx, func(s *overlayState) error {
-		if _, e := o.writable(ctx, s, 0, id); e != nil {
+		if _, e := o.writable(ctx, s, string(s.rootRaw), id); e != nil {
 			return e
 		}
 		dir, e := o.directory(ctx, s, id)
@@ -739,7 +754,7 @@ func (o *OverlayFilesystem) SetAttributes(ctx context.Context, id ObjectID, a FS
 }
 
 func cloneOverlayState(s *overlayState) *overlayState {
-	next := &overlayState{policy: append([]string(nil), s.policy...), dirs: make(map[ObjectID]*overlayDirectory, len(s.dirs))}
+	next := &overlayState{rootRaw: append([]byte(nil), s.rootRaw...), policy: append([]string(nil), s.policy...), dirs: make(map[ObjectID]*overlayDirectory, len(s.dirs))}
 	for id, d := range s.dirs {
 		copyDir := *d
 		copyDir.entries = make(map[string]ObjectID, len(d.entries))
@@ -769,18 +784,19 @@ func filesystemStoreBucket(store FilesystemStore) (BucketID, bool) {
 // A missing upper inode can be reused only while the subscribed namespace head
 // is unchanged. Copy-up publishes its dentry before changing content. Orphaned
 // upper inodes remain readable: successful upper probes are never cached absent.
-func (o *OverlayFilesystem) resetAbsent(info ObjectInfo) {
+func (o *OverlayFilesystem) resetAbsent(info ObjectInfo, raw []byte) {
 	o.absentMu.Lock()
 	defer o.absentMu.Unlock()
-	if o.absentInfo.Version != info.Version || o.absentInfo.RuntimeID != info.RuntimeID {
+	if o.absentInfo.Proof != info.Proof || o.absentInfo.RuntimeID != info.RuntimeID || o.absentRoot != string(raw) {
 		o.absentInfo = info
+		o.absentRoot = string(raw)
 		o.absentUpper = map[ObjectID]bool{}
 	}
 }
-func (o *OverlayFilesystem) upperMissing(id ObjectID, version uint64, record bool) bool {
+func (o *OverlayFilesystem) upperMissing(id ObjectID, rootKey string, record bool) bool {
 	o.absentMu.Lock()
 	defer o.absentMu.Unlock()
-	if o.absentInfo.Version != version {
+	if o.absentInfo.Proof.Subscription == (ID{}) || o.absentRoot != rootKey {
 		return false
 	}
 	if record {

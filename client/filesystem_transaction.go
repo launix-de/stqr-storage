@@ -2,7 +2,7 @@
 package client
 
 // Namespace transactions use ordinary bucket objects. A durable descriptor
-// lists expected inode images/versions and replacements; small inode markers
+// lists expected inode images and replacements; small inode markers
 // refer to it. Readers help finish interrupted transactions before using an
 // inode. All participants are acquired in OID order, avoiding lock cycles.
 
@@ -28,7 +28,6 @@ type fsSnapshot struct {
 }
 type fsTxMember struct {
 	id            ObjectID
-	version       uint64
 	before, after []byte
 	writes        []fsBlockWrite
 }
@@ -61,18 +60,12 @@ func fsLockID(raw []byte) (ObjectID, bool, error) {
 }
 func encodeFSTransaction(tx fsTransaction) []byte {
 	e := Encoder{B: []byte("STFT")}
-	version := uint16(1)
-	for _, m := range tx.members {
-		if len(m.writes) > 0 {
-			version = 2
-		}
-	}
+	version := uint16(3)
 	e.U16(version)
 	e.U8(tx.state)
 	e.U32(uint32(len(tx.members)))
 	for _, m := range tx.members {
 		e.B = append(e.B, m.id[:]...)
-		e.U64(m.version)
 		e.Blob(m.before)
 		e.Blob(m.after)
 		if version >= 2 {
@@ -86,7 +79,7 @@ func decodeFSTransaction(raw []byte, id ObjectID) (fsTransaction, error) {
 	d := Decoder{B: raw}
 	magic := string(d.Take(4))
 	version := d.U16()
-	if len(raw) > fsMaxIntentBytes || magic != "STFT" || (version != 1 && version != 2) {
+	if len(raw) > fsMaxIntentBytes || magic != "STFT" || (version != 1 && version != 2 && version != 3) {
 		return tx, ErrFSFormat
 	}
 	tx.state = d.U8()
@@ -97,17 +90,19 @@ func decodeFSTransaction(raw []byte, id ObjectID) (fsTransaction, error) {
 	for i := uint32(0); i < count; i++ {
 		var m fsTxMember
 		copy(m.id[:], d.Take(32))
-		m.version = d.U64()
+		if version < 3 {
+			d.U64()
+		} // obsolete per-object precondition, never used
 		m.before = d.Blob()
 		m.after = d.Blob()
 		if version >= 2 {
 			var err error
-			m.writes, err = decodeFSWrites(&d)
+			m.writes, err = decodeFSWrites(&d, version < 3)
 			if err != nil {
 				return tx, err
 			}
 		}
-		if d.Err != nil || m.id == (ObjectID{}) || m.id == id || m.version == 0 || i > 0 && bytes.Compare(tx.members[i-1].id[:], m.id[:]) >= 0 {
+		if d.Err != nil || m.id == (ObjectID{}) || m.id == id || i > 0 && bytes.Compare(tx.members[i-1].id[:], m.id[:]) >= 0 {
 			return tx, ErrFSFormat
 		}
 		if len(m.before) >= 4 && string(m.before[:4]) == "STOR" {
@@ -156,7 +151,7 @@ func (f *Filesystem) snapshot(ctx context.Context, id ObjectID) (fsSnapshot, err
 		}
 		node, err := decodeFSNode(raw)
 		node.identity = id
-		node.version = info.Version
+		node.head = bytes.Clone(raw)
 		return fsSnapshot{id, node, info, raw}, err
 	}
 	return fsSnapshot{}, syscall.EAGAIN
@@ -164,7 +159,7 @@ func (f *Filesystem) snapshot(ctx context.Context, id ObjectID) (fsSnapshot, err
 
 // A reader with no CAS grant can still observe a marker's logical snapshot.
 // PENDING exposes the old committed image; COMMITTED exposes the new image.
-// Mutators always use snapshot(), so a virtual version cannot overwrite a lock.
+// Mutators always use snapshot(), so a virtual inode image cannot overwrite a lock.
 func (f *Filesystem) readLockedSnapshot(ctx context.Context, id ObjectID) (fsNode, ObjectInfo, error) {
 	for attempt := 0; attempt < 128; attempt++ {
 		n, info, err := f.readLockedSnapshotOnce(ctx, id)
@@ -186,10 +181,10 @@ func (f *Filesystem) readLockedSnapshotOnce(ctx context.Context, id ObjectID) (f
 	if !locked {
 		n, e := decodeFSNode(raw)
 		n.identity = id
-		n.version = info.Version
+		n.head = bytes.Clone(raw)
 		return n, info, e
 	}
-	tx, txInfo, _, err := f.loadIntent(ctx, txID)
+	tx, _, txRaw, err := f.loadIntent(ctx, txID)
 	if err != nil {
 		if errors.Is(err, ErrNotFound) {
 			err = ErrPrecondition
@@ -207,9 +202,9 @@ func (f *Filesystem) readLockedSnapshotOnce(ctx context.Context, id ObjectID) (f
 			}
 			n, e := decodeFSNode(image)
 			n.identity = id
-			n.version = info.Version
+			n.head = bytes.Clone(raw)
 			n.guardTx = txID
-			n.guardVersion = txInfo.Version
+			n.guardRaw = bytes.Clone(txRaw)
 			if tx.state == fsTxCommitted {
 				n.blob.view = fsWriteView(m.writes)
 			}
@@ -242,7 +237,7 @@ func (f *Filesystem) transact(ctx context.Context, members []fsTxMember) (bool, 
 	return f.helpTransaction(ctx, id, 0)
 }
 
-// Recovery under exclusive fsck may complete intents and change inode versions.
+// Recovery under exclusive fsck may complete intents and change inode images.
 // Reach a stable namespace before taking the sweep inventory; old descriptors
 // become ordinary garbage after every reachable marker has been resolved.
 func (f *Filesystem) recoverNamespace(ctx context.Context) error {
@@ -315,7 +310,7 @@ func (f *Filesystem) helpTransaction(ctx context.Context, id ObjectID, depth int
 		if err := ctx.Err(); err != nil {
 			return false, err
 		}
-		tx, info, raw, err := f.loadIntent(ctx, id)
+		tx, _, raw, err := f.loadIntent(ctx, id)
 		if err != nil {
 			return false, err
 		}
@@ -350,7 +345,7 @@ func (f *Filesystem) helpTransaction(ctx context.Context, id ObjectID, depth int
 			// removed its marker; only our own markers can be replaced here.
 			for _, m := range tx.members {
 				for {
-					current, version, e := f.store.Get(ctx, m.id)
+					current, _, e := f.store.Get(ctx, m.id)
 					if e != nil {
 						return false, e
 					}
@@ -361,7 +356,7 @@ func (f *Filesystem) helpTransaction(ctx context.Context, id ObjectID, depth int
 					if tx.state == fsTxCommitted {
 						next = m.after
 					}
-					_, e = f.store.CAS(ctx, m.id, 0, nil, next, CASOptions{Scope: CASObject, MutationOptions: MutationOptions{RequestID: NewRequestID(), ExpectedVersion: &version.Version}})
+					_, e = f.store.CAS(ctx, m.id, 0, current, next, CASOptions{Scope: CASObject, MutationOptions: MutationOptions{RequestID: NewRequestID()}})
 					if errors.Is(e, ErrPrecondition) {
 						continue
 					}
@@ -371,12 +366,12 @@ func (f *Filesystem) helpTransaction(ctx context.Context, id ObjectID, depth int
 					break
 				}
 			}
-			f.retireIntentPayload(ctx, id, tx, raw, info)
+			f.retireIntentPayload(ctx, id, tx, raw, ObjectInfo{})
 			return tx.state == fsTxCommitted, nil
 		}
 		decision := uint8(fsTxCommitted)
 		for _, m := range tx.members {
-			current, version, e := f.store.Get(ctx, m.id)
+			current, _, e := f.store.Get(ctx, m.id)
 			if e != nil {
 				return false, e
 			}
@@ -394,14 +389,14 @@ func (f *Filesystem) helpTransaction(ctx context.Context, id ObjectID, depth int
 				decision = fsTxPending
 				break // reload our decision and this inode
 			}
-			if version.Version != m.version || !bytes.Equal(current, m.before) {
+			if !bytes.Equal(current, m.before) {
 				decision = fsTxAborted
 				break
 			}
-			// A decision can race this CAS. ExpectedVersion prevents re-locking
-			// an inode already unlocked by a helper. A late marker after abort
-			// still refers to a durable ABORTED descriptor and is helped away.
-			_, e = f.store.CAS(ctx, m.id, 0, nil, marker, CASOptions{Scope: CASObject, MutationOptions: MutationOptions{RequestID: NewRequestID(), ExpectedVersion: &version.Version}})
+			// Compare the complete observed inode under the storage lock. A late
+			// marker still refers to this durable transaction descriptor and is
+			// resolved using its committed/aborted decision.
+			_, e = f.store.CAS(ctx, m.id, 0, current, marker, CASOptions{Scope: CASObject, MutationOptions: MutationOptions{RequestID: NewRequestID()}})
 			if errors.Is(e, ErrPrecondition) {
 				decision = fsTxPending
 				break
@@ -414,9 +409,9 @@ func (f *Filesystem) helpTransaction(ctx context.Context, id ObjectID, depth int
 			continue
 		}
 		tx.state = decision
-		raw = bytes.Clone(raw)
-		raw[6] = decision
-		_, err = f.store.CAS(ctx, id, 0, nil, raw, CASOptions{Scope: CASObject, MutationOptions: MutationOptions{RequestID: NewRequestID(), ExpectedVersion: &info.Version}})
+		nextRaw := bytes.Clone(raw)
+		nextRaw[6] = decision
+		_, err = f.store.CAS(ctx, id, 0, raw, nextRaw, CASOptions{Scope: CASObject, MutationOptions: MutationOptions{RequestID: NewRequestID()}})
 		if err != nil && !errors.Is(err, ErrPrecondition) {
 			return false, err
 		}
@@ -425,5 +420,5 @@ func (f *Filesystem) helpTransaction(ctx context.Context, id ObjectID, depth int
 }
 
 func fsMember(s fsSnapshot, next fsNode) fsTxMember {
-	return fsTxMember{id: s.id, version: s.info.Version, before: s.raw, after: encodeFSNode(next), writes: next.edits}
+	return fsTxMember{id: s.id, before: s.raw, after: encodeFSNode(next), writes: next.edits}
 }

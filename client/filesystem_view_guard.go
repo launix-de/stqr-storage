@@ -2,6 +2,7 @@
 package client
 
 import (
+	"bytes"
 	"context"
 	"errors"
 )
@@ -13,23 +14,23 @@ func (f *Filesystem) checkNodeView(ctx context.Context, n fsNode) error {
 		return nil
 	}
 	if n.guardTx != (ObjectID{}) {
-		info, err := f.blockInfo(ctx, n.guardTx)
+		raw, _, err := f.store.Get(ctx, n.guardTx)
 		if errors.Is(err, ErrNotFound) {
 			return ErrPrecondition
 		}
 		if err != nil {
 			return err
 		}
-		if info.Version != n.guardVersion {
+		if !bytes.Equal(raw, n.guardRaw) {
 			return ErrPrecondition
 		}
 		return nil
 	}
-	info, err := f.blockInfo(ctx, n.identity)
+	raw, _, err := f.store.Get(ctx, n.identity)
 	if err != nil {
 		return err
 	}
-	if info.Version != n.version {
+	if !bytes.Equal(raw, n.head) {
 		if cache, ok := f.store.(*SubscriptionStore); ok {
 			cache.remove(n.identity, nil)
 		}

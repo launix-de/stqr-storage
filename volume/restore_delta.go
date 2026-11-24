@@ -1,20 +1,24 @@
 // SPDX-License-Identifier: GPL-3.0-only
 package volume
 
-import "bytes"
+import (
+	"bytes"
+	"crypto/sha256"
+	"io"
+)
 
 // RestorePatch is one changed logical interval of a fenced migration shadow.
-// Intervals must be disjoint and sorted. The complete source version is published
-// atomically with all patches; intermediate object versions are never visible.
+// Intervals must be disjoint and sorted. The complete source contents is published
+// atomically with all patches; intermediate objects are never visible.
 type RestorePatch struct {
 	Offset uint64
 	Data   []byte
 }
 
 // RestoreDelta patches an existing non-authoritative raw snapshot in place. It
-// requires the exact previously imported version and unchanged logical length.
-// Ordinary client mutations must use PUT_RANGE rather than supplying versions.
-func (h *Handle) RestoreDelta(k Key, base uint64, info Info, patches []RestorePatch, opts Options) error {
+// requires the exact previously imported bytes and unchanged logical length.
+// Ordinary client mutations must use PUT_RANGE rather than this trusted import operation.
+func (h *Handle) RestoreDelta(k Key, base [32]byte, info Info, patches []RestorePatch, opts Options) error {
 	return h.do(true, func(v *Volume) error {
 		if opts.RequestID != (ID{}) || opts.Compression != nil && *opts.Compression != Raw {
 			return ErrRange
@@ -23,10 +27,24 @@ func (h *Handle) RestoreDelta(k Key, base uint64, info Info, patches []RestorePa
 		if err != nil {
 			return err
 		}
-		if err = precondition(old, opts); err != nil {
+		if err = v.precondition(old, opts); err != nil {
 			return err
 		}
-		if !old.importShadow || !opts.ImportShadow || old.Info.Version != base || info.Version <= base || info.Deleted || old.Info.Deleted || info.Length != old.Info.Length || info.Compression != Raw || old.Info.Compression != Raw {
+		if !old.importShadow || !opts.ImportShadow || info.Deleted || old.Info.Deleted || info.Length != old.Info.Length || info.Compression != Raw || old.Info.Compression != Raw {
+			return ErrPrecondition
+		}
+		hash := sha256.New()
+		var preimage bytes.Buffer
+		var dst io.Writer = hash
+		// Optional delta manifests are bounded to 64 MiB. Reuse these verified bytes
+		// when updating checksums, rather than reading each checksum block twice.
+		if old.Info.Length <= 64<<20 {
+			dst = io.MultiWriter(hash, &preimage)
+		}
+		if _, e := v.copyToLocked(k, 0, old.Info.Length, dst); e != nil {
+			return e
+		}
+		if !bytes.Equal(hash.Sum(nil), base[:]) {
 			return ErrPrecondition
 		}
 		if busy, e := v.pending(k); e != nil {
@@ -55,7 +73,7 @@ func (h *Handle) RestoreDelta(k Key, base uint64, info Info, patches []RestorePa
 		dense = dense && covered == info.Length
 		if dense {
 			for i := range o.Spans {
-				if err = t.patchRawBatch(&o.Spans[i], patches); err != nil {
+				if err = t.patchRawBatch(&o.Spans[i], patches, preimage.Bytes()); err != nil {
 					return err
 				}
 			}

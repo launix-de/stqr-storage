@@ -1,0 +1,158 @@
+name: Object COW checks
+
+on:
+  push:
+    branches: [unversioned-bucket-cow]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  go:
+    name: Go / ${{ matrix.module }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        module: [., networkboot, windows]
+    defaults:
+      run:
+        shell: bash
+        working-directory: ${{ matrix.module }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7
+        with:
+          go-version-file: ${{ matrix.module }}/go.mod
+          cache-dependency-path: '**/go.sum'
+      - run: go vet ./...
+      - name: Unit, crash/recovery and localhost cluster tests
+        if: matrix.module != '.'
+        run: go test -race ./... -count=1 -timeout=15m
+      - name: Root packages (server suite runs in separate shards)
+        if: matrix.module == '.'
+        run: |
+          python3 - <<'PY'
+          import subprocess
+          packages = subprocess.check_output(['go', 'list', './...'], text=True).splitlines()
+          packages = [p for p in packages if p != 'github.com/launix-de/stqr-storage/server']
+          subprocess.run(['go', 'test', '-race', *packages, '-count=1', '-timeout=15m'], check=True)
+          PY
+      - name: Networkboot tools and PAM harness
+        if: matrix.module == 'networkboot'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential libpam0g-dev dnsmasq-base
+          test -f /usr/include/security/pam_modules.h
+          make all pam
+          python3 -m unittest discover -s tests -v
+          sh -n initramfs/hooks/stqr initramfs/scripts/stqr
+
+  server:
+    name: Go / server shard ${{ matrix.shard }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3]
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+      - name: Disjoint server tests, examples and fuzz seeds with race detector
+        run: python3 tools/ci/server-tests.py --shard ${{ matrix.shard }} --shards 4
+
+  dashboard:
+    name: Dashboard / Chromium
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '24'
+      - run: node --test server/dashboard_*_test.mjs
+      - run: npm ci --prefix tools/ci --no-audit --no-fund
+      - run: npm exec --prefix tools/ci -- playwright install --with-deps chromium
+      - name: Select the installed browser and module
+        working-directory: tools/ci
+        run: |
+          node - <<'NODE' >> "$GITHUB_ENV"
+          console.log('STQR_TEST_BROWSER_MODULE=' + require.resolve('playwright'));
+          console.log('STQR_TEST_BROWSER_EXECUTABLE=' + require('playwright').chromium.executablePath());
+          NODE
+      - name: Real dashboard and PG replication acceptance
+        run: go test -race ./server -run 'Browser$' -count=1 -v -timeout=10m
+
+  linux-integration:
+    name: Linux / C, FUSE and NBD
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      STQR_TEST_C: '1'
+      STQR_C_SANITIZE: '1'
+      STQR_TEST_FUSE: '1'
+      STQR_TEST_NETWORKBOOT: '1'
+      ASAN_OPTIONS: detect_leaks=1:abort_on_error=1
+      UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: '**/go.sum'
+      - name: Native test dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential libssl-dev fuse3 rsync php-cli qemu-utils
+          sudo modprobe fuse
+          sudo chmod a+rw /dev/fuse
+          test -r /dev/fuse -a -w /dev/fuse
+      - run: make -C client/c all check
+      - run: make -C qemu-plugin-nbd all
+      - run: make -C networkboot all
+      - name: Real native clients against disposable localhost fixtures
+        # Kernel here means FUSE/VFS mounts, not loading the kstqr module.
+        run: go test -race ./client ./server -p=1 -run 'Test(CClient|.*Networkboot.*|.*Kernel.*|.*Rsync.*|BucketNativeOverlayPHPCluster)$' -count=1 -v -timeout=15m
+
+  windows:
+    name: Windows / native callbacks and setup
+    runs-on: windows-2025
+    timeout-minutes: 15
+    env:
+      CGO_ENABLED: '0'
+    defaults:
+      run:
+        working-directory: windows
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7
+        with:
+          go-version-file: windows/go.mod
+          cache-dependency-path: '**/go.sum'
+      - run: go test ./... -count=1 -timeout=10m
+      - run: go build -buildvcs=false -ldflags="-H=windowsgui" -o stqr-windows.exe ./cmd/stqr-windows
+

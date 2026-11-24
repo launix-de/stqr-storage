@@ -23,7 +23,7 @@ func dialTestSocket(t *testing.T, host, username, password, bucket string) (*web
 	if bucket != "" {
 		r.Header.Set(client.BucketHeader, bucket)
 	}
-	d := websocket.Dialer{Subprotocols: []string{"stqr.v1"}}
+	d := websocket.Dialer{Subprotocols: []string{"stqr.v2"}}
 	return d.Dial("ws"+strings.TrimPrefix(host, "http")+"/api/ws", r.Header)
 }
 func TestConnectionChecksBucketGrantAtUpgrade(t *testing.T) {
@@ -112,11 +112,11 @@ func TestConnectionDataPathHasNoAccountOrGrantLookups(t *testing.T) {
 		if _, err = c.Stat(ctx, oid); err != nil {
 			t.Fatal(err)
 		}
-		appended, err := c.Append(ctx, oid, []byte("!"), client.AppendOptions{})
+		_, err = c.Append(ctx, oid, []byte("!"), client.AppendOptions{})
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, err = c.CAS(ctx, oid, 0, []byte("initial"), []byte("initial"), client.CASOptions{MutationOptions: client.MutationOptions{ExpectedVersion: &appended.Version}}); err != nil {
+		if _, err = c.CAS(ctx, oid, 0, []byte("initial"), []byte("initial"), client.CASOptions{MutationOptions: client.MutationOptions{}}); err != nil {
 			t.Fatal(err)
 		}
 	}

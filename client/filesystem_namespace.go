@@ -201,7 +201,7 @@ func (f *Filesystem) planRename(ctx context.Context, parent ObjectID, name strin
 	checks := map[ObjectID]fsSnapshot{}
 	consistent := true
 	add := func(s fsSnapshot) {
-		if old, ok := checks[s.id]; ok && (old.info.Version != s.info.Version || !bytes.Equal(old.raw, s.raw)) {
+		if old, ok := checks[s.id]; ok && (!bytes.Equal(old.raw, s.raw)) {
 			consistent = false
 		}
 		checks[s.id] = s

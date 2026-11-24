@@ -22,7 +22,7 @@ func (b *Bucket) lostRange(object volume.ObjectID) bool {
 // establishes known absence. Their new canonical records allow normal access.
 // Partial create operations must not turn a lost object into a short fragment.
 func (b *Bucket) absenceError(object volume.ObjectID, info volume.Info, err error) error {
-	if errors.Is(err, volume.ErrNotFound) && info.Version == 0 && b.lostRange(object) {
+	if errors.Is(err, volume.ErrNotFound) && !info.Deleted && b.lostRange(object) {
 		return fail(410, "object state was lost")
 	}
 	return err

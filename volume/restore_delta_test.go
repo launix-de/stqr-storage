@@ -3,16 +3,17 @@ package volume
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"errors"
 	"io"
 	"testing"
 )
 
-func TestRestoreDeltaKeepsAllocationAndExactSourceVersion(t *testing.T) {
+func TestRestoreDeltaKeepsAllocationAndExactBaseBytes(t *testing.T) {
 	v, d := memoryVolume(t, 8<<20)
 	key := testKey(1)
 	payload := bytes.Repeat([]byte("p"), BlockSize)
-	info := Info{Version: 11, Length: uint64(len(payload)), Compression: Raw}
+	info := Info{Length: uint64(len(payload)), Compression: Raw}
 	h, err := v.Open(true)
 	if err != nil {
 		t.Fatal(err)
@@ -26,14 +27,14 @@ func TestRestoreDeltaKeepsAllocationAndExactSourceVersion(t *testing.T) {
 	old, _ := v.loadObject(key)
 	location := old.Spans[0].Location
 	newer := info
-	newer.Version = 29
+
 	h.Close()
 	before := v.IOStats()
 	h, err = v.Open(true)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err = h.RestoreDelta(key, info.Version, newer, []RestorePatch{{Offset: 97, Data: []byte("changed")}}, Options{ImportShadow: true}); err != nil {
+	if err = h.RestoreDelta(key, sha256.Sum256(payload), newer, []RestorePatch{{Offset: 97, Data: []byte("changed")}}, Options{ImportShadow: true}); err != nil {
 		t.Fatal(err)
 	}
 	h.Close()
@@ -44,9 +45,9 @@ func TestRestoreDeltaKeepsAllocationAndExactSourceVersion(t *testing.T) {
 	}
 	next, _ := v.loadObject(key)
 	if next.Spans[0].Location != location || next.Info != newer || after.WriteBytes-before.WriteBytes > 128<<10 {
-		t.Fatal("delta copied payload or lost source version", next.Info, after.WriteBytes-before.WriteBytes)
+		t.Fatal("delta copied payload or lost source metadata", next.Info, after.WriteBytes-before.WriteBytes)
 	}
-	if err = h.RestoreDelta(key, info.Version, newer, nil, Options{ImportShadow: true}); !errors.Is(err, ErrPrecondition) {
+	if err = h.RestoreDelta(key, sha256.Sum256(payload), newer, nil, Options{ImportShadow: true}); !errors.Is(err, ErrPrecondition) {
 		t.Fatal("stale base accepted", err)
 	}
 	h.Close()
@@ -67,8 +68,8 @@ func TestRestoreDeltaRejectsAuthoritativeObjects(t *testing.T) {
 	}
 	defer h.Close()
 	next := info
-	next.Version++
-	if err = h.RestoreDelta(key, info.Version, next, []RestorePatch{{Data: []byte("bad!")}}, Options{ImportShadow: true}); !errors.Is(err, ErrPrecondition) {
+
+	if err = h.RestoreDelta(key, sha256.Sum256([]byte("keep")), next, []RestorePatch{{Data: []byte("bad!")}}, Options{ImportShadow: true}); !errors.Is(err, ErrPrecondition) {
 		t.Fatal(err)
 	}
 }
@@ -81,7 +82,7 @@ func TestRestoreDeltaScatteredPagesReadChecksumBlockOnce(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	info := Info{Version: 2, Length: BlockSize}
+	info := Info{Length: BlockSize}
 	if err = h.RestoreSeekable(key, info, func(yield func(uint64, io.Reader, uint64) error) error {
 		return yield(0, bytes.NewReader(payload), BlockSize)
 	}, Options{ImportShadow: true}); err != nil {
@@ -93,6 +94,7 @@ func TestRestoreDeltaScatteredPagesReadChecksumBlockOnce(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	baseDigest := sha256.Sum256(payload)
 	var patches []RestorePatch
 	for i := 0; i < 16; i++ {
 		off := uint64(i * 64 * 1024)
@@ -100,8 +102,8 @@ func TestRestoreDeltaScatteredPagesReadChecksumBlockOnce(t *testing.T) {
 		payload[off] = 'z'
 	}
 	next := info
-	next.Version = 9
-	if err = h.RestoreDelta(key, info.Version, next, patches, Options{ImportShadow: true}); err != nil {
+
+	if err = h.RestoreDelta(key, baseDigest, next, patches, Options{ImportShadow: true}); err != nil {
 		t.Fatal(err)
 	}
 	h.Close()
@@ -120,7 +122,7 @@ func TestRestoreDeltaCrashAtEveryCommitStep(t *testing.T) {
 	}
 	key := testKey(1)
 	original := bytes.Repeat([]byte("x"), BlockSize)
-	info := Info{Version: 2, Length: BlockSize}
+	info := Info{Length: BlockSize}
 	h, err := v.Open(true)
 	if err != nil {
 		t.Fatal(err)
@@ -137,7 +139,7 @@ func TestRestoreDeltaCrashAtEveryCommitStep(t *testing.T) {
 		copy(expected[p.Offset:], p.Data)
 	}
 	next := info
-	next.Version = 9
+
 	for _, through := range []bool{false, true} {
 		for _, persist := range []bool{false, true} {
 			failures := 0
@@ -155,7 +157,7 @@ func TestRestoreDeltaCrashAtEveryCommitStep(t *testing.T) {
 				if e != nil {
 					t.Fatal(e)
 				}
-				e = h.RestoreDelta(key, info.Version, next, patches, Options{ImportShadow: true})
+				e = h.RestoreDelta(key, sha256.Sum256(original), next, patches, Options{ImportShadow: true})
 				h.Close()
 				if e != nil {
 					failures++
@@ -168,7 +170,7 @@ func TestRestoreDeltaCrashAtEveryCommitStep(t *testing.T) {
 					t.Fatalf("step=%d reopen: %v", step, re)
 				}
 				got, actual, re := testGet(recovered, key)
-				if re != nil || !(bytes.Equal(got, original) && actual.Version == info.Version || bytes.Equal(got, expected) && actual.Version == next.Version) {
+				if re != nil || !(bytes.Equal(got, original) || bytes.Equal(got, expected)) {
 					t.Fatalf("step=%d torn delta, info=%+v err=%v", step, actual, re)
 				}
 				if e == nil && !bytes.Equal(got, expected) {

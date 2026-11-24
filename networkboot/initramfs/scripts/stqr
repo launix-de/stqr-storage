@@ -6,38 +6,19 @@ mountroot() {
     . /scripts/functions
     configure_networking
     stqr_server=""
-    stqr_port=2049
-    stqr_release=""
-    stqr_upper_port=""
+    stqr_port=8088
+    stqr_session=""
     for arg in $(cat /proc/cmdline); do
         case "$arg" in
             stqr.server=*) stqr_server=${arg#*=} ;;
-            stqr.upper-port=*) stqr_upper_port=${arg#*=} ;;
-            stqr.release=*) stqr_release=${arg#*=} ;;
-            stqr.nfsport=*) stqr_port=${arg#*=} ;;
+            stqr.http-port=*) stqr_port=${arg#*=} ;;
+            stqr.session=*) stqr_session=${arg#*=} ;;
         esac
     done
     [ -n "$stqr_server" ] || panic "STQR boot server missing"
-    case "$stqr_release" in *[!0-9a-f]*|"") panic "Invalid STQR release" ;; esac
-    [ "${#stqr_release}" = 64 ] || panic "Invalid STQR release length"
-    modprobe nfs
-    modprobe overlay
-    modprobe squashfs
-    modprobe loop
-    mkdir -p /run/stqr/lower /run/stqr/export /run/stqr/ram "$rootmnt"
-    mount -t nfs -o "ro,vers=3,proto=tcp,port=$stqr_port,mountport=$stqr_port,mountproto=tcp,nolock,noacl" "$stqr_server:/$stqr_release" /run/stqr/export || panic "STQR NFS root failed"
-    mount -t squashfs -o loop,ro /run/stqr/export/rootfs.squashfs /run/stqr/lower || panic "STQR root image failed"
-    if [ -n "$stqr_upper_port" ]; then
-        modprobe nbd nbds_max=4 max_part=0
-        modprobe ext4
-        /bin/stqr-nbd-client "$stqr_server" "$stqr_upper_port" /dev/nbd0 --root-storage || panic "STQR upper connection failed"
-        /sbin/mkfs.ext4 -q -F /dev/nbd0 || panic "STQR upper format failed"
-        mount -t ext4 /dev/nbd0 /run/stqr/ram || panic "STQR upper mount failed"
-    else
-        mount -t tmpfs -o mode=0700 tmpfs /run/stqr/ram || panic "STQR temporary upper failed"
-    fi
-    mkdir -p /run/stqr/ram/upper /run/stqr/ram/work
-    mount -t overlay overlay -o lowerdir=/run/stqr/lower,upperdir=/run/stqr/ram/upper,workdir=/run/stqr/ram/work "$rootmnt" || panic "STQR root overlay failed"
+    modprobe kstqr || panic "STQR kernel module unavailable"
+    mkdir -p "$rootmnt"
+    /bin/stqr-boot-root "$stqr_server" "$stqr_port" "$stqr_session" "$rootmnt" || panic "STQR native root mount failed"
     # Each boot gets its own identity and host keys; the readonly base is shared.
     : > "$rootmnt/etc/machine-id"
     rm -f "$rootmnt/var/lib/dbus/machine-id" "$rootmnt/var/lib/systemd/random-seed"

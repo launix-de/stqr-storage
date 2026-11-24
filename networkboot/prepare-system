@@ -3,12 +3,13 @@
 import argparse
 import subprocess
 from pathlib import Path
-from common import cli, ctl, extract, nbd, qemu, require, staging
+from common import (cli, ctl, extract, nbd, qemu, require, staging,
+                    prepared_release, remember_preparation, forget_preparation)
 
 def main():
     p = argparse.ArgumentParser(description='Install a Linux VM directly on a bucket-backed NBD disk, then publish its rootfs')
     p.add_argument('--config', default='stqr.yaml', help='STQR YAML (default: ./stqr.yaml) or private credentials JSON')
-    p.add_argument('bucket_name', nargs='?', help='new rootfs bucket name')
+    p.add_argument('bucket_name', nargs='?', help='rootfs bucket name; without ISO, finish preparing an existing installation')
     p.add_argument('image', nargs='?', type=Path, help='installer ISO')
     p.add_argument('--bucket', help=argparse.SUPPRESS)
     p.add_argument('--install-image', type=Path, help=argparse.SUPPRESS)
@@ -29,9 +30,12 @@ def main():
     if args.image and args.install_image:
         p.error('specify the install image only once')
     args.install_image = args.image or args.install_image
-    if not args.install_image and not args.publish_only:
-        p.error('installer ISO required')
-    require('guestfish', 'sort', 'lsinitramfs', *([] if args.publish_only else ['qemu-system-x86_64']))
+    args.publish_only = args.publish_only or not args.install_image
+    if args.resume and args.publish_only:
+        p.error('--resume requires an installer ISO; omit it to publish the installed system')
+    prepared = prepared_release(args.config, args.bucket) if args.publish_only and not args.kernel_version else None
+    require(*([] if prepared else ['guestfish', 'sort', 'lsinitramfs']),
+            *([] if args.publish_only else ['qemu-system-x86_64']))
     ctl(args.config, 'check-exclusive', args.bucket)
     if args.memory<512 or args.cpus<1:
         p.error("memory must be at least 512 MiB and CPU count positive")
@@ -42,19 +46,27 @@ def main():
     elif not args.publish_only:
         ctl(args.config, 'create', args.bucket)
         ctl(args.config, '--size', str(args.disk_gib << 30), 'init-disk', args.bucket)
-    with staging(args.work_dir, 'stqr-prepare-') as work:
-        with nbd(args.config, args.bucket, work) as socket:
-            if not args.publish_only:
-                qemu(socket, args, args.install_image)
-            print('Preparing networkboot release from the installed disk...', flush=True)
-            extract(socket, work, args.kernel_version)
-        print('Uploading and publishing networkboot release...', flush=True)
-        ctl(args.config, 'publish', args.bucket, work)
+    options = {'existing': prepared['work']} if prepared else {}
+    with staging(args.work_dir, 'stqr-prepare-', **options) as work:
+        if not prepared:
+            with nbd(args.config, args.bucket, work) as socket:
+                if not args.publish_only:
+                    qemu(socket, args, args.install_image)
+                print('Preparing networkboot release from the installed disk...', flush=True)
+                extract(socket, work, args.kernel_version)
+            remember_preparation(args.config, args.bucket, work)
+        else:
+            print('Resuming prepared image', args.bucket, flush=True)
+        if not prepared or prepared['phase'] != 'published':
+            print('Uploading and publishing networkboot release...', flush=True)
+            ctl(args.config, 'publish', args.bucket, work)
+            remember_preparation(args.config, args.bucket, work, 'published')
         print('Published', args.bucket, flush=True)
         try:
             ctl(args.config, 'gc', args.bucket)
         except subprocess.CalledProcessError:
-            raise RuntimeError(f'Image {args.bucket} is published, but cleanup failed. Disconnect bucket clients and retry: networkboot/bin/stqr-bootctl --config {args.config} gc {args.bucket}') from None
+            raise RuntimeError(f'Image {args.bucket} is published, but cleanup failed. Disconnect bucket clients and retry: networkboot/prepare-system {args.bucket}') from None
+    forget_preparation(args.config, args.bucket)
     print('Cleanup complete', flush=True)
 
 if __name__ == '__main__':

@@ -25,14 +25,14 @@ func TestAcceptedVisibleAndRetryUpgrade(t *testing.T) {
 		t.Fatal("accepted mutation touched durable backend")
 	}
 	duplicate, err := testPut(v, k, []byte("visible"), Options{RequestID: testID(1), Accepted: true})
-	if err != nil || duplicate.Version != info.Version {
+	if err != nil || duplicate != info {
 		t.Fatal(duplicate, err)
 	}
 	if _, err = testPut(v, k, []byte("changed"), Options{RequestID: testID(1), Accepted: true}); !errors.Is(err, ErrRequestID) {
 		t.Fatal(err)
 	}
 	duplicate, err = testPut(v, k, []byte("visible"), Options{RequestID: testID(1)})
-	if err != nil || duplicate.Version != info.Version {
+	if err != nil || duplicate != info {
 		t.Fatal(duplicate, err)
 	}
 	if v.IOStats().SyncOps-syncs != 4 {

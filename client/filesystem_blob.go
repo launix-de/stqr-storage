@@ -4,6 +4,7 @@ package client
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"errors"
 	"io"
 	"syscall"
@@ -47,8 +48,11 @@ func (f *Filesystem) readSegment(ctx context.Context, s fsSegment, depth uint8, 
 		return nil
 	}
 	if depth == 0 {
-		if s.lowerVersion != 0 {
-			return f.readLower(ctx, s.id, s.lowerVersion, dst, s.offset+off)
+		if s.legacyVersion != 0 {
+			return f.readLowerLegacy(ctx, s.id, dst, s.offset+off)
+		}
+		if s.lower {
+			return f.readLower(ctx, s.id, dst, s.offset+off)
 		}
 		if writes, _ := ctx.Value(fsReadViewKey{}).(map[ObjectID]fsBlockWrite); len(writes) > 0 {
 			data, _, e := f.objectBytes(ctx, s.id)
@@ -137,8 +141,43 @@ func (f *Filesystem) readSegment(ctx context.Context, s fsSegment, depth uint8, 
 	}
 	return nil
 }
+func lowerDataFingerprint(n fsNode) [32]byte {
+	e := Encoder{B: []byte("STQR readonly lower data v1\x00")}
+	e.U64(n.mtime)
+	e.U64(n.blob.length)
+	e.B = append(e.B, n.blob.root[:]...)
+	e.U8(n.blob.depth)
+	e.Blob(n.blob.inline)
+	return sha256.Sum256(e.B)
+}
+func (f *Filesystem) checkLowerAnchor(ctx context.Context, b fsBlob) error {
+	if b.lowerOwner == (ObjectID{}) {
+		return nil
+	}
+	if f.lower == nil {
+		return ErrOverlayNeedsLower
+	}
+	n, _, e := f.lower.load(ctx, b.lowerOwner)
+	if e != nil {
+		return e
+	}
+	if lowerDataFingerprint(n) != b.lowerDigest {
+		return syscall.ESTALE
+	}
+	return nil
+}
 func (f *Filesystem) readBlob(ctx context.Context, b fsBlob, dst []byte, off uint64) (int, error) {
-	if b.stamp != 0 {
+	if e := f.checkLowerAnchor(ctx, b); e != nil {
+		return 0, e
+	}
+	n, e := f.readBlobUnchecked(ctx, b, dst, off)
+	if check := f.checkLowerAnchor(ctx, b); check != nil {
+		return n, check
+	}
+	return n, e
+}
+func (f *Filesystem) readBlobUnchecked(ctx context.Context, b fsBlob, dst []byte, off uint64) (int, error) {
+	if b.mutable {
 		ctx = context.WithValue(ctx, fsSparsePageKey{}, true)
 	}
 	if b.view != nil {
@@ -149,9 +188,15 @@ func (f *Filesystem) readBlob(ctx context.Context, b fsBlob, dst []byte, off uin
 	}
 	n := int(min(uint64(len(dst)), b.length-off))
 	if b.source != (ObjectID{}) {
-		if err := f.readLower(ctx, b.source, b.sourceVersion, dst[:n], off); err != nil {
-			return 0, err
+		return n, f.readLowerLegacy(ctx, b.source, dst[:n], off)
+	}
+	if b.lower {
+		if f.lower == nil {
+			return 0, ErrOverlayNeedsLower
 		}
+		b.lower = false
+		b.lowerOwner = ObjectID{}
+		return f.lower.readBlob(ctx, b, dst, off)
 	} else if b.root == (ObjectID{}) {
 		copy(dst[:n], b.inline[off:off+uint64(n)])
 	} else if err := f.readSegment(ctx, fsSegment{length: b.length, id: b.root}, b.depth, dst[:n], off); err != nil {
@@ -200,28 +245,30 @@ func sliceFSSegments(in []fsSegment, start, end uint64) []fsSegment {
 	}
 	return out
 }
-func (f *Filesystem) readLower(ctx context.Context, id ObjectID, version uint64, dst []byte, offset uint64) error {
+func (f *Filesystem) readLowerLegacy(ctx context.Context, id ObjectID, dst []byte, offset uint64) error {
 	if f.lower == nil {
 		return ErrOverlayNeedsLower
 	}
-	n, info, err := f.lower.load(ctx, id)
+	n, _, err := f.lower.load(ctx, id)
 	if err != nil {
 		return err
-	}
-	if info.Version != version {
-		return syscall.ESTALE
 	}
 	if n.kind != fsFile || offset > n.blob.length || uint64(len(dst)) > n.blob.length-offset {
 		return ErrFSFormat
 	}
 	_, err = f.lower.readBlob(ctx, n.blob, dst, offset)
-	if check := f.lower.checkNodeView(ctx, n); errors.Is(check, ErrPrecondition) {
-		return syscall.ESTALE
-	} else if check != nil {
-		return check
+	if err != nil {
+		return err
 	}
-	return err
+	return f.lower.checkNodeView(ctx, n)
 }
+func (f *Filesystem) readLower(ctx context.Context, id ObjectID, dst []byte, offset uint64) error {
+	if f.lower == nil {
+		return ErrOverlayNeedsLower
+	}
+	return f.lower.readSegment(ctx, fsSegment{id: id, offset: offset, length: uint64(len(dst))}, 0, dst, 0)
+}
+
 func (f *Filesystem) dataSegments(ctx context.Context, data []byte) ([]fsSegment, error) {
 	var out []fsSegment
 	for len(data) > 0 {
@@ -284,4 +331,18 @@ func (f *Filesystem) blobFromBytes(ctx context.Context, data []byte) (fsBlob, er
 		return fsBlob{}, err
 	}
 	return f.buildBlob(ctx, s, uint64(len(data)))
+}
+
+func (f *Filesystem) segments(ctx context.Context, b fsBlob) ([]fsSegment, error) {
+	if b.length == 0 {
+		return nil, nil
+	}
+	if b.root != (ObjectID{}) || b.source != (ObjectID{}) || b.lower {
+		return f.segmentsReadOnly(ctx, b)
+	}
+	id, e := f.putImmutable(ctx, b.inline)
+	if e != nil {
+		return nil, e
+	}
+	return []fsSegment{{id: id, length: b.length}}, nil
 }

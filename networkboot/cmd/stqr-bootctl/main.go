@@ -33,8 +33,9 @@ type artifact struct {
 	SHA256 string          `json:"sha256"`
 }
 type manifest struct {
-	Schema int                 `json:"schema"`
-	Files  map[string]artifact `json:"files"`
+	Schema     int                 `json:"schema"`
+	RootBucket client.ID           `json:"root_bucket,omitempty"`
+	Files      map[string]artifact `json:"files"`
 }
 
 var manifestID = client.ObjectID(sha256.Sum256([]byte("STQR networkboot manifest v1")))
@@ -114,6 +115,9 @@ func resolve(ctx context.Context, c config, name string) (client.ID, error) {
 }
 func create(ctx context.Context, c config, name string) (client.ID, error) {
 	id := client.NewRequestID()
+	return createID(ctx, c, name, id)
+}
+func createID(ctx context.Context, c config, name string, id client.ID) (client.ID, error) {
 	e := client.Encoder{}
 	e.ID(id)
 	e.U64(1)
@@ -134,7 +138,7 @@ func create(ctx context.Context, c config, name string) (client.ID, error) {
 	e.Bool(true)
 	e.U64(0)
 	e.U32(150000)
-	_, err := request(ctx, c, client.BucketCreate, e.B)
+	_, err := control(ctx, c, client.BucketCreate, e.B)
 	return id, err
 }
 func loadConfig(path string) (config, error) {
@@ -154,14 +158,26 @@ func publish(ctx context.Context, c config, bucket, dir string) error {
 		return err
 	}
 	defer conn.Close()
-	old, info, err := conn.Get(ctx, manifestID)
-	_ = old
+	old, _, err := conn.Get(ctx, manifestID)
+	manifestAbsent := errors.Is(err, client.ErrNotFound)
 	if err != nil && !errors.Is(err, client.ErrNotFound) {
 		return err
 	}
-	m := manifest{Schema: 1, Files: map[string]artifact{}}
+
+	for _, name := range []string{"rootfs.tar", "vmlinuz", "initrd.img", "release.json"} {
+		if info, err := os.Stat(filepath.Join(dir, name)); err != nil {
+			return err
+		} else if !info.Mode().IsRegular() {
+			return fmt.Errorf("artifact %s is not a regular file", name)
+		}
+	}
+	m := manifest{Schema: 2, Files: map[string]artifact{}}
+	m.RootBucket, err = publishNativeRoot(ctx, c, dir)
+	if err != nil {
+		return err
+	}
 	for _, name := range names {
-		if name == "disk.qcow2" {
+		if name == "disk.qcow2" || (name == "rootfs.tar" && m.Schema == 2) {
 			continue
 		}
 		f, err := os.Open(filepath.Join(dir, name))
@@ -194,15 +210,13 @@ func publish(ctx context.Context, c config, bucket, dir string) error {
 		return err
 	}
 	opt := client.CASOptions{Scope: client.CASObject, MutationOptions: client.MutationOptions{RequestID: client.NewRequestID()}}
-	if info.Version == 0 {
+	if manifestAbsent {
 		opt.Absent = true
-	} else {
-		opt.ExpectedVersion = &info.Version
 	}
-	_, err = conn.CAS(ctx, manifestID, 0, nil, raw, opt)
+	_, err = conn.CAS(ctx, manifestID, 0, old, raw, opt)
 	return err
 }
-func fetch(ctx context.Context, c config, bucket, dir string) error {
+func fetch(ctx context.Context, c config, bucket, dir string, native bool) error {
 	conn, err := connect(ctx, c, bucket)
 	if err != nil {
 		return err
@@ -213,14 +227,17 @@ func fetch(ctx context.Context, c config, bucket, dir string) error {
 		return err
 	}
 	var m manifest
-	if err = json.Unmarshal(raw, &m); err != nil || m.Schema != 1 {
+	if err = json.Unmarshal(raw, &m); err != nil || (m.Schema != 1 && m.Schema != 2) {
 		return client.ErrProtocol
+	}
+	if native && (m.Schema != 2 || m.RootBucket == (client.ID{})) {
+		return errors.New("legacy boot release: run prepare-system --publish-only BUCKET")
 	}
 	if err = os.MkdirAll(dir, 0700); err != nil {
 		return err
 	}
 	for _, name := range names {
-		if name == "disk.qcow2" {
+		if name == "disk.qcow2" || (name == "rootfs.tar" && m.Schema == 2) {
 			continue
 		}
 		a, ok := m.Files[name]
@@ -257,8 +274,9 @@ func run() error {
 	socket := flags.String("socket", "", "NBD Unix socket")
 	device := flags.String("device", "disk.raw", "named block device/default export")
 	ro := flags.Bool("readonly", false, "readonly NBD export")
+	record := flags.String("session-record", "", "private boot-session recovery record")
 	flags.Usage = func() {
-		fmt.Fprintln(flags.Output(), "Usage: stqr-bootctl --config FILE [--size BYTES|--socket PATH] COMMAND BUCKET [ARG]\nCommands: resolve, create, clear, delete, clone SOURCE DEST, publish BUCKET DIRECTORY, fetch BUCKET DIRECTORY, init-disk, nbd, gc")
+		fmt.Fprintln(flags.Output(), "Usage: stqr-bootctl --config FILE [--size BYTES|--socket PATH] COMMAND BUCKET [ARG]\nCommands: resolve, manifest, create, clear, delete, clone SOURCE DEST, publish BUCKET DIRECTORY, fetch BUCKET DIRECTORY, init-disk, nbd, gc, boot-session-create ROOT_BUCKET, boot-session-delete USER_ID UPPER_ID LOWER_ID")
 		flags.PrintDefaults()
 	}
 	if err := flags.Parse(os.Args[1:]); err != nil {
@@ -276,6 +294,22 @@ func run() error {
 	ctx := context.Background()
 	cmd, name := args[0], args[1]
 	switch cmd {
+	case "boot-session-create", "boot-session-delete":
+		ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+		defer cancel()
+		return nativeCommand(ctx, c, cmd, args[1:], *size, *record)
+	case "manifest":
+		conn, err := connect(ctx, c, name)
+		if err != nil {
+			return err
+		}
+		defer conn.Close()
+		raw, _, err := conn.Get(ctx, manifestID)
+		if err != nil {
+			return err
+		}
+		fmt.Println(string(raw))
+		return nil
 	case "check-exclusive":
 		_, err := request(ctx, c, client.BucketMaintenanceStatus, nil)
 		return err
@@ -292,16 +326,22 @@ func run() error {
 		}
 		return err
 	case "delete":
-		id, err := resolve(ctx, c, name)
+		id, err := parseBootID(name)
+		if err != nil {
+			id, err = resolve(ctx, c, name)
+		}
 		if err != nil {
 			return err
 		}
 		e := client.Encoder{}
 		e.ID(id)
-		_, err = request(ctx, c, client.BucketDelete, e.B)
+		_, err = control(ctx, c, client.BucketDelete, e.B)
 		return err
 	case "clear", "clone":
-		src, err := resolve(ctx, c, name)
+		src, err := parseBootID(name)
+		if err != nil {
+			src, err = resolve(ctx, c, name)
+		}
 		if err != nil {
 			return err
 		}
@@ -319,16 +359,16 @@ func run() error {
 			e.ID(dst)
 			op = client.BucketClone
 		}
-		_, err = request(ctx, c, op, e.B)
+		_, err = control(ctx, c, op, e.B)
 		return err
-	case "publish", "fetch":
+	case "publish", "fetch", "fetch-native":
 		if len(args) != 3 {
 			return errors.New("directory required")
 		}
 		if cmd == "publish" {
 			return publish(ctx, c, name, args[2])
 		}
-		return fetch(ctx, c, name, args[2])
+		return fetch(ctx, c, name, args[2], cmd == "fetch-native")
 	case "gc":
 		conn, err := connect(ctx, c, name)
 		if err != nil {
@@ -343,12 +383,12 @@ func run() error {
 			return err
 		}
 		var m manifest
-		if err = json.Unmarshal(raw, &m); err != nil || m.Schema != 1 {
+		if err = json.Unmarshal(raw, &m); err != nil || (m.Schema != 1 && m.Schema != 2) {
 			return client.ErrProtocol
 		}
 		roots := []client.ObjectID{manifestID}
 		for _, name := range names {
-			if name == "disk.qcow2" {
+			if name == "disk.qcow2" || (name == "rootfs.tar" && m.Schema == 2) {
 				continue
 			}
 			a, ok := m.Files[name]

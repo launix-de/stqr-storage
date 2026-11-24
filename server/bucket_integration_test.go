@@ -98,9 +98,8 @@ func TestBucketAdminAndClientObjectsEndToEnd(t *testing.T) {
 	if err != nil || retry != app {
 		t.Fatal("append duplicated", retry, app, err)
 	}
-	expectedVersion := app.Version
-	changed, err := c.CAS(ctx, oid, 6, []byte("world"), []byte("STQR!"), client.CASOptions{MutationOptions: client.MutationOptions{RequestID: client.NewRequestID(), ExpectedVersion: &expectedVersion}})
-	if err != nil || changed.Version <= app.Version {
+	changed, err := c.CAS(ctx, oid, 6, []byte("world"), []byte("STQR!"), client.CASOptions{MutationOptions: client.MutationOptions{RequestID: client.NewRequestID()}})
+	if err != nil || changed.Length != app.Length {
 		t.Fatal(changed, err)
 	}
 	if _, err = c.CAS(ctx, oid, 0, []byte("bad"), []byte("new"), client.CASOptions{MutationOptions: client.MutationOptions{RequestID: client.NewRequestID()}}); !errors.Is(err, client.ErrPrecondition) {
@@ -465,7 +464,7 @@ func TestBucketDiskPolicyMovePreservesVersionsAndRetries(t *testing.T) {
 		t.Fatal("tier migration incomplete", d)
 	}
 	info, err := c.Stat(ctx, oid)
-	if err != nil || info.Version != original.Version || info.Compression != 1 {
+	if err != nil || info.Length != original.Length || info.Compression != 1 {
 		t.Fatal("conversion changed logical version", info, err)
 	}
 	again, err := c.Append(ctx, oid, bytes.Repeat([]byte("x"), 10000), client.AppendOptions{RequestID: request})
@@ -589,7 +588,7 @@ func TestBucketStreamingDigestFailureDoesNotCommit(t *testing.T) {
 	auth, _ := http.NewRequest(http.MethodGet, host.URL, nil)
 	auth.SetBasicAuth(admin.Username, admin.Password)
 	auth.Header.Set(client.BucketHeader, b.ID().String())
-	dialer := websocket.Dialer{Subprotocols: []string{"stqr.v1"}}
+	dialer := websocket.Dialer{Subprotocols: []string{"stqr.v2"}}
 	conn, _, err := dialer.Dial("ws"+strings.TrimPrefix(host.URL, "http")+"/api/ws", auth.Header)
 	if err != nil {
 		t.Fatal(err)

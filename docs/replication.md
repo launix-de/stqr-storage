@@ -10,13 +10,13 @@ writes; transport failure never changes placement or elects another writer.
 
 1. The primary serializes each object's mutations and validates the complete
    original request fingerprint, preconditions and CAS. It assigns a sequence
-   and stages the resulting version without publishing it. The durable record
-   binds bucket, object, original request ID/result, previous version, owner
+   and stages the resulting bytes without publishing it. The durable record
+   binds bucket, object, original request ID/result, byte predicates, owner
    epoch and replica-set hash, including the range's policy version and runtime.
 2. Required peers receive the original mutation in bounded chunks. Each checks
-   the previous version, prepares independently, and verifies the primary's
+   actual byte/length predicates under its volume lock, prepares independently, and verifies the primary's
    fingerprint and exact result before returning READY. APPEND therefore has
-   the same offset/version everywhere. Learners are not read sources.
+   the same offset and bytes everywhere. Learners are not read sources.
 3. After ALL-READY the primary flushes an irreversible commit decision. Followers
    publish object and original retry receipt atomically before replying to
    COMMIT. The primary publishes only after every required peer has replied.
@@ -44,8 +44,8 @@ and allocate their delta. Metadata and staging consume physical capacity.
 Reads continue from the old index during payload staging and peer waits. The
 short local WAL/publication transaction takes the normal volume lock. A read
 handle retains its consistent snapshot until closed. While a write is pending,
-different copies may expose different locally committed versions; after ACK
-every required copy contains that write or a later ordered version.
+different copies may expose different locally committed contents; after ACK
+every required copy contains that write or a later ordered write.
 
 The SDK can select an existing committed replica for GET, GET_RANGE, STAT and
 subscriptions when the primary transport is unavailable. This grants no write
@@ -105,7 +105,7 @@ volume or an explicit policy/membership change.
  An offline
 node is never removed because of a timeout. Codec-only changes of an otherwise
 valid set freeze that bucket, rewrite every required copy while preserving
-versions/receipts, and activate the new central PG version after ALL confirmation.
+logical contents/receipts, and activate the new central PG version after ALL confirmation.
 
 Pending data transactions prevent a handoff/control decision from stranding
 their old binding. Logical growth reservations include invisible primary writes.
@@ -114,8 +114,9 @@ replicas, private metadata and staged allocations to their actual volumes.
 
 ## Compatibility and remaining work
 
-Volume format 4 adds private replica records to the durable object index. Readers
-accept formats 2/3/4; the next durable write uses format 4. The system manifest
+Volume format 5 retains private replica records without object-content counters.
+Readers accept formats 2/3/5; format 4 is explicitly rejected. Existing format-4
+installations require a separate, verified migration before upgrade. The system manifest
 retains replication protocol marker 2 (marker 1 remains readable) even after the
 last replicated bucket is deleted, so older peers cannot join a cluster with incompatible range history.
 
@@ -135,7 +136,7 @@ own boot-bound recovery implementation. Multi-copy RAM writes return 501.
 Capacity/load-driven rebalancing of existing multi-copy groups, changing their
 storage strategy, and forced promotion/reconciliation of a surviving data replica
 remain separate work. Such unfinished transitions stay pending; the server does
-not pick a raw highest-version object as a new primary or silently discard a required offline copy.
+not pick a seemingly newer payload as a new primary or silently discard a required offline copy.
 
 Tests cover torn writes/sync failures in prepare, decision and publication;
 nonblocking reads during staging; sparse and compressed copy-on-write; retained

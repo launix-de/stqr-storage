@@ -12,6 +12,9 @@ all:
 	CGO_ENABLED=0 go build -buildvcs=false -o bin/stqr-boot-nfs ./cmd/stqr-boot-nfs
 	$(MAKE) -C ../qemu-plugin-nbd all
 	install -m 0755 ../qemu-plugin-nbd/bin/stqr-nbd-client bin/
+	$(CC) -std=c11 -Wall -Wextra -Werror -O2 -static -o bin/stqr-boot-root linux-client/boot-root.c
+	$(CC) -std=c11 -Wall -Wextra -Werror -O2 -static -o bin/mount.kstqr ../kernel/kstqr/mount.c
+	python3 -c "from common import source_archive; source_archive('bin/kstqr-source.tar')"
 pam:
 	mkdir -p bin
 	$(CC) -std=c11 -Wall -Wextra -Werror -fPIC -shared -O2 $(PAM_CFLAGS) -o bin/pam_stqr.so pam/pam_stqr.c $(PAM_LIBS)
@@ -26,9 +29,10 @@ install: all pam
 	install -m 0755 bin/pam_stqr.so $(DESTDIR)$(PAM_MODULE_DIR)/
 	install -d $(DESTDIR)$(PREFIX)/libexec/stqr-networkboot/bin
 	install -m 0755 prepare-system edit-image serve test-boot $(DESTDIR)$(PREFIX)/libexec/stqr-networkboot/
-	install -m 0644 common.py sessions.py $(DESTDIR)$(PREFIX)/libexec/stqr-networkboot/
+	install -m 0644 common.py sessions.py native_sessions.py $(DESTDIR)$(PREFIX)/libexec/stqr-networkboot/
 	cp -R initramfs $(DESTDIR)$(PREFIX)/libexec/stqr-networkboot/
-	install -m 0755 bin/stqr-bootctl bin/stqr-boot-nfs bin/stqr-nbd-client $(DESTDIR)$(PREFIX)/libexec/stqr-networkboot/bin/
+	install -m 0755 bin/stqr-bootctl bin/stqr-boot-nfs bin/stqr-nbd-client bin/stqr-boot-root bin/mount.kstqr $(DESTDIR)$(PREFIX)/libexec/stqr-networkboot/bin/
+	install -m 0644 bin/kstqr-source.tar $(DESTDIR)$(PREFIX)/libexec/stqr-networkboot/bin/
 	ln -sf ../libexec/stqr-networkboot/prepare-system $(DESTDIR)$(PREFIX)/sbin/stqr-prepare-system
 	ln -sf ../libexec/stqr-networkboot/edit-image $(DESTDIR)$(PREFIX)/sbin/stqr-edit-image
 	ln -sf ../libexec/stqr-networkboot/serve $(DESTDIR)$(PREFIX)/sbin/stqr-networkboot

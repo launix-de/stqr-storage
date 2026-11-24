@@ -156,7 +156,7 @@ func TestLocalMetadataDoesNotBecomePayloadAndSurvivesReassignment(t *testing.T) 
 			t.Fatal("metadata lost", e)
 		}
 		data, current, e := h.Get(key)
-		if e != nil || string(data) != "unchanged" || current.Version != info.Version {
+		if e != nil || string(data) != "unchanged" || current != info {
 			t.Fatal("data changed", e)
 		}
 		_, found, e := h.OperationStatus(request)

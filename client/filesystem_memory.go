@@ -2,6 +2,7 @@
 package client
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"errors"
@@ -10,7 +11,7 @@ import (
 
 // MemoryFilesystemStore is an explicitly volatile backend for dry filesystem
 // development. It implements local object access, not a network connection.
-// All handles sharing this instance share atomic version checks and object data.
+// All handles sharing this instance share atomic byte comparisons and object data.
 // It retains immutable/orphan objects and is not intended for unbounded workloads.
 type MemoryFilesystemStore struct {
 	mu       sync.RWMutex
@@ -18,8 +19,7 @@ type MemoryFilesystemStore struct {
 	requests map[RequestID]fsMemoryRequest
 }
 type fsMemoryObject struct {
-	data    []byte
-	version uint64
+	data []byte
 }
 type fsMemoryRequest struct {
 	digest [32]byte
@@ -39,7 +39,7 @@ func (m *MemoryFilesystemStore) Get(ctx context.Context, id ObjectID) ([]byte, O
 	if !ok {
 		return nil, ObjectInfo{}, ErrNotFound
 	}
-	return append([]byte(nil), o.data...), ObjectInfo{Version: o.version, Length: uint64(len(o.data))}, nil
+	return append([]byte(nil), o.data...), ObjectInfo{Length: uint64(len(o.data))}, nil
 }
 
 // GetRange is the optional ranged-read fast path for file data objects.
@@ -56,23 +56,24 @@ func (m *MemoryFilesystemStore) GetRange(ctx context.Context, id ObjectID, offse
 	if offset > uint64(len(o.data)) || length > uint64(len(o.data))-offset {
 		return nil, ObjectInfo{}, ErrRange
 	}
-	return append([]byte(nil), o.data[offset:offset+length]...), ObjectInfo{Version: o.version, Length: uint64(len(o.data))}, nil
+	return append([]byte(nil), o.data[offset:offset+length]...), ObjectInfo{Length: uint64(len(o.data))}, nil
 }
 func (m *MemoryFilesystemStore) CAS(ctx context.Context, id ObjectID, offset uint64, expected, replacement []byte, opt CASOptions) (ObjectInfo, error) {
 	if err := ctx.Err(); err != nil {
 		return ObjectInfo{}, err
 	}
-	if opt.Scope != CASObject || offset != 0 || len(expected) != 0 || len(replacement) > FSObjectSize || (opt.Absent && opt.ExpectedVersion != nil) {
+	if opt.Scope != CASObject || offset != 0 || len(replacement) > FSObjectSize {
 		return ObjectInfo{}, errors.New("client: unsupported dry filesystem CAS")
 	}
 	e := Encoder{B: append([]byte(nil), id[:]...)}
 	e.Bool(opt.Absent)
-	for _, v := range []*uint64{opt.ExpectedVersion, opt.ExpectedLength} {
+	for _, v := range []*uint64{opt.ExpectedLength} {
 		e.Bool(v != nil)
 		if v != nil {
 			e.U64(*v)
 		}
 	}
+	e.Blob(expected)
 	e.Blob(replacement)
 	digest := sha256.Sum256(e.B)
 	m.mu.Lock()
@@ -89,15 +90,15 @@ func (m *MemoryFilesystemStore) CAS(ctx context.Context, id ObjectID, offset uin
 		}
 	}
 	old, exists := m.objects[id]
-	if (opt.Absent && exists) || (!exists && !opt.Absent) || (opt.ExpectedVersion != nil && *opt.ExpectedVersion != old.version) || (opt.ExpectedLength != nil && *opt.ExpectedLength != uint64(len(old.data))) {
+	if (opt.Absent && exists) || (!exists && !opt.Absent) || (opt.ExpectedLength != nil && *opt.ExpectedLength != uint64(len(old.data))) {
 		return ObjectInfo{}, ErrPrecondition
 	}
-	if !opt.Absent && opt.ExpectedVersion == nil {
+	if !opt.Absent && !bytes.Equal(expected, old.data) {
 		return ObjectInfo{}, ErrPrecondition
 	}
-	o := fsMemoryObject{data: append([]byte(nil), replacement...), version: old.version + 1}
+	o := fsMemoryObject{data: append([]byte(nil), replacement...)}
 	m.objects[id] = o
-	info := ObjectInfo{Version: o.version, Length: uint64(len(o.data))}
+	info := ObjectInfo{Length: uint64(len(o.data))}
 	if opt.RequestID != (RequestID{}) {
 		m.requests[opt.RequestID] = fsMemoryRequest{digest: digest, info: info}
 	}
@@ -116,7 +117,7 @@ func (m *MemoryFilesystemStore) Stat(ctx context.Context, id ObjectID) (ObjectIn
 	if !ok {
 		return ObjectInfo{}, ErrNotFound
 	}
-	return ObjectInfo{Version: o.version, Length: uint64(len(o.data))}, nil
+	return ObjectInfo{Length: uint64(len(o.data))}, nil
 }
 func (m *MemoryFilesystemStore) PutRange(ctx context.Context, id ObjectID, offset uint64, data []byte, opt PutOptions) (ObjectInfo, error) {
 	if offset > FSObjectSize || uint64(len(data)) > FSObjectSize-offset {
@@ -128,10 +129,12 @@ func (m *MemoryFilesystemStore) PutRange(ctx context.Context, id ObjectID, offse
 	e.U64(offset)
 	e.Blob(data)
 	e.Bool(opt.Absent)
-	e.Bool(opt.ExpectedVersion != nil)
-	if opt.ExpectedVersion != nil {
-		e.U64(*opt.ExpectedVersion)
+	e.Bool(opt.ExpectedLength != nil)
+	if opt.ExpectedLength != nil {
+		e.U64(*opt.ExpectedLength)
 	}
+	e.U64(opt.CompareOffset)
+	e.Blob(opt.Compare)
 	digest := sha256.Sum256(e.B)
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -145,7 +148,10 @@ func (m *MemoryFilesystemStore) PutRange(ctx context.Context, id ObjectID, offse
 		return prior.info, nil
 	}
 	old, exists := m.objects[id]
-	if opt.Absent && exists || !opt.Absent && !exists || opt.ExpectedVersion != nil && old.version != *opt.ExpectedVersion {
+	if opt.Absent && exists || opt.ExpectedLength != nil && (!exists || uint64(len(old.data)) != *opt.ExpectedLength) {
+		return ObjectInfo{}, ErrPrecondition
+	}
+	if opt.Compare != nil && (opt.CompareOffset > uint64(len(old.data)) || uint64(len(opt.Compare)) > uint64(len(old.data))-opt.CompareOffset || !bytes.Equal(old.data[opt.CompareOffset:opt.CompareOffset+uint64(len(opt.Compare))], opt.Compare)) {
 		return ObjectInfo{}, ErrPrecondition
 	}
 	body := append([]byte(nil), old.data...)
@@ -154,9 +160,9 @@ func (m *MemoryFilesystemStore) PutRange(ctx context.Context, id ObjectID, offse
 		body = append(body, make([]byte, end-uint64(len(body)))...)
 	}
 	copy(body[offset:], data)
-	next := fsMemoryObject{data: body, version: old.version + 1}
+	next := fsMemoryObject{data: body}
 	m.objects[id] = next
-	info := ObjectInfo{Version: next.version, Length: uint64(len(body))}
+	info := ObjectInfo{Length: uint64(len(body))}
 	if opt.RequestID != (RequestID{}) {
 		m.requests[opt.RequestID] = fsMemoryRequest{digest: digest, info: info}
 	}

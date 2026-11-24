@@ -3,7 +3,7 @@
 struct ks_edit {
 	struct ks_edit *next;
 	stqr_object_id id;
-	u64 version, offset;
+	u64 offset;
 	bool absent, full, remove;
 	struct buf data;
 };
@@ -81,7 +81,6 @@ static int stage_block(struct ks_fs *f, struct ks_node *node, stqr_object_id id,
 		return -ENOMEM;
 	}
 	w->id = id;
-	w->version = info.version;
 	w->offset = off;
 	w->absent = absent;
 	w->full = full;
@@ -101,7 +100,7 @@ static int stage_block(struct ks_fs *f, struct ks_node *node, stqr_object_id id,
 			tail = tail->next;
 		tail->next = w;
 	}
-	node->stamp = node->version + 1;
+	node->mutable = true;
 	return 0;
 }
 static void encode_edits(struct buf *b, const struct ks_node *node)
@@ -113,35 +112,43 @@ static void encode_edits(struct buf *b, const struct ks_node *node)
 	number(b, count, 4);
 	for (w = node->edits; w; w = w->next) {
 		put(b, w->id.bytes, 32);
-		number(b, w->version, 8);
 		number(b, w->absent, 1);
 		number(b, w->full, 1);
 		number(b, w->remove, 1);
 		number(b, w->offset, 8);
 		blob(b, w->data.p, w->data.n);
+		blob(b, NULL, 0);
 	}
 }
-static int edit_id_compare(const void *a, const void *b) { return memcmp(a, b, 32); }
-static int skip_edits(struct buf *d, struct buf *out)
+static int edit_id_compare(const void *a, const void *b)
+{
+	return memcmp(a, b, 32);
+}
+static int skip_edits(struct buf *d, struct buf *out, bool legacy)
 {
 	size_t start = d->pos;
 	unsigned count = readnum(d, 4), i;
 	stqr_object_id *ids;
-	if (count > (1U << 20) || count > (d->n - d->pos) / 52)
+	if (count > (1U << 20) || count > (d->n - d->pos) / 44)
 		return -EUCLEAN;
 	ids = count ? sq_alloc(count * sizeof(*ids)) : NULL;
 	if (count && !ids)
 		return -ENOMEM;
 	for (i = 0; i < count; i++) {
 		const u8 *id = take(d, 32);
-		u64 version = readnum(d, 8), off;
+		u64 off;
+		if (legacy)
+			readnum(d, 8);
 		bool absent = boolean(d), full = boolean(d), remove = boolean(d);
 		size_t n;
 		off = readnum(d, 8);
 		readblob(d, &n);
+		if (!legacy) {
+			size_t ignored;
+			readblob(d, &ignored);
+		}
 		if (d->err || !id || zero(id, 32) || off > SQ_CHUNK || n > SQ_CHUNK - off ||
-		    (absent && version) || (!absent && !version) || (full && off) ||
-		    (remove && (absent || full || off || n))) {
+		    (full && off) || (remove && (absent || full || off || n))) {
 			sq_free(ids);
 			return -EUCLEAN;
 		}
@@ -190,13 +197,15 @@ static int apply_edits(struct ks_fs *f, stqr_object_id tx, const struct buf *enc
 		if (!p)
 			return -EUCLEAN;
 		memcpy(id.bytes, p, 32);
-		opt.version = readnum(&d, 8);
 		opt.absent = boolean(&d);
-		opt.has_version = !opt.absent;
 		full = boolean(&d);
 		remove = boolean(&d);
 		off = readnum(&d, 8);
 		data = readblob(&d, &n);
+		{
+			size_t ignored;
+			readblob(&d, &ignored);
+		}
 		if (d.err)
 			return -EUCLEAN;
 		err = redo_request(tx, (*index)++, &opt.request_id);
@@ -207,7 +216,7 @@ static int apply_edits(struct ks_fs *f, stqr_object_id tx, const struct buf *enc
 		if (remove)
 			err = stqr_delete(rpc->client, id, &opt);
 		else if (full)
-			err = stqr_cas(rpc->client, id, 1, 0, NULL, 0, data, n, &opt, &info);
+			err = stqr_put(rpc->client, id, data, n, &opt, &info);
 		else
 			err = stqr_put_range(rpc->client, id, off, data, n, &opt, &info);
 		if (err == -EINPROGRESS || err == -EACCES || err == -ENOTCONN ||
@@ -216,8 +225,7 @@ static int apply_edits(struct ks_fs *f, stqr_object_id tx, const struct buf *enc
 				if (remove)
 					err = stqr_delete(rpc->client, id, &opt);
 				else if (full)
-					err = stqr_cas(rpc->client, id, 1, 0, NULL, 0, data, n,
-						       &opt, &info);
+					err = stqr_put(rpc->client, id, data, n, &opt, &info);
 				else
 					err = stqr_put_range(rpc->client, id, off, data, n, &opt,
 							     &info);
@@ -327,10 +335,10 @@ static void intent_retire(struct ks_fs *f, stqr_object_id id, const struct buf *
 	unsigned count, i;
 	int err;
 	if (head->n < 7 ||
-	    (memcmp(head->p, "STFJ", 4) && !(head->p[4] == 2 && !memcmp(head->p, "STFT", 4))))
+	    (memcmp(head->p, "STFJ", 4) && !(head->p[4] >= 2 && !memcmp(head->p, "STFT", 4))))
 		return;
 	terminal[6] = state;
-	err = cas_object(f, id, terminal, sizeof(terminal), info->version, false);
+	err = cas_object(f, id, terminal, sizeof(terminal), head->p, head->n, false);
 	if (err)
 		return;
 	if (memcmp(head->p, "STFJ", 4))
@@ -349,8 +357,6 @@ static void intent_retire(struct ks_fs *f, stqr_object_id id, const struct buf *
 		memcpy(part.bytes, p, 32);
 		if (object_stat(f, part, &pi))
 			continue;
-		opt.has_version = 1;
-		opt.version = pi.version;
 		if (stqr_request_id(&opt.request_id))
 			continue;
 		rpc = ks_rpc_lock(f, part);
@@ -371,15 +377,18 @@ static int get_view_object(struct ks_fs *f, const struct ks_node *node, stqr_obj
 	count = readnum(&d, 4);
 	for (i = 0; i < count; i++) {
 		const u8 *key = take(&d, 32), *data;
-		u64 version = readnum(&d, 8), off;
+		u64 off;
 		bool absent = boolean(&d), full = boolean(&d), remove = boolean(&d);
 		size_t n;
 		u8 *body;
 		off = readnum(&d, 8);
 		data = readblob(&d, &n);
+		{
+			size_t ignored;
+			readblob(&d, &ignored);
+		}
 		if (d.err)
 			return -EUCLEAN;
-		(void)version;
 		if (memcmp(key, id.bytes, 32))
 			continue;
 		if (remove)

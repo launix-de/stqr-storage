@@ -92,8 +92,12 @@ per-local-user STQR login.
 
 The kernel socket adapter supports numeric IPv4/IPv6 endpoints in the host network
 namespace. The helper resolves hostnames at mount time; reconnect uses that same
-resolved address. Other network namespaces, address failover and cluster routing
-are not implemented. Transport is plain HTTP/WebSocket, matching the current
+resolved address. Object operations follow validated range-owner redirects;
+cluster nodes must advertise numeric addresses usable by the kernel. Before a
+serial RPC connection changes owner, it synchronizes accepted writes to its old
+node. Each RPC slot and the subscription connection has its own durability
+barrier. Other network namespaces and automatic address failover are not
+implemented. Transport is plain HTTP/WebSocket, matching the current
 server; use it on loopback or an appropriately protected network.
 
 ## Filesystem behavior
@@ -101,8 +105,8 @@ server; use it on loopback or an appropriately protected network.
 The module reads and writes the normal Go/FUSE filesystem format: `STFS` inodes,
 `STDR` directories, `STIX` immutable segment indexes and `STFT`/`STFL` namespace
 intents. No import/conversion is needed between upgraded normal FUSE and kernel mounts.
-STFS v5 adds node types, link counts and xattrs: **upgrade all clients before
-writing v5 metadata**. See the [format and semantics guide](filesystem-posix.md).
+STFS v6 includes node types, link counts, xattrs and immutable lower references:
+**upgrade all clients before writing v6 metadata**. See the [format and semantics guide](filesystem-posix.md).
 
 Implemented operations include regular files, directories, symlinks, hardlinks,
 FIFO/Unix-socket nodes, user/trusted xattrs, lookup/readdir,
@@ -113,7 +117,7 @@ CAS intents. Destination ancestry is validated and enrolled when moving director
 so competing clients cannot silently introduce a directory cycle. Pending intents
 can be helped after interruption without recursive kernel-stack traversal.
 
-Data and index objects are immutable. A version-checked inode CAS publishes each
+Data and index objects are immutable. A byte-compared inode CAS under the volume write lock publishes each
 new content image. Partial writes preserve unmodified segment references; sparse
 extensions store zero spans. Open-unlinked files remain usable until close.
 Successful `write`/`pwrite` chunks are atomically accepted by the server before
@@ -151,11 +155,11 @@ snapshots are retained in a bounded LRU: 8 MiB of raw snapshots and at most 512
 entries per mount, plus bounded bookkeeping. Configure it with
 `--metadata-cache-bytes N` or `-o metadata_cache_bytes=N`; zero disables it and
 the maximum is 64 MiB. Warm positive and negative dentries reuse their lookup
-only while the subscribed parent version matches; positive dentries also require
+only while the parent subscription ID and stream cursor match; positive dentries also require
 a current subscribed child. There is no metadata TTL. Pending namespace intents
 are resolved through the existing recovery path and cannot prove cached lookups.
 
-The protocol validates update hashes. Cursor/version gaps, multipart or unsupported
+The protocol validates update hashes. Cursor gaps, multipart or unsupported
 changes and socket loss invalidate cached snapshots. Eviction unsubscribes; unmount
 stops the reader, drains invalidation work and closes all connections. The reader
 reconnects after loss, but old snapshots remain invalid and resubscribe on demand.
@@ -192,10 +196,11 @@ send operation to avoid delaying a small payload behind its separate header.
 
 - **This is not yet a complete developer-home filesystem.** POSIX ACLs and broader
   application compatibility testing remain. User/trusted xattrs
-  work; security/capability xattrs and device nodes are not implemented. Keep a
+  and security/capability xattrs work; device nodes are not implemented. Keep a
   real home on its existing filesystem while evaluating this client.
-- Native overlay buckets require lower/upper handling and are currently rejected
-  by the kernel client. Use `stqr-fuse` for overlays.
+- Native overlays use the same STOR/STOM format as Go/FUSE. Hardlink creation
+  through an overlay is unsupported; untouched hardlinks in the lower remain
+  readable. Copy-up or rename of a multiply linked lower file is rejected.
 - Namespace editing materializes directory contents, limited to 16 MiB per
   directory; an intent is limited to 1 MiB and 1024 participants. Very large
   edits can fail with `E2BIG`. Index flattening needs further performance work.
@@ -280,5 +285,46 @@ the read benchmark: ordinary durable writes, dense/sparse mmap+msync and repeate
 
 The [explicit durability contract](durability.md) describes accepted writes,
 checkpoint bounds, cross-volume ordering and unconfirmed marks after server loss.
-After a rollback, inode versions/sizes can decrease to the recovered checkpoint;
+After a rollback, inode sizes can decrease to the recovered checkpoint;
 reads refresh that state, while fsync of the lost incarnation reports ESTALE.
+
+## Native networkboot root
+
+The kernel reads and writes the same STOR/STOM overlay format as Go/FUSE. A
+single mount merges an STFS lower bucket with an STOR upper bucket:
+
+```sh
+mount.kstqr --credentials /run/stqr/credentials --bucket UPPER_ID \
+  --readonly-bucket LOWER_ID --init /mnt/root
+```
+
+`--init` initializes a fresh upper; existing uppers retain their stored lower ID
+and whitelist. An upper cannot be mounted alone. `--whitelist conf.json,work/`
+restricts changes, including metadata and writable mmap. On remount an explicitly
+supplied whitelist must match the stored policy. With only `--readonly-bucket`,
+the helper mounts the lower read-only without an overlay.
+
+Directory records contain deletion markers and metadata overrides. File copy-up
+retains immutable references to unchanged lower content, so changing one range
+does not copy the entire file. These references name
+immutable data/index objects. Copy-up retains those IDs when a lower inode
+is later updated. Missing referenced data is an error. Offline lower garbage
+collection still requires coordination with dependent upper buckets.
+Each bucket has its own RPC connections and subscription cache. Changes from
+other clients invalidate the merged namespace and cached file data.
+
+The networkboot adapter builds the module for the installed guest kernel. Its
+one-shot helper mounts the immutable release and temporary upper directly as
+one native kstqr root, without a resident userspace filesystem client.
+
+The internal `--boot-lifetime-fd FD` mount-helper option passes a connected
+socket into the upper superblock. The kernel holds it until unmount, after data
+connections have closed, so the gateway can revoke and collect the temporary
+identity/bucket without a resident userspace root client. It is not a data proxy.
+See [networkboot](../networkboot/README.md) for provisioning and recovery.
+
+The current native wire schema is `stqr.v2`; object contents have no version
+counter. STFS v6 stores immutable lower index references, STIX v3 stores explicit
+lower-data flags, and STFT v2 compares complete before/after inode images. Legacy
+STFS v3–v5 lower-inode references and STIX v2 lower references require an explicit
+conversion or a recreated upper. Ordinary older inode formats remain readable.

@@ -44,8 +44,11 @@ func (s *Server) startBucketCleanup(id volume.ID) {
 			if s.ctx.Err() != nil {
 				return
 			}
+			err := s.cowLocalDetachStep(id)
 			s.opMu.Lock()
-			err := s.bucketLifecycleOnce(id)
+			if err == nil {
+				err = s.bucketLifecycleOnce(id)
+			}
 			if err == nil {
 				s.mu.Lock()
 				delete(s.bucketJobs, id)
@@ -76,6 +79,9 @@ func (s *Server) bucketLifecycleOnce(id volume.ID) error {
 		return err
 	}
 	d := b.Describe()
+	if len(d.ClonePeers) > 0 && (d.CloneDetach || d.State == BucketDeleting || d.DesiredPolicy != nil) {
+		return fail(503, "clone connections must materialize before physical cleanup")
+	}
 	if d.State == BucketDeleting {
 		for _, v := range b.allVolumes() {
 			var after *volume.Key

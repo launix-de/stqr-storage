@@ -2,12 +2,15 @@
 package server
 
 import (
+	"context"
+	"github.com/launix-de/stqr-storage/volume"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/gorilla/websocket"
 	"github.com/launix-de/stqr-storage/client"
@@ -50,9 +53,42 @@ func TestCClient(t *testing.T) {
 		admin := s.cfg.Auth.BootstrapAdmin
 		run(t, host.URL, admin.Username, admin.Password, client.ID(b.ID()).String(), "")
 	})
+	t.Run("cluster-routing", func(t *testing.T) {
+		source, target := startAutomaticDaemonPair(t, false)
+		addTestVolume(t, source.node, "c-routing", "hdd", 16<<20)
+		remote := addTestVolume(t, target.node, "c-routing", "hdd", 16<<20)
+		bucket, _ := createProtocolBucket(t, source.node, "c-routing")
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		admin := source.node.cfg.Auth.BootstrapAdmin
+		c, err := client.Dial(ctx, source.node.cfg.Node.Advertise, admin.Username, admin.Password, client.ID(bucket.ID()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, id := range []client.ObjectID{{1}, {0x81}} {
+			if _, err = c.Put(ctx, id, []byte("old"), client.PutOptions{}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		c.Close()
+		before, _ := source.node.routingPatch(bucket.ID(), volume.ObjectID{0x81})
+		_, moving, err := client.SplitRange(before.Entries[0])
+		if err != nil {
+			t.Fatal(err)
+		}
+		targetVolume, _ := parseID(remote.VolumeID)
+		plan, err := planRangeMove(before, moving, target.node.control.ledger.node, targetVolume, uint8(volume.HDD), volume.Raw, 1<<20)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err = source.node.scopes.move(ctx, plan); err != nil {
+			t.Fatal(err)
+		}
+		run(t, source.node.cfg.Node.Advertise, admin.Username, admin.Password, client.ID(bucket.ID()).String(), "routing")
+	})
 	for _, mode := range []string{"disconnect", "digest", "malformed", "wrong-id", "varint", "text", "subscription-digest"} {
 		t.Run(mode, func(t *testing.T) {
-			upgrade := websocket.Upgrader{Subprotocols: []string{"stqr.v1"}}
+			upgrade := websocket.Upgrader{Subprotocols: []string{"stqr.v2"}}
 			host := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				c, err := upgrade.Upgrade(w, r, nil)
 				if err != nil {
@@ -68,7 +104,7 @@ func TestCClient(t *testing.T) {
 					return
 				}
 				hello := client.Encoder{}
-				hello.U16(1)
+				hello.U16(2)
 				hello.U64(0)
 				hello.ID(client.ID{})
 				hello.ID(client.ID{})
@@ -84,7 +120,7 @@ func TestCClient(t *testing.T) {
 					return
 				}
 				if mode == "subscription-digest" {
-					update := client.ObjectUpdate{Subscription: client.NewRequestID(), Cursor: 1, PreviousVersion: 1, NewVersion: 2, Parts: 1, Data: []byte("x"), NewLength: 1}
+					update := client.ObjectUpdate{Subscription: client.NewRequestID(), Cursor: 1, Parts: 1, Data: []byte("x"), NewLength: 1}
 					body, _ := update.MarshalBinary()
 					body[len(body)-1] ^= 1
 					c.WriteMessage(websocket.BinaryMessage, client.EncodeMessage(client.Message{Kind: client.Push, Opcode: client.ObjectUpdateMessage, Body: body}))
@@ -108,7 +144,6 @@ func TestCClient(t *testing.T) {
 					return
 				}
 				result := client.Encoder{}
-				result.U64(1)
 				result.U64(1)
 				result.Bool(false)
 				result.U32(0)

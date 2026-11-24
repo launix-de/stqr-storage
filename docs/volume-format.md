@@ -1,4 +1,4 @@
-# Volume library and on-volume format 4
+# Volume library and on-volume format 5
 
 The implementation is the Go package `github.com/launix-de/stqr-storage/volume`.
 There are no UI handlers, CLI commands, or networking code. Runtime files live in
@@ -40,7 +40,7 @@ private staging phase before releasing the device.
 `Volume.Stat` is an independent general metadata query. All other object access
 is exclusively through a handle from `Volume.Open(write bool)`; there is no
 second, automatically locking object API on `Volume`. Use a read session to
-build response headers and stream the matching version:
+build response headers and stream the matching contents:
 
 ```go
 h, err := v.Open(false) // true acquires the exclusive write lock
@@ -99,30 +99,32 @@ deduplication. Inputs and options must remain unchanged until their call returns
 reader-based writes support larger objects without whole-object payload buffers.
 `GetRange` clips at EOF, `ReadAt` follows the usual partial-read/EOF convention.
 `Trunc` can create/extend sparse objects. Gaps use logical lengths and no payload
-allocation. CAS is bounded to 1 MiB and supports ranges or version-conditional
-whole-object replacement. Versions are monotonic across tombstones/recreation.
-An explicit codec change uses `Recompress`, preserving the logical version.
+allocation. CAS compares up to 1 MiB of actual previous bytes under the volume write lock.
+Whole-object CAS also checks the exact length; ranged CAS patches in place.
+Optional length and byte predicates share that lock with PUT and DELETE. There
+are no object-content counters. `Recompress` preserves the logical bytes.
 
 `Import` atomically installs a complete export in an empty destination.
-`Restore` installs one object/version in an already populated target;
+`Restore` installs one object in an already populated target;
 `RestoreRequest` transfers original retry results before activation. `Repair`
-can replace a corrupted physical representation at the same logical version.
+can replace a corrupted physical representation without changing its logical bytes.
 These are trusted server primitives, not authority to perform a cluster cutover.
 
-## Packed format 4
+## Packed format 5
 
 The packed object layout from format 2 is retained. Format 3 added a private
 management-root pointer and length at superblock offsets 160 and 168. Format-2
 volumes open without copying data and are upgraded on the next transaction.
-Format 4 adds checksummed private replication records: index kind 2 stores the
+Private replication records remain checksummed: index kind 2 stores the
 original request/result, epoch, sequence, replica-set hash, protocol state and
 staged descriptor/receipt references; kind 3 indexes pending decisions by object.
 Prepared payload is not reachable through the visible kind-0 object record.
 Publication replaces the object pointer and installs its kind-1 retry receipt in
 one transaction. Unchanged encoded allocations remain shared until retirement;
 allocation accounting and freeing use the union of referenced intervals.
-Readers accept formats 2 and 3 and upgrade on their next write. Older binaries
-reject version 4; a downgrade after writing is unsupported.
+Readers accept formats 2/3/5 and upgrade older accepted formats on their next
+write. Format 4 is rejected because its object descriptors contain counters.
+A separate verified migration is required; a downgrade is unsupported.
 
 The physical layout starts with two alternating 4096-byte superblocks, two
 commit-anchor pages and eight redo scratch pages (32 KiB). The initial object
@@ -160,7 +162,7 @@ range, with their checksum in the descriptor. Larger raw PUTs have a separate
 small checksum array. Compressed containers hold a compact chunk table so
 ranged reads need only decode affected chunks. Incompressible chunks use raw
 encoding. Hot APPEND arenas store raw bytes for efficient small updates; explicit
-recompression can compress them without changing the logical object version.
+recompression can compress them without changing the logical object bytes.
 Compression staging uses at most 4 MiB of RAM before spilling transient encoded
 input to a temporary file. Committed data always lives in the volume.
 
@@ -192,8 +194,10 @@ Large ranged writes spill dirty page images and redo assembly after about
 applying any image and also uses bounded payload buffers. A large atomic range
 still needs transient on-volume journal space for its changed pages, not a second
 copy of the whole object. Read handles and the private write lock provide local
-isolation; no historical payload versions are retained for readers. Full PUT and
-TRUNC currently retain their separate rebuild paths.
+isolation; no historical payload versions are retained for readers. Full PUT reuses independent allocations of the same codec, retaining fitting
+encoded chunks and relocating only chunks that grow. TRUNC trims or extends the
+logical extents. Replicated publication uses the same in-place path after its
+durable ALL decision; private staging is not retained object history.
 
 ### Page-sized B+-trees
 
@@ -249,7 +253,7 @@ blockdevice. Both add the new bytes to the free tree without rewriting a bank.
 whole removed tail is free. If live data or metadata cannot be evacuated, it
 returns an error. The smaller header commits before the backend is truncated.
 
-Snapshot Export/Import carries logical ranges, versions, tombstones, layout flags
+Snapshot Export/Import carries logical ranges, bytes, tombstones, layout flags
 and request receipts. Import validates the complete stream and publishes the
 final snapshot in one destination transaction. Restore/Repair additionally support
 already populated destinations under the existing handle API.
@@ -273,7 +277,7 @@ measurement. There is intentionally no README or performance claim yet.
 
 `Handle.LocalMetadata` / `SetLocalMetadata` read and atomically replace a private
 management record, limited to 64 MiB. The record is not a client object and does
-not alter object counts, logical bytes, payload addresses, versions or retry
+not alter object counts, logical bytes, payload addresses or retry
 records. Its pages count as physical metadata. A page is 4096 bytes: magic
 `STQRMET1` at 0, volume ID at 8, next-page offset at 24, payload length at 32,
 payload at 40, and CRC32C at 4092. Each page holds at most 4048 payload bytes;

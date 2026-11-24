@@ -122,30 +122,33 @@ func (v *Volume) extentsLocked(k Key) ([]Extent, error) {
 	}
 	return out, nil
 }
-func precondition(old *object, o Options) error {
+func (v *Volume) precondition(old *object, o Options) error {
 	exists := old != nil && !old.Info.Deleted
-	if o.CreateOnly && o.ExpectedVersion != nil {
-		return ErrRange
-	}
 	if o.CreateOnly && exists {
 		return ErrPrecondition
 	}
-	var version, length uint64
-	if old != nil {
-		version = old.Info.Version
-	}
+	var length uint64
 	if exists {
 		length = old.Info.Length
-	}
-	if o.ExpectedVersion != nil && *o.ExpectedVersion != version {
-		return ErrPrecondition
 	}
 	if o.ExpectedLength != nil && *o.ExpectedLength != length {
 		return ErrPrecondition
 	}
+	if o.Compare != nil {
+		if !exists || len(o.Compare) > 1<<20 || o.CompareOffset > length || uint64(len(o.Compare)) > length-o.CompareOffset {
+			return ErrPrecondition
+		}
+		actual := make([]byte, len(o.Compare))
+		if err := v.readObject(old, actual, o.CompareOffset); err != nil {
+			return err
+		}
+		if !bytes.Equal(actual, o.Compare) {
+			return ErrPrecondition
+		}
+	}
 	return nil
 }
-func fingerprint(op uint8, k Key, offset, length uint64, opts Options, expected []byte) hash.Hash {
+func fingerprintCurrent(op uint8, k Key, offset, length uint64, opts Options, expected []byte) hash.Hash {
 	h := sha256.New()
 	h.Write([]byte{op})
 	h.Write(k.Bucket[:])
@@ -155,7 +158,7 @@ func fingerprint(op uint8, k Key, offset, length uint64, opts Options, expected 
 		binary.LittleEndian.PutUint64(b[:], x)
 		h.Write(b[:])
 	}
-	for _, x := range []*uint64{opts.ExpectedVersion, opts.ExpectedLength} {
+	for _, x := range []*uint64{opts.ExpectedLength} {
 		if x == nil {
 			h.Write([]byte{0})
 		} else {
@@ -171,9 +174,6 @@ func fingerprint(op uint8, k Key, offset, length uint64, opts Options, expected 
 	if opts.WholeObject {
 		flags |= 2
 	}
-	if opts.restoreSameVersion {
-		flags |= 4
-	}
 	h.Write([]byte{flags})
 	if opts.Compression == nil {
 		h.Write([]byte{0})
@@ -183,6 +183,16 @@ func fingerprint(op uint8, k Key, offset, length uint64, opts Options, expected 
 	binary.LittleEndian.PutUint64(b[:], uint64(len(expected)))
 	h.Write(b[:])
 	h.Write(expected)
+	if opts.Compare == nil {
+		h.Write([]byte{0})
+	} else {
+		h.Write([]byte{1})
+		binary.LittleEndian.PutUint64(b[:], opts.CompareOffset)
+		h.Write(b[:])
+		binary.LittleEndian.PutUint64(b[:], uint64(len(opts.Compare)))
+		h.Write(b[:])
+		h.Write(opts.Compare)
+	}
 	return h
 }
 func validateCAS(offset uint64, expected, replacement []byte, opts Options) error {
@@ -192,7 +202,7 @@ func validateCAS(offset uint64, expected, replacement []byte, opts Options) erro
 	if !opts.WholeObject && len(expected) != len(replacement) {
 		return ErrRange
 	}
-	if opts.WholeObject && (offset != 0 || (!opts.CreateOnly && opts.ExpectedVersion == nil)) {
+	if opts.WholeObject && offset != 0 {
 		return ErrRange
 	}
 	return nil
@@ -220,7 +230,7 @@ func (v *Volume) loadDedupe(id ID) (dedupe, bool, error) {
 	copy(d.Key.Bucket[:], b[4:20])
 	copy(d.Key.Object[:], b[20:52])
 	copy(d.Fingerprint[:], b[52:84])
-	d.Result = Result{Info: Info{Version: diskOrder.Uint64(b[84:]), Length: diskOrder.Uint64(b[92:]), Compression: Compression(b[100]), Deleted: b[101] != 0}, Offset: diskOrder.Uint64(b[104:])}
+	d.Result = Result{Info: Info{Length: diskOrder.Uint64(b[92:]), Compression: Compression(b[100]), Deleted: b[101] != 0}, Offset: diskOrder.Uint64(b[104:])}
 	return d, true, nil
 }
 func (t *transaction) saveReceipt(id ID, d dedupe) error {
@@ -242,7 +252,6 @@ func (t *transaction) writeReceipt(d dedupe) (uint64, error) {
 	copy(b[4:20], d.Key.Bucket[:])
 	copy(b[20:52], d.Key.Object[:])
 	copy(b[52:84], d.Fingerprint[:])
-	diskOrder.PutUint64(b[84:], d.Result.Info.Version)
 	diskOrder.PutUint64(b[92:], d.Result.Info.Length)
 	b[100] = byte(d.Result.Info.Compression)
 	if d.Result.Info.Deleted {
@@ -368,7 +377,7 @@ func (v *Volume) mutateCore(op uint8, k Key, offset, length uint64, src io.Reade
 			}
 			var fp [32]byte
 			copy(fp[:], h.Sum(nil))
-			if r.Request.Key != k || r.Request.Fingerprint != fp {
+			if r.Request.Key != k || !matchesRequestFingerprint(h, r.Request.Fingerprint) {
 				return Result{}, ErrRequestID
 			}
 			if r.State == ReplicaAborted {
@@ -389,7 +398,7 @@ func (v *Volume) mutateCore(op uint8, k Key, offset, length uint64, src io.Reade
 		}
 		var fp [32]byte
 		copy(fp[:], h.Sum(nil))
-		if prior.Key != k || prior.Fingerprint != fp {
+		if prior.Key != k || !matchesRequestFingerprint(h, prior.Fingerprint) {
 			return Result{}, ErrRequestID
 		}
 		return prior.Result, nil
@@ -405,7 +414,7 @@ func (v *Volume) mutateCore(op uint8, k Key, offset, length uint64, src io.Reade
 	} else if e != nil {
 		return Result{}, e
 	}
-	if e = precondition(old, opts); e != nil {
+	if e = v.precondition(old, opts); e != nil {
 		return Result{}, e
 	}
 	if opts.prepare == nil && (op == opPutRange || op == opCAS && !opts.WholeObject) && objectAliases(old) {
@@ -446,6 +455,20 @@ func (v *Volume) mutateCore(op uint8, k Key, offset, length uint64, src io.Reade
 	if e != nil && payload {
 		return Result{}, e
 	}
+	if op == opCAS && opts.WholeObject && !opts.CreateOnly {
+		// Whole-object byte CAS includes the old length. The read and update
+		// share this volume write handle; no client-side revision is needed.
+		if !alive || uint64(len(expected)) != o.Info.Length {
+			return Result{}, ErrPrecondition
+		}
+		actual := make([]byte, len(expected))
+		if e = v.readObject(o, actual, 0); e != nil {
+			return Result{}, e
+		}
+		if !bytes.Equal(actual, expected) {
+			return Result{}, ErrPrecondition
+		}
+	}
 	if op == opCAS && !opts.WholeObject {
 		if !alive || end > o.Info.Length {
 			return Result{}, ErrPrecondition
@@ -458,10 +481,6 @@ func (v *Volume) mutateCore(op uint8, k Key, offset, length uint64, src io.Reade
 			return Result{}, ErrPrecondition
 		}
 	}
-	version := o.Info.Version + 1
-	if version == 0 {
-		return Result{}, ErrRange
-	}
 	newLength := o.Info.Length
 	if replace {
 		newLength = length
@@ -472,9 +491,6 @@ func (v *Volume) mutateCore(op uint8, k Key, offset, length uint64, src io.Reade
 	} else {
 		newLength = 0
 	}
-	if op == opAppend && length == 0 && alive {
-		version = o.Info.Version
-	}
 	t := v.transaction()
 	defer t.close()
 	reader := src
@@ -482,8 +498,8 @@ func (v *Volume) mutateCore(op uint8, k Key, offset, length uint64, src io.Reade
 		reader = io.TeeReader(src, h)
 	}
 	if opts.prepare != nil {
-		// Prepared versions own their allocations. Never change an arena,
-		// checksum table or descriptor still used by the visible old version.
+		// Prepared writes own their allocations. Never change an arena,
+		// checksum table or descriptor still used by readers.
 		var pieces []payloadPiece
 		cow := !replace && op != opDelete
 		switch {
@@ -528,20 +544,19 @@ func (v *Volume) mutateCore(op uint8, k Key, offset, length uint64, src io.Reade
 			spans = append(retained, spans...)
 			sort.Slice(spans, func(i, j int) bool { return spans[i].Offset < spans[j].Offset })
 		}
-		o = &object{Info: Info{Version: version, Length: newLength, Compression: codec, Deleted: op == opDelete}, Spans: spans, Segmented: op == opAppend || len(spans) > 1}
+		o = &object{Info: Info{Length: newLength, Compression: codec, Deleted: op == opDelete}, Spans: spans, Segmented: op == opAppend || len(spans) > 1}
 		if err = t.writeObject(o); err != nil {
 			return Result{}, err
 		}
 		result := Result{Info: o.Info, Offset: offset}
 		var fp [32]byte
 		copy(fp[:], h.Sum(nil))
-		r := ReplicaRecord{Request: RequestRecord{ID: opts.RequestID, Key: k, Fingerprint: fp, Result: result}, Binding: *opts.prepare, State: ReplicaPrepared, object: o.Base}
+		r := ReplicaRecord{Request: RequestRecord{ID: opts.RequestID, Key: k, Fingerprint: fp, Result: result}, Binding: *opts.prepare, State: ReplicaPrepared, object: o.Base, operation: op, whole: opts.WholeObject, offset: offset, length: length}
 		r.receipt, err = t.writeReceipt(dedupe{Key: k, Fingerprint: fp, Result: result})
 		if err != nil {
 			return Result{}, err
 		}
 		if old != nil {
-			r.PreviousVersion = old.Info.Version
 			if !old.Info.Deleted {
 				r.PreviousLength = old.Info.Length
 			}
@@ -557,7 +572,31 @@ func (v *Volume) mutateCore(op uint8, k Key, offset, length uint64, src io.Reade
 		}
 		return result, nil
 	}
-	if op == opAppend {
+	if replace && reusableObject(old, codec) {
+		if e = t.writeRange(o, 0, length, reader, codec); e != nil {
+			return Result{}, e
+		}
+		spans, err := v.retainSpans(o, newLength, 0, 0)
+		if err != nil {
+			return Result{}, err
+		}
+		o.Spans = spans
+		for i := range o.Spans {
+			if o.Spans[i].Direct || o.Spans[i].Codec != Raw {
+				continue
+			}
+			if err := t.trimRawAllocation(&o.Spans[i]); err != nil {
+				return Result{}, err
+			}
+		}
+		o.Segmented = len(spans) > 1
+		if !o.Segmented {
+			o.ListBlocks = nil
+			o.ListHead, o.ListTail = 0, 0
+		}
+		releaseUnsharedData(t, old, o)
+		o.dirtyFrom = -1
+	} else if op == opAppend {
 		o.Segmented = true
 		o.dirtyFrom = max(0, len(o.Spans)-1)
 		if length > 0 {
@@ -570,6 +609,7 @@ func (v *Volume) mutateCore(op uint8, k Key, offset, length uint64, src io.Reade
 		if e = t.writeRange(o, offset, length, reader, codec); e != nil {
 			return Result{}, e
 		}
+		releaseUnsharedData(t, old, o)
 	} else {
 		var pieces []payloadPiece
 		if replace {
@@ -592,7 +632,7 @@ func (v *Volume) mutateCore(op uint8, k Key, offset, length uint64, src io.Reade
 		o.ListHead = 0
 		o.ListTail = 0
 	}
-	o.Info = Info{Version: version, Length: newLength, Compression: codec, Deleted: op == opDelete}
+	o.Info = Info{Length: newLength, Compression: codec, Deleted: op == opDelete}
 	if old != nil && !old.Info.Deleted {
 		t.sb.Objects--
 		t.sb.LogicalBytes -= old.Info.Length
@@ -619,6 +659,15 @@ func (v *Volume) mutateCore(op uint8, k Key, offset, length uint64, src io.Reade
 	}
 	v.cache.put(k, o)
 	return result, nil
+}
+
+// Reuse independently owned payload allocations under the volume write lock.
+// Compressed chunks stay at their address when their new encoding fits.
+func reusableObject(o *object, codec Compression) bool {
+	if o == nil || o.Info.Deleted || o.Info.Compression != codec || objectAliases(o) {
+		return false
+	}
+	return true
 }
 func arenaUnused(o *object) uint64 {
 	var n uint64

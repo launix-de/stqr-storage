@@ -56,8 +56,11 @@ int save_settings(const char *url, const char *user, const char *password,
   after reconnect. A potentially sent mutation interrupted by transport loss
   returns `-EINPROGRESS`; the library does not silently report failure or generate
   another ID. `stqr_reconnect` reauthenticates; it never replays operations itself.
-- `has_version` and `has_length` distinguish an omitted precondition from zero.
-  `absent` is create-only and cannot be combined with an expected version.
+- `has_length` distinguishes an omitted length precondition from zero. `absent`
+  is create-only. Optional `has_compare`, `compare_offset`, `compare` and
+  `compare_size` guard a mutation with actual bytes checked under the same volume
+  lock. Range CAS compares its addressed bytes; whole-object CAS supplies all
+  previous bytes. Native objects have no content-version field.
 - Data returned by get belongs to the caller and is freed with `stqr_free`.
   Failed get calls clear the data pointer and length. Empty objects may return
   a NULL data pointer with length zero.
@@ -95,7 +98,7 @@ See the [kernel client guide](../../docs/kstqr.md) for mounting and VM tests.
 
 `stqr_capabilities()` reports HELLO capabilities. On nodes advertising
 `STQR_CAP_SUBSCRIPTIONS`, `stqr_subscribe()` returns a consistent full or ranged
-snapshot, its version and cursor. Snapshots use the same validated chunk transfer
+snapshot and its subscription cursor. Snapshots use the same validated chunk transfer
 as GET. `stqr_set_update_handler()` installs a callback receiving borrowed update
 bytes; `stqr_poll()` processes updates when ordinary RPCs are idle. RPC reply waits
 also dispatch incoming updates. The caller must serialize poll, RPCs and close on
@@ -104,7 +107,7 @@ connections remain independent; the library starts no background thread.
 
 The codec checks lengths, enums, multipart fields and SHA-256 before dispatch,
 and cumulatively ACKs received updates. Consumers maintaining snapshots must check
-the subscription ID, cursor continuity, previous version and supported change
+the subscription ID, cursor continuity and supported change
 shape before applying an event. A gap or RESYNC_REQUIRED requires a fresh snapshot.
 The callback receives NULL on connection loss/close, invalidating all snapshots
 covered by that connection. Reconnect does not retain live server registrations;
@@ -130,3 +133,17 @@ all observed pending writes on the connection. `stqr_pending_mark()` and
 bucket. Receipt observation also covers reads and subscription notices. Marks
 survive reconnect; an unconfirmed lost incarnation yields `-ESTALE`. Close alone
 is not a sync. See [the complete contract](../../docs/durability.md).
+
+## Cluster routing
+
+Reads and inline mutations (up to 1 MiB per payload, including native filesystem
+segments) follow authoritative range-owner redirects. The client validates the
+bucket/range and primary node in the returned map patch, flushes accepted writes
+before switching its serial connection, reauthenticates and retries with the same
+request ID. Reconnecting invalidates outstanding subscription coverage. There is
+no per-node connection pool or automatic alternate-address failover. Chunked
+mutations larger than 1 MiB still require connecting to their correct owner; use
+bounded ranged writes for the native filesystem path.
+
+The unversioned object schema uses WebSocket subprotocol `stqr.v2` and HELLO
+version 2. Upgrade all native clients and nodes together; v1 messages are rejected.

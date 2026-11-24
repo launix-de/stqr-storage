@@ -221,7 +221,7 @@ func TestImportShadowMarkersSurviveSnapshotAndAccountingRebuild(t *testing.T) {
 	imported.Bucket = testID(1)
 	ordinary.Bucket = testID(2)
 	h, _ := v.Open(true)
-	err = h.Restore(imported, Info{Version: 1, Length: 3, Compression: Raw}, func(yield func(uint64, io.Reader, uint64) error) error {
+	err = h.Restore(imported, Info{Length: 3, Compression: Raw}, func(yield func(uint64, io.Reader, uint64) error) error {
 		return yield(0, bytes.NewReader([]byte("abc")), 3)
 	}, Options{ImportShadow: true, RequestID: testID(1)})
 	if err != nil {

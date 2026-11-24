@@ -25,7 +25,7 @@ func TestReplicaPrepareRecoveryVisibilityAndExactlyOnce(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Offset != 3 || result.Info.Version != 2 {
+	if result.Offset != 3 || result.Info.Length != 4 {
 		t.Fatal(result)
 	}
 	mustGet(t, v, k, []byte("old"))
@@ -119,7 +119,7 @@ func TestReplicaAbortHistoryRestoreDurabilityAndConflicts(t *testing.T) {
 	if _, err := testPut(v, testKey(2), []byte("accepted"), Options{Accepted: true}); err != nil {
 		t.Fatal(err)
 	}
-	record := ReplicaRecord{State: ReplicaAborted, AbortStatus: 507, Binding: ReplicaBinding{Epoch: 1, Sequence: 4, SetHash: [32]byte{1}}, Request: RequestRecord{ID: testID(77), Key: testKey(1), Fingerprint: [32]byte{5}, Result: Result{Info: Info{Version: 1, Length: 8}}}}
+	record := ReplicaRecord{State: ReplicaAborted, AbortStatus: 507, Binding: ReplicaBinding{Epoch: 1, Sequence: 4, SetHash: [32]byte{1}}, Request: RequestRecord{ID: testID(77), Key: testKey(1), Fingerprint: [32]byte{5}, Result: Result{Info: Info{Length: 8}}}}
 	h, _ := v.Open(true)
 	if err := h.RestoreReplicaAbort(record, Options{}); err != nil {
 		t.Fatal(err)

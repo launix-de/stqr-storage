@@ -119,6 +119,7 @@ func (c *clusterController) start() {
 					c.ensureQuotaAllocations(s.ctx)
 					c.admitDiscovered(s.ctx)
 				}
+				c.finishCowDetaches(s.ctx)
 				c.finishBucketDeletions(s.ctx)
 				c.finishBucketPolicies(s.ctx)
 				c.finishPlacementGroups(s.ctx)
@@ -478,7 +479,8 @@ func (c *clusterController) finishReservedChange(ctx context.Context, claim cont
 		return nil, 0, err
 	}
 	var planned volume.ObjectID
-	if exclusion != nil {
+	currentImage := c.server.currentSystem.Load()
+	if exclusion != nil || currentImage != nil && cloneQuotaCheckpointNeeded(currentImage.descriptions, descriptions) {
 		if err := c.server.stageSystemBundle(bundle); err != nil {
 			return nil, 0, err
 		}

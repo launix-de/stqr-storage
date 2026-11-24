@@ -117,10 +117,10 @@ func runSSHRecoveryFence(t *testing.T, f sshRecoveryFixture) {
 		}
 		defer c.Close()
 		got, current, err := c.Get(ctx, object)
-		if err != nil || !bytes.Equal(got, payload) || current.Version != info.Version {
+		if err != nil || !bytes.Equal(got, payload) || current.Length != info.Length {
 			t.Fatal("remote recovered bytes/version", err)
 		}
-		if result, err := c.Append(ctx, object, []byte("acknowledged after bulk"), client.AppendOptions{RequestID: retryID}); err != nil || result.Version != info.Version {
+		if result, err := c.Append(ctx, object, []byte("acknowledged after bulk"), client.AppendOptions{RequestID: retryID}); err != nil || result.Length != info.Length {
 			t.Fatal("remote retry receipt", err)
 		}
 	}

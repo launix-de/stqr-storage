@@ -33,13 +33,13 @@ type controlRecord struct {
 // reopened/reconciled. Journal records are bounded control/transfer fragments;
 // this bound does not restrict client object sizes or total journal length.
 type controlJournal struct {
-	mu              sync.Mutex
-	store           *volume.Volume
-	cluster, node   volume.ID
-	sequence        uint64
-	last            [32]byte
-	length, version uint64
-	failed          error
+	mu            sync.Mutex
+	store         *volume.Volume
+	cluster, node volume.ID
+	sequence      uint64
+	last          [32]byte
+	length        uint64
+	failed        error
 }
 
 func openControlJournal(path string, cluster, node volume.ID, create bool, replay func(controlRecord) error) (_ *controlJournal, err error) {
@@ -146,7 +146,7 @@ func (j *controlJournal) replay(consume func(controlRecord) error) error {
 	if err != nil {
 		return err
 	}
-	j.length, j.version = info.Length, info.Version
+	j.length = info.Length
 	// CopyTo walks the log's segments once, rather than restarting a span scan
 	// for every record. Pipe backpressure bounds staging regardless of log size.
 	r, w := io.Pipe()
@@ -191,12 +191,19 @@ func (j *controlJournal) replay(consume func(controlRecord) error) error {
 			}
 		}
 	}
-	if j.sequence != info.Version {
-		return volume.ErrCorrupt // also catches a rewritten/truncated valid prefix
-	}
 	err = <-done
 	finished = true
-	return err
+	if err != nil {
+		return err
+	}
+	// Retained append receipts are independent evidence of the durable tail.
+	// Replacing the log by a valid shorter prefix cannot erase this evidence.
+	return h.ScanRequests(func(record volume.RequestRecord) error {
+		if record.Key == controlLogKey && record.Result.Info.Length > j.length {
+			return volume.ErrCorrupt
+		}
+		return nil
+	})
 }
 
 func (j *controlJournal) append(kind uint16, payload []byte) (client.Proof, error) {
@@ -224,7 +231,7 @@ func (j *controlJournal) append(kind uint16, payload []byte) (client.Proof, erro
 			j.failed = err
 			return client.Proof{}, err
 		}
-		result, err := h.Append(controlLogKey, frame, volume.Options{ExpectedVersion: &j.version, ExpectedLength: &j.length})
+		result, err := h.Append(controlLogKey, frame, volume.Options{ExpectedLength: &j.length, RequestID: volume.ID(digest[:16])})
 		h.Close()
 		if errors.Is(err, volume.ErrFull) && !errors.Is(err, volume.ErrRecovery) {
 			current := j.store.Size()
@@ -237,7 +244,7 @@ func (j *controlJournal) append(kind uint16, payload []byte) (client.Proof, erro
 			}
 			continue
 		}
-		if err == nil && (result.Offset != j.length || result.Info.Length != j.length+uint64(len(frame)) || result.Info.Version != j.version+1) {
+		if err == nil && (result.Offset != j.length || result.Info.Length != j.length+uint64(len(frame))) {
 			err = volume.ErrCorrupt
 		}
 		if err != nil {
@@ -245,7 +252,7 @@ func (j *controlJournal) append(kind uint16, payload []byte) (client.Proof, erro
 			return client.Proof{}, err
 		}
 		j.sequence++
-		j.last, j.version, j.length = digest, result.Info.Version, result.Info.Length
+		j.last, j.length = digest, result.Info.Length
 		return client.Proof{Node: client.ID(j.node), RecordSequence: j.sequence, Digest: digest}, nil
 	}
 }

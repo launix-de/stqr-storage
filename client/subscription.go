@@ -168,7 +168,9 @@ func (s *Subscription) Snapshot() ([]byte, ObjectInfo, uint64, error) {
 	if s.err != nil {
 		return nil, s.info, s.cursor, s.err
 	}
-	return append([]byte(nil), s.data...), s.info, s.cursor, nil
+	info := s.info
+	info.Proof = SnapshotProof{Subscription: s.id, Cursor: s.cursor}
+	return append([]byte(nil), s.data...), info, s.cursor, nil
 }
 func (s *Subscription) Changes() <-chan struct{} { return s.changed }
 
@@ -191,7 +193,7 @@ func (s *Subscription) applyLocked(u ObjectUpdate) {
 	if s.closed || u.Cursor <= s.cursor {
 		return
 	}
-	if u.Change == UpdateResyncRequired || u.Part != 0 || u.Parts != 1 || u.Cursor != s.cursor+1 || u.PreviousVersion != s.info.Version || u.NewVersion <= u.PreviousVersion {
+	if u.Change == UpdateResyncRequired || u.Part != 0 || u.Parts != 1 || u.Cursor != s.cursor+1 {
 		s.valid = false
 		s.err = ErrSubscriptionResync
 		s.data = nil
@@ -223,7 +225,6 @@ func (s *Subscription) applyLocked(u ObjectUpdate) {
 		s.err = ErrSubscriptionResync
 		return
 	}
-	s.info.Version = u.NewVersion
 	s.info.Length = u.NewLength
 	s.cursor = u.Cursor
 }

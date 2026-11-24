@@ -247,7 +247,7 @@ func copyObject(ctx context.Context, source, target *volume.Volume, k volume.Key
 	}
 	if e == nil {
 		if existing != info {
-			return errors.New("target contains a different object version")
+			return errors.New("target contains conflicting object metadata")
 		}
 		// A replay after crash must verify content, not infer equality from length.
 		a, b := make([]byte, volume.BlockSize), make([]byte, volume.BlockSize)

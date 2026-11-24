@@ -24,7 +24,7 @@ type S3Store interface {
 	FilesystemStore
 	GetRange(context.Context, ObjectID, uint64, uint64) ([]byte, ObjectInfo, error)
 	PutFrom(context.Context, ObjectID, io.Reader, uint64, PutOptions) (ObjectInfo, error)
-	GetRangeToVersion(context.Context, ObjectID, uint64, uint64, uint64, io.Writer) (ObjectInfo, error)
+	GetRangeToMatching(context.Context, ObjectID, uint64, uint64, ReadCondition, io.Writer) (ObjectInfo, error)
 	Delete(context.Context, ObjectID, DeleteOptions) error
 	ScanObjects(context.Context, *ObjectID, uint32) ([]ObjectEntry, *ObjectID, error)
 }
@@ -42,7 +42,7 @@ type S3Object struct {
 	Modified      time.Time
 	Headers       map[string]string
 	Metadata      map[string]string
-	Version       uint64
+	header        []byte
 	PayloadOffset uint64
 	Deleted       bool
 }
@@ -78,7 +78,7 @@ func (s *S3) load(ctx context.Context, key string) (S3Object, ObjectInfo, error)
 	if err != nil || o.Key != key || o.Payload != S3MetadataID(key) || o.PayloadOffset+o.Size != info.Length {
 		return o, info, ErrS3Format
 	}
-	o.Version = info.Version
+	o.header = append([]byte(nil), raw[:o.PayloadOffset]...)
 	return o, info, nil
 }
 func (s *S3) Head(ctx context.Context, key string) (S3Object, error) {
@@ -101,7 +101,7 @@ func (s *S3) Stat(ctx context.Context, key string) (S3Object, error) {
 	}
 	o, err := decodeS3Header(raw)
 	o.Key = key
-	o.Version = info.Version
+	o.header = append([]byte(nil), raw...)
 	if err == nil && (o.Payload != S3MetadataID(key) || o.PayloadOffset+o.Size != info.Length) {
 		err = ErrS3Format
 	}
@@ -188,8 +188,8 @@ func (s *S3) Put(ctx context.Context, key string, src io.Reader, size uint64, op
 		if _, err = staged.Seek(0, io.SeekStart); err != nil {
 			return o, err
 		}
-		info, e := s.store.PutFrom(ctx, o.Payload, io.MultiReader(strings.NewReader(string(raw)), staged), uint64(len(raw))+size, *opt.Publication)
-		o.Version = info.Version
+		_, e := s.store.PutFrom(ctx, o.Payload, io.MultiReader(strings.NewReader(string(raw)), staged), uint64(len(raw))+size, *opt.Publication)
+		o.header = append([]byte(nil), raw...)
 		o.PayloadOffset = uint64(len(raw))
 		return o, e
 	}
@@ -204,14 +204,14 @@ func (s *S3) Put(ctx context.Context, key string, src io.Reader, size uint64, op
 		}
 		co := PutOptions{RequestID: NewRequestID(), Absent: absent}
 		if !absent {
-			co.ExpectedVersion = &info.Version
+			co.ExpectedLength = &info.Length
+			co.Compare = old.header
 		}
 		if _, err = staged.Seek(0, io.SeekStart); err != nil {
 			return o, err
 		}
-		var published ObjectInfo
-		published, err = s.store.PutFrom(ctx, S3MetadataID(key), io.MultiReader(strings.NewReader(string(raw)), staged), uint64(len(raw))+size, co)
-		o.Version = published.Version
+		_, err = s.store.PutFrom(ctx, S3MetadataID(key), io.MultiReader(strings.NewReader(string(raw)), staged), uint64(len(raw))+size, co)
+		o.header = append([]byte(nil), raw...)
 		o.PayloadOffset = uint64(len(raw))
 		if errors.Is(err, ErrPrecondition) {
 			continue
@@ -229,7 +229,7 @@ func (s *S3) Delete(ctx context.Context, key string) error {
 		if err != nil {
 			return err
 		}
-		err = s.store.Delete(ctx, S3MetadataID(key), DeleteOptions{RequestID: NewRequestID(), ExpectedVersion: &o.Version})
+		err = s.store.Delete(ctx, S3MetadataID(key), DeleteOptions{RequestID: NewRequestID(), ExpectedLength: uint64Pointer(o.PayloadOffset + o.Size), Compare: o.header})
 		if errors.Is(err, ErrPrecondition) {
 			continue
 		}
@@ -247,7 +247,7 @@ func (s *S3) ReadTo(ctx context.Context, o S3Object, off, length uint64, dst io.
 	if off > o.Size || length > o.Size-off {
 		return ErrRange
 	}
-	_, err := s.store.GetRangeToVersion(ctx, o.Payload, o.PayloadOffset+off, length, o.Version, dst)
+	_, err := s.store.GetRangeToMatching(ctx, o.Payload, o.PayloadOffset+off, length, ReadCondition{Bytes: o.header, Length: uint64Pointer(o.PayloadOffset + o.Size)}, dst)
 	return err
 }
 
@@ -306,3 +306,5 @@ func (s *S3) List(ctx context.Context, prefix string) ([]S3Object, error) {
 	}
 	return out, nil
 }
+
+func uint64Pointer(n uint64) *uint64 { return &n }

@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
-/* Mutable data/index pages: same addresses and redo format as the Go library. */
+/* Mutable data/index pages: same addresses and redo format as the Go library.
+ */
 static bool segments_have(const struct segments *parts, stqr_object_id id)
 {
 	size_t i;
@@ -48,7 +49,7 @@ static int collect_index_ids(struct ks_fs *f, stqr_object_id id, unsigned depth,
 	take(&b, 4);
 	version = readnum(&b, 2);
 	count = readnum(&b, 4);
-	if (version < 1 || version > 2 || !count || count > 1024) {
+	if (version < 1 || version > 3 || !count || count > 1024) {
 		drop(&b);
 		return -EUCLEAN;
 	}
@@ -65,6 +66,8 @@ static int collect_index_ids(struct ks_fs *f, stqr_object_id id, unsigned depth,
 		readnum(&b, version == 1 ? 4 : 8);
 		if (version == 2)
 			readnum(&b, 8);
+		if (version == 3)
+			boolean(&b);
 		if (b.err) {
 			err = b.err;
 			break;
@@ -84,12 +87,15 @@ static int retire_pages(struct ks_fs *f, const struct ks_node *old, struct ks_no
 	struct segments prior = {0}, indexes = {0};
 	size_t i;
 	int err = 0;
+	if (old->lower)
+		return 0;
 	if (old->depth)
 		err = index_segments(f, old->root, old->size, old->depth, &prior);
 	if (!err)
 		err = collect_index_ids(f, old->root, old->depth, &indexes);
 	for (i = 0; !err && i < prior.n; i++)
-		if (!nullid(prior.p[i].id) && !segments_have(parts, prior.p[i].id)) {
+		if (!prior.p[i].lower && !nullid(prior.p[i].id) &&
+		    !segments_have(parts, prior.p[i].id)) {
 			size_t j;
 			bool seen = false;
 			for (j = 0; j < i; j++)
@@ -112,8 +118,14 @@ static int prepare_mutable_write(struct ks_fs *f, struct ks_snapshot *old, struc
 	u64 end = off + count, length = max(old->node.size, end), first = off / SQ_CHUNK * SQ_CHUNK,
 	    stop = (end - 1) / SQ_CHUNK * SQ_CHUNK, at;
 	int err = 0;
-	if (old->node.depth)
-		err = index_segments(f, old->node.root, old->node.size, old->node.depth, &before);
+	if (old->node.depth) {
+		err = index_segments(old->node.lower ? f->lower : f, old->node.root, old->node.size,
+				     old->node.depth, &before);
+		if (!err && old->node.lower)
+			for (size_t j = 0; j < before.n; j++)
+				if (!nullid(before.p[j].id))
+					before.p[j].lower = true;
+	}
 	if (!err)
 		err = slice_segments(&after, &before, 0, min(first, old->node.size));
 	if (!err && !old->node.depth && old->node.size && first) {
@@ -138,7 +150,8 @@ static int prepare_mutable_write(struct ks_fs *f, struct ks_snapshot *old, struc
 		if (err)
 			break;
 		for (i = 0; i < before.n; i++) {
-			if (pos == at && !before.p[i].offset && eqid(before.p[i].id, part.id)) {
+			if (!before.p[i].lower && pos == at && !before.p[i].offset &&
+			    eqid(before.p[i].id, part.id)) {
 				canonical = true;
 				break;
 			}
@@ -192,9 +205,14 @@ static int prepare_mutable_resize(struct ks_fs *f, struct ks_snapshot *old, stru
 	struct segments before = {0}, after = {0}, keep = {0};
 	int err = 0;
 	size_t i;
-	if (old->node.depth)
-		err = index_segments(f, old->node.root, old->node.size, old->node.depth, &before);
-	else if (old->node.size) {
+	if (old->node.depth) {
+		err = index_segments(old->node.lower ? f->lower : f, old->node.root, old->node.size,
+				     old->node.depth, &before);
+		if (!err && old->node.lower)
+			for (size_t j = 0; j < before.n; j++)
+				if (!nullid(before.p[j].id))
+					before.p[j].lower = true;
+	} else if (old->node.size) {
 		struct segment part = {.length = old->node.size};
 		err = stable_id(next->identity, 0, 0, 0, &part.id);
 		if (!err)
@@ -212,7 +230,7 @@ static int prepare_mutable_resize(struct ks_fs *f, struct ks_snapshot *old, stru
 		for (i = 0; i + 1 < after.n; i++)
 			at += after.p[i].length;
 		err = stable_id(next->identity, 0, 0, at / SQ_CHUNK, &want);
-		if (!err && !last->offset && eqid(last->id, want)) {
+		if (!err && !last->lower && !last->offset && eqid(last->id, want)) {
 			u8 *body = sq_alloc(last->length);
 			if (!body)
 				err = -ENOMEM;

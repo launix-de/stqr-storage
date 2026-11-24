@@ -178,7 +178,7 @@ func TestBucketInfoWebSocketRevocation(t *testing.T) {
 	request, _ := http.NewRequest(http.MethodGet, host.URL, nil)
 	request.SetBasicAuth(user.Name, "bucket-test-password")
 	request.Header.Set(client.BucketHeader, b.ID().String())
-	dialer := websocket.Dialer{Subprotocols: []string{"stqr.v1"}}
+	dialer := websocket.Dialer{Subprotocols: []string{"stqr.v2"}}
 	conn, _, err := dialer.Dial("ws"+strings.TrimPrefix(host.URL, "http")+"/api/ws", request.Header)
 	if err != nil {
 		t.Fatal(err)

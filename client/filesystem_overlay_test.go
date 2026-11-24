@@ -313,8 +313,10 @@ func TestOverlaySparseAndChangedBase(t *testing.T) {
 	if _, err := lower.WriteAt(ctx, conf.ID, []byte("changed"), 0); err != nil {
 		t.Fatal(err)
 	}
+	// Stable data IDs make a mutable source an invalid readonly lower. A
+	// writable origin must provide a distinct COW bucket for this readonly view.
 	if _, err := o.ReadAt(ctx, conf.ID, buf, 0); !errors.Is(err, syscall.ESTALE) {
-		t.Fatal("stale lower silently read", err)
+		t.Fatal("changed readonly lower was silently reused", buf, err)
 	}
 }
 
@@ -429,7 +431,7 @@ func TestOverlayCompletedCopyUpKeepsPageIdentity(t *testing.T) {
 	}
 	ids := map[ObjectID]bool{}
 	for _, part := range parts {
-		if part.lowerVersion != 0 {
+		if part.lower || part.legacyVersion != 0 {
 			t.Fatal("copy-up was not completed")
 		}
 		ids[part.id] = true
@@ -458,5 +460,21 @@ func TestOverlayCompletedCopyUpKeepsPageIdentity(t *testing.T) {
 	want[5000] = 'z'
 	if !bytes.Equal(got, want) {
 		t.Fatal("copy-up content changed")
+	}
+}
+
+func TestOverlayRenameInheritedSymlinkPreservesInlineTarget(t *testing.T) {
+	ctx := context.Background()
+	lower, o, _, _, _, _ := overlayFixture(t, nil)
+	link, err := lower.Symlink(ctx, FilesystemRootID(), "original-link", "conf.json", 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = o.Rename(ctx, FilesystemRootID(), "original-link", FilesystemRootID(), "moved-link"); err != nil {
+		t.Fatal(err)
+	}
+	target, err := o.Readlink(ctx, link.ID)
+	if err != nil || string(target) != "conf.json" {
+		t.Fatal(string(target), err)
 	}
 }

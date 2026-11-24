@@ -36,10 +36,16 @@ type ReplicaRecord struct {
 	Binding               ReplicaBinding
 	State                 ReplicaState
 	AbortStatus           uint16
-	PreviousVersion       uint64
 	PreviousLength        uint64
+	operation             uint8
+	whole                 bool
+	offset, length        uint64
 	base, object, receipt uint64
 }
+
+// IsSnapshot identifies physical snapshot installation, whose publication does
+// not represent an application-level content mutation.
+func (r ReplicaRecord) IsSnapshot() bool { return r.operation == opSnapshot }
 
 const replicaBytes = 256
 
@@ -67,15 +73,17 @@ func (v *Volume) replicaAt(ptr uint64) (ReplicaRecord, error) {
 		return r, ErrCorrupt
 	}
 	r.State = ReplicaState(b[4])
+	r.operation, r.whole = b[5], b[6] == 1
+	r.offset, r.length = diskOrder.Uint64(b[104:]), diskOrder.Uint64(b[136:])
 	r.AbortStatus = diskOrder.Uint16(b[224:])
 	copy(r.Request.ID[:], b[8:24])
 	copy(r.Request.Key.Bucket[:], b[24:40])
 	copy(r.Request.Key.Object[:], b[40:72])
 	copy(r.Request.Fingerprint[:], b[72:104])
-	r.Request.Result = Result{Info: Info{Version: diskOrder.Uint64(b[104:]), Length: diskOrder.Uint64(b[112:]), Compression: Compression(b[128]), Deleted: b[129] == 1}, Offset: diskOrder.Uint64(b[120:])}
+	r.Request.Result = Result{Info: Info{Length: diskOrder.Uint64(b[112:]), Compression: Compression(b[128]), Deleted: b[129] == 1}, Offset: diskOrder.Uint64(b[120:])}
 	r.Binding.Epoch, r.Binding.Sequence = diskOrder.Uint64(b[144:]), diskOrder.Uint64(b[152:])
 	copy(r.Binding.SetHash[:], b[160:192])
-	r.PreviousVersion, r.object = diskOrder.Uint64(b[192:]), diskOrder.Uint64(b[200:])
+	r.object = diskOrder.Uint64(b[200:])
 	r.receipt = diskOrder.Uint64(b[208:])
 	r.PreviousLength = diskOrder.Uint64(b[216:])
 	if r.State < ReplicaPrepared || r.State > ReplicaAborted || r.Request.ID == (ID{}) || !r.Request.Result.Info.Compression.valid() || (r.State >= ReplicaPublished) != (r.object == 0) || r.Binding.Epoch == 0 || r.Binding.Sequence == 0 || r.Binding.SetHash == ([32]byte{}) {
@@ -94,11 +102,16 @@ func (t *transaction) saveReplica(r *ReplicaRecord) error {
 	b := make([]byte, replicaBytes)
 	copy(b, "RPL4")
 	b[4] = byte(r.State)
+	b[5] = r.operation
+	if r.whole {
+		b[6] = 1
+	}
+	diskOrder.PutUint64(b[104:], r.offset)
+	diskOrder.PutUint64(b[136:], r.length)
 	copy(b[8:24], r.Request.ID[:])
 	copy(b[24:40], r.Request.Key.Bucket[:])
 	copy(b[40:72], r.Request.Key.Object[:])
 	copy(b[72:104], r.Request.Fingerprint[:])
-	diskOrder.PutUint64(b[104:], r.Request.Result.Info.Version)
 	diskOrder.PutUint64(b[112:], r.Request.Result.Info.Length)
 	diskOrder.PutUint64(b[120:], r.Request.Result.Offset)
 	b[128] = byte(r.Request.Result.Info.Compression)
@@ -108,7 +121,6 @@ func (t *transaction) saveReplica(r *ReplicaRecord) error {
 	diskOrder.PutUint64(b[144:], r.Binding.Epoch)
 	diskOrder.PutUint64(b[152:], r.Binding.Sequence)
 	copy(b[160:192], r.Binding.SetHash[:])
-	diskOrder.PutUint64(b[192:], r.PreviousVersion)
 	diskOrder.PutUint64(b[200:], r.object)
 	diskOrder.PutUint64(b[208:], r.receipt)
 	diskOrder.PutUint64(b[216:], r.PreviousLength)
@@ -136,7 +148,7 @@ func (h *Handle) PrepareMutation(op uint8, k Key, offset, length uint64, src io.
 			return Result{}, ErrRange
 		}
 		if op == opCAS {
-			if length > 1<<20 || (!opts.WholeObject && uint64(len(expected)) != length) || opts.WholeObject && (offset != 0 || !opts.CreateOnly && opts.ExpectedVersion == nil) {
+			if length > 1<<20 || (!opts.WholeObject && uint64(len(expected)) != length) || opts.WholeObject && offset != 0 {
 				return Result{}, ErrRange
 			}
 		}
@@ -277,11 +289,11 @@ func (h *Handle) PublishReplica(id ID, binding ReplicaBinding) (Result, error) {
 		} else if err != nil {
 			return Result{}, err
 		}
-		version := uint64(0)
-		if old != nil {
-			version = old.Info.Version
+		pending, err := v.lookup(pendingKey(r.Request.Key))
+		if err != nil {
+			return Result{}, err
 		}
-		if version != r.PreviousVersion {
+		if pending != r.base {
 			return Result{}, ErrPrecondition
 		}
 		o, err := v.loadObjectAt(r.object)
@@ -290,7 +302,46 @@ func (h *Handle) PublishReplica(id ID, binding ReplicaBinding) (Result, error) {
 		}
 		t := v.transaction()
 		defer t.close()
-		releaseUnsharedData(t, old, o)
+		// Prepared payload remains durable until this redo transaction commits.
+		// Apply addressed bytes to existing allocations under the volume lock.
+		if reusableObject(old, o.Info.Compression) && (r.operation == opPut || r.operation == opPutRange || r.operation == opCAS) {
+			staged := o
+			next := cloneObject(old)
+			next.Base, next.Size = 0, 0
+			source := &objectReader{v: v, o: staged, off: r.offset, left: r.length}
+			if err = t.writeRange(next, r.offset, r.length, source, o.Info.Compression); err != nil {
+				return Result{}, err
+			}
+			if r.operation == opPut || r.whole {
+				next.Spans, err = v.retainSpans(next, o.Info.Length, 0, 0)
+				if err != nil {
+					return Result{}, err
+				}
+				for i := range next.Spans {
+					if next.Spans[i].Direct || next.Spans[i].Codec != Raw {
+						continue
+					}
+					if err = t.trimRawAllocation(&next.Spans[i]); err != nil {
+						return Result{}, err
+					}
+				}
+			}
+			next.Info = staged.Info
+			next.Segmented = len(next.Spans) > 1
+			next.ListBlocks = nil
+			next.ListHead, next.ListTail = 0, 0
+			if err = t.writeObject(next); err != nil {
+				return Result{}, err
+			}
+			combined := cloneObject(old)
+			combined.Spans = append(combined.Spans, staged.Spans...)
+			combined.ListBlocks = append(combined.ListBlocks, staged.ListBlocks...)
+			releaseUnsharedData(t, combined, next)
+			t.release(staged.Base, staged.Size, true)
+			o = next
+		} else {
+			releaseUnsharedData(t, old, o)
+		}
 		if old != nil {
 			t.release(old.Base, old.Size, true)
 			if !old.Info.Deleted {

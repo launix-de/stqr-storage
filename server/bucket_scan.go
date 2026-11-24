@@ -260,7 +260,10 @@ func (b *Bucket) scanPlacement(ctx context.Context, description BucketDescriptio
 				}
 			}
 			old, exists := merged[r.Key.Object]
-			if !exists || r.Info.Version > old.Info.Version || r.Info.Version == old.Info.Version && r.Info.Deleted {
+			if exists && old.Info != r.Info {
+				return nil, volume.ObjectID{}, false, fail(503, "inventory has conflicting physical copies")
+			}
+			if !exists {
 				merged[r.Key.Object] = r
 			}
 		}
@@ -302,7 +305,14 @@ func (s *Server) executeObjectList(ctx context.Context, op *objectMutation, d *c
 	if d.Done() != nil || limit == 0 || limit > 1000 {
 		return nil, 0, fail(400, "invalid object scan")
 	}
-	records, next, more, err := op.bucket.scanCluster(ctx, description, p, after, int(limit))
+	var records []volume.ObjectRecord
+	var next volume.ObjectID
+	var more bool
+	if len(description.ClonePeers) > 0 {
+		records, next, more, err = s.cowLogicalPage(ctx, op.bucket.ID(), after, int(limit), false)
+	} else {
+		records, next, more, err = op.bucket.scanCluster(ctx, description, p, after, int(limit))
+	}
 	if err != nil {
 		return nil, 0, err
 	}

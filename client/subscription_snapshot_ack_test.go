@@ -22,7 +22,7 @@ func TestSubscriptionBufferedUpdateIsAcknowledgedAfterInitialSnapshot(t *testing
 func testSubscriptionSnapshotACK(t *testing.T, bufferedUpdate bool) {
 	var acknowledgments atomic.Int64
 	host := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		conn, err := (&websocket.Upgrader{Subprotocols: []string{"stqr.v1"}}).Upgrade(w, r, nil)
+		conn, err := (&websocket.Upgrader{Subprotocols: []string{"stqr.v2"}}).Upgrade(w, r, nil)
 		if err != nil {
 			return
 		}
@@ -40,7 +40,7 @@ func testSubscriptionSnapshotACK(t *testing.T, bufferedUpdate bool) {
 			result := Encoder{}
 			switch m.Opcode {
 			case Hello:
-				result.U16(1)
+				result.U16(2)
 				result.U64(CapabilityObjectSubscriptions)
 				result.ID(ID{1})
 				result.ID(ID{2})
@@ -60,7 +60,7 @@ func testSubscriptionSnapshotACK(t *testing.T, bufferedUpdate bool) {
 				result.B = append(result.B, sum[:]...)
 				result.Blob(payload)
 				if bufferedUpdate {
-					update := ObjectUpdate{Subscription: id, Cursor: 2, PreviousVersion: 1, NewVersion: 2, Parts: 1, Change: UpdateReplace, NewLength: 4, Data: []byte("next")}
+					update := ObjectUpdate{Subscription: id, Cursor: 2, Parts: 1, Change: UpdateReplace, NewLength: 4, Data: []byte("next")}
 					body, e := update.MarshalBinary()
 					if e != nil {
 						t.Error(e)
@@ -107,17 +107,17 @@ func testSubscriptionSnapshotACK(t *testing.T, bufferedUpdate bool) {
 	}
 	want := int64(0)
 	wantData := "data"
-	wantVersion := uint64(1)
+	wantCursor := uint64(1)
 	if bufferedUpdate {
 		want = 1
 		wantData = "next"
-		wantVersion = 2
+		wantCursor = 2
 	}
 	if n := acknowledgments.Load(); n != want {
 		t.Fatalf("snapshot ACKs=%d want=%d", n, want)
 	}
 	data, info, _, err := sub.Snapshot()
-	if err != nil || string(data) != wantData || info.Version != wantVersion {
+	if err != nil || string(data) != wantData || info.Proof.Cursor != wantCursor {
 		t.Fatal("buffered snapshot update lost", string(data), info, err)
 	}
 }

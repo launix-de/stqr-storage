@@ -60,7 +60,7 @@ func (t *transaction) spillPages() error {
 		return nil
 	}
 	if t.spool == nil {
-		t.spool = &encodedSpool{}
+		t.spool = &encodedSpool{noSpill: t.sb.Identity.Class == RAM}
 		t.spilled = map[uint64]int64{}
 	}
 	for off, b := range t.pages {
@@ -549,7 +549,7 @@ func (t *transaction) commitReserved(useGuaranteed bool, allowance, guaranteedAl
 		offsets = append(offsets, off)
 	}
 	sort.Slice(offsets, func(i, j int) bool { return offsets[i] < offsets[j] })
-	payload := &encodedSpool{}
+	payload := &encodedSpool{noSpill: t.sb.Identity.Class == RAM}
 	defer payload.Close()
 	digest := sha256.New()
 	writer := io.MultiWriter(payload, digest)
@@ -711,7 +711,7 @@ func recoverWAL(dev VolumeIO, s Superblock) (Superblock, error) {
 	if length > uint64(size)*2 || length < PageSize+8 {
 		return s, ErrCorrupt
 	}
-	payload := &encodedSpool{}
+	payload := &encodedSpool{noSpill: s.Identity.Class == RAM}
 	defer payload.Close()
 	digest := sha256.New()
 	off := diskOrder.Uint64(anchor[16:])

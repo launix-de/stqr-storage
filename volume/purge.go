@@ -3,19 +3,14 @@ package volume
 
 import "errors"
 
-// Purge removes an obsolete physical copy without inventing a higher logical
-// tombstone version. Only a trusted, durably committed ownership handoff may
-// authorize this cleanup; it is never the implementation of client DELETE.
-// ExpectedVersion fences cleanup against a newer copy; missing is idempotent.
-// Retry receipts are retained until separately confirmed/forgotten by the caller.
-func (h *Handle) Purge(k Key, expectedVersion uint64) error {
-	return h.PurgeBatch([]ObjectRecord{{Key: k, Info: Info{Version: expectedVersion}}})
+// Purge removes a physical copy under the volume write lock. The caller must
+// hold a durable ownership/maintenance fence for the key. Missing is idempotent.
+func (h *Handle) Purge(k Key) error {
+	return h.PurgeBatch([]ObjectRecord{{Key: k}})
 }
 
-// PurgeBatch performs version-fenced cleanup in one durable transaction. A
-// missing key is idempotent; a mismatched version or duplicate key aborts the
-// entire batch. Logical data and retry receipts have the same contract as Purge.
-// At most 4096 records are accepted to bound the transaction's working set.
+// PurgeBatch requires the same externally verified ownership fence for every
+// key. Duplicate keys abort the batch; retry receipts remain independently owned.
 func (h *Handle) PurgeBatch(records []ObjectRecord) error {
 	return h.do(true, func(v *Volume) error {
 		if len(records) > 4096 {
@@ -29,19 +24,16 @@ func (h *Handle) PurgeBatch(records []ObjectRecord) error {
 			} else if busy {
 				return ErrBusy
 			}
-			if record.Info.Version == 0 || seen[record.Key] {
+			if seen[record.Key] {
 				return ErrRange
 			}
 			seen[record.Key] = true
-			o, err := v.loadObject(record.Key)
+			_, err := v.loadObject(record.Key)
 			if errors.Is(err, ErrNotFound) {
 				continue
 			}
 			if err != nil {
 				return err
-			}
-			if o.Info.Version != record.Info.Version {
-				return ErrPrecondition
 			}
 		}
 		t := v.transaction()

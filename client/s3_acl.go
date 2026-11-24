@@ -7,7 +7,7 @@ import (
 	"errors"
 )
 
-// SetPublicRead changes only the fixed ACL flag with version-checked ranged CAS.
+// SetPublicRead changes only the fixed ACL flag with byte-comparing ranged CAS.
 // Payload, ETag and Last-Modified remain unchanged. Private is the default ACL.
 func (s *S3) SetPublicRead(ctx context.Context, key string, public bool) error {
 	for n := 0; n < 128; n++ {
@@ -25,7 +25,7 @@ func (s *S3) SetPublicRead(ctx context.Context, key string, public bool) error {
 		if public {
 			binary.LittleEndian.PutUint32(replacement, 2)
 		}
-		_, err = s.store.CAS(ctx, S3MetadataID(key), S3FlagsOffset, expected, replacement, CASOptions{Scope: CASRange, MutationOptions: MutationOptions{RequestID: NewRequestID(), ExpectedVersion: &o.Version}})
+		_, err = s.store.CAS(ctx, S3MetadataID(key), S3FlagsOffset, expected, replacement, CASOptions{Scope: CASRange, MutationOptions: MutationOptions{RequestID: NewRequestID()}})
 		if errors.Is(err, ErrPrecondition) {
 			continue
 		}

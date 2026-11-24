@@ -38,7 +38,7 @@ func TestFilesystemExplicitTimestampsAndChmod(t *testing.T) {
 		t.Fatal(err)
 	}
 	read, err := f.Stat(ctx, file.ID)
-	if err != nil || read.Version != after.Version || read.AtimeNS != 0 {
+	if err != nil || read != after || read.AtimeNS != 0 {
 		t.Fatal("read persisted an atime update", read, err)
 	}
 }

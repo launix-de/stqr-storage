@@ -40,15 +40,15 @@ type replicaManager struct {
 	sequence atomic.Uint64
 }
 type replicaHeader struct {
-	Schema          uint16
-	Volume          volume.ID
-	Request         volume.RequestRecord
-	Binding         volume.ReplicaBinding
-	PreviousVersion uint64
-	Opcode          uint8
-	Offset, Length  uint64
-	Expected        []byte
-	Options         volume.Options
+	Schema         uint16
+	Volume         volume.ID
+	Request        volume.RequestRecord
+	Binding        volume.ReplicaBinding
+	Opcode         uint8
+	Offset, Length uint64
+	Expected       []byte
+	Options        volume.Options
+	Snapshot       *volume.Info `json:",omitempty"`
 }
 type replicaUpload struct {
 	actor   client.ID
@@ -83,6 +83,25 @@ func (s *replicaSpool) Write(b []byte) (int, error) {
 	s.memory = append(s.memory, b...)
 	s.position = int64(len(s.memory))
 	return len(b), nil
+}
+func (s *replicaSpool) ReadAt(b []byte, off int64) (int, error) {
+	if s.file != nil {
+		return s.file.ReadAt(b, off)
+	}
+	if off < 0 {
+		return 0, volume.ErrRange
+	}
+	if len(b) == 0 {
+		return 0, nil
+	}
+	if off >= int64(len(s.memory)) {
+		return 0, io.EOF
+	}
+	n := copy(b, s.memory[off:])
+	if n < len(b) {
+		return n, io.EOF
+	}
+	return n, nil
 }
 func (s *replicaSpool) Read(b []byte) (int, error) {
 	if s.file != nil {
@@ -270,6 +289,8 @@ func replicaSetHash(bucket volume.ID, entry client.RangeEntry) [32]byte {
 }
 func replicaOpcode(op uint16) uint8 {
 	switch op {
+	case cowRestoreOpcode:
+		return 7
 	case 0x0102:
 		return 1
 	case 0x0103:
@@ -286,7 +307,7 @@ func replicaOpcode(op uint16) uint8 {
 	return 0
 }
 
-func (b *Bucket) prepareReplicated(v *volume.Volume, key volume.Key, entry client.RangeEntry, opcode uint16, offset, length uint64, src io.Reader, expected []byte, opts volume.Options) (volume.Result, error) {
+func (b *Bucket) prepareReplicated(ctx context.Context, v *volume.Volume, key volume.Key, entry client.RangeEntry, opcode uint16, offset, length uint64, src io.Reader, expected []byte, opts volume.Options) (volume.Result, error) {
 	h, err := v.Open(true)
 	if err != nil {
 		return volume.Result{}, err
@@ -302,7 +323,13 @@ func (b *Bucket) prepareReplicated(v *volume.Volume, key volume.Key, entry clien
 	} else {
 		binding.Sequence = b.server.replicas.sequence.Add(1)
 	}
-	result, err := h.PrepareMutation(replicaOpcode(opcode), key, offset, length, src, expected, opts, binding)
+	var result volume.Result
+	if opcode == cowRestoreOpcode {
+		restore := ctx.Value(cowRestoreKey{}).(cowRestore)
+		result, err = h.PrepareRestore(key, restore.info, cowExtentSource(src), opts, binding)
+	} else {
+		result, err = h.PrepareMutation(replicaOpcode(opcode), key, offset, length, src, expected, opts, binding)
+	}
 	if err != nil && known && prior.State == volume.ReplicaAborted && prior.AbortStatus >= 400 && errors.Is(err, volume.ErrPrecondition) {
 		return result, fail(int(prior.AbortStatus), "replica write was aborted before commit")
 	}
@@ -362,7 +389,7 @@ func (s *Server) replicaPeerMessage(m client.Message, actor client.ID) ([]byte, 
 	if header.Schema != 1 {
 		return nil, client.ErrProtocol
 	}
-	if header.Options.RequestID != header.Request.ID || header.Request.ID == (volume.ID{}) || header.Length > maxObjectStagingBytes || len(header.Expected) > 1<<20 {
+	if header.Options.RequestID != header.Request.ID || header.Request.ID == (volume.ID{}) || header.Opcode != 4 && header.Opcode != 7 && header.Length > maxObjectStagingBytes || len(header.Expected) > 1<<20 {
 		return nil, client.ErrProtocol
 	}
 	r.mu.Lock()
@@ -466,14 +493,18 @@ func (s *Server) replicaPeerMessage(m client.Message, actor client.ID) ([]byte, 
 		if _, err = u.spool.Seek(0, io.SeekStart); err != nil {
 			return nil, err
 		}
-		old, e := h.RecordInfo(header.Request.Key)
+		_, e := h.RecordInfo(header.Request.Key)
 		if e != nil && !errors.Is(e, volume.ErrNotFound) {
 			return nil, e
 		}
-		if old.Version != header.PreviousVersion {
-			return nil, volume.ErrPrecondition
+		if header.Opcode == 7 {
+			if header.Snapshot == nil {
+				return nil, client.ErrProtocol
+			}
+			_, err = h.PrepareRestore(header.Request.Key, *header.Snapshot, cowExtentSource(u.spool), header.Options, header.Binding)
+		} else {
+			_, err = h.PrepareMutation(header.Opcode, header.Request.Key, header.Offset, header.Length, u.spool, header.Expected, header.Options, header.Binding)
 		}
-		_, err = h.PrepareMutation(header.Opcode, header.Request.Key, header.Offset, header.Length, u.spool, header.Expected, header.Options, header.Binding)
 		if err != nil {
 			var quotaFull *physicalQuotaFull
 			if errors.As(err, &quotaFull) && quotaFull.Waiting {
@@ -507,10 +538,11 @@ func (s *Server) replicaPeerMessage(m client.Message, actor client.ID) ([]byte, 
 		if err = h.DecideReplica(header.Request.ID, header.Binding); err != nil {
 			return nil, err
 		}
-		old, _ := h.RecordInfo(header.Request.Key)
 		result, err := h.PublishReplica(header.Request.ID, header.Binding)
-		if err == nil && result.Info.Version != old.Version && s.objectSubscriptions.watched(header.Request.Key) {
-			s.objectSubscriptions.publish(header.Request.Key, old.Version, result.Info, h)
+		if err == nil && s.objectSubscriptions.watched(header.Request.Key) {
+			if !record.IsSnapshot() {
+				s.objectSubscriptions.publish(header.Request.Key, result.Info, h)
+			}
 		}
 		return nil, err
 	case peerReplicaCommitted:
@@ -698,11 +730,12 @@ func (r *replicaManager) start() {
 							if record.State == volume.ReplicaAborted {
 								_ = h.FinishReplicaAbort(record.Request.ID, record.Binding)
 							} else if current.State == volume.ReplicaDecided {
-								old, _ := h.RecordInfo(record.Request.Key)
 								result, e := h.PublishReplica(record.Request.ID, record.Binding)
 								if e == nil {
 									published = true
-									s.objectSubscriptions.publish(record.Request.Key, old.Version, result.Info, h)
+									if !current.IsSnapshot() {
+										s.objectSubscriptions.publish(record.Request.Key, result.Info, h)
+									}
 								}
 							}
 						}

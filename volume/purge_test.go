@@ -7,7 +7,7 @@ import (
 	"testing"
 )
 
-func TestPurgeRemovesOnlyConfirmedPhysicalVersion(t *testing.T) {
+func TestPurgeRemovesFencedPhysicalCopy(t *testing.T) {
 	v, device := memoryVolume(t, 4<<20)
 	key := testKey(1)
 	request := testID(77)
@@ -15,12 +15,9 @@ func TestPurgeRemovesOnlyConfirmedPhysicalVersion(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	info, err := h.Put(key, bytes.Repeat([]byte{1}, 1<<20), Options{RequestID: request})
+	_, err = h.Put(key, bytes.Repeat([]byte{1}, 1<<20), Options{RequestID: request})
 	if err != nil {
 		t.Fatal(err)
-	}
-	if err := h.Purge(key, info.Version+1); !errors.Is(err, ErrPrecondition) {
-		t.Fatal("stale cleanup removed newer version", err)
 	}
 	h.Close()
 	before := v.Stats().AllocatedPhysical
@@ -28,7 +25,7 @@ func TestPurgeRemovesOnlyConfirmedPhysicalVersion(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := h.Purge(key, info.Version); err != nil {
+	if err := h.Purge(key); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := h.RecordInfo(key); !errors.Is(err, ErrNotFound) {
@@ -37,7 +34,7 @@ func TestPurgeRemovesOnlyConfirmedPhysicalVersion(t *testing.T) {
 	if _, found, err := h.OperationStatus(request); err != nil || !found {
 		t.Fatal("cleanup discarded unconfirmed receipt", err)
 	}
-	if err := h.Purge(key, info.Version); err != nil {
+	if err := h.Purge(key); err != nil {
 		t.Fatal("cleanup retry", err)
 	}
 	h.Close()
@@ -56,7 +53,7 @@ func TestPurgeRemovesOnlyConfirmedPhysicalVersion(t *testing.T) {
 	}
 }
 
-func TestPurgeBatchRejectsWholeBatchOnVersionConflict(t *testing.T) {
+func TestPurgeBatchRejectsWholeBatchOnDuplicateKey(t *testing.T) {
 	v, device := memoryVolume(t, 4<<20)
 	h, err := v.Open(true)
 	if err != nil {
@@ -72,8 +69,8 @@ func TestPurgeBatchRejectsWholeBatchOnVersionConflict(t *testing.T) {
 		records[i] = ObjectRecord{Key: key, Info: info}
 	}
 	invalid := append([]ObjectRecord(nil), records...)
-	invalid[len(invalid)-1].Info.Version++
-	if err := h.PurgeBatch(invalid); !errors.Is(err, ErrPrecondition) {
+	invalid[len(invalid)-1] = invalid[0]
+	if err := h.PurgeBatch(invalid); !errors.Is(err, ErrRange) {
 		t.Fatal(err)
 	}
 	for _, record := range records {

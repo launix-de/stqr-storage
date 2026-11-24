@@ -2,6 +2,7 @@
 #include "kstqr.h"
 #include "port.h"
 #include <linux/backing-dev.h>
+#include <linux/file.h>
 #include <linux/fs_context.h>
 #include <linux/fs_parser.h>
 #include <linux/hex.h>
@@ -13,6 +14,7 @@
 #include <linux/pagemap.h>
 #include <linux/sched/mm.h>
 #include <linux/seq_file.h>
+#include <linux/splice.h>
 #include <linux/statfs.h>
 #include <linux/uio.h>
 #include <linux/writeback.h>
@@ -21,7 +23,9 @@
 #define KS_MAGIC 0x53545152
 struct ks_context {
 	char *url, *username, *password;
-	stqr_id bucket;
+	stqr_id bucket, lower;
+	char *whitelist;
+	struct file *boot_lifetime;
 	unsigned timeout, cache_bytes;
 	bool create, readonly;
 };
@@ -59,15 +63,14 @@ static umode_t node_mode(const struct ks_node *n)
 	}
 	return type | n->mode;
 }
-static void update_inode(struct inode *i, const struct ks_node *n, u64 version)
+static void update_inode(struct inode *i, const struct ks_node *n, stqr_proof proof)
 {
 	mutex_lock(&KS_I(i)->metadata_lock);
-	/* Unconfirmed accepted versions can roll back after an incarnation loss.
-	 * Cache/transport loss invalidates pages; accept authoritative lower versions
-	 * too instead of pinning the inode forever to a vanished volatile size. */
-	if (KS_I(i)->version && KS_I(i)->version != version)
+	/* Only a live subscription proves cached contents across calls. */
+	if (!proof.cursor || memcmp(&KS_I(i)->proof, &proof, sizeof(proof)))
 		WRITE_ONCE(KS_I(i)->invalidate, true);
-	KS_I(i)->version = version;
+	KS_I(i)->proof = proof;
+	KS_I(i)->upper_absent = n->upper_absent;
 	i->i_mode = node_mode(n);
 	set_nlink(i, n->removed ? 0 : n->links);
 	i_uid_write(i, n->uid);
@@ -93,7 +96,7 @@ static int inode_set(struct inode *i, void *data)
 	return 0;
 }
 static struct inode *get_inode(struct super_block *sb, stqr_object_id id, const struct ks_node *n,
-			       u64 version)
+			       stqr_proof proof)
 {
 	struct inode *i;
 	unsigned long hash = 0;
@@ -113,10 +116,10 @@ static struct inode *get_inode(struct super_block *sb, stqr_object_id id, const 
 		mapping_set_stable_writes(i->i_mapping);
 		if (n->kind == 4 || n->kind == 5)
 			init_special_inode(i, node_mode(n), 0);
-		update_inode(i, n, version);
+		update_inode(i, n, proof);
 		unlock_new_inode(i);
 	} else
-		update_inode(i, n, version);
+		update_inode(i, n, proof);
 	return i;
 }
 static int refresh_inode(struct inode *i)
@@ -124,13 +127,13 @@ static int refresh_inode(struct inode *i)
 	struct ks_snapshot s;
 	int err = ks_snapshot(i->i_sb->s_fs_info, KS_I(i)->id, &s);
 	if (!err) {
-		update_inode(i, &s.node, s.info.version);
+		update_inode(i, &s.node, s.info.proof);
 		ks_snapshot_free(&s);
 	}
 	return err;
 }
 struct ks_dentry {
-	u64 parent_version;
+	stqr_proof parent_proof;
 };
 static struct dentry *ks_lookup(struct inode *parent, struct dentry *d, unsigned flags)
 {
@@ -153,7 +156,7 @@ static struct dentry *ks_lookup(struct inode *parent, struct dentry *d, unsigned
 					err = -ENOENT;
 				if (!err) {
 					i = get_inode(parent->i_sb, entries[k].id, &child.node,
-						      child.info.version);
+						      child.info.proof);
 					if (IS_ERR(i)) {
 						err = PTR_ERR(i);
 						i = NULL;
@@ -164,7 +167,7 @@ static struct dentry *ks_lookup(struct inode *parent, struct dentry *d, unsigned
 	if (!err) {
 		struct ks_dentry *proof = kmalloc(sizeof(*proof), GFP_NOFS);
 		if (proof) {
-			proof->parent_version = s.info.version;
+			proof->parent_proof = s.info.proof;
 			d->d_fsdata = proof;
 		}
 	}
@@ -181,18 +184,45 @@ static int ks_revalidate(struct inode *parent, const struct qstr *name, struct d
 {
 	struct ks_dentry *proof;
 	struct ks_fs *f = parent->i_sb->s_fs_info;
-	u64 version;
+	stqr_proof cached_proof;
 	(void)name;
 	if (flags & LOOKUP_RCU)
 		return -ECHILD;
+	if (f->lower) {
+		struct ks_snapshot node;
+		int err = ks_snapshot(f, KS_I(parent)->id, &node);
+		if (err)
+			return err;
+		struct ks_entry *entries = NULL;
+		size_t count;
+		err = ks_directory(f, &node.node, &entries, &count);
+		ks_snapshot_free(&node);
+		if (err)
+			return err;
+		bool found = false;
+		stqr_object_id id = {{0}};
+		for (size_t j = 0; j < count; j++)
+			if (!strcmp(entries[j].name, d->d_name.name)) {
+				found = true;
+				id = entries[j].id;
+				break;
+			}
+		sq_free(entries);
+		if (!d_inode(d))
+			return !found;
+		if (!found || memcmp(id.bytes, KS_I(d_inode(d))->id.bytes, 32))
+			return 0;
+		return refresh_inode(d_inode(d)) ? 0 : 1;
+	}
+
 	proof = d->d_fsdata;
-	if (!proof || !ks_cache_version(f, KS_I(parent)->id, &version) ||
-	    version != proof->parent_version)
+	if (!proof || !ks_cache_proof(f, KS_I(parent)->id, &cached_proof) ||
+	    memcmp(&cached_proof, &proof->parent_proof, sizeof(cached_proof)))
 		return 0;
 	/* Namespace proof also covers negative dentries. Refresh a positive inode
 	 * from its live subscription before permission checks use its attributes. */
 	if (d_inode(d) &&
-	    (!ks_cache_version(f, KS_I(d_inode(d))->id, &version) || refresh_inode(d_inode(d))))
+	    (!ks_cache_proof(f, KS_I(d_inode(d))->id, &cached_proof) || refresh_inode(d_inode(d))))
 		return 0;
 	return 1;
 }
@@ -225,7 +255,7 @@ static int ks_iterate(struct file *file, struct dir_context *ctx)
 				leave_fs(f, saved);
 				break;
 			}
-			ci = get_inode(i->i_sb, entries[k].id, &child.node, child.info.version);
+			ci = get_inode(i->i_sb, entries[k].id, &child.node, child.info.proof);
 			ks_snapshot_free(&child);
 			leave_fs(f, saved);
 			if (IS_ERR(ci)) {
@@ -267,7 +297,7 @@ static int create_common(struct mnt_idmap *idmap, struct inode *parent, struct d
 	if (!err) {
 		err = ks_snapshot(f, id, &s);
 		if (!err) {
-			i = get_inode(parent->i_sb, id, &s.node, s.info.version);
+			i = get_inode(parent->i_sb, id, &s.node, s.info.proof);
 			ks_snapshot_free(&s);
 			if (IS_ERR(i))
 				err = PTR_ERR(i);
@@ -328,7 +358,7 @@ static int ks_link_vfs(struct dentry *old, struct inode *parent, struct dentry *
 	if (!err) {
 		err = ks_snapshot(f, KS_I(d_inode(old))->id, &s);
 		if (!err) {
-			i = get_inode(parent->i_sb, s.id, &s.node, s.info.version);
+			i = get_inode(parent->i_sb, s.id, &s.node, s.info.proof);
 			ks_snapshot_free(&s);
 			if (IS_ERR(i))
 				err = PTR_ERR(i);
@@ -548,6 +578,12 @@ static ssize_t ks_write_iter(struct kiocb *iocb, struct iov_iter *from)
 		return -EAGAIN;
 	if (iocb->ki_flags & IOCB_DIRECT)
 		return -EOPNOTSUPP;
+	if (f->lower) {
+		err = ks_overlay_check_write(f, KS_I(i)->id);
+		if (err)
+			return err;
+	}
+
 	if (f->readonly)
 		return -EROFS;
 	size_t chunk = min_t(size_t, iov_iter_count(from), 1U << 20);
@@ -797,6 +833,9 @@ static vm_fault_t ks_page_mkwrite(struct vm_fault *vmf)
 	struct folio *folio = page_folio(vmf->page);
 	vm_fault_t result = VM_FAULT_NOPAGE;
 	int err;
+	struct ks_fs *f = i->i_sb->s_fs_info;
+	if (f->lower && ks_overlay_check_write(f, KS_I(i)->id))
+		return VM_FAULT_SIGBUS;
 	if (sb_rdonly(i->i_sb))
 		return VM_FAULT_SIGBUS;
 	sb_start_pagefault(i->i_sb);
@@ -834,6 +873,13 @@ static int ks_mmap(struct file *file, struct vm_area_struct *vma)
 {
 	struct inode *i = file_inode(file);
 	int err;
+	struct ks_fs *f = i->i_sb->s_fs_info;
+	if (f->lower && (vma->vm_flags & VM_SHARED) && (vma->vm_flags & VM_WRITE)) {
+		err = ks_overlay_check_write(f, KS_I(i)->id);
+		if (err)
+			return err;
+	}
+
 	if ((vma->vm_flags & VM_SHARED) && (vma->vm_flags & VM_WRITE) && sb_rdonly(i->i_sb))
 		return -EROFS;
 	if ((vma->vm_flags & VM_SHARED) && (vma->vm_flags & VM_MAYWRITE)) {
@@ -866,6 +912,8 @@ static const struct file_operations ks_file_fops = {
     .open = generic_file_open,
     .llseek = generic_file_llseek,
     .read_iter = ks_read_iter,
+    .splice_read = filemap_splice_read,
+    .splice_write = iter_file_splice_write,
     .write_iter = ks_write_iter,
     .fsync = ks_fsync,
     .mmap = ks_mmap,
@@ -924,7 +972,10 @@ static const struct xattr_handler ks_user_xattr = {
     .prefix = "user.", .get = ks_xattr_get, .set = ks_xattr_set};
 static const struct xattr_handler ks_trusted_xattr = {
     .prefix = "trusted.", .flags = 1, .get = ks_xattr_get, .set = ks_xattr_set};
-static const struct xattr_handler *const ks_xattrs[] = {&ks_user_xattr, &ks_trusted_xattr, NULL};
+static const struct xattr_handler ks_security_xattr = {
+    .prefix = "security.", .get = ks_xattr_get, .set = ks_xattr_set};
+static const struct xattr_handler *const ks_xattrs[] = {&ks_user_xattr, &ks_trusted_xattr,
+							&ks_security_xattr, NULL};
 static const struct inode_operations ks_file_ops = {
     .getattr = ks_getattr, .setattr = ks_setattr_vfs, .listxattr = ks_listxattr_vfs};
 static const struct inode_operations ks_dir_ops = {
@@ -947,6 +998,12 @@ static const struct inode_operations ks_symlink_ops = {.get_link = ks_get_link,
 						       .listxattr = ks_listxattr_vfs};
 void ks_queue_invalidation(struct ks_fs *f, const stqr_object_id *id)
 {
+	if (f->parent) {
+		ks_queue_invalidation(f->parent, NULL);
+		return;
+	}
+	if (f->lower && id && !memcmp(id->bytes, ks_root_id.bytes, 32))
+		id = NULL;
 	if (READ_ONCE(f->stopping))
 		return;
 	spin_lock(&f->inode_lock);
@@ -964,7 +1021,7 @@ static void ks_invalidate_one(struct inode *i)
 	struct ks_snapshot snapshot;
 	int err = ks_snapshot_cached(i->i_sb->s_fs_info, KS_I(i)->id, &snapshot);
 	if (!err) {
-		update_inode(i, &snapshot.node, snapshot.info.version);
+		update_inode(i, &snapshot.node, snapshot.info.proof);
 		ks_snapshot_free(&snapshot);
 	}
 	WRITE_ONCE(KS_I(i)->invalidate, true);
@@ -1061,6 +1118,17 @@ static void ks_evict(struct inode *i)
 	truncate_inode_pages_final(&i->i_data);
 	clear_inode(i);
 }
+static void ks_close_lower(struct ks_fs *f)
+{
+	if (!f)
+		return;
+	WRITE_ONCE(f->stopping, true);
+	ks_cache_stop(f);
+	for (unsigned slot = 0; slot < KS_RPC_SLOTS; slot++)
+		stqr_close(f->rpc[slot].client);
+	kfree(f->url);
+	kfree(f);
+}
 static void ks_put_super(struct super_block *sb)
 {
 	struct ks_fs *f = sb->s_fs_info;
@@ -1074,8 +1142,13 @@ static void ks_put_super(struct super_block *sb)
 	WRITE_ONCE(f->stopping, true);
 	ks_cache_stop(f);
 	cancel_work_sync(&f->invalidation_work);
+	ks_close_lower(f->lower);
+	f->lower = NULL;
 	for (unsigned slot = 0; slot < KS_RPC_SLOTS; slot++)
 		stqr_close(f->rpc[slot].client);
+	ks_overlay_stop(f);
+	if (f->boot_lifetime)
+		fput(f->boot_lifetime);
 	kfree(f->url);
 	kfree(f);
 	sb->s_fs_info = NULL;
@@ -1088,6 +1161,12 @@ static int ks_show_options(struct seq_file *m, struct dentry *root)
 	bucket[32] = 0;
 	seq_show_option(m, "url", f->url);
 	seq_show_option(m, "bucket", bucket);
+	if (f->lower) {
+		bin2hex(bucket, f->lower->bucket.bytes, 16);
+		bucket[32] = 0;
+		seq_show_option(m, "readonly_bucket", bucket);
+	}
+
 	seq_printf(m, ",metadata_cache_bytes=%zu", f->cache_budget);
 	return 0;
 }
@@ -1170,6 +1249,8 @@ static int ks_fill_super(struct super_block *sb, struct fs_context *fc)
 	for (unsigned slot = 0; slot < KS_RPC_SLOTS; slot++)
 		mutex_init(&f->rpc[slot].lock);
 	mutex_init(&f->sync_lock);
+	mutex_init(&f->overlay_lock);
+	mutex_init(&f->overlay_cache_lock);
 	spin_lock_init(&f->inode_lock);
 	INIT_LIST_HEAD(&f->inodes);
 	INIT_WORK(&f->invalidation_work, ks_invalidation_worker);
@@ -1181,9 +1262,13 @@ static int ks_fill_super(struct super_block *sb, struct fs_context *fc)
 		return -EINVAL;
 	}
 	f->cache_budget = c->cache_bytes;
+	if (c->boot_lifetime)
+		f->boot_lifetime = get_file(c->boot_lifetime);
 	f->bucket = c->bucket;
 	f->url = kstrdup(c->url, GFP_KERNEL);
 	if (!f->url) {
+		if (f->boot_lifetime)
+			fput(f->boot_lifetime);
 		kfree(f);
 		return -ENOMEM;
 	}
@@ -1206,19 +1291,59 @@ static int ks_fill_super(struct super_block *sb, struct fs_context *fc)
 				c->timeout);
 	if (!err)
 		err = ks_cache_start(f, c->username, c->password, c->timeout);
+	if (!err && memcmp(c->lower.bytes, (u8[16]){0}, 16)) {
+		if (!memcmp(c->lower.bytes, c->bucket.bytes, 16))
+			err = -EINVAL;
+		else {
+			struct ks_fs *lower = kzalloc(sizeof(*lower), GFP_KERNEL);
+			if (!lower)
+				err = -ENOMEM;
+			else {
+				f->lower = lower;
+				lower->parent = f;
+				lower->readonly = true;
+				lower->bucket = c->lower;
+				lower->cache_budget = c->cache_bytes;
+				lower->url = kstrdup(c->url, GFP_KERNEL);
+				for (unsigned slot = 0; slot < KS_RPC_SLOTS; slot++)
+					mutex_init(&lower->rpc[slot].lock);
+				mutex_init(&lower->sync_lock);
+				spin_lock_init(&lower->inode_lock);
+				INIT_LIST_HEAD(&lower->inodes);
+				INIT_WORK(&lower->invalidation_work, ks_invalidation_worker);
+				if (!lower->url)
+					err = -ENOMEM;
+				for (unsigned slot = 0; slot < KS_RPC_SLOTS && !err; slot++)
+					err =
+					    stqr_dial(&lower->rpc[slot].client, c->url, c->username,
+						      c->password, c->lower, c->timeout);
+				if (!err)
+					err = ks_cache_start(lower, c->username, c->password,
+							     c->timeout);
+			}
+		}
+	}
+
 	if (!err)
 		err = ks_snapshot(f, ks_root_id, &root);
 	if (err == -ENOENT && c->create) {
-		err = ks_initialize(f, from_kuid(&init_user_ns, current_fsuid()),
-				    from_kgid(&init_user_ns, current_fsgid()));
+		err = f->lower ? ks_overlay_initialize(f, c->whitelist)
+			       : ks_initialize(f, from_kuid(&init_user_ns, current_fsuid()),
+					       from_kgid(&init_user_ns, current_fsgid()));
 		if (!err || err == -EAGAIN)
 			err = ks_snapshot(f, ks_root_id, &root);
 	}
+	if (!err && f->lower) {
+		err = ks_overlay_validate_policy(f, c->whitelist);
+		if (err)
+			ks_snapshot_free(&root);
+	}
+
 	if (!err) {
 		if (root.node.kind != 2 || root.node.removed)
 			err = -ENOTDIR;
 		else {
-			inode = get_inode(sb, ks_root_id, &root.node, root.info.version);
+			inode = get_inode(sb, ks_root_id, &root.node, root.info.proof);
 			if (IS_ERR(inode))
 				err = PTR_ERR(inode);
 			else {
@@ -1234,13 +1359,27 @@ static int ks_fill_super(struct super_block *sb, struct fs_context *fc)
 		ks_put_super(sb);
 	return err;
 }
-enum { Opt_url, Opt_bucket, Opt_credentials, Opt_timeout, Opt_init, Opt_readonly, Opt_cache };
+enum {
+	Opt_url,
+	Opt_bucket,
+	Opt_credentials,
+	Opt_timeout,
+	Opt_init,
+	Opt_readonly,
+	Opt_cache,
+	Opt_lower,
+	Opt_whitelist,
+	Opt_boot_lifetime
+};
 static const struct fs_parameter_spec ks_parameters[] = {
     fsparam_string("url", Opt_url),
     fsparam_string("bucket", Opt_bucket),
     fsparam_fd("credentials", Opt_credentials),
     fsparam_u32("timeout_ms", Opt_timeout),
     fsparam_u32("metadata_cache_bytes", Opt_cache),
+    fsparam_string("readonly_bucket", Opt_lower),
+    fsparam_string("whitelist", Opt_whitelist),
+    fsparam_fd("boot_lifetime", Opt_boot_lifetime),
     fsparam_flag("init", Opt_init),
     fsparam_flag("readonly", Opt_readonly),
     {}};
@@ -1317,6 +1456,21 @@ static int ks_parse(struct fs_context *fc, struct fs_parameter *param)
 		break;
 	case Opt_bucket:
 		return stqr_parse_id(param->string, &c->bucket);
+	case Opt_lower: {
+		int err = stqr_parse_id(param->string, &c->lower);
+		return err ? err : memcmp(c->lower.bytes, (u8[16]){0}, 16) ? 0 : -EINVAL;
+	}
+	case Opt_whitelist:
+		kfree(c->whitelist);
+		c->whitelist = param->string;
+		param->string = NULL;
+		break;
+	case Opt_boot_lifetime:
+		if (param->type != fs_value_is_file || !S_ISSOCK(file_inode(param->file)->i_mode) ||
+		    c->boot_lifetime)
+			return -EINVAL;
+		c->boot_lifetime = get_file(param->file);
+		break;
 	case Opt_credentials:
 		if (param->type != fs_value_is_file)
 			return -EINVAL;
@@ -1346,6 +1500,9 @@ static void ks_free_context(struct fs_context *fc)
 	struct ks_context *c = fc->fs_private;
 	if (c) {
 		kfree(c->url);
+		kfree(c->whitelist);
+		if (c->boot_lifetime)
+			fput(c->boot_lifetime);
 		kfree_sensitive(c->username);
 		kfree_sensitive(c->password);
 		kfree(c);

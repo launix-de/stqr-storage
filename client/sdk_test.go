@@ -59,7 +59,6 @@ func newWirePeer(t *testing.T) (*wireObjectPeer, *httptest.Server) {
 	return p, server
 }
 func fixtureInfo(e *Encoder, version, length uint64) {
-	e.U64(version)
 	e.U64(length)
 	e.Bool(false)
 	e.U32(0)
@@ -85,7 +84,7 @@ func (p *wireObjectPeer) serve(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	up := websocket.Upgrader{Subprotocols: []string{"stqr.v1"}}
+	up := websocket.Upgrader{Subprotocols: []string{"stqr.v2"}}
 	c, e := up.Upgrade(w, r, nil)
 	if e != nil {
 		return
@@ -165,7 +164,7 @@ func (p *wireObjectPeer) serve(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			result := Encoder{}
-			result.U16(1)
+			result.U16(2)
 			result.U64(0)
 			result.ID(ID{1})
 			result.ID(ID{2})
@@ -234,10 +233,11 @@ func (p *wireObjectPeer) serve(w http.ResponseWriter, r *http.Request) {
 			if d.Bool() {
 				d.U64()
 			}
+			d.Bool()
 			if d.Bool() {
 				d.U64()
+				d.Blob()
 			}
-			d.Bool()
 			mode, length, digest, data := decodeTransfer(&d)
 			if d.Done() != nil {
 				p.t.Error(d.Done())
@@ -283,7 +283,10 @@ func (p *wireObjectPeer) serve(w http.ResponseWriter, r *http.Request) {
 				result.U64(length)
 				result.U64(uint64(len(data)))
 			}
-			if d.Done() != nil {
+			if m.Opcode != objectStat && d.Bool() {
+ if d.Bool() { d.U64() }; d.U64(); d.Blob()
+ }
+ if d.Done() != nil {
 				p.t.Error("object reference or range layout")
 				return
 			}
@@ -355,7 +358,7 @@ func TestBucketConnectionObjectsStreamingAndRequestMultiplexing(t *testing.T) {
 	defer c.Close()
 	id := ObjectID{4}
 	info, e := c.Put(ctx, id, []byte("abc"), PutOptions{})
-	if e != nil || info.Version != 1 {
+	if e != nil || info.Length == 0 {
 		t.Fatal(info, e)
 	}
 	b, info, e := c.GetRange(ctx, id, 1, 2)
@@ -406,7 +409,7 @@ func TestBucketConnectionReconnectPreservesMutationID(t *testing.T) {
 	peer.dropNext.Store(true)
 	id := NewRequestID()
 	result, e := c.Append(ctx, ObjectID{7}, []byte("once"), AppendOptions{RequestID: id})
-	if e != nil || result.Length != 4 || result.Version != 1 {
+	if e != nil || result.Length != 4 {
 		t.Fatal("reconnect result", result, e)
 	}
 	peer.mu.Lock()
@@ -435,7 +438,7 @@ func TestBucketConnectionCancellationUnknownOutcome(t *testing.T) {
 	retryCtx, stop := context.WithTimeout(context.Background(), 2*time.Second)
 	defer stop()
 	info, e := c.Put(retryCtx, ObjectID{8}, []byte("confirmed"), PutOptions{RequestID: id})
-	if e != nil || info.Version != 1 || peer.commits.Load() != 1 {
+	if e != nil || info.Length == 0 || peer.commits.Load() != 1 {
 		t.Fatal("unknown-outcome retry duplicated write", info, e)
 	}
 }

@@ -91,7 +91,7 @@ use the same discrete size steps. The server rechecks limits before growth.
 Blockdevices use their entire current physical capacity with no size selector.
 
 **Aushängen & entfernen** persists DRAINING and an operation ID. The local
-coordinator copies live data, sparse extents, versions, tombstones and retry
+coordinator copies live data, sparse extents, tombstones and retry
 records to active compatible targets (HDD may use SSD; SSD never HDD). Without a
 safe target it waits, keeps the source attached and retries when capacity becomes
 available. Shutdown leaves the drain resumable. Only after destination commits
@@ -107,7 +107,7 @@ heartbeat is treated as a quorum or timeout-based eviction.
 ## Original WebSocket protocol and queues
 
 The dashboard logs in through `POST /api/session` using HTTP Basic and then uses
-an HttpOnly, SameSite=Strict session cookie. The WebSocket requests `stqr.v1` and
+an HttpOnly, SameSite=Strict session cookie. The WebSocket requests `stqr.v2` and
 passes the CSRF token in a second subprotocol. Origin, source subnet and current
 account/session state are checked at upgrade; text WebSocket messages are not accepted.
 The connection caches authenticated admin/cluster-peer flags. Account changes,
@@ -298,12 +298,13 @@ authenticated auxiliary sockets carry the grant for direct routed I/O. Passive
 participant restart preserves the fence; owner loss initiates ALL release.
 `BUCKET_MAINTENANCE_END` acknowledges release on clean close. A timer does not
 expire a live lease. Epochs, sequence high-water marks and fresh grant tokens fence
-late protocol messages. Cluster receipts for clear/clone are globally committed
-before data changes and after completion, retaining replay protection on restart.
+late protocol messages. Clear receipts retain replay protection across restart. Clone publishes its
+COW links and success receipt in one ALL-member catalog decision; see
+[bucket copies and maintenance](bucket-maintenance.md).
 
 These restrictions apply only to the offline maintenance session. Ordinary FUSE
-reads do not persist synchronization records. The scan is hash-ordered and merges
-versions/tombstones across local copies before returning live records. Tombstones
+reads do not persist synchronization records. The scan is hash-ordered and selects authoritative
+records/tombstones across local copies before returning live records. Tombstones
 can advance a cursor without returning live entries. The daemon does not decode
 filesystem formats or determine reachability; the client performs mark-and-sweep.
 
@@ -465,7 +466,7 @@ Proofs remain available after release and voluntary membership departure.
 Single-primary ranges have independent durable source/target transitions.
 Disjoint scopes may proceed without an unrelated offline member. A plan claims
 its complete old parent, splits only the selected path, bulk copies data, fences
-source mutations, catches up canonical versions and retry receipts, then commits
+source mutations, catches up canonical contents and retry receipts, then commits
 ownership. Old physical records are purged only after target commit. Cleanup
 never invents a higher-version tombstone. Global admin checkpoints collect
 committed scoped archives under ALL reservations before capturing the map.
@@ -529,7 +530,7 @@ connections, separate from deployment or performance claims:
   new hashes sharing the same initial half; authoritative usage excludes copies.
 - `TestDaemonCodecPolicyConvertsEveryOwner` and
   `TestDaemonStorageClassPolicyMovesToEligibleOwner`: distributed physical codec
-  changes, combined HDD->SSD/raw->lz4 handoff, unchanged versions and restart.
+  changes, combined HDD->SSD/raw->lz4 handoff, unchanged bytes and restart.
 - `TestDaemonBucketDeletionReclaimsEveryNode`: replicated DELETE intent, physical
   object/receipt cleanup on both members, map removal and restart persistence.
 - `TestDaemonNativeShortShutdownCommand` and the process signal tests: native
@@ -633,7 +634,7 @@ go test -race ./server -run '^TestSSHClusterAcceptance$' -v -timeout 180s
 ```
 
 The test has passed over these two real hosts: six MiB in two four-MiB data
-volumes, remote volume creation, cross-host reads with unchanged versions,
+volumes, remote volume creation, cross-host reads with unchanged bytes,
 finite quota measured from both owners, production SIGTERM/SHORT, full CLUSTER
 STOP with the former joiner starting first, remote volume evacuation/detachment,
 node departure and continued use of the original client connection. All test
@@ -746,7 +747,7 @@ that a missing issuer preserves 503 while invalid credentials remain rejected.
 
 `TestDaemonUpgradeFromDiscoveryOnlyCluster` opens a prior discovery-only setup
 with existing acknowledged data, restarts the join-pending node first, and checks
-shared committed membership, unchanged object bytes/versions and local volume
+shared committed membership, unchanged object bytes and local volume
 ownership. The existing deployment was backed up before its matching upgrade.
 
 ## PM2 shutdown behavior
@@ -826,7 +827,7 @@ contains such origins. Ordinary FORCE scope reports retain their existing shape.
 `TestRecoveryRebuildsCancellationEvidenceAfterCoordinatorRestart` interrupts the
 coordinator after target cancellation and before recovery READY.
 `TestSSHRecoveryFenceClearance` uses two real hosts, stops the source after its
-fence, moves only its data volume over SSH and checks content, versions and
+fence, moves only its data volume over SSH and checks content and
 APPEND retry identity before and after restarting the surviving daemon. The
 temporary test nodes never modify the existing deployed PM2 process.
 

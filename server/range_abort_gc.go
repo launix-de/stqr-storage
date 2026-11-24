@@ -79,8 +79,8 @@ func (r *rangeManager) collectAbortedImports() error {
 			if !safe {
 				bucket, err := s.Bucket(record.Key.Bucket)
 				if err == nil {
-					authoritative, info, found, err := bucket.selectVolume(bucket.Describe(), record.Key, volume.ID{}, false)
-					safe = err == nil && found && authoritative != store && info.Version >= record.Info.Version
+					authoritative, _, found, err := bucket.selectVolume(bucket.Describe(), record.Key, volume.ID{}, false)
+					safe = err == nil && found && authoritative != store
 				}
 			}
 			if safe {

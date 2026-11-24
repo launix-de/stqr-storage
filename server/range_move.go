@@ -283,7 +283,7 @@ func (r *rangeManager) cleanup(ctx context.Context, p rangePlan) error {
 				}
 				h, err := v.Open(true)
 				if err == nil {
-					err = h.Purge(record.Key, record.Info.Version)
+					err = h.Purge(record.Key)
 					h.Close()
 				}
 				r.server.opMu.Unlock()

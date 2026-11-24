@@ -2,7 +2,8 @@
 # SPDX-License-Identifier: GPL-3.0-only
 import argparse
 import subprocess
-from common import cli, ctl, extract, nbd, qemu, require, staging
+from common import (cli, ctl, extract, nbd, qemu, require, staging,
+                    forget_preparation, remember_preparation)
 
 def main():
     p = argparse.ArgumentParser(description='Boot an existing bucket disk in QEMU; optionally clone before editing')
@@ -31,14 +32,18 @@ def main():
         ctl(args.config, 'clone', args.bucket, target)
     with staging(args.work_dir, 'stqr-edit-') as work:
         with nbd(args.config, target, work) as socket:
+            forget_preparation(args.config, target)
             qemu(socket, args)
             extract(socket, work, args.kernel_version)
+        remember_preparation(args.config, target, work)
         ctl(args.config, 'publish', target, work)
+        remember_preparation(args.config, target, work, 'published')
         print('Published', target, flush=True)
         try:
             ctl(args.config, 'gc', target)
         except subprocess.CalledProcessError:
-            raise RuntimeError(f'Image {target} is published, but cleanup failed. Disconnect bucket clients and retry: networkboot/bin/stqr-bootctl --config {args.config} gc {target}') from None
+            raise RuntimeError(f'Image {target} is published, but cleanup failed. Disconnect bucket clients and retry: networkboot/prepare-system {target}') from None
+    forget_preparation(args.config, target)
     print('Cleanup complete', flush=True)
 
 if __name__ == '__main__':

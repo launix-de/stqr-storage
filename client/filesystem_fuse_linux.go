@@ -24,12 +24,12 @@ import (
 // OIDs are never truncated to 64 bits to synthesize kernel inode numbers.
 type FSNode struct {
 	fusefs.Inode
-	filesystem    FilesystemView
-	numbers       *fsInodeNumbers
-	identity      *fsInodeIdentity
-	coherent      *atomic.Bool
-	openedVersion atomic.Uint64
-	id            ObjectID
+	filesystem  FilesystemView
+	numbers     *fsInodeNumbers
+	identity    *fsInodeIdentity
+	coherent    *atomic.Bool
+	openedProof atomic.Pointer[SnapshotProof]
+	id          ObjectID
 }
 
 func (n *FSNode) Statfs(ctx context.Context, out *fuse.StatfsOut) syscall.Errno {
@@ -298,9 +298,12 @@ func (n *FSNode) Open(ctx context.Context, flags uint32) (fusefs.FileHandle, uin
 		openFlags = fuse.FOPEN_DIRECT_IO
 	}
 	if openFlags == 0 && n.coherent != nil && n.coherent.Load() {
-		if source, ok := n.filesystem.(interface{ subscribed(ObjectID, uint64) bool }); ok && source.subscribed(n.id, info.Version) {
-			previous := n.openedVersion.Swap(info.Version)
-			if previous == info.Version {
+		if source, ok := n.filesystem.(interface {
+			subscribed(ObjectID, SnapshotProof) bool
+		}); ok && source.subscribed(n.id, info.Proof) {
+			proof := info.Proof
+			previous := n.openedProof.Swap(&proof)
+			if previous != nil && *previous == proof {
 				openFlags = fuse.FOPEN_KEEP_CACHE
 			}
 		}
@@ -467,7 +470,7 @@ func (n *FSNode) startInvalidations(server *fuse.Server) {
 			}
 			table.mu.Unlock()
 			for _, node := range nodes {
-				node.openedVersion.Store(0)
+				node.openedProof.Store(nil)
 				node.NotifyContent(0, 0)
 				for name := range node.Children() {
 					node.NotifyEntry(name)

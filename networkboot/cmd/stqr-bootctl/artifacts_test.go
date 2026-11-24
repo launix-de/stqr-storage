@@ -32,7 +32,7 @@ func (s *artifactFixture) PutRangeFrom(_ context.Context, _ client.ObjectID, off
 	if s.failAt == s.writes {
 		return s.info, errors.New("interrupted upload")
 	}
-	if opt.Absent && s.exists || opt.ExpectedVersion != nil && (!s.exists || *opt.ExpectedVersion != s.info.Version) {
+	if opt.Absent && s.exists || opt.ExpectedLength != nil && (!s.exists || *opt.ExpectedLength != s.info.Length) {
 		return s.info, client.ErrPrecondition
 	}
 	if off != uint64(len(s.data)) {
@@ -43,19 +43,19 @@ func (s *artifactFixture) PutRangeFrom(_ context.Context, _ client.ObjectID, off
 		return s.info, err
 	}
 	s.data = append(s.data, data...)
-	s.info.Version++
 	s.info.Length = uint64(len(s.data))
 	s.exists = true
 	return s.info, nil
 }
-func (s *artifactFixture) GetRangeToVersion(_ context.Context, _ client.ObjectID, off, n, version uint64, dst io.Writer) (client.ObjectInfo, error) {
-	if version != s.info.Version {
+func (s *artifactFixture) GetRangeToMatching(_ context.Context, _ client.ObjectID, off, n uint64, condition client.ReadCondition, dst io.Writer) (client.ObjectInfo, error) {
+	if condition.Length != nil && *condition.Length != s.info.Length {
 		return s.info, client.ErrPrecondition
 	}
 	_, err := dst.Write(s.data[off : off+n])
 	info := s.info
 	if s.changeAfterRead {
-		s.info.Version++
+		s.data = append(s.data, 0)
+		s.info.Length++
 	}
 	return info, err
 }
@@ -92,8 +92,8 @@ func TestArtifactTransferResumeAndDeduplication(t *testing.T) {
 		t.Fatal("ranged download differs")
 	}
 }
-func TestArtifactRejectsForeignPrefixAndMixedVersions(t *testing.T) {
-	store := &artifactFixture{exists: true, data: []byte("wrong"), info: client.ObjectInfo{Length: 5, Version: 1}}
+func TestArtifactRejectsForeignPrefixAndChangingLength(t *testing.T) {
+	store := &artifactFixture{exists: true, data: []byte("wrong"), info: client.ObjectInfo{Length: 5}}
 	if _, err := uploadArtifact(context.Background(), store, client.ObjectID{}, bytes.NewReader([]byte("right tail")), 10, 2); err == nil {
 		t.Fatal("accepted foreign prefix")
 	}
@@ -102,6 +102,6 @@ func TestArtifactRejectsForeignPrefixAndMixedVersions(t *testing.T) {
 	}
 	store.changeAfterRead = true
 	if _, err := copyArtifact(context.Background(), store, client.ObjectID{}, 5, 2, io.Discard); !errors.Is(err, client.ErrPrecondition) {
-		t.Fatal("mixed versions accepted", err)
+		t.Fatal("changed length accepted", err)
 	}
 }

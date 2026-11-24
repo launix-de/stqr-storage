@@ -136,8 +136,8 @@ func TestCatchupWritesOnlyChangedPages(t *testing.T) {
 	h.Close()
 	expected := bytes.Repeat([]byte{1}, 1<<20)
 	expected[0] = 2
-	if e != nil || !bytes.Equal(got, expected) || info.Version != 2 {
-		t.Fatal("delta lost bytes/version", info, e)
+	if e != nil || !bytes.Equal(got, expected) {
+		t.Fatal("delta lost bytes", info, e)
 	}
 	if written > 128<<10 {
 		t.Fatalf("1-byte update after bulk copy caused full catch-up: source reads=%d bytes, target writes=%d bytes", read, written)

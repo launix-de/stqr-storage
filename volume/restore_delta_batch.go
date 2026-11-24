@@ -10,7 +10,7 @@ type restorePatchPiece struct {
 
 // A checksum block is read and verified once even when the migration changes
 // several disjoint pages in it. Only the changed byte intervals enter redo.
-func (t *transaction) patchRawBatch(span *dataSpan, patches []RestorePatch) error {
+func (t *transaction) patchRawBatch(span *dataSpan, patches []RestorePatch, preimage []byte) error {
 	if span.Skip > span.Stored || span.Length > span.Stored-span.Skip {
 		return ErrCorrupt
 	}
@@ -38,7 +38,9 @@ func (t *transaction) patchRawBatch(span *dataSpan, patches []RestorePatch) erro
 	for _, index := range indices {
 		size := min(uint64(BlockSize), span.Stored-index*BlockSize)
 		raw := make([]byte, int(size))
-		if err := t.readBytes(raw, span.Location+index*BlockSize); err != nil {
+		if span.Skip == 0 && span.Stored == span.Length && span.Offset+index*BlockSize+size <= uint64(len(preimage)) {
+			copy(raw, preimage[span.Offset+index*BlockSize:span.Offset+index*BlockSize+size])
+		} else if err := t.readBytes(raw, span.Location+index*BlockSize); err != nil {
 			return err
 		}
 		crc := span.CRC

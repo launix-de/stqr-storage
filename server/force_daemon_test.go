@@ -82,7 +82,7 @@ func TestDaemonExplicitExclusionMarksLostAndPurgesStaleCopies(t *testing.T) {
 		t.Fatal(err)
 	}
 	stale := []byte("obsolete unowned bytes")
-	err = h.Restore(volume.Key{Bucket: draft.ID(), Object: volume.ObjectID(right)}, volume.Info{Version: 99, Length: uint64(len(stale))}, func(yield func(uint64, io.Reader, uint64) error) error {
+	err = h.Restore(volume.Key{Bucket: draft.ID(), Object: volume.ObjectID(right)}, volume.Info{Length: uint64(len(stale))}, func(yield func(uint64, io.Reader, uint64) error) error {
 		return yield(0, bytes.NewReader(stale), uint64(len(stale)))
 	}, volume.Options{})
 	if err == nil {
@@ -143,7 +143,7 @@ func TestDaemonExplicitExclusionMarksLostAndPurgesStaleCopies(t *testing.T) {
 	if len(view.manifest.Membership.Members) != 1 || !hasControlNode(view.manifest.Membership.Excluded, victim) {
 		t.Fatal("membership did not exclude the fenced node")
 	}
-	if data, info, err := c.Get(ctx, left); err != nil || !bytes.Equal(data, leftData) || info.Version != leftInfo.Version {
+	if data, info, err := c.Get(ctx, left); err != nil || !bytes.Equal(data, leftData) || info.Length != leftInfo.Length {
 		t.Fatal("survivor data changed", err)
 	}
 	if _, _, err := c.Get(ctx, right); !errors.Is(err, client.ErrGone) {
@@ -529,7 +529,7 @@ func TestDaemonExclusionCancelsUncommittedHandoffs(t *testing.T) {
 				if _, err := reader.Put(ctx, object, data, client.PutOptions{}); err != nil {
 					t.Fatal(err)
 				}
-			} else if err != nil || !bytes.Equal(got, data) || info.Version != original.Version {
+			} else if err != nil || !bytes.Equal(got, data) || info.Length != original.Length {
 				t.Fatal("surviving source lost acknowledged data", err)
 			}
 			if err := survivor.node.scopes.cleanup(ctx, p); !expectLost && !tc.sourceLost && err == nil {
@@ -896,7 +896,7 @@ func TestDaemonForceCompletesCommittedDepartureWithoutLosingData(t *testing.T) {
 		t.Fatal("historical retirement proof missing")
 	}
 	target = restartDaemonTestNode(t, target)
-	if data, info, err := objects.Get(ctx, object); err != nil || string(data) != "kept" || info.Version != written.Version {
+	if data, info, err := objects.Get(ctx, object); err != nil || string(data) != "kept" || info.Length != written.Length {
 		t.Fatal("recovered departure lost authoritative data", err)
 	}
 	if status, _ := bucketHTTPReply(t, target.node, request, admin.Username, admin.Password); status != 200 {
@@ -1046,7 +1046,7 @@ func TestDaemonForcePreservesEarlierForceCommit(t *testing.T) {
 				t.Fatal("ancestor operation replay failed", status)
 			}
 			b = restartDaemonTestNode(t, b)
-			if data, info, err := objects.Get(ctx, object); err != nil || string(data) != "kept" || info.Version != written.Version {
+			if data, info, err := objects.Get(ctx, object); err != nil || string(data) != "kept" || info.Length != written.Length {
 				t.Fatal("survivor data lost", err)
 			}
 			for _, request := range []client.Message{first, second} {

@@ -38,7 +38,7 @@ func (m *fsckMemory) scanFilesystemObjects(ctx context.Context, after *ObjectID,
 	page := []fsCheckObject{}
 	for _, id := range ids {
 		o := m.objects[id]
-		page = append(page, fsCheckObject{id, ObjectInfo{Version: o.version, Length: uint64(len(o.data))}})
+		page = append(page, fsCheckObject{id, ObjectInfo{Length: uint64(len(o.data))}})
 	}
 	return page, next, nil
 }
@@ -51,12 +51,9 @@ func (m *fsckMemory) Delete(ctx context.Context, id ObjectID, opt DeleteOptions)
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	o, ok := m.objects[id]
+	_, ok := m.objects[id]
 	if !ok {
 		return ErrNotFound
-	}
-	if opt.ExpectedVersion == nil || *opt.ExpectedVersion != o.version {
-		return ErrPrecondition
 	}
 	delete(m.objects, id)
 	m.deletes++

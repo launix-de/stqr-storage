@@ -24,8 +24,9 @@ func ParseFilesystemWhitelist(value string) ([]string, error) {
 // directory by OID; opaque records are independent upper directories. Root CAS
 // publishes a whole namespace change, including both halves of rename.
 type overlayState struct {
-	policy []string
-	dirs   map[ObjectID]*overlayDirectory
+	rootRaw []byte // exact bytes observed before editing this namespace
+	policy  []string
+	dirs    map[ObjectID]*overlayDirectory
 }
 type overlayDirectory struct {
 	lower            ObjectID
@@ -157,7 +158,7 @@ func decodeOverlayState(raw []byte) (*overlayState, error) {
 		previous = id
 		dir := &overlayDirectory{lower: lower, opaque: d.Bool(), metadata: d.Bool(), entries: map[string]ObjectID{}}
 		dir.node, err = decodeFSNode(d.Blob())
-		if err != nil || dir.node.kind != fsDirectory || dir.node.blob.source != (ObjectID{}) || dir.node.blob.root != (ObjectID{}) {
+		if err != nil || dir.node.kind != fsDirectory || dir.node.blob.lower || dir.node.blob.root != (ObjectID{}) {
 			return nil, ErrFSFormat
 		}
 		if dir.opaque && lower != (ObjectID{}) || !dir.opaque && lower == (ObjectID{}) {
@@ -199,7 +200,7 @@ func decodeOverlayRoot(raw []byte) (BucketID, fsBlob, error) {
 	}
 	id := d.ID()
 	node, err := decodeFSNode(d.Blob())
-	if err != nil || d.Done() != nil || id == (BucketID{}) || node.kind != fsFile || node.blob.source != (ObjectID{}) {
+	if err != nil || d.Done() != nil || id == (BucketID{}) || node.kind != fsFile || node.blob.lower {
 		return id, fsBlob{}, ErrFSFormat
 	}
 	return id, node.blob, nil

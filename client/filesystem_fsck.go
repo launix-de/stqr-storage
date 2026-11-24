@@ -240,7 +240,7 @@ func filesystemSweep(ctx context.Context, store fsCheckStore, inventory map[Obje
 			return result, err
 		}
 		info := inventory[id]
-		if err := store.Delete(ctx, id, DeleteOptions{RequestID: NewRequestID(), ExpectedVersion: &info.Version}); err != nil {
+		if err := store.Delete(ctx, id, DeleteOptions{RequestID: NewRequestID()}); err != nil {
 			return result, fmt.Errorf("fsck delete %s (rerun fsck to finish): %w", id, err)
 		}
 		result.Deleted++
@@ -278,7 +278,7 @@ type fsCheckMarker struct {
 func (m *fsCheckMarker) object(ctx context.Context, id ObjectID, role uint8) ([]byte, error) {
 	info, exists := m.inventory[id]
 	if !exists {
-		return nil, fmt.Errorf("missing referenced object %s", id)
+		return nil, fmt.Errorf("missing referenced object %s: %w", id, ErrNotFound)
 	}
 	if old := m.roles[id]; old != 0 && old != role {
 		return nil, ErrFSFormat
@@ -287,7 +287,7 @@ func (m *fsCheckMarker) object(ctx context.Context, id ObjectID, role uint8) ([]
 	if err != nil {
 		return nil, err
 	}
-	if actual.Version != info.Version || actual.Length != info.Length || uint64(len(data)) != info.Length || len(data) > FSObjectSize {
+	if actual.Length != info.Length || uint64(len(data)) != info.Length || len(data) > FSObjectSize {
 		return nil, ErrFSFormat
 	}
 	m.roles[id] = role
@@ -322,12 +322,10 @@ func (m *fsCheckMarker) inode(ctx context.Context, id ObjectID, root bool) error
 		return ErrFSFormat
 	}
 	if node.blob.root != (ObjectID{}) {
-		if err = m.segment(context.WithValue(ctx, fsSparsePageKey{}, node.blob.stamp != 0), fsSegment{id: node.blob.root, length: node.blob.length}, node.blob.depth); err != nil {
+		if err = m.segment(context.WithValue(ctx, fsSparsePageKey{}, node.blob.mutable), fsSegment{id: node.blob.root, length: node.blob.length}, node.blob.depth); err != nil {
 			return err
 		}
-	}
-	if node.blob.source != (ObjectID{}) {
-		if err = m.lowerSource(ctx, node.blob.source, node.blob.sourceVersion, 0, node.blob.length); err != nil {
+		if err != nil {
 			return err
 		}
 	}
@@ -353,8 +351,8 @@ func (m *fsCheckMarker) segment(ctx context.Context, segment fsSegment, depth ui
 		return nil
 	} // sparse span
 	if depth == 0 {
-		if segment.lowerVersion != 0 {
-			return m.lowerSource(ctx, segment.id, segment.lowerVersion, segment.offset, segment.length)
+		if segment.lower {
+			return m.lowerSource(ctx, segment.id, segment.offset, segment.length, 0)
 		}
 		info, ok := m.inventory[segment.id]
 		sparse, _ := ctx.Value(fsSparsePageKey{}).(bool)

@@ -25,7 +25,7 @@ func pendingTestTransaction(t *testing.T, f *Filesystem) (ObjectID, []fsTxMember
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err = f.store.CAS(ctx, root, 0, nil, fsLock(id), CASOptions{Scope: CASObject, MutationOptions: MutationOptions{RequestID: NewRequestID(), ExpectedVersion: &s.info.Version}}); err != nil {
+	if _, err = f.store.CAS(ctx, root, 0, s.raw, fsLock(id), CASOptions{Scope: CASObject, MutationOptions: MutationOptions{RequestID: NewRequestID()}}); err != nil {
 		t.Fatal(err)
 	}
 	return id, members
@@ -134,7 +134,7 @@ func TestFilesystemTransactionAbortPreservesConcurrentChanges(t *testing.T) {
 		t.Fatal(err)
 	}
 	m := members[0]
-	if _, err = store.CAS(ctx, m.id, 0, nil, fsLock(id), CASOptions{Scope: CASObject, MutationOptions: MutationOptions{ExpectedVersion: &m.version}}); err != nil {
+	if _, err = store.CAS(ctx, m.id, 0, m.before, fsLock(id), CASOptions{Scope: CASObject, MutationOptions: MutationOptions{}}); err != nil {
 		t.Fatal(err)
 	}
 	m = members[1]
@@ -143,7 +143,7 @@ func TestFilesystemTransactionAbortPreservesConcurrentChanges(t *testing.T) {
 		t.Fatal(err)
 	}
 	changed.mode = 0770
-	if _, err = store.CAS(ctx, m.id, 0, nil, encodeFSNode(changed), CASOptions{Scope: CASObject, MutationOptions: MutationOptions{ExpectedVersion: &m.version}}); err != nil {
+	if _, err = store.CAS(ctx, m.id, 0, m.before, encodeFSNode(changed), CASOptions{Scope: CASObject, MutationOptions: MutationOptions{}}); err != nil {
 		t.Fatal(err)
 	}
 	committed, err := f.helpTransaction(ctx, id, 0)

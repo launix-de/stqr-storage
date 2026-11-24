@@ -9,6 +9,7 @@
 #include <linux/workqueue.h>
 #define KS_RPC_SLOTS 4
 struct ks_cache;
+struct ks_overlay_state;
 struct ks_rpc {
 	struct mutex lock;
 	stqr_client *client;
@@ -16,15 +17,21 @@ struct ks_rpc {
 #define KS_DIR_LIMIT (16U << 20)
 struct ks_edit;
 struct ks_node {
- stqr_object_id identity;
- u64 version,stamp;
- stqr_object_id guard;
- u64 guard_version;
- const void *view;
- size_t view_size;
- struct ks_edit *edits;
+	stqr_object_id identity;
+	bool mutable;
+	u8 digest[32], head_digest[32], guard_digest[32], lower_digest[32];
+	stqr_object_id lower_owner;
+	stqr_object_id guard;
+	const void *view;
+	size_t view_size;
+	struct ks_edit *edits;
 	unsigned kind, mode, uid, gid, depth;
 	u64 size, mtime, atime, ctime;
+	bool lower;
+	stqr_proof upper_absent;
+	const u8 *write_path;
+	size_t write_path_len;
+	bool inherited;
 	bool removed;
 	u32 links;
 	const u8 *xattrs;
@@ -38,13 +45,19 @@ struct ks_snapshot {
 	struct ks_node node;
 	void *raw;
 	size_t raw_len;
- void *view;
+	void *view;
+	void *namespace_head;
+	size_t namespace_head_len;
 };
 struct ks_entry {
 	stqr_object_id id;
 	char name[256];
 };
 struct ks_fs {
+	struct ks_fs *lower, *parent;
+	struct mutex overlay_lock, overlay_cache_lock;
+	struct ks_overlay_state *overlay_state;
+	struct file *boot_lifetime;
 	struct ks_rpc rpc[KS_RPC_SLOTS];
 	struct mutex sync_lock;
 	stqr_commit_mark durable;
@@ -70,7 +83,8 @@ struct ks_inode {
 	struct mutex metadata_lock;
 	struct list_head mount_list;
 	u64 invalidated_generation;
-	u64 version;
+	stqr_proof proof;
+	stqr_proof upper_absent;
 	bool invalidate;
 	stqr_object_id id;
 	struct inode inode;
@@ -80,6 +94,21 @@ static inline struct ks_inode *KS_I(struct inode *i)
 	return container_of(i, struct ks_inode, inode);
 }
 int ks_checkpoint(struct ks_fs *);
+int ks_cache_sync(struct ks_fs *);
+int ks_plain_snapshot(struct ks_fs *, stqr_object_id, struct ks_snapshot *);
+int ks_overlay_snapshot(struct ks_fs *, stqr_object_id, struct ks_snapshot *);
+int ks_overlay_initialize(struct ks_fs *, const char *);
+int ks_overlay_validate_policy(struct ks_fs *, const char *);
+int ks_overlay_check_write(struct ks_fs *, stqr_object_id);
+void ks_overlay_stop(struct ks_fs *);
+int ks_overlay_newnode(struct ks_fs *, stqr_object_id, const char *, unsigned, u32, u32, unsigned,
+		       const char *, stqr_object_id *);
+int ks_overlay_remove(struct ks_fs *, stqr_object_id, const char *, bool);
+int ks_overlay_rename(struct ks_fs *, stqr_object_id, const char *, stqr_object_id, const char *,
+		      unsigned);
+int ks_overlay_copyup(struct ks_fs *, stqr_object_id);
+int ks_overlay_setattr(struct ks_fs *, stqr_object_id, struct iattr *);
+int ks_overlay_setxattr(struct ks_fs *, stqr_object_id, const char *, const void *, size_t, int);
 int ks_cache_mark(struct ks_fs *, stqr_commit_mark *);
 void ks_cache_note_durable(struct ks_fs *, const stqr_commit_mark *);
 struct ks_rpc *ks_rpc_lock(struct ks_fs *, stqr_object_id);
@@ -88,7 +117,7 @@ void ks_cache_stop(struct ks_fs *);
 int ks_cache_peek(struct ks_fs *, stqr_object_id, void **, size_t *, stqr_info *);
 int ks_snapshot_cached(struct ks_fs *, stqr_object_id, struct ks_snapshot *);
 int ks_cache_get(struct ks_fs *, stqr_object_id, void **, size_t *, stqr_info *);
-bool ks_cache_version(struct ks_fs *, stqr_object_id, u64 *);
+bool ks_cache_proof(struct ks_fs *, stqr_object_id, stqr_proof *);
 void ks_cache_forget(struct ks_fs *, stqr_object_id);
 void ks_queue_invalidation(struct ks_fs *, const stqr_object_id *);
 extern const stqr_object_id ks_root_id;

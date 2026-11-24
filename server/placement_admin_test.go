@@ -192,7 +192,7 @@ func TestDaemonPlacementMaskTransitionsKeepOldAndNewReadable(t *testing.T) {
 			}
 			for _, id := range ids {
 				got, info, err := objects.Get(ctx, id)
-				if err != nil || !bytes.Equal(got, payload) || info.Version != infos[id].Version || info.RuntimeID != infos[id].RuntimeID {
+				if err != nil || !bytes.Equal(got, payload) || info.Length != infos[id].Length || info.RuntimeID != infos[id].RuntimeID {
 					t.Fatal("mask migration changed data/version/runtime", err)
 				}
 			}

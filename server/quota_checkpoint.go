@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"math"
 	"reflect"
+	"slices"
 	"sort"
 
 	"github.com/launix-de/stqr-storage/client"
@@ -75,14 +76,14 @@ func (s *Server) quotaCheckpoint(body []byte, actor client.ID) ([]byte, error) {
 	}
 	var plannedView *systemView
 	if planned != (volume.ObjectID{}) {
-		if claim.Exclusion == nil {
+		if claim.Exclusion == nil && len(claim.FrozenBuckets) == 0 {
 			return nil, errControlConflict
 		}
 		plannedView, err = s.loadSystemView(planned)
 		if err != nil {
 			return nil, err
 		}
-		if plannedView.manifest.Sequence != claim.Base.Sequence+1 || plannedView.manifest.Membership.Epoch != claim.Base.Membership.Epoch+1 && !(claim.Exclusion != nil && claim.Exclusion.Restore != nil && plannedView.manifest.Membership.Epoch == claim.Base.Membership.Epoch) {
+		if plannedView.manifest.Sequence != claim.Base.Sequence+1 || !(claim.Exclusion == nil && plannedView.manifest.Membership.Epoch == claim.Base.Membership.Epoch || claim.Exclusion != nil && (plannedView.manifest.Membership.Epoch == claim.Base.Membership.Epoch+1 || claim.Exclusion.Restore != nil && plannedView.manifest.Membership.Epoch == claim.Base.Membership.Epoch)) {
 			return nil, errControlConflict
 		}
 	}
@@ -157,6 +158,14 @@ func (c *clusterController) captureQuotaAllocations(ctx context.Context, claim c
 		old := findQuota(view, client.ID(id))
 		a := quotaAllocation{Bucket: client.ID(id), Limit: p.Limits.Absolute}
 		changed := claim.Exclusion != nil || old == nil || old.Limit != a.Limit || quotaAccounting(old.Accounting) != p.Limits.Accounting
+		if view != nil {
+			for _, before := range view.descriptions {
+				if before.ID == description.ID && !slices.Equal(before.ClonePeers, description.ClonePeers) {
+					changed = true
+					break
+				}
+			}
+		}
 		if p.Limits.Accounting == "physical" {
 			a.Accounting = "physical"
 		}
@@ -345,6 +354,11 @@ func (c *clusterController) ensureQuotaAllocations(ctx context.Context) {
 // ignore newly LOST ranges whose stale records PREPARE will remove. This does
 // not populate the normal cache or publish speculative placement authority.
 func (b *Bucket) plannedLogicalUsage(view *systemView) (uint64, error) {
+	for _, d := range view.descriptions {
+		if d.ID == b.ID().String() && len(d.ClonePeers) > 0 {
+			return b.plannedCowUsage(view)
+		}
+	}
 	placement := view.placement
 	current := b.server.placement.Load()
 	exclude := func(entry client.RangeEntry) bool {

@@ -16,17 +16,17 @@ func encodeFSWrites(e *Encoder, writes []fsBlockWrite) {
 	e.U32(uint32(len(writes)))
 	for _, w := range writes {
 		e.B = append(e.B, w.id[:]...)
-		e.U64(w.version)
 		e.Bool(w.absent)
 		e.Bool(w.full)
 		e.Bool(w.remove)
 		e.U64(w.offset)
 		e.Blob(w.data)
+		e.Blob(w.before)
 	}
 }
-func decodeFSWrites(d *Decoder) ([]fsBlockWrite, error) {
+func decodeFSWrites(d *Decoder, legacy bool) ([]fsBlockWrite, error) {
 	count := d.U32()
-	if count > 1<<20 || uint64(count) > uint64(len(d.B))/52 {
+	if count > 1<<20 || uint64(count) > uint64(len(d.B))/44 {
 		return nil, ErrFSFormat
 	}
 	writes := make([]fsBlockWrite, 0, count)
@@ -34,13 +34,18 @@ func decodeFSWrites(d *Decoder) ([]fsBlockWrite, error) {
 	for i := uint32(0); i < count; i++ {
 		var w fsBlockWrite
 		copy(w.id[:], d.Take(32))
-		w.version = d.U64()
+		if legacy {
+			d.U64()
+		}
 		w.absent = d.Bool()
 		w.full = d.Bool()
 		w.remove = d.Bool()
 		w.offset = d.U64()
 		w.data = bytes.Clone(d.Blob())
-		if d.Err != nil || w.id == (ObjectID{}) || seen[w.id] || w.offset > FSObjectSize || uint64(len(w.data)) > FSObjectSize-w.offset || w.absent && w.version != 0 || !w.absent && w.version == 0 || w.full && w.offset != 0 || w.remove && (w.absent || w.full || w.offset != 0 || len(w.data) != 0) {
+		if !legacy {
+			w.before = bytes.Clone(d.Blob())
+		}
+		if d.Err != nil || w.id == (ObjectID{}) || seen[w.id] || w.offset > FSObjectSize || uint64(len(w.data)) > FSObjectSize-w.offset || w.full && w.offset != 0 || w.remove && (w.absent || w.full || w.offset != 0 || len(w.data) != 0) {
 			return nil, ErrFSFormat
 		}
 		seen[w.id] = true
@@ -132,25 +137,22 @@ func (f *Filesystem) applyFSWrite(ctx context.Context, txID ObjectID, index uint
 	opt := MutationOptions{RequestID: fsRedoRequest(txID, index)}
 	if w.absent {
 		opt.Absent = true
-	} else {
-		v := w.version
-		opt.ExpectedVersion = &v
 	}
 	if w.remove {
 		if d, ok := f.store.(interface {
 			Delete(context.Context, ObjectID, DeleteOptions) error
 		}); ok {
-			err := d.Delete(ctx, w.id, DeleteOptions{RequestID: opt.RequestID, ExpectedVersion: opt.ExpectedVersion})
+			err := d.Delete(ctx, w.id, DeleteOptions{RequestID: opt.RequestID})
 			if errors.Is(err, ErrNotFound) {
 				return nil
 			}
 			return err
 		}
-		_, err := f.store.CAS(ctx, w.id, 0, nil, nil, CASOptions{Scope: CASObject, MutationOptions: opt})
+		_, err := f.casOwnedBlock(ctx, w.id, w.before, nil, opt)
 		return err
 	}
 	if w.full {
-		_, err := f.store.CAS(ctx, w.id, 0, nil, w.data, CASOptions{Scope: CASObject, MutationOptions: opt})
+		_, err := f.casOwnedBlock(ctx, w.id, w.before, w.data, opt)
 		return err
 	}
 	if r, ok := f.store.(interface {
@@ -162,6 +164,7 @@ func (f *Filesystem) applyFSWrite(ctx context.Context, txID ObjectID, index uint
 	// Minimal custom backends can implement the same contract through whole-
 	// object CAS. Native stores always use the small ranged mutation above.
 	raw, _, err := f.store.Get(ctx, w.id)
+	before := bytes.Clone(w.before)
 	if w.absent && errors.Is(err, ErrNotFound) {
 		err = nil
 		raw = nil
@@ -174,7 +177,7 @@ func (f *Filesystem) applyFSWrite(ctx context.Context, txID ObjectID, index uint
 		raw = append(raw, make([]byte, end-uint64(len(raw)))...)
 	}
 	copy(raw[w.offset:], w.data)
-	_, err = f.store.CAS(ctx, w.id, 0, nil, raw, CASOptions{Scope: CASObject, MutationOptions: opt})
+	_, err = f.store.CAS(ctx, w.id, 0, before, raw, CASOptions{Scope: CASObject, MutationOptions: opt})
 	return err
 }
 
@@ -195,7 +198,7 @@ func (f *Filesystem) retireIntentPayload(ctx context.Context, id ObjectID, tx fs
 	done := Encoder{B: []byte("STFD")}
 	done.U16(1)
 	done.U8(tx.state)
-	if _, err := f.store.CAS(ctx, id, 0, nil, done.B, CASOptions{Scope: CASObject, MutationOptions: MutationOptions{RequestID: fsRedoRequest(id, ^uint64(0)), ExpectedVersion: &info.Version}}); err != nil {
+	if _, err := f.store.CAS(ctx, id, 0, raw, done.B, CASOptions{Scope: CASObject, MutationOptions: MutationOptions{RequestID: fsRedoRequest(id, ^uint64(0))}}); err != nil {
 		return
 	}
 	if len(raw) >= 15 && string(raw[:4]) == "STFJ" {
@@ -213,17 +216,17 @@ func (f *Filesystem) retireIntentPayload(ctx context.Context, id ObjectID, tx fs
 	}
 }
 func (f *Filesystem) removeRedoObject(ctx context.Context, id ObjectID) {
-	info, err := f.blockInfo(ctx, id)
+	raw, _, err := f.store.Get(ctx, id)
 	if err != nil {
 		return
 	}
 	if d, ok := f.store.(interface {
 		Delete(context.Context, ObjectID, DeleteOptions) error
 	}); ok {
-		_ = d.Delete(ctx, id, DeleteOptions{RequestID: NewRequestID(), ExpectedVersion: &info.Version})
+		_ = d.Delete(ctx, id, DeleteOptions{RequestID: NewRequestID()})
 		return
 	}
-	_, _ = f.store.CAS(ctx, id, 0, nil, nil, CASOptions{Scope: CASObject, MutationOptions: MutationOptions{RequestID: NewRequestID(), ExpectedVersion: &info.Version}})
+	_, _ = f.store.CAS(ctx, id, 0, raw, nil, CASOptions{Scope: CASObject, MutationOptions: MutationOptions{RequestID: NewRequestID()}})
 }
 
 // The overlay namespace root uses the same inode intent protocol. It remains
@@ -239,7 +242,7 @@ func (f *Filesystem) overlayRootImage(ctx context.Context) ([]byte, ObjectInfo, 
 		if err != nil {
 			return nil, info, fsNode{}, err
 		}
-		guard := fsNode{identity: root, version: info.Version}
+		guard := fsNode{identity: root, head: bytes.Clone(raw)}
 		if !locked {
 			return raw, info, guard, nil
 		}
@@ -251,7 +254,7 @@ func (f *Filesystem) overlayRootImage(ctx context.Context) ([]byte, ObjectInfo, 
 				return nil, info, guard, err
 			}
 		}
-		tx, ti, _, err := f.loadIntent(ctx, txID)
+		tx, _, txRaw, err := f.loadIntent(ctx, txID)
 		if errors.Is(err, ErrNotFound) {
 			continue
 		}
@@ -265,7 +268,7 @@ func (f *Filesystem) overlayRootImage(ctx context.Context) ([]byte, ObjectInfo, 
 			if member.id == root {
 				image := member.before
 				guard.guardTx = txID
-				guard.guardVersion = ti.Version
+				guard.guardRaw = bytes.Clone(txRaw)
 				if tx.state == fsTxCommitted {
 					image = member.after
 					guard.blob.view = fsWriteView(member.writes)
@@ -276,4 +279,15 @@ func (f *Filesystem) overlayRootImage(ctx context.Context) ([]byte, ObjectInfo, 
 		return nil, info, guard, ErrFSFormat
 	}
 	return nil, ObjectInfo{}, fsNode{}, ErrWouldBlock
+}
+
+// The recoverable inode intent owns this block. Actual bytes are still compared
+// for minimal CAS-only stores; native PUT remains an ordinary in-place write.
+func (f *Filesystem) casOwnedBlock(ctx context.Context, id ObjectID, before, data []byte, opt MutationOptions) (ObjectInfo, error) {
+	if p, ok := f.store.(interface {
+		Put(context.Context, ObjectID, []byte, PutOptions) (ObjectInfo, error)
+	}); ok {
+		return p.Put(ctx, id, data, opt)
+	}
+	return f.store.CAS(ctx, id, 0, before, data, CASOptions{Scope: CASObject, MutationOptions: opt})
 }

@@ -102,8 +102,8 @@ func (r *rangeManager) pressurePlan(hint rangePressure) (rangePlan, bool) {
 		// Refine to isolate existing payload, not to arbitrarily tiny empty hash
 		// intervals. At most the first differing bit between real object IDs is
 		// needed for an empty blocked address.
-		_, oldInfo, found, e := b.selectVolume(b.Describe(), volume.Key{Bucket: hint.bucket, Object: hint.object}, volume.ID{}, false)
-		existing := e == nil && found && oldInfo.Version != 0
+		_, _, found, e := b.selectVolume(b.Describe(), volume.Key{Bucket: hint.bucket, Object: hint.object}, volume.ID{}, false)
+		existing := e == nil && found
 		for moving.PrefixBits < 256 && count > 0 && !(existing && count == 1) {
 			left, right, e := client.SplitRange(moving)
 			if e != nil {

@@ -10,6 +10,9 @@ import (
 // Delegated control operations must leave the ordinary duplex worker free for
 // PREPARE and READY callbacks. Both queues are bounded by the peer transport.
 func isControlPeerRequest(m client.Message) bool {
+	if m.Opcode == peerCowMaterialize {
+		return true
+	}
 	if m.Opcode == peerBucketCopy {
 		return true
 	}
@@ -152,6 +155,9 @@ func (s *Server) verifyDelegatedAdmin(body []byte) ([]byte, error) {
 // Lease coordination must not queue behind long delegated copies, nor occupy
 // the ordinary worker needed by quota/control callbacks while participants drain.
 func isLeaseCoordinatorRequest(m client.Message) bool {
+	if m.Opcode >= peerCowCapture && m.Opcode <= peerCowSync && m.Opcode != peerCowMaterialize {
+		return true
+	}
 	if m.Opcode != peerBucketLease {
 		return false
 	}

@@ -178,7 +178,7 @@ func TestCodecsRangesAndRecompress(t *testing.T) {
 				t.Fatal(e)
 			}
 			after, _ := v.Stat(k)
-			if after.Version != before.Version || after.Length != before.Length || after.Compression != target || info.Compression != c {
+			if after.Length != before.Length || after.Compression != target || info.Compression != c {
 				t.Fatalf("before %+v after %+v", before, after)
 			}
 			mustGet(t, v, k, want)
@@ -196,7 +196,7 @@ func TestCodecsRangesAndRecompress(t *testing.T) {
 func TestCASAndPreconditions(t *testing.T) {
 	v, _ := memoryVolume(t, 4<<20)
 	k := testKey(1)
-	info, e := testPut(v, k, []byte("abcd"), Options{})
+	_, e := testPut(v, k, []byte("abcd"), Options{})
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -207,11 +207,10 @@ func TestCASAndPreconditions(t *testing.T) {
 	if _, e = testCAS(v, k, 1, []byte("bc"), []byte("ZZ"), Options{}); !errors.Is(e, ErrPrecondition) {
 		t.Fatal(e)
 	}
-	if _, e = testPut(v, k, []byte("stale"), Options{ExpectedVersion: &info.Version}); !errors.Is(e, ErrPrecondition) {
+	if _, e = testCAS(v, k, 0, []byte("abcd"), []byte("stale"), Options{WholeObject: true}); !errors.Is(e, ErrPrecondition) {
 		t.Fatal(e)
 	}
-	info, _ = v.Stat(k)
-	if _, e = testCAS(v, k, 0, nil, []byte("replacement"), Options{WholeObject: true, ExpectedVersion: &info.Version}); e != nil {
+	if _, e = testCAS(v, k, 0, []byte("aXYd"), []byte("replacement"), Options{WholeObject: true}); e != nil {
 		t.Fatal(e)
 	}
 	mustGet(t, v, k, []byte("replacement"))

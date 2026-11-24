@@ -14,13 +14,13 @@ import (
 )
 
 type fsBlockWrite struct {
-	id      ObjectID
-	version uint64
-	absent  bool
-	full    bool
-	remove  bool
-	offset  uint64
-	data    []byte
+	id     ObjectID
+	absent bool
+	full   bool
+	remove bool
+	offset uint64
+	data   []byte
+	before []byte
 }
 type fsReadViewKey struct{}
 type fsSparsePageKey struct{}
@@ -75,7 +75,16 @@ func (f *Filesystem) objectBytes(ctx context.Context, id ObjectID) ([]byte, Obje
 	return data, info, nil
 }
 func (f *Filesystem) stageBlock(ctx context.Context, n *fsNode, id ObjectID, offset uint64, data []byte, full bool) error {
-	info, err := f.blockInfo(ctx, id)
+	var before []byte
+	_, nativePut := f.store.(interface {
+		Put(context.Context, ObjectID, []byte, PutOptions) (ObjectInfo, error)
+	})
+	var err error
+	if nativePut && !full {
+		_, err = f.blockInfo(ctx, id)
+	} else {
+		before, _, err = f.store.Get(ctx, id)
+	}
 	absent := errors.Is(err, ErrNotFound)
 	if err != nil && !absent {
 		return err
@@ -83,10 +92,7 @@ func (f *Filesystem) stageBlock(ctx context.Context, n *fsNode, id ObjectID, off
 	// Index pages and directory pages are compared before staging. A stable page
 	// which did not change must cause neither a mutation nor another native version.
 	if full && !absent {
-		old, _, e := f.store.Get(ctx, id)
-		if e != nil {
-			return e
-		}
+		old := before
 		if bytes.Equal(old, data) {
 			return nil
 		}
@@ -106,16 +112,13 @@ func (f *Filesystem) stageBlock(ctx context.Context, n *fsNode, id ObjectID, off
 	if _, ranged := f.store.(interface {
 		PutRange(context.Context, ObjectID, uint64, []byte, PutOptions) (ObjectInfo, error)
 	}); !ranged && !full {
-		raw, version, e := f.store.Get(ctx, id)
+		raw, _, e := f.store.Get(ctx, id)
 		if absent && errors.Is(e, ErrNotFound) {
 			e = nil
 			raw = nil
 		}
 		if e != nil {
 			return e
-		}
-		if !absent && version.Version != info.Version {
-			return ErrPrecondition
 		}
 		end := offset + uint64(len(data))
 		if end > uint64(len(raw)) {
@@ -126,25 +129,28 @@ func (f *Filesystem) stageBlock(ctx context.Context, n *fsNode, id ObjectID, off
 		offset = 0
 		full = true
 	}
-	n.edits = append(n.edits, fsBlockWrite{id: id, version: info.Version, absent: absent, full: full, offset: offset, data: bytes.Clone(data)})
+	if nativePut {
+		before = nil
+	}
+	n.edits = append(n.edits, fsBlockWrite{id: id, before: bytes.Clone(before), absent: absent, full: full, offset: offset, data: bytes.Clone(data)})
 	return nil
 }
 func (f *Filesystem) stageRemoval(ctx context.Context, n *fsNode, id ObjectID) error {
-	info, err := f.blockInfo(ctx, id)
+	before, _, err := f.store.Get(ctx, id)
 	if errors.Is(err, ErrNotFound) {
 		return nil
 	}
 	if err != nil {
 		return err
 	}
-	n.edits = append(n.edits, fsBlockWrite{id: id, version: info.Version, remove: true})
+	n.edits = append(n.edits, fsBlockWrite{id: id, before: bytes.Clone(before), remove: true})
 	return nil
 }
 func (f *Filesystem) indexIDs(ctx context.Context, b fsBlob) ([]ObjectID, error) {
 	var out []ObjectID
 	var walk func(ObjectID, uint64, uint8) error
 	walk = func(id ObjectID, length uint64, depth uint8) error {
-		if depth == 0 || id == (ObjectID{}) {
+		if b.lower || b.source != (ObjectID{}) || depth == 0 || id == (ObjectID{}) {
 			return nil
 		}
 		out = append(out, id)
@@ -163,10 +169,33 @@ func (f *Filesystem) indexIDs(ctx context.Context, b fsBlob) ([]ObjectID, error)
 	return out, err
 }
 func (f *Filesystem) finishStableBlob(ctx context.Context, n *fsNode, old fsBlob, segments []fsSegment, length uint64) error {
-	b := fsBlob{length: length, stamp: n.version + 1}
+	b := fsBlob{length: length, mutable: true}
+	var logical uint64
+	for i, part := range segments {
+		if part.legacyVersion != 0 {
+			data := make([]byte, int(part.length))
+			if e := f.readSegment(ctx, part, 0, data, 0); e != nil {
+				return e
+			}
+			id := fsStableID(n.identity, 2, 0, logical/4096)
+			if e := f.stageBlock(ctx, n, id, 0, data, true); e != nil {
+				return e
+			}
+			segments[i] = fsSegment{id: id, length: part.length}
+		}
+		logical += part.length
+	}
+
+	for _, s := range segments {
+		if s.lower {
+			b.lowerOwner = old.lowerOwner
+			b.lowerDigest = old.lowerDigest
+			break
+		}
+	}
 	keep := map[ObjectID]bool{}
 	for _, s := range segments {
-		if s.id != (ObjectID{}) && s.lowerVersion == 0 {
+		if s.id != (ObjectID{}) && !s.lower && s.legacyVersion == 0 {
 			keep[s.id] = true
 		}
 	}
@@ -222,7 +251,7 @@ func (f *Filesystem) finishStableBlob(ctx context.Context, n *fsNode, old fsBlob
 	}
 	retired := map[ObjectID]bool{}
 	for _, s := range oldData {
-		if s.lowerVersion == 0 && s.id != (ObjectID{}) && !keep[s.id] {
+		if !s.lower && s.legacyVersion == 0 && s.id != (ObjectID{}) && !keep[s.id] {
 			retired[s.id] = true
 		}
 	}
@@ -243,13 +272,59 @@ func (f *Filesystem) finishStableBlob(ctx context.Context, n *fsNode, old fsBlob
 // Reading an inline old blob must never allocate an "immutable" copy merely to
 // edit it. Inline conversion is handled by the actual affected data page.
 func (f *Filesystem) segmentsReadOnly(ctx context.Context, b fsBlob) ([]fsSegment, error) {
-	if b.length == 0 || b.root == (ObjectID{}) && b.source == (ObjectID{}) {
+	if b.length == 0 || b.root == (ObjectID{}) && b.source == (ObjectID{}) && !b.lower {
 		return nil, nil
 	}
-	if b.source != (ObjectID{}) {
-		return []fsSegment{{id: b.source, length: b.length, lowerVersion: b.sourceVersion}}, nil
+	if b.lower {
+		if f.lower == nil {
+			return nil, ErrOverlayNeedsLower
+		}
+		b.lower = false
+		parts, e := f.lower.segmentsReadOnly(ctx, b)
+		for i := range parts {
+			if parts[i].id != (ObjectID{}) {
+				parts[i].lower = true
+			}
+		}
+		return parts, e
 	}
-	return f.flatten(ctx, fsSegment{id: b.root, length: b.length}, b.depth)
+	if b.source != (ObjectID{}) {
+		return []fsSegment{{id: b.source, length: b.length, legacyVersion: b.legacyVersion}}, nil
+	}
+	parts, e := f.flatten(ctx, fsSegment{id: b.root, length: b.length}, b.depth)
+	if e != nil {
+		return nil, e
+	}
+	var converted []fsSegment
+	for _, part := range parts {
+		if part.legacyVersion == 0 {
+			converted = append(converted, part)
+			continue
+		}
+		if f.lower == nil {
+			return nil, ErrOverlayNeedsLower
+		}
+		node, _, e := f.lower.load(ctx, part.id)
+		if e != nil {
+			return nil, e
+		}
+		refs, e := f.lower.segmentsReadOnly(ctx, node.blob)
+		if e != nil {
+			return nil, e
+		}
+		if node.blob.root == (ObjectID{}) {
+			converted = append(converted, part)
+			continue
+		} // inline is materialized by the affected write
+		refs = sliceFSSegments(refs, part.offset, part.offset+part.length)
+		for i := range refs {
+			if refs[i].id != (ObjectID{}) {
+				refs[i].lower = true
+			}
+		}
+		converted = append(converted, refs...)
+	}
+	return converted, nil
 }
 func (f *Filesystem) stableWriteNode(ctx context.Context, n *fsNode, data []byte, start uint64) error {
 	if n.kind != fsFile {
@@ -272,7 +347,7 @@ func (f *Filesystem) stableWriteNode(ctx context.Context, n *fsNode, data []byte
 			}
 		}
 		copy(body[start:], data)
-		n.blob = fsBlob{length: length, inline: body, stamp: n.version + 1}
+		n.blob = fsBlob{length: length, inline: body, mutable: true}
 		n.mtime = n.ctime
 		return nil
 	}
@@ -285,7 +360,7 @@ func (f *Filesystem) stableWriteNode(ctx context.Context, n *fsNode, data []byte
 	smallPages := false
 	var logical uint64
 	for _, part := range parts {
-		smallPages = smallPages || part.lowerVersion != 0 || part.id == fsStableID(n.identity, 2, 0, logical/4096)
+		smallPages = smallPages || part.lower || part.legacyVersion != 0 || part.id == fsStableID(n.identity, 2, 0, logical/4096)
 		logical += part.length
 	}
 	unit := uint64(FSObjectSize)
@@ -307,7 +382,7 @@ func (f *Filesystem) stableWriteNode(ctx context.Context, n *fsNode, data []byte
 		canonical := false
 		var pos uint64
 		for _, s := range parts {
-			if pos == at && s.id == id && s.offset == 0 && s.lowerVersion == 0 {
+			if pos == at && s.id == id && s.offset == 0 && !s.lower && s.legacyVersion == 0 {
 				canonical = true
 				break
 			}
@@ -393,7 +468,7 @@ func (f *Filesystem) stableResize(ctx context.Context, n *fsNode, length uint64)
 			return e
 		}
 		for _, s := range parts {
-			if s.lowerVersion == 0 && s.id != (ObjectID{}) {
+			if !s.lower && s.legacyVersion == 0 && s.id != (ObjectID{}) {
 				ids = append(ids, s.id)
 			}
 		}
@@ -406,7 +481,7 @@ func (f *Filesystem) stableResize(ctx context.Context, n *fsNode, length uint64)
 				}
 			}
 		}
-		n.blob = fsBlob{length: length, inline: body, stamp: n.version + 1}
+		n.blob = fsBlob{length: length, inline: body, mutable: true}
 		return nil
 	}
 	parts, e := f.segmentsReadOnly(ctx, old)
@@ -428,7 +503,7 @@ func (f *Filesystem) stableResize(ctx context.Context, n *fsNode, length uint64)
 			at += part.length
 		}
 		smallPage := last.id == fsStableID(n.identity, 2, 0, at/4096)
-		if last.lowerVersion == 0 && smallPage {
+		if !last.lower && last.legacyVersion == 0 && smallPage {
 			raw, _, e := f.objectBytes(ctx, last.id)
 			if e != nil {
 				return e
@@ -439,7 +514,7 @@ func (f *Filesystem) stableResize(ctx context.Context, n *fsNode, length uint64)
 					return e
 				}
 			}
-		} else if last.lowerVersion == 0 && last.offset == 0 && last.id == fsStableID(n.identity, 0, 0, at/FSObjectSize) {
+		} else if !last.lower && last.legacyVersion == 0 && last.offset == 0 && last.id == fsStableID(n.identity, 0, 0, at/FSObjectSize) {
 			body := make([]byte, int(last.length))
 			if _, e = f.readBlob(ctx, old, body, at); e != nil {
 				return e
@@ -466,7 +541,7 @@ func (f *Filesystem) stableBody(ctx context.Context, n *fsNode, data []byte) err
 		if err != nil {
 			return err
 		}
-		n.blob = fsBlob{length: uint64(len(data)), inline: bytes.Clone(data), stamp: n.version + 1}
+		n.blob = fsBlob{length: uint64(len(data)), inline: bytes.Clone(data), mutable: true}
 		return nil
 	}
 	var parts []fsSegment

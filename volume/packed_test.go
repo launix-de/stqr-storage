@@ -203,7 +203,7 @@ func defragFixture(t *testing.T, d VolumeIO) (*Volume, []byte) {
 	if e = tx.writeBytes(at, want); e != nil {
 		t.Fatal(e)
 	}
-	o := &object{Info: Info{Version: 1, Length: uint64(len(want)), Compression: Raw}, Spans: []dataSpan{{Offset: 0, Length: uint64(len(want)), Location: at, Stored: uint64(len(want)), Capacity: uint64(len(want)), Codec: Raw, CRC: checksum(want)}}}
+	o := &object{Info: Info{Length: uint64(len(want)), Compression: Raw}, Spans: []dataSpan{{Offset: 0, Length: uint64(len(want)), Location: at, Stored: uint64(len(want)), Capacity: uint64(len(want)), Codec: Raw, CRC: checksum(want)}}}
 	if e = tx.saveObject(testKey(1), o); e != nil {
 		t.Fatal(e)
 	}

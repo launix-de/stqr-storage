@@ -259,7 +259,7 @@ func runSSHClusterAcceptance(t *testing.T, usePM2 bool, recovery ...bool) {
 		if err != nil {
 			t.Fatal("cross-host extension", i, err)
 		}
-		versions[i] = info.Version
+		versions[i] = info.Length
 	}
 	t.Log("extension wrote six MiB")
 	remoteClient, err := client.Dial(ctx, peer.Node.Advertise, admin.Username, admin.Password, client.BucketID(bucket.ID()))
@@ -269,7 +269,7 @@ func runSSHClusterAcceptance(t *testing.T, usePM2 bool, recovery ...bool) {
 	defer remoteClient.Close()
 	for i := 0; i < 6; i++ {
 		data, info, err := remoteClient.Get(ctx, client.ObjectID{byte(i*41 + 1)})
-		if err != nil || !bytes.Equal(data, payload) || info.Version != versions[i] {
+		if err != nil || !bytes.Equal(data, payload) || info.Length != versions[i] {
 			t.Fatal("cross-host read", i, err)
 		}
 	}
@@ -333,7 +333,7 @@ func runSSHClusterAcceptance(t *testing.T, usePM2 bool, recovery ...bool) {
 	start()
 	for i := 0; i < 6; i++ {
 		data, info, err := c.Get(ctx, client.ObjectID{byte(i*41 + 1)})
-		if err != nil || !bytes.Equal(data, payload) || info.Version != versions[i] {
+		if err != nil || !bytes.Equal(data, payload) || info.Length != versions[i] {
 			t.Fatal("read after remote restart", i, err)
 		}
 	}
@@ -397,7 +397,7 @@ func runSSHClusterAcceptance(t *testing.T, usePM2 bool, recovery ...bool) {
 	go h.Serve(ln)
 	for i := 0; i < 6; i++ {
 		data, info, err := c.Get(ctx, client.ObjectID{byte(i*41 + 1)})
-		if err != nil || !bytes.Equal(data, payload) || info.Version != versions[i] {
+		if err != nil || !bytes.Equal(data, payload) || info.Length != versions[i] {
 			t.Fatal("data after complete cluster restart", i, err)
 		}
 	}
@@ -489,7 +489,7 @@ func runSSHClusterAcceptance(t *testing.T, usePM2 bool, recovery ...bool) {
 	}
 	for i := 0; i < 6; i++ {
 		data, info, err := remoteClient.Get(ctx, client.ObjectID{byte(i*41 + 1)})
-		if err != nil || !bytes.Equal(data, payload) || info.Version != versions[i] {
+		if err != nil || !bytes.Equal(data, payload) || info.Length != versions[i] {
 			t.Fatal("read through old seed after node drain", i, err)
 		}
 	}

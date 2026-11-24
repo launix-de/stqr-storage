@@ -74,7 +74,7 @@ func (v *Volume) stageReplicaData(t *transaction, produce func() ([]dataSpan, er
 
 // Prepared range writes retain unaffected extents. Allocation ownership is
 // the union of referenced intervals: a prefix and suffix may share the original
-// arena and checksum table. Retirement subtracts the next version's intervals.
+// arena and checksum table. Retirement subtracts the new descriptor's intervals.
 func objectAllocations(o *object) []allocation {
 	if o == nil {
 		return nil
@@ -200,7 +200,7 @@ func (v *Volume) retainSpans(old *object, limit, cutStart, cutEnd uint64) ([]dat
 }
 
 // Read-only counterpart of unpackChunks: the old packed header and padding
-// remain allocated until publication retires the old version. Direct chunk
+// remain allocated until publication retires the old descriptor. Direct chunk
 // references can then retain just the unchanged encoded bytes.
 func (v *Volume) packedChunkReferences(s dataSpan) ([]dataSpan, error) {
 	var head [8]byte

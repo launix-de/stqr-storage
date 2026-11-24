@@ -15,18 +15,15 @@ type bucketUsage struct {
 	valid      bool
 	bytes      uint64
 	placement  *placementImage
-	generation uint64 // legacy/local placement has no immutable range image
+	generation uint64 // bucket catalog revision; never an object-content counter
 }
 
 func (b *Bucket) usageStamp() (*placementImage, uint64) {
 	s := b.server
 	if s.controller != nil {
-		return s.placement.Load(), 0
+		return s.placement.Load(), b.storageDescription().Revision
 	}
-	s.mu.RLock()
-	generation := s.cfg.Generation
-	s.mu.RUnlock()
-	return nil, generation
+	return nil, b.storageDescription().Revision
 }
 
 func (b *Bucket) logicalUsage() (uint64, error) {
@@ -37,7 +34,13 @@ func (b *Bucket) logicalUsage() (uint64, error) {
 	if u.valid && u.placement == placement && u.generation == generation {
 		return u.bytes, nil
 	}
-	value, err := b.scanLogicalUsage()
+	var value uint64
+	var err error
+	if len(b.storageDescription().ClonePeers) > 0 {
+		value, err = b.cowLogicalUsage()
+	} else {
+		value, err = b.scanLogicalUsage()
+	}
 	if err != nil {
 		return 0, err
 	}

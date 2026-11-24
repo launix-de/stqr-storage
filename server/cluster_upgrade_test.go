@@ -102,7 +102,7 @@ func TestDaemonUpgradeFromDiscoveryOnlyCluster(t *testing.T) {
 	}
 	defer c.Close()
 	got, info, err := c.Get(ctx, oid)
-	if err != nil || !bytes.Equal(got, data) || info.Version != before.Version {
+	if err != nil || !bytes.Equal(got, data) || info.Length != before.Length {
 		t.Fatal("upgrade lost old acknowledged object/version", err)
 	}
 }

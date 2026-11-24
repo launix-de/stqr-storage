@@ -37,6 +37,16 @@ int main(void) {
     CHECK(!stqr_parse_id(getenv("STQR_TEST_BUCKET"), &bucket));
     CHECK(!stqr_parse_object_id("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", &id));
     CHECK(!stqr_dial(&c, url, getenv("STQR_TEST_USER"), getenv("STQR_TEST_PASSWORD"), bucket, 3000));
+    if (mode && !strcmp(mode,"routing")) {
+        for (unsigned step=0;step<8;step++) {
+            memset(&id,0,sizeof(id)); id.bytes[0]=(step&1)?0x81:1;
+            o=fresh();o.accepted=1;
+            CHECK(!stqr_put(c,id,"routed",6,&o,&info));
+            CHECK(!stqr_get(c,id,&data,&n,&info));
+            CHECK(n==6 && !memcmp(data,"routed",6));stqr_free(data);
+        }
+        CHECK(!stqr_sync(c));stqr_close(c);puts("cluster routing passed");return 0;
+    }
     if (mode) {
         if (!strcmp(mode,"disconnect")) {
             o = fresh(); CHECK(stqr_append(c,id,"x",1,&o,&info,&offset) == -EINPROGRESS);
@@ -87,7 +97,7 @@ int main(void) {
         CHECK(n == 3 && !memcmp(data,"ell",3)); stqr_free(data);
         o = fresh(); CHECK(!stqr_put(c,id,"HELLO",5,&o,&info));
         wait_change(watch,&events,1);
-        CHECK(events.last.cursor == cursor+1 && events.last.version == info.version);
+        CHECK(events.last.cursor == cursor+1 && events.last.length == info.length);
         CHECK(events.last.change == STQR_UPDATE_REPLACE && events.last.size == 3 && !memcmp(events.data,"ELL",3));
         CHECK(!stqr_unsubscribe(watch,sid));
         o = fresh(); CHECK(!stqr_put(c,id,"hello",5,&o,&info));
@@ -109,15 +119,15 @@ int main(void) {
     o = fresh();
     CHECK(!stqr_append(c,id," world",6,&o,&info,&offset)); CHECK(offset == 5 && info.length == 11);
     previous = info;
-    CHECK(!stqr_append(c,id," world",6,&o,&info,&offset)); CHECK(offset == 5 && info.version == previous.version && info.length == 11);
+    CHECK(!stqr_append(c,id," world",6,&o,&info,&offset)); CHECK(offset == 5 && info.length == previous.length && info.length == 11);
     CHECK(!stqr_get_range(c,id,6,5,&data,&n,&info)); CHECK(n == 5 && !memcmp(data,"world",5)); stqr_free(data);
-    o = fresh(); o.has_version = 1; o.version = info.version;
+    o = fresh();
     CHECK(!stqr_cas(c,id,0,6,"world",5,"STQR!",5,&o,&info));
-    o = fresh(); o.has_version = 1; o.version = previous.version;
+    o = fresh(); o.has_compare = 1; o.compare = "hello world"; o.compare_size = 11;
     CHECK(stqr_put(c,id,"bad",3,&o,&info) == -EAGAIN); CHECK(stqr_status(c) == 412);
     CHECK(!stqr_stat(c,id,&info));
-    o = fresh(); o.has_version = 1; o.version = info.version;
-    CHECK(!stqr_cas(c,id,1,0,NULL,0,"new",3,&o,&info)); CHECK(info.length == 3);
+    o = fresh();
+    CHECK(!stqr_cas(c,id,1,0,"hello STQR!",11,"new",3,&o,&info)); CHECK(info.length == 3);
     o = fresh(); CHECK(!stqr_put_range(c,id,1,"XX",2,&o,&info));
     CHECK(!stqr_get(c,id,&data,&n,&info)); CHECK(n == 3 && !memcmp(data,"nXX",3)); stqr_free(data);
     o = fresh(); CHECK(!stqr_trunc(c,id,1,&o,&info)); CHECK(info.length == 1);

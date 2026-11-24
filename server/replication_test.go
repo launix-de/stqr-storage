@@ -105,7 +105,7 @@ func TestDaemonReplicationAllOfflineRetryAndRestart(t *testing.T) {
 	storage.Compression = "gzip"
 	centralPGRequest(t, source.node, group, 1, PlacementMask{NodeSelection: "all", Storage: &storage})
 	awaitPGVersion(t, source.node, group, 2)
-	if _, info, err := follower.Get(ctx, actor, id); err != nil || info.Compression != volume.Gzip || info.Version != 5 {
+	if _, info, err := follower.Get(ctx, actor, id); err != nil || info.Compression != volume.Gzip || info.Length != 3 {
 		t.Fatalf("replica codec conversion %+v %v", info, err)
 	}
 	// A required offline replica blocks only this write; prepared bytes stay
@@ -199,7 +199,7 @@ func TestDaemonReplicaAddPreservesPrimaryDataAndOriginalReceipts(t *testing.T) {
 	follower, _ := target.node.Bucket(b.ID())
 	for _, copy := range []*Bucket{b, follower} {
 		data, info, err := copy.Get(ctx, actor, id)
-		if err != nil || string(data) != "existing" || info.Version != original.Info.Version {
+		if err != nil || string(data) != "existing" || info.Length != original.Info.Length {
 			t.Fatalf("learner %q %+v %v", data, info, err)
 		}
 	}

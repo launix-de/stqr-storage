@@ -44,7 +44,7 @@ func TestLifecycleBindingCheckpointAndScan(t *testing.T) {
 	if e := testSyncThrough(v, testKey(2), 1); e != nil {
 		t.Fatal(e)
 	}
-	if e := testSyncThrough(v, testKey(2), 2); !errors.Is(e, ErrPrecondition) {
+	if e := testSyncThrough(v, testKey(2000), 2); !errors.Is(e, ErrNotFound) {
 		t.Fatal(e)
 	}
 	if e := v.Sync(); e != nil {
@@ -389,21 +389,21 @@ func TestRecompressConsumesOnlyItsOwnImportAllowance(t *testing.T) {
 	if err := h.RecompressWithOptions(key, Raw, Options{}); !errors.Is(err, ErrFull) {
 		t.Fatal("recompression stole pending import space", err)
 	}
-	if got, info, err := h.Get(key); err != nil || !bytes.Equal(got, payload) || info.Version != first.Version || info.Compression != Gzip {
+	if got, info, err := h.Get(key); err != nil || !bytes.Equal(got, payload) || info.Length != first.Length || info.Compression != Gzip {
 		t.Fatal("failed rewrite damaged source", info, err)
 	}
 	if err := h.RecompressWithOptions(key, Raw, Options{InFlightAllowance: 2 << 20}); err != nil {
 		t.Fatal("own reserve did not fund rewrite", err)
 	}
-	if got, info, err := h.Get(key); err != nil || !bytes.Equal(got, payload) || info.Version != first.Version || info.Compression != Raw {
+	if got, info, err := h.Get(key); err != nil || !bytes.Equal(got, payload) || info.Length != first.Length || info.Compression != Raw {
 		t.Fatal("rewrite changed logical state", info, err)
 	}
 	original, found, err := h.OperationStatus(request)
 	if err != nil || !found || original.Info != first {
 		t.Fatal("physical rewrite changed retry result", original, err)
 	}
-	version := first.Version
-	if err := h.RecompressWithOptions(key, Gzip, Options{ExpectedVersion: &version}); !errors.Is(err, ErrRange) {
+	length := first.Length
+	if err := h.RecompressWithOptions(key, Gzip, Options{ExpectedLength: &length}); !errors.Is(err, ErrRange) {
 		t.Fatal("logical precondition silently ignored", err)
 	}
 	h.Close()

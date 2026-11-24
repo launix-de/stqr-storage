@@ -39,7 +39,7 @@ func TestExportImportTranscodesSparseAndRetry(t *testing.T) {
 	}
 	dst = reopen(t, dst, d)
 	b, info, e := testGetRange(dst, k, 1<<40, 4)
-	if e != nil || string(b) != "far!" || info.Compression != Gzip || info.Version != a.Info.Version {
+	if e != nil || string(b) != "far!" || info.Compression != Gzip {
 		t.Fatalf("%q %+v %v", b, info, e)
 	}
 	retry, e := testAppend(dst, k, []byte("!"), Options{RequestID: id})
@@ -58,7 +58,7 @@ func TestImportMalformedDoesNotPublish(t *testing.T) {
 	var b bytes.Buffer
 	enc := json.NewEncoder(&b)
 	enc.Encode(snapshotFrame{Kind: "STQR-SNAPSHOT-2"})
-	enc.Encode(snapshotFrame{Kind: "object", Key: testKey(1), Info: Info{Version: 1, Length: 3}})
+	enc.Encode(snapshotFrame{Kind: "object", Key: testKey(1), Info: Info{Length: 3}})
 	enc.Encode(snapshotFrame{Kind: "data", Data: []byte("abc")}) // missing end/complete
 	if e := v.Import(&b, nil); e == nil {
 		t.Fatal("truncated import succeeded")
@@ -72,7 +72,7 @@ func TestImportMalformedDoesNotPublish(t *testing.T) {
 	mustGet(t, v, testKey(1), []byte("after"))
 }
 
-func TestRestoreIntoPopulatedVolumePreservesVersionAndRetries(t *testing.T) {
+func TestRestoreIntoPopulatedVolumePreservesContentAndRetries(t *testing.T) {
 	source, _ := memoryVolume(t, 4<<20)
 	target, d := memoryVolume(t, 4<<20)
 	k := testKey(1)
@@ -106,12 +106,12 @@ func TestRestoreIntoPopulatedVolumePreservesVersionAndRetries(t *testing.T) {
 	}
 	mustGet(t, target, k, []byte("data"))
 	mustGet(t, target, testKey(2), []byte("unrelated"))
-	if e = testRestore(target, k, info, input, Options{}); !errors.Is(e, ErrPrecondition) {
+	if e = testRestore(target, k, info, input, Options{CreateOnly: true}); !errors.Is(e, ErrPrecondition) {
 		t.Fatal(e)
 	}
 }
 
-func TestRepairRetainsLogicalVersionAndRetry(t *testing.T) {
+func TestRepairRetainsContentAndRetry(t *testing.T) {
 	d := newCrash(2 << 20)
 	v, e := Format(d, FormatOptions{Class: SSD})
 	if e != nil {
