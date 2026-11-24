@@ -151,5 +151,6 @@ jobs:
         with:
           name: format-compatibility
           path: .compat-reports/
+          include-hidden-files: true
           if-no-files-found: error
           retention-days: 14
