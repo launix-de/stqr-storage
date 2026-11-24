@@ -183,6 +183,11 @@ func (a *Adapter) Opendir(p string) (int, uint64) {
 	return 0, h
 }
 func (a *Adapter) Readdir(_ string, fill func(string, *fuse.Stat_t, int64) bool, offset int64, h uint64) int {
+	if offset == 0 {
+		if e := a.FS.RefreshDirectory(h); e != nil {
+			return errno(e)
+		}
+	}
 	entries, e := a.FS.Entries(h)
 	if e != nil {
 		return errno(e)

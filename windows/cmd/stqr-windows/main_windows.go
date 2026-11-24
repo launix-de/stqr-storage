@@ -143,6 +143,13 @@ func run() error {
 	}
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
+	go func() {
+		select {
+		case <-consoleInterrupt:
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
 	ctx, release, e := claimDrive(ctx, c.Drive)
 	if errors.Is(e, errAlreadyMounted) {
 		if *background {
@@ -154,6 +161,13 @@ func run() error {
 		return e
 	}
 	defer release()
+	finished := make(chan struct{})
+	_, closeSession, e := watchSessionShutdown(cancel, finished)
+	if e != nil {
+		return e
+	}
+	defer closeSession()
+	defer close(finished)
 	if *background {
 		if e = os.MkdirAll(installation.directory, 0700); e != nil {
 			return e
@@ -179,10 +193,17 @@ func run() error {
 			}
 		}
 	}
-	return mount(ctx, c, *initialize, installation, *install, forget)
+	e = mount(ctx, c, *initialize, installation, *install, forget)
+	if ctx.Err() != nil {
+		return nil
+	}
+	return e
 }
 
 func mount(ctx context.Context, c mountConfig, initialize bool, installation installation, persist, forget bool) (result error) {
+	if err := ensureWinFsp(); err != nil {
+		return err
+	}
 	var e error
 	var id client.ID
 	if decoded, err := hex.DecodeString(c.Bucket); err == nil && len(decoded) == len(id) {
@@ -255,6 +276,8 @@ func mount(ctx context.Context, c mountConfig, initialize bool, installation ins
 	host := fuse.NewFileSystemHost(adapter)
 	host.SetCapCaseInsensitive(false)
 	host.SetCapReaddirPlus(true)
+	stopNotifications := watchWindowsChanges(ctx, store, adapter.FS, host)
+	defer stopNotifications()
 	opts := []string{"-o", "volname=STQR,uid=-1,gid=-1,umask=077,FileInfoTimeout=0,DirInfoTimeout=0,attr_timeout=0,entry_timeout=0,negative_timeout=0"}
 	if c.ReadOnly {
 		opts = append(opts, "-o", "ro")
@@ -289,7 +312,7 @@ func mount(ctx context.Context, c mountConfig, initialize bool, installation ins
 	defer func() {
 		if p := recover(); p != nil {
 			if text, ok := p.(string); ok && strings.Contains(text, "cgofuse: cannot find winfsp") {
-				result = fmt.Errorf("%w: WinFsp runtime not found; install WinFsp before mounting", errMountUnavailable)
+				result = fmt.Errorf("%w: WinFsp wurde nicht gefunden. Bitte WinFsp über https://winfsp.dev/rel/ installieren und STQR danach erneut öffnen", errMountUnavailable)
 			} else {
 				panic(p)
 			}
@@ -304,6 +327,7 @@ func mount(ctx context.Context, c mountConfig, initialize bool, installation ins
 }
 
 func main() {
+	attachCLIConsole()
 	if e := run(); e != nil && !errors.Is(e, flag.ErrHelp) {
 		if len(os.Args) == 1 || hasSetupFlag(os.Args[1:]) {
 			messageBox(0, "STQR", e.Error(), 0x10)

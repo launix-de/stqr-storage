@@ -18,16 +18,17 @@ import (
 type SubscriptionStore struct {
 	accepted bool
 
-	client       *Client
-	life         context.Context
-	cancel       context.CancelFunc
-	loading      map[ObjectID]chan struct{}
-	mu           sync.Mutex
-	entries      map[ObjectID]*list.Element
-	lru          list.List
-	used, budget uint64
-	closed       bool
-	observers    map[ID]func(ObjectID)
+	client          *Client
+	life            context.Context
+	cancel          context.CancelFunc
+	loading         map[ObjectID]chan struct{}
+	mu              sync.Mutex
+	entries         map[ObjectID]*list.Element
+	lru             list.List
+	used, budget    uint64
+	closed          bool
+	observers       map[ID]func(ObjectID)
+	updateObservers map[ID]func(ObjectID)
 }
 type subscriptionCacheEntry struct {
 	store *SubscriptionStore
@@ -41,7 +42,7 @@ const subscriptionCacheOverhead = 512
 
 func NewSubscriptionStore(c *Client, budget uint64) *SubscriptionStore {
 	life, cancel := context.WithCancel(context.Background())
-	return &SubscriptionStore{client: c, life: life, cancel: cancel, loading: map[ObjectID]chan struct{}{}, budget: budget, entries: map[ObjectID]*list.Element{}, observers: map[ID]func(ObjectID){}}
+	return &SubscriptionStore{client: c, life: life, cancel: cancel, loading: map[ObjectID]chan struct{}{}, budget: budget, entries: map[ObjectID]*list.Element{}, observers: map[ID]func(ObjectID){}, updateObservers: map[ID]func(ObjectID){}}
 }
 
 // Backpressure is per routed transport, not a bucket-wide semaphore: a paused
@@ -223,8 +224,10 @@ func (c *SubscriptionStore) changed(entry *subscriptionCacheEntry) {
 	valid := entry.sub.valid && !entry.sub.closed
 	entry.sub.mu.RUnlock()
 	var evicted []*subscriptionCacheEntry
+	tracked := false
 	c.mu.Lock()
 	if el := c.entries[entry.id]; el != nil && el.Value == entry {
+		tracked = true
 		if valid {
 			c.used = c.used - entry.cost + cost
 			entry.cost = cost
@@ -238,6 +241,17 @@ func (c *SubscriptionStore) changed(entry *subscriptionCacheEntry) {
 	}
 	c.mu.Unlock()
 	c.emit(entry.id)
+	c.mu.Lock()
+	updates := make([]func(ObjectID), 0, len(c.updateObservers))
+	for _, fn := range c.updateObservers {
+		updates = append(updates, fn)
+	}
+	c.mu.Unlock()
+	if tracked {
+		for _, fn := range updates {
+			fn(entry.id)
+		}
+	}
 	for _, e := range evicted {
 		c.emit(e.id)
 		e.sub.discard()
@@ -260,6 +274,19 @@ func (c *SubscriptionStore) watchChanges(fn func(ObjectID)) func() {
 	c.observers[token] = fn
 	c.mu.Unlock()
 	return func() { c.mu.Lock(); delete(c.observers, token); c.mu.Unlock() }
+}
+
+// WatchUpdates observes subscription updates and transport/resync loss. Cache
+// capacity evictions do not trigger callbacks, so adapters may refresh views
+// without causing an eviction/refresh notification loop. Callbacks must enqueue
+// work and must not issue blocking RPCs. Only currently subscribed objects are
+// observed; directory enumeration remains authoritative after cache eviction.
+func (c *SubscriptionStore) WatchUpdates(fn func(ObjectID)) func() {
+	token := NewRequestID()
+	c.mu.Lock()
+	c.updateObservers[token] = fn
+	c.mu.Unlock()
+	return func() { c.mu.Lock(); delete(c.updateObservers, token); c.mu.Unlock() }
 }
 func (c *SubscriptionStore) subscribed(id ObjectID, version uint64) bool {
 	c.mu.Lock()

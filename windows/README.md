@@ -5,8 +5,9 @@
 nodes and uses the same STFS inode format as Linux FUSE and `kstqr`.
 
 Install WinFsp on the Windows machine, then double-click `stqr-windows.exe`.
-Enter the server URI, STQR username/password, bucket and drive letter. Select
-**“Dauerhaft einbinden und Passwort merken”** to install the client for your
+The application runs without a console window. A WinFsp download button opens
+the official runtime download when needed. Enter the server URI, STQR username/password, bucket and drive letter. Select
+**“Bei der Anmeldung verbinden und Passwort merken”** to install the client for your
 Windows account and reconnect the drive automatically at **user login**. No
 administrator rights are needed for this per-user setup. This is not a system
 service or a drive available before anyone has logged in.
@@ -64,6 +65,10 @@ Existing Linux hardlinks share their inode and content when read from Windows.
 
 The client uses a bounded subscription cache. WinFsp file and directory cache
 timeouts are explicitly zero to avoid a second cache hiding remote changes.
+Subscription events refresh visited directory snapshots and notify WinFsp about
+remote creates, deletes and metadata/content changes, so Explorer can refresh
+without reopening the drive. Directory snapshots are bounded to 256 visited
+folders. Re-enumerating an existing directory handle also refreshes its view.
 Distributed application locks and writable memory-map coherence are not promised.
 As with the Linux clients, physical collection of unlinked objects is an offline
 operation: disconnect the drive and use the Linux client's `--fsck`.
@@ -73,7 +78,9 @@ operation: disconnect the drive and use the Linux client's `--fsck`.
 From this directory, `make` cross-compiles an amd64 executable into
 `bin/stqr-windows.exe`; no C compiler is required. The WinFsp runtime is required
 on the Windows machine, not on the build host. The adapter uses cgofuse's Windows
-binding with `CGO_ENABLED=0`.
+binding with `CGO_ENABLED=0`. The executable uses the Windows GUI subsystem,
+Segoe UI and themed controls with DPI scaling. Its application manifest is a
+checked-in resource; `make resources` regenerates it using LLVM resource tools.
 
 `make all check` tests the portable filesystem layer and builds Windows callback
 tests. These cover open handles across rename/unlink, sparse and segmented I/O,

@@ -19,6 +19,7 @@ type Entry struct {
 	Info client.FSInfo
 }
 type handle struct {
+	path    string
 	id      client.ObjectID
 	options OpenOptions
 	entries []Entry
@@ -28,14 +29,15 @@ type Filesystem struct {
 	Volume   *client.Filesystem
 	ReadOnly bool
 	// Owner for newly created POSIX inodes; the CLI inherits the bucket root.
-	UID, GID uint32
-	mu       sync.Mutex
-	next     uint64
-	handles  map[uint64]handle
+	UID, GID    uint32
+	mu          sync.Mutex
+	next        uint64
+	handles     map[uint64]handle
+	directories map[string][]Entry
 }
 
 func New(ctx context.Context, f *client.Filesystem, readonly bool) *Filesystem {
-	return &Filesystem{Context: ctx, Volume: f, ReadOnly: readonly, handles: map[uint64]handle{}}
+	return &Filesystem{Context: ctx, Volume: f, ReadOnly: readonly, handles: map[uint64]handle{}, directories: map[string][]Entry{}}
 }
 func clean(p string) (string, error) {
 	if strings.ContainsAny(p, "\x00\\") || !strings.HasPrefix(p, "/") {
@@ -128,7 +130,7 @@ func (f *Filesystem) Open(p string, o OpenOptions, mode uint32) (uint64, error) 
 			return 0, e
 		}
 	}
-	h := handle{id: info.ID, options: o}
+	h := handle{path: path.Clean(p), id: info.ID, options: o}
 	if o.Directory {
 		h.entries = []Entry{{".", info}}
 		parent, err := f.Lookup(path.Dir(p))
@@ -155,6 +157,9 @@ func (f *Filesystem) Open(p string, o OpenOptions, mode uint32) (uint64, error) 
 	defer f.mu.Unlock()
 	f.next++
 	f.handles[f.next] = h
+	if o.Directory {
+		f.rememberDirectoryLocked(h.path, h.entries)
+	}
 	return f.next, nil
 }
 func (f *Filesystem) get(h uint64) (handle, error) {
@@ -284,7 +289,33 @@ func (f *Filesystem) Rename(from, to string, flags uint32) error {
 	if e != nil {
 		return e
 	}
-	return f.Volume.RenameWithFlags(f.Context, p, n, q, m, flags)
+	if e = f.Volume.RenameWithFlags(f.Context, p, n, q, m, flags); e != nil {
+		return e
+	}
+	from, to = path.Clean(from), path.Clean(to)
+	remap := func(current string) string {
+		if current == from || strings.HasPrefix(current, from+"/") {
+			return to + strings.TrimPrefix(current, from)
+		}
+		if flags&2 != 0 && (current == to || strings.HasPrefix(current, to+"/")) {
+			return from + strings.TrimPrefix(current, to)
+		}
+		return current
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for h, current := range f.handles {
+		current.path = remap(current.path)
+		f.handles[h] = current
+	}
+	// Keep the old directory views until Changes diffs their parents, but move
+	// enumerations within the renamed subtree to their new path.
+	dirs := make(map[string][]Entry, len(f.directories))
+	for p, entries := range f.directories {
+		dirs[remap(p)] = entries
+	}
+	f.directories = dirs
+	return nil
 }
 func (f *Filesystem) Link(from, to string) error {
 	if e := f.writable(); e != nil {

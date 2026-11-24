@@ -92,6 +92,11 @@ var setupCallback = syscall.NewCallback(func(hwnd uintptr, msg uint32, wparam, l
 			dialogState.choice.cancel = true
 			destroyWindow.Call(hwnd)
 			return 0
+		case 4:
+			if err := windows.ShellExecute(windows.Handle(hwnd), u16("open"), u16("https://winfsp.dev/rel/"), nil, nil, 1); err != nil {
+				messageBox(hwnd, "STQR", err.Error(), 0x10)
+			}
+			return 0
 		case 3:
 			d, e := normalizeDrive(textField(hwnd, idDrive))
 			if e != nil {
@@ -102,6 +107,12 @@ var setupCallback = syscall.NewCallback(func(hwnd uintptr, msg uint32, wparam, l
 			destroyWindow.Call(hwnd)
 			return 0
 		}
+	case 0x138: // WM_CTLCOLORSTATIC
+		gdi := windows.NewLazySystemDLL("gdi32.dll")
+		gdi.NewProc("SetBkMode").Call(wparam, 1)
+		gdi.NewProc("SetTextColor").Call(wparam, 0x29251f)
+		brush, _, _ := gdi.NewProc("GetStockObject").Call(0)
+		return brush
 	case 0x10:
 		if dialogState != nil {
 			dialogState.choice.cancel = true
@@ -141,7 +152,7 @@ func showSetup(initial mountConfig, persist bool) (setupChoice, error) {
 		return setupChoice{}, e
 	}
 	cursor, _, _ := user32.NewProc("LoadCursorW").Call(0, 32512)
-	wc := windowClass{Proc: setupCallback, Instance: uintptr(module), Cursor: cursor, Background: 16, Class: u16(setupClass)}
+	wc := windowClass{Proc: setupCallback, Instance: uintptr(module), Cursor: cursor, Background: 6, Class: u16(setupClass)}
 	wc.Size = uint32(unsafe.Sizeof(wc))
 	atom, _, e := user32.NewProc("RegisterClassExW").Call(uintptr(unsafe.Pointer(&wc)))
 	if atom == 0 && e != windows.ERROR_CLASS_ALREADY_EXISTS {
@@ -154,35 +165,73 @@ func showSetup(initial mountConfig, persist bool) (setupChoice, error) {
 	if hwnd == 0 {
 		return setupChoice{}, fmt.Errorf("setup window: %w", e)
 	}
-	font, _, _ := windows.NewLazySystemDLL("gdi32.dll").NewProc("GetStockObject").Call(17)
+
+	dpi := uintptr(96)
+	if proc := user32.NewProc("GetDpiForWindow"); proc.Find() == nil {
+		if value, _, _ := proc.Call(hwnd); value != 0 {
+			dpi = value
+		}
+	}
+	scale := func(v int) uintptr { return uintptr(v) * dpi / 96 }
+	user32.NewProc("SetWindowPos").Call(hwnd, 0, 0, 0, scale(704), scale(690), 6)
+	gdi := windows.NewLazySystemDLL("gdi32.dll")
+	fontFor := func(size int, weight uintptr) uintptr {
+		negativeHeight := int32(-int(scale(size)))
+		font, _, _ := gdi.NewProc("CreateFontW").Call(uintptr(negativeHeight), 0, 0, 0, weight, 0, 0, 0, 1, 0, 0, 5, 0, uintptr(unsafe.Pointer(u16("Segoe UI"))))
+		return font
+	}
+	font, titleFont := fontFor(16, 400), fontFor(28, 600)
+	defer gdi.NewProc("DeleteObject").Call(font)
+	defer gdi.NewProc("DeleteObject").Call(titleFont)
 	makeControl := func(class, text string, style uintptr, x, y, w, h, id int) uintptr {
-		control, _, _ := createWindow.Call(0, uintptr(unsafe.Pointer(u16(class))), uintptr(unsafe.Pointer(u16(text))), 0x50000000|style, uintptr(x), uintptr(y), uintptr(w), uintptr(h), hwnd, uintptr(id), uintptr(module), 0)
+		ex := uintptr(0)
+		if class == "EDIT" {
+			ex = 0x200
+		}
+		control, _, _ := createWindow.Call(ex, uintptr(unsafe.Pointer(u16(class))), uintptr(unsafe.Pointer(u16(text))), 0x50000000|style, scale(x), scale(y), scale(w), scale(h), hwnd, uintptr(id), uintptr(module), 0)
 		sendMessage.Call(control, 0x30, font, 1)
+		if class == "EDIT" {
+			sendMessage.Call(control, 0xc5, 4096, 0)
+		}
+		if class == "EDIT" || class == "BUTTON" {
+			windows.NewLazySystemDLL("uxtheme.dll").NewProc("SetWindowTheme").Call(control, uintptr(unsafe.Pointer(u16("Explorer"))), 0)
+		}
 		return control
 	}
+	title := makeControl("STATIC", "Speicher verbinden", 0, 32, 24, 620, 42, 0)
+	sendMessage.Call(title, 0x30, titleFont, 1)
+	makeControl("STATIC", "Deine Dateien als Laufwerk im Windows-Explorer.", 0, 32, 72, 620, 28, 0)
 	fields := []struct {
 		label, value string
-		id           int
+		id, x, y, w  int
 		style        uintptr
-	}{{"Server-URI", initial.URI, idURI, 0}, {"Benutzername", initial.Username, idUser, 0}, {"Passwort", initial.Password, idPassword, 0x20}, {"Bucket", initial.Bucket, idBucket, 0}, {"Laufwerk", initial.Drive, idDrive, 0}}
-	for n, f := range fields {
-		y := 20 + n*38
-		makeControl("STATIC", f.label, 0, 20, y+3, 130, 24, 0)
-		h := makeControl("EDIT", f.value, 0x00810080|f.style, 155, y, 405, 26, f.id)
-		sendMessage.Call(h, 0xc5, 4096, 0)
+	}{
+		{"Server-URI", initial.URI, idURI, 32, 116, 624, 0},
+		{"Benutzername", initial.Username, idUser, 32, 198, 296, 0},
+		{"Passwort", initial.Password, idPassword, 360, 198, 296, 0x20},
+		{"Bucket", initial.Bucket, idBucket, 32, 280, 452, 0},
+		{"Laufwerk", initial.Drive, idDrive, 516, 280, 140, 0},
 	}
-	ro := makeControl("BUTTON", "Nur lesen", 0x10003, 155, 215, 400, 25, idReadonly)
-	remember := makeControl("BUTTON", "Dauerhaft einbinden und Passwort merken", 0x10003, 155, 245, 410, 25, idPersist)
+	for _, f := range fields {
+		makeControl("STATIC", f.label, 0, f.x, f.y, f.w, 24, 0)
+		makeControl("EDIT", f.value, 0x10080|f.style, f.x, f.y+28, f.w, 34, f.id)
+	}
+	ro := makeControl("BUTTON", "Nur lesen", 0x10003, 32, 358, 624, 28, idReadonly)
+	remember := makeControl("BUTTON", "Bei der Anmeldung verbinden und Passwort merken", 0x10003, 32, 398, 624, 28, idPersist)
 	if initial.ReadOnly {
 		sendMessage.Call(ro, 0xf1, 1, 0)
 	}
 	if persist {
 		sendMessage.Call(remember, 0xf1, 1, 0)
 	}
-	makeControl("STATIC", "Automatisch bei deiner Windows-Anmeldung verbinden.", 0, 155, 273, 410, 22, 0)
-	makeControl("BUTTON", "Trennen und Autostart entfernen", 0x10000, 20, 315, 265, 30, 3)
-	makeControl("BUTTON", "Verbinden", 0x10001, 315, 315, 115, 30, 1)
-	makeControl("BUTTON", "Abbrechen", 0x10000, 445, 315, 115, 30, 2)
+	makeControl("STATIC", "Das Passwort wird geschützt in deinem Windows-Konto gespeichert.", 0, 56, 432, 600, 26, 0)
+	makeControl("STATIC", "WinFsp wird zum Einbinden als Windows-Laufwerk benötigt.", 0, 32, 482, 624, 28, 0)
+	makeControl("BUTTON", "WinFsp-Download", 0x10000, 32, 514, 180, 32, 4)
+	makeControl("STATIC", "Nach der Installation STQR erneut öffnen.", 0, 228, 518, 428, 28, 0)
+	makeControl("STATIC", "", 0x10, 32, 566, 624, 2, 0)
+	makeControl("BUTTON", "Trennen / Autostart entfernen", 0x10000, 32, 590, 276, 40, 3)
+	makeControl("BUTTON", "Abbrechen", 0x10000, 332, 590, 140, 40, 2)
+	makeControl("BUTTON", "Verbinden", 0x10001, 492, 590, 164, 40, 1)
 	user32.NewProc("ShowWindow").Call(hwnd, 5)
 	user32.NewProc("UpdateWindow").Call(hwnd)
 	user32.NewProc("SetFocus").Call(field(hwnd, idURI))
