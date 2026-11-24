@@ -145,12 +145,20 @@ receipt prevents replaying a completed clear against subsequently written data.
 An interrupted operation is partial and must be inspected/restarted with a new
 operation ID; a response is not a multi-object transaction.
 
-**Exclusive NBD, clear and clone currently require a single-node membership.**
-The existing maintenance protocol cannot exclude clients cluster-wide, so these
-operations return 501 on multi-node clusters. This restriction is checked before
-copying/deleting. Do not bypass it by merely selecting a different node.
-The RAM-upper/read-only boot gateway and ordinary home connections can use the existing
-routed cluster object protocol.
+NBD, GC, clear and clone use **durable exclusive leases across all admitted
+cluster members**. All members must be reachable and upgraded; existing clients
+of the affected bucket must disconnect. A read-only preflight checks member
+support before the builder or STQR-upper gateway allocates buckets. Data I/O
+continues directly to the committed object owners. Handoffs of a leased bucket
+and ordinary membership changes wait until the lease is released; unrelated
+bucket data operations continue normally.
+
+Participants persist their fence and sequence high-water mark in the admin
+volume. A network timeout never unlocks a live lease. Clean client close releases
+it synchronously; loss of the original owner socket, or owner restart, triggers
+recovery and release through all members. Passive participant restart preserves
+the fence. Explicit externally fenced node exclusion uses the existing recovery
+contract and retires leases from the preceding membership epoch.
 
 ## Boot gateway
 
@@ -204,9 +212,9 @@ MACs are selectors, not authentication; only the IP that requested a boot may
 connect to that session port. This is intended for a trusted boot LAN.
 
 `--upper ram` selects the simpler per-boot client tmpfs upper and does not need
-exclusive bucket maintenance. **STQR uppers require single-node membership**,
-like the image-builder NBD writer. A read-only preflight rejects unsupported
-membership before allocating anything. Logout alone does not clear a running
+exclusive bucket maintenance. STQR uppers and the image-builder writer require
+all admitted members to be available for lease acquisition. A read-only preflight
+checks support before allocating anything. Logout alone does not clear a running
 system; shutdown/reboot disconnects its root upper. Personal home buckets remain
 persistent and independent. Machine ID, random seed and SSH host keys are
 regenerated in the private upper.

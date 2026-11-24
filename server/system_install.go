@@ -90,6 +90,9 @@ func (s *Server) installSystemView(view *systemView) error {
 		}
 	}
 	s.currentSystem.Store(view)
+	if err := s.retirePreviousEpochLeases(view.manifest.Membership.Epoch); err != nil {
+		return err
+	}
 	s.dirtyVolumeAuthority()
 	if q := s.quotas; q != nil {
 		q.mu.Lock()

@@ -510,6 +510,9 @@ func (s *Server) prepareSystemImage(ledger *controlLedger, proposal controlPropo
 		return proof, nil
 	}
 	ledger.mu.Unlock()
+	if proposal.Kind == controlMembership && s.anyBucketLease() {
+		return client.Proof{}, fail(409, "release exclusive buckets before changing membership")
+	}
 	view, err := s.loadSystemView(volume.ObjectID(proposal.Image))
 	if err != nil {
 		return client.Proof{}, err

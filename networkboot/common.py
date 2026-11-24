@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
 
@@ -110,3 +111,16 @@ def extract(socket, work, kernel_version=None):
         guest(socket, 'command', '/bin/cp -p /etc/fstab.stqr-original /etc/fstab')
     (work / 'release.json').write_text(json.dumps({'schema': 1, 'kernel': version,
         'boot': 'nfs3-readonly-with-tmpfs-overlay', 'architecture': 'x86_64'}))
+
+
+def cli(main):
+    """Report operational failures without a Python implementation traceback."""
+    try:
+        main()
+    except subprocess.CalledProcessError as error:
+        raise SystemExit(error.returncode)
+    except (RuntimeError, OSError) as error:
+        print(f'{Path(sys.argv[0]).name}: {error}', file=sys.stderr)
+        raise SystemExit(1)
+    except KeyboardInterrupt:
+        raise SystemExit(130)

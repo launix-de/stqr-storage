@@ -262,6 +262,12 @@ func (p peerControlParticipants) call(ctx context.Context, node client.ID, opcod
 		if opcode == peerForceControlState {
 			return p.runtime.server.receiveForceControlState(body, node)
 		}
+		if opcode == peerBucketCopy {
+			return p.runtime.server.receiveBucketCopy(ctx, body, node)
+		}
+		if opcode == peerBucketLease {
+			return p.runtime.server.receiveBucketLease(ctx, body, node)
+		}
 		if opcode == peerForceScopes {
 			return p.runtime.server.receiveForceScopes(body, node)
 		}

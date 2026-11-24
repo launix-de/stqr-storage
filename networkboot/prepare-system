@@ -3,7 +3,7 @@
 import argparse
 from pathlib import Path
 import tempfile
-from common import ctl, extract, nbd, qemu, require
+from common import cli, ctl, extract, nbd, qemu, require
 
 def main():
     p = argparse.ArgumentParser(description='Install a Linux VM directly on a bucket-backed NBD disk, then publish its rootfs')
@@ -46,4 +46,4 @@ def main():
     print('Published', args.bucket)
 
 if __name__ == '__main__':
-    main()
+    cli(main)

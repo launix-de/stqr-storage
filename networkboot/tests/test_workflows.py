@@ -62,6 +62,11 @@ class Workflows(unittest.TestCase):
         with patch.object(sys,'argv',['serve','ubuntu','--check']),patch.object(script,'require'),patch.object(script,'ctl') as ctl,patch.object(script,'boot_network',return_value=('eth0','192.0.2.10','192.0.2.0/24')),patch.object(Path,'is_file',return_value=True),contextlib.redirect_stdout(io.StringIO()):
             script.main()
             ctl.assert_any_call('stqr.yaml','resolve','ubuntu')
+    def test_cli_operational_failure_has_no_traceback(self):
+        from common import cli
+        with self.assertRaises(SystemExit) as stopped:
+            cli(lambda: (_ for _ in ()).throw(subprocess.CalledProcessError(7,['fixture'])))
+        self.assertEqual(stopped.exception.code,7)
     def test_help_has_no_side_effects(self):
         for script in ['prepare-system', 'edit-image', 'serve', 'pam/stqr-home']:
             result = subprocess.run([sys.executable, str(ROOT / script), '--help'], capture_output=True)

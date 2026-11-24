@@ -32,6 +32,7 @@ const (
 	BucketScan              uint16 = 0x0116
 	BucketObjectList        uint16 = 0x0117
 	BucketBlockMaintenance  uint16 = 0x011c
+	BucketMaintenanceEnd    uint16 = 0x011d
 	UserListPage            uint16 = 0x2038
 	BucketListPage          uint16 = 0x2039
 	VolumeAddWithGroups     uint16 = 0x2036

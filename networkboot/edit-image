@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: GPL-3.0-only
 import argparse
 import tempfile
-from common import ctl, extract, nbd, qemu, require
+from common import cli, ctl, extract, nbd, qemu, require
 
 def main():
     p = argparse.ArgumentParser(description='Boot an existing bucket disk in QEMU; optionally clone before editing')
@@ -38,4 +38,4 @@ def main():
     print('Published', target)
 
 if __name__ == '__main__':
-    main()
+    cli(main)

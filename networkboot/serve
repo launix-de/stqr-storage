@@ -18,7 +18,7 @@ import threading
 import time
 import urllib.parse
 from sessions import Sessions
-from common import BIN, ctl, require, run
+from common import cli, BIN, ctl, require, run
 
 
 def dnsmasq_config(server, interface, clients, tftp, http_port):
@@ -242,4 +242,4 @@ def main():
             tftp_directory.cleanup()
 
 if __name__ == '__main__':
-    main()
+    cli(main)

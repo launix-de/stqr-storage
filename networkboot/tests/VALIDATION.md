@@ -64,3 +64,27 @@ disposable server/volume fixtures:
 
 This run did not repeat the interactive installer or guest kernel boot tests.
 Cluster-wide exclusion, Trim and Resize remain unimplemented.
+
+## Cluster maintenance, 2026-11-24
+
+This supersedes the earlier single-node-only exclusion boundary. Disposable
+production daemon fixtures now pass:
+
+- Two-owner ranged read/write and Sync under one ALL-member lease, with normal
+  clients excluded and readonly mutation denied on both nodes.
+- Passive participant restart retaining its durable fence; the owning client
+  reauthenticates its auxiliary socket and reads the preserved HDD data.
+- Abrupt original-socket loss followed by ALL orphan release, with no SDK
+  reconnect of the old owner. Retired prepares cannot resurrect a lease, and
+  delayed release cannot clear the next lease.
+- Clear/clone through either node, with globally committed receipts protecting
+  later writes against clear replay. A production one-node daemon also retains
+  those receipts across restart.
+- Real QEMU across a two-node deployment: named disk creation, stripe-boundary
+  write, flush/readback, publish/GC/fetch, clone, clear and delete.
+- The existing single-node QEMU/gateway/session fixture still passes. CLI
+  operational failures exit without Python tracebacks. Full Go tests and focused
+  race tests passed; Python, shell checks and helper builds passed.
+
+An interactive Ubuntu installer and physical PXE firmware remain outside this
+fixture. The scripts do not hide those untested end-to-end steps.

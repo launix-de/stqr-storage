@@ -2,9 +2,11 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"math"
+	"time"
 
 	"github.com/launix-de/stqr-storage/client"
 	"github.com/launix-de/stqr-storage/volume"
@@ -49,7 +51,7 @@ func (s *Server) dispatchAs(m client.Message, ws *wsSession, p principal) ([]byt
 		if p.connection.invalid.Load() {
 			return client.ResponseBody(403, nil, "connection authorization revoked"), 403
 		}
-		if p.connection.bucket != nil && m.Opcode != client.Hello && m.Opcode != client.Ping && !(m.Opcode >= 0x0100 && m.Opcode <= client.BucketObjectList || m.Opcode == client.ObjectAccepted || m.Opcode == client.BucketBlockMaintenance || m.Opcode == client.BucketStatFS || m.Opcode == client.BucketSync) {
+		if p.connection.bucket != nil && m.Opcode != client.Hello && m.Opcode != client.Ping && !(m.Opcode >= 0x0100 && m.Opcode <= client.BucketObjectList || m.Opcode == client.ObjectAccepted || m.Opcode == client.BucketBlockMaintenance || m.Opcode == client.BucketMaintenanceEnd || m.Opcode == client.BucketStatFS || m.Opcode == client.BucketSync) {
 			return client.ResponseBody(403, nil, "bucket connection has no administrative privileges"), 403
 		}
 	}
@@ -107,6 +109,24 @@ func (s *Server) dispatchAs(m client.Message, ws *wsSession, p principal) ([]byt
 		if m.Opcode == peerForceControlState {
 			actor, _ := parseID(p.User.ID)
 			result, err := s.receiveForceControlState(m.Body, client.ID(actor))
+			if err != nil {
+				status := statusOf(err)
+				return client.ResponseBody(status, nil, err.Error()), status
+			}
+			return client.ResponseBody(200, result, ""), 200
+		}
+		if m.Opcode == peerBucketCopy {
+			actor, _ := parseID(p.User.ID)
+			result, err := s.receiveBucketCopy(s.ctx, m.Body, client.ID(actor))
+			if err != nil {
+				status := statusOf(err)
+				return client.ResponseBody(status, nil, err.Error()), status
+			}
+			return client.ResponseBody(200, result, ""), 200
+		}
+		if m.Opcode == peerBucketLease {
+			actor, _ := parseID(p.User.ID)
+			result, err := s.receiveBucketLease(s.ctx, m.Body, client.ID(actor))
 			if err != nil {
 				status := statusOf(err)
 				return client.ResponseBody(status, nil, err.Error()), status
@@ -286,7 +306,7 @@ func (s *Server) dispatchAs(m client.Message, ws *wsSession, p principal) ([]byt
 		return client.ResponseBody(403, nil, "cluster peer operation required"), 403
 	}
 
-	if !p.isAdmin() && m.Opcode != client.Hello && m.Opcode != client.Ping && !(m.Opcode >= 0x0100 && m.Opcode <= client.BucketObjectList || m.Opcode == client.ObjectAccepted || m.Opcode == client.BucketBlockMaintenance || m.Opcode == client.BucketStatFS || m.Opcode == client.BucketSync) {
+	if !p.isAdmin() && m.Opcode != client.Hello && m.Opcode != client.Ping && !(m.Opcode >= 0x0100 && m.Opcode <= client.BucketObjectList || m.Opcode == client.ObjectAccepted || m.Opcode == client.BucketBlockMaintenance || m.Opcode == client.BucketMaintenanceEnd || m.Opcode == client.BucketStatFS || m.Opcode == client.BucketSync) {
 		return client.ResponseBody(403, nil, "administrator required"), 403
 	}
 	if s.clusterPaused() || s.forceFrozen() {
@@ -381,8 +401,16 @@ func (s *Server) dispatchAs(m client.Message, ws *wsSession, p principal) ([]byt
 		if len(m.Body) != 0 {
 			return client.ResponseBody(400, nil, "empty body required"), 400
 		}
-		if view := s.currentSystem.Load(); view != nil && len(view.manifest.Membership.Members) > 1 {
-			return client.ResponseBody(501, nil, "cluster-wide exclusive maintenance is unavailable"), 501
+		if ids, epoch, err := s.leaseMembers(); err == nil && len(ids) > 1 {
+			l := bucketLease{Epoch: epoch, Token: client.NewRequestID()}
+			for _, node := range ids {
+				ctx, cancel := context.WithTimeout(s.ctx, 5*time.Second)
+				_, err := s.callLease(ctx, node, 4, l)
+				cancel()
+				if err != nil {
+					return client.ResponseBody(statusOf(err), nil, err.Error()), statusOf(err)
+				}
+			}
 		}
 		return client.ResponseBody(200, nil, ""), 200
 	}
@@ -456,7 +484,7 @@ func (s *Server) dispatchAs(m client.Message, ws *wsSession, p principal) ([]byt
 		}
 		return client.ResponseBody(status, result, ""), status
 	}
-	if m.Opcode >= 0x0100 && m.Opcode <= 0x0108 || m.Opcode == client.ObjectAccepted || m.Opcode == client.BucketBlockMaintenance || m.Opcode == client.BucketMaintenance || m.Opcode == client.BucketScan || m.Opcode == client.BucketObjectList {
+	if m.Opcode >= 0x0100 && m.Opcode <= 0x0108 || m.Opcode == client.ObjectAccepted || m.Opcode == client.BucketBlockMaintenance || m.Opcode == client.BucketMaintenanceEnd || m.Opcode == client.BucketMaintenance || m.Opcode == client.BucketScan || m.Opcode == client.BucketObjectList {
 		result, status, err := s.executeObjects(m, ws, p)
 		if errors.Is(err, errObjectStaged) {
 			return nil, 0

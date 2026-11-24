@@ -76,10 +76,21 @@ connections are supported by a readonly exporter. The NBD multi-connection flag
 for concurrent writers to the same device is not advertised. After connection
 loss, the lease cannot reconnect and silently resume writes.
 
-**Exclusive leases currently require single-node membership.** Cluster-wide
-exclusion remains future work; multi-node acquisition fails explicitly. Other
-bucket clients must disconnect before acquiring the lease. Device resize,
-discard/trim, write-zeroes and snapshots are not implemented.
+Leases span **all admitted cluster members**, including a one-node deployment.
+Every participant persists its fence before acquisition succeeds. Other bucket
+clients must disconnect first. Object reads/writes and Sync still go directly to
+their committed owners through authenticated auxiliary sockets carrying the
+lease grant. The original owning socket remains pinned; losing it stops the SDK
+from continuing and triggers orphan cleanup. A passive participant restart keeps
+the fence. A network timeout alone never releases ownership.
+
+Clean close sends `BUCKET_MAINTENANCE_END` (`0x011d`) before disconnecting.
+Journal epochs, monotonically increasing sequences and fresh server-generated
+bearer tokens reject delayed prepares/releases and stale auxiliary connections.
+Handoffs of this bucket and ordinary membership changes are blocked while leased;
+unrelated bucket operations remain available. All nodes and the exporter must
+use the upgraded protocol. Device resize, discard/trim, write-zeroes and snapshots
+remain unimplemented.
 
 The older filesystem-backed disk format is rejected rather than reformatted.
 Export old disks with the previous version and copy into a fresh striped bucket.

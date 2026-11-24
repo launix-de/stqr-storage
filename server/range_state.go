@@ -316,6 +316,9 @@ func (r *rangeManager) reserve(p rangePlan, sourceBoot ...client.ID) error {
 	}
 	r.server.opMu.Lock()
 	defer r.server.opMu.Unlock()
+	if b, err := r.server.Bucket(volume.ID(p.Before.Bucket)); err == nil && b.underMaintenance() {
+		return fail(409, "bucket is under exclusive maintenance")
+	}
 	if r.server.clusterPaused() {
 		return fail(503, "cluster shutdown is pending")
 	}

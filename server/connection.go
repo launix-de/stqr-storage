@@ -2,6 +2,7 @@
 package server
 
 import (
+	"encoding/hex"
 	"net/http"
 	"sync/atomic"
 	"time"
@@ -14,6 +15,8 @@ import (
 // Roles, bucket pointer and permissions are immutable; administrative changes
 // revoke the capability instead of making data requests reread account/ACL data.
 type connectionAuthorization struct {
+	lease                      atomic.Pointer[bucketLease]
+	leaseOwner                 atomic.Bool
 	admin, clusterPeer         bool
 	blockDevice, blockReadOnly atomic.Bool
 	offlineCopy                bool // private offline clear/clone owner; never accepted from wire
@@ -113,7 +116,20 @@ func (s *Server) authorizeConnection(r *http.Request, p principal) (*connectionA
 		if err != nil {
 			return nil, p, err
 		}
-		if b.underMaintenance() {
+		if token := r.Header.Get(bucketLeaseHeader); token != "" {
+			raw, e := hex.DecodeString(token)
+			if e != nil || len(raw) != 16 {
+				return nil, p, ErrBucketForbidden
+			}
+			l := s.leaseRecord(b)
+			if l == nil || l.Released || !bytesEqualLeaseToken(raw, l.Token) || l.User != auth.accountID {
+				return nil, p, ErrBucketForbidden
+			}
+			auth.lease.Store(l)
+			auth.blockDevice.Store(l.Block)
+			auth.blockReadOnly.Store(l.ReadOnly)
+		}
+		if b.underMaintenance() && !b.leaseAllows(auth) {
 			return nil, p, fail(409, "bucket is under exclusive maintenance")
 		}
 		if info.Permissions == 0 || b.Describe().State == BucketDeleting {

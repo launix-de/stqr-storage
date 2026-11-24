@@ -286,10 +286,16 @@ The bucket-bound WebSocket supports BUCKET_MAINTENANCE (0x0115) and BUCKET_SCAN
 (0x0116) for `stqr-fuse --fsck`. Maintenance requires read/delete grants, an active
 bucket without pending policy transition, and no other connection to that bucket.
 It blocks new bucket connections, other HTTP object accesses, reference-creating
-writes and bucket configuration mutations until the owner's request loop ends.
-The owner can read, scan, use CAS for namespace recovery (with its normal write
-grant), and delete. It must abort on transport loss and start a
-new complete traversal; maintenance ownership does not survive reconnect/restart.
+writes and bucket configuration mutations. The owner can read, scan, use CAS for
+namespace recovery (with its normal write grant), and delete. Production daemons
+persist an exclusive lease across ALL members. The owning socket remains pinned;
+authenticated auxiliary sockets carry the grant for direct routed I/O. Passive
+participant restart preserves the fence; owner loss initiates ALL release.
+`BUCKET_MAINTENANCE_END` acknowledges release on clean close. A timer does not
+expire a live lease. Epochs, sequence high-water marks and fresh grant tokens fence
+late protocol messages. Cluster receipts for clear/clone are globally committed
+before data changes and after completion, retaining replay protection on restart.
+
 These restrictions apply only to the offline maintenance session. Ordinary FUSE
 reads do not persist synchronization records. The scan is hash-ordered and merges
 versions/tombstones across local copies before returning live records. Tombstones

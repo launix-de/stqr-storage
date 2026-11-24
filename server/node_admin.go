@@ -1,11 +1,19 @@
 // SPDX-License-Identifier: GPL-3.0-only
 package server
 
-import "github.com/launix-de/stqr-storage/client"
+import (
+	"encoding/json"
+
+	"github.com/launix-de/stqr-storage/client"
+)
 
 // Delegated control operations must leave the ordinary duplex worker free for
 // PREPARE and READY callbacks. Both queues are bounded by the peer transport.
 func isControlPeerRequest(m client.Message) bool {
+	if m.Opcode == peerBucketCopy {
+		return true
+	}
+
 	if m.Opcode == peerForceAdmin {
 		return true
 	}
@@ -139,4 +147,14 @@ func (s *Server) verifyDelegatedAdmin(body []byte) ([]byte, error) {
 	e.ID(id)
 	e.Text(name)
 	return e.B, nil
+}
+
+// Lease coordination must not queue behind long delegated copies, nor occupy
+// the ordinary worker needed by quota/control callbacks while participants drain.
+func isLeaseCoordinatorRequest(m client.Message) bool {
+	if m.Opcode != peerBucketLease {
+		return false
+	}
+	var r struct{ Action uint8 }
+	return len(m.Body) <= 8192 && json.Unmarshal(m.Body, &r) == nil && (r.Action == 0 || r.Action == 2)
 }

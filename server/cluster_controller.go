@@ -6,6 +6,7 @@ import (
 	"context"
 	"net"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"sync"
 	"time"
@@ -377,6 +378,25 @@ func (c *clusterController) finishReservedChange(ctx context.Context, claim cont
 		}
 		if draft != nil {
 			defer draft.close()
+			// A PG edit can affect a bucket without going through its direct
+			// admin opcode. Only receipt updates may change a leased descriptor.
+			for _, live := range c.server.leaseBuckets(false) {
+				if !live.underMaintenance() {
+					continue
+				}
+				candidate, e := draft.server.Bucket(live.ID())
+				if e != nil {
+					return nil, 0, fail(409, "leased bucket cannot be removed")
+				}
+				before, after := live.Describe(), candidate.Describe()
+				before.Revision = 0
+				after.Revision = 0
+				before.Receipts = nil
+				after.Receipts = nil
+				if !reflect.DeepEqual(before, after) {
+					return nil, 0, fail(409, "bucket configuration is under exclusive maintenance")
+				}
+			}
 			source = draft.server
 			result, status = draft.result, draft.status
 		}

@@ -56,10 +56,21 @@ func (c *Client) beginMaintenanceCommand(ctx context.Context, opcode uint16, rea
 	if opcode == BucketBlockMaintenance {
 		e.Bool(readonly)
 	}
-	r, err := c.do(ctx, opcode, e.B, NewRequestID(), false, nil)
+	token := NewRequestID()
+	c.mu.Lock()
+	c.maintenanceToken = token
+	c.mu.Unlock()
+	r, err := c.do(ctx, opcode, e.B, token, false, nil)
 	defer r.close()
-	if err == nil && len(r.result) != 0 {
-		err = ErrProtocol
+	if err == nil {
+		if len(r.result) == 17 && r.result[0] == 1 {
+			c.mu.Lock()
+			copy(c.maintenanceToken[:], r.result[1:])
+			c.distributedMaintenance = true
+			c.mu.Unlock()
+		} else if len(r.result) != 0 {
+			err = ErrProtocol
+		}
 	}
 	return err
 }

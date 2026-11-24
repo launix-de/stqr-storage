@@ -25,6 +25,9 @@ func (s *Server) executeBucketCopy(ctx context.Context, m client.Message, p prin
 	if d.Done() != nil || srcID == systemBucket || dstID == systemBucket || m.Opcode == client.BucketClone && srcID == dstID {
 		return nil, fail(400, "invalid clear/clone buckets")
 	}
+	if s.controller != nil {
+		return s.clusterBucketCopy(ctx, m, p)
+	}
 	s.opMu.Lock()
 	locked := true
 	defer func() {

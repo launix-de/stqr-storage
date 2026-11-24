@@ -20,7 +20,10 @@ func (b *Bucket) authorize(p principal, permission BucketPermissions) (BucketDes
 	b.mu.RLock()
 	maintenance := b.maintenance
 	b.mu.RUnlock()
-	if maintenance != nil && (p.connection != maintenance || permission != BucketRead && permission != BucketDelete && permission != BucketWrite) {
+	if p.connection != nil && p.connection.lease.Load() != nil && !b.leaseAllows(p.connection) {
+		return BucketDescription{}, ErrBucketForbidden
+	}
+	if maintenance != nil && (p.connection != maintenance && !b.leaseAllows(p.connection) || permission != BucketRead && permission != BucketDelete && permission != BucketWrite) {
 		return BucketDescription{}, fail(409, "bucket is under exclusive maintenance")
 	}
 	d := b.storageDescription()
@@ -350,9 +353,12 @@ func (b *Bucket) mutate(ctx context.Context, p principal, id volume.ObjectID, op
 	s.opMu.Lock()
 	defer s.opMu.Unlock()
 	if b.underMaintenance() {
-		if view := s.currentSystem.Load(); view != nil && len(view.manifest.Membership.Members) > 1 {
+		if view := s.currentSystem.Load(); view != nil && len(view.manifest.Membership.Members) > 1 && s.leaseRecord(b) == nil {
 			return volume.Result{}, fail(501, "exclusive maintenance cannot mutate after multi-node admission")
 		}
+	}
+	if l := s.leaseRecord(b); l != nil && !l.Released && l.ReadOnly {
+		return volume.Result{}, ErrBucketForbidden
 	}
 	if b.underMaintenance() && p.connection != nil && p.connection.blockReadOnly.Load() {
 		return volume.Result{}, ErrBucketForbidden
