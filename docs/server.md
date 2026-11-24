@@ -1078,3 +1078,10 @@ announcing generation's control slot nor waits for physical deletion to finalize
 that generation. Each node reclaims bounded pages in idle cycles, skips occupied
 locks, and yields to user I/O and active rebuild work. Completion is observed
 before starting the later, short catalog-cleanup decision.
+
+Dashboard disk administration follows the same client boundary. The server
+relays bounded, opaque requests to registered object-lease owners; an absent
+owner is reported without opening a disk catalog. The browser handles offline
+descriptors using delegated native GET/STAT/inventory/ranged-CAS operations.
+Delegation requires an administrator and retains ordinary bucket authorization,
+lease exclusion, owner routing and traffic accounting.

@@ -37,7 +37,8 @@ type Store interface {
 }
 
 // Metadata is the only per-device descriptor. No stripe/segment list is stored.
-// ID is a generation identifier so a recreated name never exposes older stripes.
+// ID is the disk identity, unchanged by writes or resize. Recreating a deleted
+// name creates a new disk identity so it cannot expose the old disk's stripes.
 type Metadata struct {
 	ID           client.ID `json:"id"`
 	Name         string    `json:"name"`
@@ -126,7 +127,7 @@ func (c *Catalog) CheckFormat(ctx context.Context) error {
 	return nil
 }
 func (c *Catalog) Create(ctx context.Context, m Metadata) (Metadata, error) {
-	// Each new name gets its own generation, including callers reusing Metadata.
+	// Each new disk gets its own identity, including callers reusing Metadata.
 	m.ID = client.NewRequestID()
 	if m.Manufacturer == "" {
 		m.Manufacturer = "STQR"

@@ -1864,10 +1864,10 @@ ADMIN oder ausdrücklich ADMIN_READ für reine Leseoperationen. `C` bedeutet glo
 | 0x2028 | BUCKET_CLEAR / Q, Admin | `bucket:ID` => `objects:u64`; offline, Single-Node-Maintenance; persistente Replay-Sperre |
 | 0x2029 | BUCKET_CLONE / Q, Admin | `source:ID,target:ID` => `objects:u64`; frischer physisch leerer Zielbucket; veröffentlicht objektweises COW ohne initiale Payload-Kopie, `objects=0` bezeichnet synchron kopierte Objekte; Grants bleiben getrennt |
 | 0x202a | BUCKET_MAINTENANCE_STATUS / Q, Admin | leer => leer nach rein lesendem Capability-/Erreichbarkeits-Preflight aller Mitglieder; vor jeder Bucket-Allokation |
-| 0x203e | BLOCK_DEVICE_LIST / Q, Admin | `schema:u16=1,bucket:ID,expected_owner:ID,request:Blob` => `live:Bool,readonly:Bool,owner:ID,page:Blob`; Request `schema:u16=1,action:u8=1,after:Text,limit:u32,query:Text`, Limit 1–100, Cursor hexkodierte native OID; Page `schema:u16=1,count:u32,descriptors:count*Blob,next:Text`; Descriptor ist unverändertes STNBD001. Leere gefilterte Seiten dürfen einen Folgecursor haben. |
-| 0x203f | BLOCK_DEVICE_RESIZE / Q, Admin | gleiche äußere Felder und Antwort; Request `schema:u16=1,action:u8=2,name:Text,device:ID,expected_size:u64,new_size:u64`; genau ein bestätigter Descriptor; andere aktuelle Größe oder Generation = Konflikt, bereits erreichte Zielgröße = idempotenter Sync-Retry. `expected_owner` null beim Dashboard-Aufruf, bei Weiterleitung auf die konkrete Lease-Owner-Node gebunden. |
-| 0x011e | BLOCK_CONTROL_REGISTER / Q, Block-Lease-Owner | `schema:u16=1` => leer; nur auf dem ursprünglichen Lease-Socket, niemals auf Hilfsverbindungen. HELLO-Capability 65536 signalisiert Unterstützung. |
-| 0x011f | BLOCK_CONTROL / umgekehrtes Q auf Owner-Socket | native Management-Request-Bytes => native Page-Bytes; nur nach Registrierung, maximal ein laufender SDK-Handler, Request höchstens 2048 Bytes, Antwort höchstens 1 MiB, Timeout 30 Sekunden; Verarbeitung außerhalb des Framing-Loops. Alle neuen Operationen benötigen explizite Semantik-Advertisement bei Peer-Weiterleitung; alte Peers lehnen sie mit 426 ab. |
+| 0x203e | LEASE_CONTROL_READ (historisch BLOCK_DEVICE_LIST) / Q, Admin | `schema:u16=1,bucket:ID,expected_owner:ID,request:Blob` => `live:Bool,readonly:Bool,owner:ID,result:Blob`; opake Verwaltungsanfrage an den registrierten Lease-Client, Request maximal 2048 Bytes. Ohne aktiven Owner: `live=false,result=leer`; der aufrufende Client verwaltet seine Daten dann über native Objektoperationen. |
+| 0x203f | LEASE_CONTROL_WRITE (historisch BLOCK_DEVICE_RESIZE) / Q, Admin | gleiche äußere Felder und Antwort; bei readonly Lease verboten. `expected_owner` null beim Dashboard-Aufruf, bei Weiterleitung auf die konkrete Lease-Owner-Node gebunden. Der Server interpretiert weder Request noch Result. |
+| 0x011e | LEASE_CONTROL_REGISTER (historisch BLOCK_CONTROL_REGISTER) / Q, Object-Lease-Owner | `schema:u16=1` => leer; nur auf dem ursprünglichen Lease-Socket, niemals auf Hilfsverbindungen. HELLO-Capability 65536 signalisiert Unterstützung. |
+| 0x011f | LEASE_CONTROL (historisch BLOCK_CONTROL) / umgekehrtes Q auf Owner-Socket | opake Request-Bytes => opake Result-Bytes; nur nach Registrierung, maximal ein laufender SDK-Handler, Request höchstens 2048 Bytes, Antwort höchstens 1 MiB, Timeout 30 Sekunden; Verarbeitung außerhalb des Framing-Loops. Relay 0x203e/0x203f verwendet Semantikrevision 2; alte Peers lehnen die neue Offline-Antwort mit 426 ab. |
 | 0x201e | VOLUME_CAPACITY_GET / Q / L | leer => `filesystem_available:u64,ram_available:u64,ram_limit:u64`; Available-Wert für das aktive Volume-Verzeichnis, verfügbarer System-RAM und wirksame RAM-Grenze nach optionalem Budget |
 | 0x2024 | NODE_ADMIN_REQUEST / Q/F / L | `target:ID,opcode:u16,body:Blob` => Status/Folgeheader/result des inneren Befehls; Operations-ID bleibt die ID des äußeren Requests; kein beliebiges URL-Ziel |
 | 0x2025 | USER_S3_KEY_LIST / Q | `user_id:ID` => `access_key_ids:Vec(Text)`; nur IDs, keine Secrets |
@@ -1876,8 +1876,12 @@ ADMIN oder ausdrücklich ADMIN_READ für reine Leseoperationen. `C` bedeutet glo
 
 `NODE_ADMIN_REQUEST` erlaubt ausschließlich Volume-Anlegen/-Entfernen/-Rescan/
 -Vergrößern, Volume-Kandidaten/Kapazität/Wachstumsgrenzen, lokale Config-Ansicht/
-Feldänderungen und Operationsstatus. Rekursive Weiterleitung, Objekt-, Bucket-
-und Benutzerbefehle sind ausgeschlossen. Nur die Ziel-Node speichert ihre
+Feldänderungen, Operationsstatus und die explizit freigegebenen lokalen
+Verwaltungsbefehle. Für browserseitige Frontends sind zusätzlich natives GET,
+STAT, CAS und BUCKET_OBJECT_LIST erlaubt: Bucket-Autorisierung, Lease-Ausschluss,
+Routing und Volume-Locks gelten unverändert; keine Auswertung von FS- oder
+Blockdevice-Payloads im Server. Rekursive Weiterleitung sowie globale Bucket-
+und Benutzermutationen sind ausgeschlossen. Nur die Ziel-Node speichert ihre
 Volume-Konfiguration und lokalen Operationsbelege. Der interne Peer-Aufruf
 unterscheidet Transporterfolg (äußere Antwort) und den vollständigen inneren
 Admin-Response-Body; der Dashboard-Proxy reicht dessen Status unverändert durch,
@@ -2636,3 +2640,12 @@ nachfolgende Generationen übernommen. Physische Bereinigung ist kein Abschlussk
 der ankündigenden Generation. Jede Node arbeitet in kleinen Idle-Portionen weiter,
 überspringt belegte Sperren und meldet ihren lokalen Abschluss. Erst danach kann eine
 kurze spätere Kontrollentscheidung die verbleibenden Verwaltungsreste abschließen.
+
+Das NBD-Dashboard ist ebenfalls ein Client des Objektprotokolls. Der Browser
+interpretiert STNBD001, adressiert Descriptoren nach dem NBD-Clientformat und
+vergrößert Offline-Disks per byteweisem Range-CAS der Größenangabe (Offset 14,
+8 Bytes, Vergleich des bisherigen Descriptors unter demselben Volume-Lock).
+Es gibt keine Objekt-Inhaltsversion. Bei einem laufenden Exporter verarbeitet
+dessen registrierter SDK-Handler das NBD-Verwaltungsformat; das Server-Relay
+bleibt opak. Format-/Protokoll- und Placement-Revisionen sind keine Versionen
+von Objektinhalten.

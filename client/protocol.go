@@ -278,3 +278,12 @@ func DecodeStatsFilter(d *Decoder) StatsFilter {
 	}
 	return f
 }
+
+// Opaque lease-owner control. Historical Block* names are wire-compatible
+// aliases; neither the native transport nor the server parses client formats.
+const (
+	LeaseControlRead           = BlockDeviceList
+	LeaseControlWrite          = BlockDeviceResize
+	BucketLeaseControlRegister = BucketBlockControlRegister
+	BucketLeaseControl         = BucketBlockControl
+)

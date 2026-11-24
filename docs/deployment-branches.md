@@ -3,7 +3,8 @@
 `fix/capacity-headroom` is a maintenance branch for the currently deployed native
 wire-v1 / volume-format-4 nodes. It is not a second feature PR. Its applicable
 capacity, accounting, dashboard and idle-cleanup changes are ported into
-`fix/publish-handoff` (PR #10), which targets the current master.
+master through PR #10 (merged). Subsequent priority, live-catalog and object
+boundary fixes continue on `fix/object-client-boundary`.
 
 Do not merge the maintenance branch wholesale into master: master already uses
 the unversioned native object API and volume format 5. Likewise, do not replace

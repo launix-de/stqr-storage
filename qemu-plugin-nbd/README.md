@@ -182,3 +182,11 @@ legacy ioctl path for compatibility.
 Run `make -C qemu-plugin-nbd check` for range/sparse/format/NBD tests. The real
 STQR/QEMU integration is `STQR_TEST_NETWORKBOOT=1 go test ./server -run
 '^TestNetworkbootNBDWithQEMU$' -count=1` after `make -C networkboot`.
+
+The dashboard is another client of this format. A connected exporter handles
+opaque management requests on its original lease socket. Without an exporter,
+the browser lists ordinary native objects, reads descriptors and conditionally
+changes their eight-byte size field with ranged CAS. Each CAS compares the old
+descriptor bytes under the volume lock; there are no object content versions.
+A concurrently acquired exclusive lease rejects the offline object request.
+The server never opens a disk catalog or decodes a descriptor for administration.

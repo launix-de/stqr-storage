@@ -2,6 +2,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {Writer,Reader,parseBlockDevicePage} from './dashboard/protocol.js';
+import {readInfo} from './dashboard/object-client.js';
 import {parseSize,sizeSteps} from './dashboard/size.js';
 
 test('disk metadata uses exact u64 sizes above JavaScript number precision',()=>{
@@ -14,4 +15,9 @@ test('disk metadata uses exact u64 sizes above JavaScript number precision',()=>
 test('block sizes permit 512-byte disks and sector-aligned slider steps',()=>{
  assert.equal(parseSize('512',512n),512n);assert.throws(()=>parseSize('511',512n));
  const steps=sizeSteps(1048576n,8192n,1024n,512n);assert(steps.includes(8192n));assert(steps.every(n=>n%512n===0n));
+});
+
+test('native object info preserves optional digest framing without content versions',()=>{
+ const length=9007199254741504n,w=new Writer().u64(length).bool(true).raw(new Uint8Array(32)).u32(0).id('0'.repeat(32)).u8(0).u16(5),r=new Reader(w.bytes());
+ assert.equal(readInfo(r).length,length);r.done();
 });
