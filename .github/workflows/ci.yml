@@ -1,0 +1,154 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  go:
+    name: Go / ${{ matrix.module }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        module: [., networkboot, windows]
+    defaults:
+      run:
+        shell: bash
+        working-directory: ${{ matrix.module }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7
+        with:
+          go-version-file: ${{ matrix.module }}/go.mod
+          cache-dependency-path: '**/go.sum'
+      - run: go vet ./...
+      - name: Unit, crash/recovery and localhost cluster tests
+        run: go test -race ./... -count=1 -timeout=15m
+      - name: Networkboot tools and PAM harness
+        if: matrix.module == 'networkboot'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential libpam0g-dev
+          test -f /usr/include/security/pam_modules.h
+          make all pam
+          python3 -m unittest discover -s tests -v
+          sh -n initramfs/hooks/stqr initramfs/scripts/stqr
+
+  dashboard:
+    name: Dashboard / Chromium
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '24'
+      - run: node --test server/dashboard_*_test.mjs
+      - run: npm ci --prefix tools/ci --no-audit --no-fund
+      - run: npm exec --prefix tools/ci -- playwright install --with-deps chromium
+      - name: Select the installed browser and module
+        working-directory: tools/ci
+        run: |
+          node - <<'NODE' >> "$GITHUB_ENV"
+          console.log('STQR_TEST_BROWSER_MODULE=' + require.resolve('playwright'));
+          console.log('STQR_TEST_BROWSER_EXECUTABLE=' + require('playwright').chromium.executablePath());
+          NODE
+      - name: Real dashboard and PG replication acceptance
+        run: go test -race ./server -run 'Browser$' -count=1 -v -timeout=10m
+
+  linux-integration:
+    name: Linux / C, FUSE and NBD
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      STQR_TEST_C: '1'
+      STQR_C_SANITIZE: '1'
+      STQR_TEST_FUSE: '1'
+      STQR_TEST_NETWORKBOOT: '1'
+      ASAN_OPTIONS: detect_leaks=1:abort_on_error=1
+      UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: '**/go.sum'
+      - name: Native test dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential libssl-dev fuse3 rsync php-cli qemu-utils
+          sudo modprobe fuse
+          sudo chmod a+rw /dev/fuse
+          test -r /dev/fuse -a -w /dev/fuse
+      - run: make -C client/c all check
+      - run: make -C qemu-plugin-nbd all
+      - name: Real native clients against disposable localhost fixtures
+        # Kernel here means FUSE/VFS mounts, not loading the kstqr module.
+        run: go test -race ./client ./server -p=1 -run 'Test(CClient|.*Networkboot.*|.*Kernel.*|.*Rsync.*|BucketNativeOverlayPHPCluster)$' -count=1 -v -timeout=15m
+
+  windows:
+    name: Windows / native callbacks and setup
+    runs-on: windows-2025
+    timeout-minutes: 15
+    env:
+      CGO_ENABLED: '0'
+    defaults:
+      run:
+        working-directory: windows
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7
+        with:
+          go-version-file: windows/go.mod
+          cache-dependency-path: '**/go.sum'
+      - run: go test ./... -count=1 -timeout=10m
+      - run: go build -buildvcs=false -ldflags="-H=windowsgui" -o stqr-windows.exe ./cmd/stqr-windows
+
+  format-compatibility:
+    name: Tagged formats / upgrade and restart
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: '**/go.sum'
+      - name: Every tag writes old data; current server and readers verify it
+        run: |
+          python3 -m unittest discover -s tools/compat -v
+          python3 tools/compat/check.py
+      - name: Retain per-version manifests and logs
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: format-compatibility
+          path: .compat-reports/
+          if-no-files-found: error
+          retention-days: 14
