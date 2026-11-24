@@ -324,3 +324,28 @@ an absolute quota, including restart before COMMIT. Public object Info and the
 native object wire format stay unchanged. Whole-volume Export/Import preserves
 both marker types and replaces initialized accounting counters atomically with
 the imported root; omitted frame fields are reset before decoding the next frame.
+
+
+### Compact range-authority metadata
+
+The server reads the legacy schema-1 JSON management record and the compact
+`STVA` encoding. New compact records begin with `STVA`, encoding revision
+`u16=1`, cluster/node/volume IDs and a `u32` entry count. Each entry contains its
+bucket ID, range start/prefix, policy and owner epochs, state/runtime, `u16`
+location count and locations, `u16` cohort count and volume IDs, `active:Bool` and
+a 32-byte handoff fence. Fixed-width fields use the normal little-endian codec.
+Only these format/placement identifiers are present; no new object-content
+counter is introduced.
+
+The active flag and fence have a constant encoded size. Fencing one range
+therefore changes only its pages instead of shifting the remainder of a JSON
+document and requiring a large temporary redo allocation on a full source disk.
+The native volume format remains unchanged. Existing JSON records are converted
+atomically by the normal metadata transaction, and compact records are never
+expanded back to JSON on a peer disconnect.
+
+Initial conversion waits until every admitted member is online and advertises
+`CapabilityCompactAuthority` (32768). Upgrade all nodes before activation. Older
+binaries cannot interpret compact authority metadata and reject that metadata;
+downgrading after conversion requires a separate verified conversion rather
+than silently reusing old recovery proofs.

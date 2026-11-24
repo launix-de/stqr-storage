@@ -21,6 +21,9 @@ const CapabilityReplication uint64 = 4096
 
 // Replica role/volume handoffs and replication protocol marker 2.
 const CapabilityReplicaTopology uint64 = 16384
+
+// CapabilityCompactAuthority permits the bounded STVA management encoding.
+const CapabilityCompactAuthority uint64 = 32768
 const NodeHelloMessage uint16 = 0x1000
 
 type NodeHello struct {

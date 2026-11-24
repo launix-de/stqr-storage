@@ -2,7 +2,6 @@
 package server
 
 import (
-	"encoding/json"
 	"errors"
 	"reflect"
 	"sort"
@@ -44,7 +43,7 @@ func readVolumeAuthority(store *volume.Volume) (volumeAuthorityRecord, error) {
 		return volumeAuthorityRecord{}, volume.ErrNotFound
 	}
 	var record volumeAuthorityRecord
-	if decodeControlRecord(raw, &record) != nil || record.Schema != 1 || record.Volume != client.ID(identity.VolumeID) || record.Cluster != client.ID(identity.ClusterID) {
+	if decodeVolumeAuthority(raw, &record) != nil || record.Schema != 1 || record.Volume != client.ID(identity.VolumeID) || record.Cluster != client.ID(identity.ClusterID) {
 		return record, volume.ErrCorrupt
 	}
 	return record, nil
@@ -225,7 +224,7 @@ func (s *Server) ensureVolumeAuthorityLocked(allowances ...map[volume.ID]uint64)
 			if len(allowances) > 0 {
 				budget = allowances[0][id]
 			}
-			if err := writeVolumeAuthorityBudget(stores[id], record, budget); err != nil {
+			if err := writeVolumeAuthorityBudget(stores[id], record, budget, s.compactAuthorityReady()); err != nil {
 				return err
 			}
 		}
@@ -237,16 +236,24 @@ func (s *Server) ensureVolumeAuthorityLocked(allowances ...map[volume.ID]uint64)
 func writeVolumeAuthority(store *volume.Volume, record volumeAuthorityRecord) error {
 	return writeVolumeAuthorityBudget(store, record, 0)
 }
-func writeVolumeAuthorityBudget(store *volume.Volume, record volumeAuthorityRecord, budget uint64) error {
-	raw, err := json.Marshal(record)
-	if err != nil {
-		return err
-	}
+func writeVolumeAuthorityBudget(store *volume.Volume, record volumeAuthorityRecord, budget uint64, compact ...bool) error {
 	h, err := store.Open(true)
 	if err != nil {
 		return err
 	}
 	defer h.Close()
+	useCompact := len(compact) > 0 && compact[0]
+	if !useCompact {
+		current, err := h.LocalMetadata()
+		if err != nil {
+			return err
+		}
+		useCompact = len(current) >= 4 && string(current[:4]) == "STVA"
+	}
+	raw, err := marshalVolumeAuthority(record, useCompact)
+	if err != nil {
+		return err
+	}
 	return h.SetLocalMetadataWithOptions(raw, volume.Options{InFlightAllowance: budget})
 }
 
@@ -283,7 +290,7 @@ func (s *Server) invalidateVolumeAuthorityLocked(p rangePlan) error {
 			}
 		}
 		if changed {
-			if err := writeVolumeAuthority(store, record); err != nil {
+			if err := writeVolumeAuthorityBudget(store, record, 0, s.compactAuthorityReady()); err != nil {
 				return err
 			}
 			s.authority.records[store.Identity().VolumeID] = record
