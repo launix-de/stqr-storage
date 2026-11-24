@@ -28,6 +28,8 @@ type bucketLease struct {
 	Token, Owner, Boot        client.ID
 	User, Username            string
 	Block, ReadOnly, Released bool
+	// Opt-in so leases persisted by older nodes retain their placement fence.
+	AllowHandoff bool
 }
 type leaseRequest struct {
 	Action uint8
@@ -433,6 +435,10 @@ func (s *Server) beginClusterLease(ctx context.Context, b *Bucket, ws *wsSession
 		return e
 	}
 	l := bucketLease{Bucket: b.ID(), Epoch: epoch, Token: id, Request: id, Owner: s.control.ledger.node, Boot: s.boot, User: p.User.ID, Username: p.User.Name, Block: block, ReadOnly: readonly}
+	// Private frontends use block leases for bounded clear/clone inventories.
+	// Their namespace must stay pinned; ordinary block exports only exclude
+	// competing clients and can use the normal durable migration protocol.
+	l.AllowHandoff = block && p.frontendPermission == 0 && ws.authorization.frontendPermission == 0
 	ws.authorization.leaseOwner.Store(true)
 	ws.authorization.lease.Store(&l)
 	granted, e := s.callLease(ctx, ids[0], 0, l)

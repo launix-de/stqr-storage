@@ -24,7 +24,7 @@ func (r *rangeManager) requestSpace(bucket volume.ID, object volume.ObjectID, ne
 		return false
 	}
 	d := b.Describe()
-	if d.Policy.StorageStrategy == "ram" {
+	if d.Policy.StorageStrategy == "ram" || b.blocksPlacementChange() {
 		return false
 	}
 	hint := rangePressure{bucket: bucket, object: object, needed: needed, requested: time.Now()}
@@ -54,6 +54,7 @@ func (r *rangeManager) requestSpace(bucket volume.ID, object volume.ObjectID, ne
 	for i, prior := range r.pressures {
 		if prior.bucket == bucket && prior.object == object {
 			r.pressures[i] = hint
+			r.wakeCapacity()
 			return true
 		}
 	}
@@ -61,7 +62,15 @@ func (r *rangeManager) requestSpace(bucket volume.ID, object volume.ObjectID, ne
 		r.pressures = r.pressures[1:]
 	}
 	r.pressures = append(r.pressures, hint)
+	r.wakeCapacity()
 	return true
+}
+
+func (r *rangeManager) wakeCapacity() {
+	select {
+	case r.capacityWake <- struct{}{}:
+	default:
+	}
 }
 
 func (r *rangeManager) pressurePlan(hint rangePressure) (rangePlan, bool) {

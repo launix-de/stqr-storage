@@ -376,7 +376,7 @@ func run() error {
 			return err
 		}
 		return json.NewEncoder(os.Stdout).Encode(result)
-	case "init-disk", "nbd":
+	case "init-disk", "check-install-disk", "nbd":
 		id, err := resolve(ctx, c, name)
 		if err != nil {
 			return err
@@ -386,6 +386,21 @@ func run() error {
 			return err
 		}
 		defer b.Close()
+		if cmd == "check-install-disk" {
+			if _, err := b.Client.Stat(ctx, manifestID); err == nil {
+				return errors.New("image is already published; use edit-image instead")
+			} else if !errors.Is(err, client.ErrNotFound) {
+				return err
+			}
+			m, err := b.Lookup(ctx, *device)
+			if err != nil {
+				return err
+			}
+			if m.Size != *size {
+				return fmt.Errorf("existing disk is %d bytes; requested %d bytes", m.Size, *size)
+			}
+			return nil
+		}
 		if cmd == "init-disk" {
 			if *ro {
 				return errors.New("readonly connection")

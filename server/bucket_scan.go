@@ -16,6 +16,12 @@ func (b *Bucket) underMaintenance() bool {
 	return b.maintenance != nil
 }
 
+func (b *Bucket) blocksPlacementChange() bool {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	return b.maintenance != nil && (b.lease == nil || b.lease.Released || !b.lease.Block || !b.lease.AllowHandoff)
+}
+
 func (ws *wsSession) releaseMaintenance() {
 	if ws.authorization == nil || ws.authorization.bucket == nil {
 		return

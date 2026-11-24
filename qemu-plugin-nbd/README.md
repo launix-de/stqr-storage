@@ -84,6 +84,13 @@ lease grant. The original owning socket remains pinned; losing it stops the SDK
 from continuing and triggers orphan cleanup. A passive participant restart keeps
 the fence. A network timeout alone never releases ownership.
 
+Internal range migration remains available while a native block lease is held.
+Local capacity exhaustion immediately wakes the range worker; the native client
+waits through retryable responses and continues the same request after handoff.
+Placement classes/groups still apply, and genuine cluster exhaustion returns a
+capacity error. Private clear/clone and filesystem-maintenance leases retain
+their placement fence so an offline inventory cannot change underneath them.
+
 Clean close sends `BUCKET_MAINTENANCE_END` (`0x011d`) before disconnecting.
 Journal epochs, monotonically increasing sequences and fresh server-generated
 bearer tokens reject delayed prepares/releases and stale auxiliary connections.

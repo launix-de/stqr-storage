@@ -52,6 +52,17 @@ Rootfs archives still need staging space in `/var/tmp` (override `--work-dir`). 
 the installation, then shut down the VM cleanly. The first installer reboot exits
 QEMU so extraction can start. Closing an unfinished installation produces an
 error rather than publishing a usable release; the disk remains in the bucket.
+To retry an interrupted installation on that existing disk without deleting its
+bucket or replacing its device metadata, use:
+
+```sh
+networkboot/prepare-system --resume ubuntu-desktop-v1 /images/ubuntu.iso
+```
+
+Resume checks that the device has the requested size and that no release has
+already been published. The installer can then repair or reformat the existing
+virtual disk. Use `edit-image` for a published template.
+
 The automated flow expects an unencrypted root disk; automatic LUKS unlocking
 is not implemented. The default builder firmware is legacy BIOS. `--uefi FIRMWARE` can select a
 monolithic OVMF firmware; firmware variables are not persisted in this version,

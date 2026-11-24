@@ -62,6 +62,18 @@ class Workflows(unittest.TestCase):
         with patch.object(sys,'argv',['serve','ubuntu','--check']),patch.object(script,'require'),patch.object(script,'ctl') as ctl,patch.object(script,'boot_network',return_value=('eth0','192.0.2.10','192.0.2.0/24')),patch.object(Path,'is_file',return_value=True),contextlib.redirect_stdout(io.StringIO()):
             script.main()
             ctl.assert_any_call('stqr.yaml','resolve','ubuntu')
+    def test_resume_preserves_existing_installation_disk(self):
+        script = load('prepare-system')
+        with tempfile.TemporaryDirectory() as directory:
+            image = Path(directory) / 'ubuntu.iso'
+            image.touch()
+            @contextlib.contextmanager
+            def disk(*args):
+                yield Path(directory) / 'disk.sock'
+            with patch.object(sys, 'argv', ['prepare-system', '--resume', 'ubuntu', str(image)]), patch.object(script, 'require'), patch.object(script, 'ctl') as ctl, patch.object(script, 'nbd', side_effect=disk), patch.object(script, 'qemu'), patch.object(script, 'extract'), contextlib.redirect_stdout(io.StringIO()):
+                script.main()
+            ctl.assert_any_call('stqr.yaml', '--size', str(32 << 30), 'check-install-disk', 'ubuntu')
+            self.assertFalse(any('create' in call.args or 'init-disk' in call.args for call in ctl.call_args_list))
     def test_cli_operational_failure_has_no_traceback(self):
         from common import cli
         with self.assertRaises(SystemExit) as stopped:

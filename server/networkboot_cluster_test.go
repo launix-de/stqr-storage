@@ -48,6 +48,7 @@ func TestClusterNetworkbootNBDWithQEMU(t *testing.T) {
 	run("check-exclusive", "image")
 	run("create", "image")
 	run("--size", "4194304", "init-disk", "image")
+	run("--size", "4194304", "check-install-disk", "image")
 	socket := filepath.Join(dir, "disk.sock")
 	cmd := exec.CommandContext(ctx, binary, "--config", cfg, "--socket", socket, "nbd", "image")
 	var logs bytes.Buffer

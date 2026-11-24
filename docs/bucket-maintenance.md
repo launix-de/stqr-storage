@@ -7,6 +7,20 @@ active, without a policy transition or in-flight handoff, and its other client
 sockets must disconnect. All members must be reachable and support the protocol.
 Normal data access in other buckets continues while a lease is held.
 
+Ordinary native block exports exclude competing clients, but permit internal
+range migration. If a write cannot be placed locally, a bounded capacity hint
+immediately wakes the range worker. The server returns retryable status 503
+while the normal durable handoff runs; the SDK waits and retries the same logical
+request ID, learns the new owner and continues under the same lease token.
+When no suitable cluster destination can admit the write, status 507 remains a
+terminal capacity error. This also applies when HDD placement initially prefers
+a small local disk over a larger remote SSD.
+
+Filesystem maintenance and private clear/clone inventories still pin placement.
+The durable lease's opt-in `AllowHandoff` flag distinguishes native block clients
+from these operations. Old persisted leases without that flag stay pinned.
+Normal membership and bucket-policy changes still wait for lease release.
+
 The smallest admitted node ID coordinates acquisition. Participants drain local
 mutations under `opMu`, validate the account/grants, and persist a fence in the
 admin volume before acknowledging. Each bucket journal retains its membership

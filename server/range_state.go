@@ -71,24 +71,25 @@ type rangeTxn struct {
 	remaining                                                     uint64
 }
 type rangeManager struct {
-	activity    atomic.Pointer[rangeActivity]
-	lastError   error
-	pressures   []rangePressure
-	mu          sync.Mutex
-	server      *Server
-	journal     *controlJournal
-	node        client.ID
-	txns        map[[32]byte]*rangeTxn
-	order       [][32]byte
-	initialized bool
-	memoCursor  *volume.Key
-	work        sync.Mutex
+	activity     atomic.Pointer[rangeActivity]
+	lastError    error
+	pressures    []rangePressure
+	mu           sync.Mutex
+	server       *Server
+	journal      *controlJournal
+	node         client.ID
+	txns         map[[32]byte]*rangeTxn
+	order        [][32]byte
+	initialized  bool
+	memoCursor   *volume.Key
+	work         sync.Mutex
+	capacityWake chan struct{}
 }
 
 func (s *Server) initRanges(dataDir string) error {
 	node, _ := parseID(s.cfg.Node.ID)
 	cluster, _ := parseID(s.cfg.ClusterID)
-	r := &rangeManager{server: s, node: client.ID(node), txns: make(map[[32]byte]*rangeTxn)}
+	r := &rangeManager{server: s, node: client.ID(node), txns: make(map[[32]byte]*rangeTxn), capacityWake: make(chan struct{}, 1)}
 	if s.cfg.RangeVersion > 1 {
 		return volume.ErrUnsupported
 	}
@@ -316,7 +317,7 @@ func (r *rangeManager) reserve(p rangePlan, sourceBoot ...client.ID) error {
 	}
 	r.server.opMu.Lock()
 	defer r.server.opMu.Unlock()
-	if b, err := r.server.Bucket(volume.ID(p.Before.Bucket)); err == nil && b.underMaintenance() {
+	if b, err := r.server.Bucket(volume.ID(p.Before.Bucket)); err == nil && b.blocksPlacementChange() {
 		return fail(409, "bucket is under exclusive maintenance")
 	}
 	if r.server.clusterPaused() {

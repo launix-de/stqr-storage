@@ -17,6 +17,7 @@ def main():
     p.add_argument('--cpus', type=int, default=2)
     p.add_argument('--uefi', help='optional OVMF firmware file; also pass it when editing')
     p.add_argument('--kernel-version')
+    p.add_argument('--resume', action='store_true', help='reuse an unpublished installation disk after an interrupted installation')
     p.add_argument('--work-dir', default='/var/tmp', help='local archive staging directory; needs disk space')
     args = p.parse_args()
     if args.bucket_name and args.bucket:
@@ -35,8 +36,11 @@ def main():
         p.error("memory must be at least 512 MiB and CPU count positive")
     if not args.install_image.is_file() or args.disk_gib <= 0:
         p.error('a local installer image and positive disk size are required')
-    ctl(args.config, 'create', args.bucket)
-    ctl(args.config, '--size', str(args.disk_gib << 30), 'init-disk', args.bucket)
+    if args.resume:
+        ctl(args.config, '--size', str(args.disk_gib << 30), 'check-install-disk', args.bucket)
+    else:
+        ctl(args.config, 'create', args.bucket)
+        ctl(args.config, '--size', str(args.disk_gib << 30), 'init-disk', args.bucket)
     with tempfile.TemporaryDirectory(prefix='stqr-prepare-', dir=args.work_dir) as work:
         with nbd(args.config, args.bucket, work) as socket:
             qemu(socket, args, args.install_image)

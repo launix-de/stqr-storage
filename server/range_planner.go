@@ -30,6 +30,7 @@ func (r *rangeManager) start() {
 			case <-s.ctx.Done():
 				return
 			case <-ticker.C:
+			case <-r.capacityWake:
 			}
 			if s.joinPending() || s.shortStopping.Load() || s.clusterPaused() || s.forceFrozen() {
 				continue
@@ -167,7 +168,7 @@ func (r *rangeManager) planNext() (rangePlan, bool) {
 			// and explicit runtime-loss recovery rather than durable-byte claims.
 		}
 		b, err := s.Bucket(newVolumeID(d.ID))
-		if err != nil || b.underMaintenance() {
+		if err != nil || b.blocksPlacementChange() {
 			continue
 		}
 		destinations, capacity := r.destinations(d)
