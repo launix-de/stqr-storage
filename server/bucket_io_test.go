@@ -46,6 +46,10 @@ func TestBucketTrafficMeasuresPayloadNotSparseLength(t *testing.T) {
 	if err := b.Delete(ctx, actor, id, opt()); err != nil {
 		t.Fatal(err)
 	}
+	read, written := source.node.userTraffic(actor.User.ID)
+	if read != 3072 || written != 4626 {
+		t.Fatal("user traffic differs from bucket traffic", read, written)
+	}
 	snap := source.node.CollectStats(client.StatsFilter{})
 	for _, row := range snap.Buckets {
 		if row.ID == client.ID(b.ID()) {
