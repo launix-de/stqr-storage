@@ -69,7 +69,7 @@ func (s *Server) executeUsers(m client.Message, p principal) ([]byte, int, error
 		return nil, 0, fail(403, "administrator required")
 	}
 	if m.Opcode == client.UserListPage {
-		return userListPage(m.Body, image)
+		return userListPage(m.Body, image, s)
 	}
 	d := client.Decoder{B: m.Body}
 	if m.Opcode == client.UserList {

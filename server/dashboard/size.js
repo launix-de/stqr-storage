@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-only
+import {formatBytes} from './numbers.js';
 // Slider positions are indices into stable, discrete size steps, never bytes.
 export const MIN_VOLUME_SIZE=256n*1024n;
 const UNITS=['K','M','G','T','P'];
@@ -37,7 +38,4 @@ export function formatSize(n){
  }
  throw Error('Größe kann nicht exakt dargestellt werden.');
 }
-export function sizeLabel(n){
- n=BigInt(n);let unit=1024n,index=0;while(index<UNITS.length-1&&n>=unit*1024n){unit*=1024n;index++}
- return `${(Number(n*100n/unit)/100).toLocaleString('de-DE',{maximumFractionDigits:2})}${UNITS[index]}`;
-}
+export const sizeLabel=formatBytes;

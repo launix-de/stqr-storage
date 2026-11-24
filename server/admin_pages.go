@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -45,13 +46,15 @@ func (q adminPageQuery) matches(id, text string) bool {
 }
 
 type userPageEntry struct {
-	ID       string `json:"id"`
-	Name     string `json:"name"`
-	Role     uint8  `json:"role"`
-	Disabled bool   `json:"disabled"`
+	ID         string `json:"id"`
+	Name       string `json:"name"`
+	Role       uint8  `json:"role"`
+	Disabled   bool   `json:"disabled"`
+	ReadBytes  uint64 `json:"read_bytes,string"`
+	WriteBytes uint64 `json:"write_bytes,string"`
 }
 
-func userListPage(body []byte, image accountsImage) ([]byte, int, error) {
+func userListPage(body []byte, image accountsImage, source ...*Server) ([]byte, int, error) {
 	q, err := decodeAdminPage(body)
 	if err != nil {
 		return nil, 0, err
@@ -78,6 +81,9 @@ func userListPage(body []byte, image accountsImage) ([]byte, int, error) {
 			continue
 		}
 		entry := userPageEntry{ID: u.ID, Name: u.Name, Disabled: u.Disabled}
+		if len(source) > 0 {
+			entry.ReadBytes, entry.WriteBytes = source[0].userTraffic(u.ID)
+		}
 		if u.Role == "ADMIN" {
 			entry.Role = 1
 		}
@@ -95,12 +101,31 @@ func userListPage(body []byte, image accountsImage) ([]byte, int, error) {
 		budget -= len(raw) + 1
 		page = append(page, entry)
 	}
+	var node, boot string
+	if len(source) > 0 {
+		s := source[0]
+		node = s.quotaNode.String()
+		boot = s.boot.String()
+		valid := make(map[string]bool, len(image.Users))
+		for _, u := range image.Users {
+			valid[u.ID] = true
+		}
+		s.userIO.Range(func(key, value any) bool {
+			if !valid[key.(string)] {
+				s.userIO.Delete(key)
+			}
+			return true
+		})
+	}
 	return jsonText(struct {
 		Users    []userPageEntry `json:"users"`
 		Next     string          `json:"next"`
 		Total    int             `json:"total"`
 		AllTotal int             `json:"all_total"`
-	}{page, next, total, len(users)}), 200, nil
+		Node     string          `json:"node"`
+		Boot     string          `json:"boot"`
+		Captured string          `json:"captured_ns"`
+	}{page, next, total, len(users), node, boot, strconv.FormatInt(time.Now().UnixNano(), 10)}), 200, nil
 }
 func (s *Server) executeBucketListPage(body []byte, p principal) ([]byte, int, error) {
 	if err := s.requireAdmin(p); err != nil {

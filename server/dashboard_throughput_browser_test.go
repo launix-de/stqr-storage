@@ -20,6 +20,12 @@ func TestDashboardThroughputBrowser(t *testing.T) {
 	n, _ := startAutomaticDaemonPair(t, false)
 	v := addReplicaDataVolume(t, n.node, "throughput-data", "hdd", 8<<20)
 	b, _ := createProtocolBucket(t, n.node, "throughput-browser")
+	for _, name := range []string{"alice", "bob", "charlie"} {
+		m, _ := createUserMessage(name, "throughput-test-password")
+		if _, status := n.node.dispatchAs(m, nil, userPrincipal(t, n.node)); status != 201 {
+			t.Fatal("fixture user", status)
+		}
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 	defer cancel()
 	actor := userPrincipal(t, n.node)
@@ -44,7 +50,7 @@ func TestDashboardThroughputBrowser(t *testing.T) {
 	}()
 	defer func() { cancel(); <-done }()
 	admin := n.node.cfg.Auth.BootstrapAdmin
-	input, _ := json.Marshal(map[string]string{"url": n.node.cfg.Node.Advertise, "username": admin.Username, "password": admin.Password, "bucket": b.ID().String(), "volume": v.Identity().VolumeID.String()})
+	input, _ := json.Marshal(map[string]string{"url": n.node.cfg.Node.Advertise, "username": admin.Username, "password": admin.Password, "bucket": b.ID().String(), "volume": v.Identity().VolumeID.String(), "user": actor.User.ID})
 	cmd := exec.CommandContext(ctx, "node", "dashboard_throughput_browser.mjs")
 	cmd.Stdin = bytes.NewReader(input)
 	out, err := cmd.CombinedOutput()
