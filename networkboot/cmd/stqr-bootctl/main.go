@@ -14,8 +14,10 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/launix-de/stqr-storage/client"
@@ -48,7 +50,10 @@ type apiError struct {
 
 func (e *apiError) Error() string { return fmt.Sprintf("STQR status %d: %s", e.Status, e.Detail) }
 func request(ctx context.Context, c config, op uint16, body []byte) ([]byte, error) {
-	m := client.Message{Kind: client.Request, Opcode: op, ID: client.NewRequestID(), Body: body}
+	return requestWithID(ctx, c, op, body, client.NewRequestID())
+}
+func requestWithID(ctx context.Context, c config, op uint16, body []byte, id client.ID) ([]byte, error) {
+	m := client.Message{Kind: client.Request, Opcode: op, ID: id, Body: body}
 	req, err := http.NewRequestWithContext(ctx, "POST", strings.TrimRight(c.URI, "/")+"/api/message", bytes.NewReader(client.EncodeMessage(m)))
 	if err != nil {
 		return nil, err
@@ -153,6 +158,12 @@ func connect(ctx context.Context, c config, name string) (*client.Client, error)
 	return client.Dial(ctx, c.URI, c.Username, c.Password, id)
 }
 func publish(ctx context.Context, c config, bucket, dir string) error {
+	release, err := lockPublication(dir)
+	if err != nil {
+		return err
+	}
+	defer release()
+
 	conn, err := connect(ctx, c, bucket)
 	if err != nil {
 		return err
@@ -291,7 +302,8 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	ctx := context.Background()
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer cancel()
 	cmd, name := args[0], args[1]
 	switch cmd {
 	case "boot-session-create", "boot-session-delete":

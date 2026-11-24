@@ -26,15 +26,19 @@ type bootSession struct {
 // Global control can be briefly fenced while a newly allocated range moves.
 // Rejected requests have no effect; retain the same body while waiting.
 func control(ctx context.Context, c config, op uint16, body []byte) ([]byte, error) {
-	var raw []byte
-	var err error
-	for attempt := 0; attempt < 10; attempt++ {
-		raw, err = request(ctx, c, op, body)
+	id := client.NewRequestID()
+	var reported time.Time
+	for attempt := 0; ; attempt++ {
+		raw, err := requestWithID(ctx, c, op, body, id)
 		var api *apiError
 		if !errors.As(err, &api) || api.Status != 503 {
 			return raw, err
 		}
-		timer := time.NewTimer(time.Duration(min(attempt+1, 4)) * 250 * time.Millisecond)
+		if reported.IsZero() || time.Since(reported) >= 10*time.Second {
+			fmt.Fprintln(os.Stderr, "Waiting for cluster:", api.Detail)
+			reported = time.Now()
+		}
+		timer := time.NewTimer(time.Duration(min(attempt+1, 8)) * 250 * time.Millisecond)
 		select {
 		case <-ctx.Done():
 			timer.Stop()
@@ -42,7 +46,7 @@ func control(ctx context.Context, c config, op uint16, body []byte) ([]byte, err
 		case <-timer.C:
 		}
 	}
-	return raw, err
+
 }
 
 func byID(ctx context.Context, c config, op uint16, id client.ID) error {
@@ -249,6 +253,8 @@ func publishNativeRoot(ctx context.Context, c config, dir string) (client.ID, er
 	}
 	defer conn.Close()
 	fmt.Fprintln(os.Stderr, "Importing native root filesystem into", id.String())
+	stopProgress := reportImportProgress(ctx, f)
+	defer stopProgress()
 	if err = client.ImportFilesystemTar(ctx, conn, f); err != nil {
 		return id, fmt.Errorf("native import left release bucket %s for recovery: %w", id.String(), err)
 	}
