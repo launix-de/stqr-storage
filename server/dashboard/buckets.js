@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-only
+import {bucketThroughput} from './throughput.js';
 import {EndlessList} from './endless.js';
 import {newID,Writer} from './protocol.js';
 import {writeBucketPolicy,parseQuota,defaultBucketPolicy} from './bucket-codec.js';
@@ -21,7 +22,7 @@ function bucketUsage(b,escape){
  return html;
 }
 const permissions=[[1,'Lesen'],[2,'Schreiben'],[4,'Anhängen'],[8,'Löschen']];
-export function setupBucketViews({connection,escape,toast,showView}){
+export function setupBucketViews({connection,escape,toast,showView,statsEntries=()=>[]}){
  let groups=[],buckets=[],users=[],epoch=0,poll,editor,createProgress,access,grantRetry,action,actionRetry,editorPending=false;
  let pageMeta={},searchTimer,userChoices=[],userSearchTimer,userSearchEpoch=0;
  let quotaInfo=null,quotaSteps=[],quotaEpoch=0,quotaPoll,grantRows=[],lockRetry;
@@ -37,7 +38,7 @@ export function setupBucketViews({connection,escape,toast,showView}){
   if(!ids.length){schedulePoll();return}
   try{const page=await connection().listBucketsPage('',Math.max(1,Math.min(1000,ids.length)),$('bucket-search').value.trim(),ids);if(seq!==epoch)return;
    const updates=new Map(page.buckets.map(b=>[b.id,b])),removed=new Set(ids.filter(id=>!updates.has(id)));pager.items=pager.items.filter(b=>!removed.has(b.id)).map(b=>updates.get(b.id)??b);buckets=pager.items;pageMeta.all_total=page.all_total;if(removed.size)pageMeta.total=Math.max(0,(pageMeta.total??buckets.length)-removed.size);
-   for(const row of $('bucket-rows').querySelectorAll('[data-bucket]')){const b=updates.get(row.dataset.bucket);if(removed.has(row.dataset.bucket)){row.remove();continue}if(b){const wrapper=document.createElement('tbody');wrapper.innerHTML=rowHTML(b);row.replaceChildren(...wrapper.firstElementChild.childNodes)}}if(!buckets.length)$('bucket-rows').innerHTML='<tr><td colspan="7" class="empty">Keine passenden Buckets.</td></tr>';bindRows();pager.status();$('bucket-count').textContent=String(pageMeta.total??buckets.length);$('nav-buckets-count').textContent=String(page.all_total);$('bucket-metric-count').textContent=String(page.all_total);
+   for(const row of $('bucket-rows').querySelectorAll('[data-bucket]')){const b=updates.get(row.dataset.bucket);if(removed.has(row.dataset.bucket)){row.remove();continue}if(b){const wrapper=document.createElement('tbody');wrapper.innerHTML=rowHTML(b);row.replaceChildren(...wrapper.firstElementChild.childNodes)}}if(!buckets.length)$('bucket-rows').innerHTML='<tr><td colspan="8" class="empty">Keine passenden Buckets.</td></tr>';bindRows();pager.status();$('bucket-count').textContent=String(pageMeta.total??buckets.length);$('nav-buckets-count').textContent=String(page.all_total);$('bucket-metric-count').textContent=String(page.all_total);
   }catch(e){if(seq===epoch)$('buckets-error').textContent=e.message}finally{if(seq===epoch)schedulePoll()}
  }
  function render({append=false,added=buckets,loading=false}={}){
@@ -49,13 +50,13 @@ export function setupBucketViews({connection,escape,toast,showView}){
   const table=$('bucket-rows');if(append)table.insertAdjacentHTML('beforeend',added.map(rowHTML).join(''));else{
    const previous=new Map([...table.querySelectorAll('[data-bucket]')].map(row=>[row.dataset.bucket,row]));
    const rows=buckets.map(b=>{const wrapper=document.createElement('tbody');wrapper.innerHTML=rowHTML(b);const next=wrapper.firstElementChild,row=previous.get(b.id);if(!row)return next;row.replaceChildren(...next.childNodes);return row});
-   if(rows.length)table.replaceChildren(...rows);else table.innerHTML='<tr><td colspan="7" class="empty">Keine passenden Buckets.</td></tr>';
+   if(rows.length)table.replaceChildren(...rows);else table.innerHTML='<tr><td colspan="8" class="empty">Keine passenden Buckets.</td></tr>';
   }bindRows();
  }
  function rowHTML(b){
    const p=b.policy,system=b.id===SYSTEM,busy=b.state==='deleting',locked=b.state==='locked';
    const disabled=system||busy?'disabled':'',changing=!!b.desired_policy;
-   return `<tr data-bucket="${b.id}"><td><div class="user-cell"><span class="bucket-avatar">▱</span><div><div class="volume-name"><button type="button" class="bucket-open" data-bucket-edit="${b.id}" ${disabled||changing?'disabled':''}>${escape(b.name)}</button>${system?'<span class="system-label">SYSTEM</span>':''}</div><div class="volume-path">${escape(b.id)}</div></div></div></td><td><span class="class-badge ${p.storage_strategy}">${p.storage_strategy.toUpperCase()}</span><div class="bucket-sub">${escape(groups.find(g=>g.id===p.placement_group)?.name??'PG')} · v${p.placement_mask_version??'—'}</div><div class="bucket-sub">${p.placement_mode==='everywhere'?'Jede Node':p.redundancy.replicas+' Kopie'+(p.redundancy.replicas===1?'':'n')}</div></td><td><span class="class-badge">${escape(p.compression.toUpperCase())}</span></td><td>${bucketUsage(b,escape)}</td><td>${system?'Alle Admins':(b.grants??[]).length+' User'}</td><td><span class="state-badge ${busy?'draining':locked?'detached':''}"><i></i>${busy?'Wird gelöscht':changing?'Wird umgestellt · PG v'+(b.desired_policy.placement_mask_version??'—'):locked?'Gesperrt':'Aktiv'}</span></td><td><div class="row-actions bucket-actions"><button class="row-action" data-bucket-action="clone" data-id="${b.id}" ${disabled}>Kopieren</button><button class="row-action" data-bucket-action="rename" data-id="${b.id}" ${disabled}>Umbenennen</button><button class="row-action danger-action" data-bucket-action="delete" data-id="${b.id}" ${disabled}>Löschen</button></div></td></tr>`;
+   return `<tr data-bucket="${b.id}"><td><div class="user-cell"><span class="bucket-avatar">▱</span><div><div class="volume-name"><button type="button" class="bucket-open" data-bucket-edit="${b.id}" ${disabled||changing?'disabled':''}>${escape(b.name)}</button>${system?'<span class="system-label">SYSTEM</span>':''}</div><div class="volume-path">${escape(b.id)}</div></div></div></td><td><span class="class-badge ${p.storage_strategy}">${p.storage_strategy.toUpperCase()}</span><div class="bucket-sub">${escape(groups.find(g=>g.id===p.placement_group)?.name??'PG')} · v${p.placement_mask_version??'—'}</div><div class="bucket-sub">${p.placement_mode==='everywhere'?'Jede Node':p.redundancy.replicas+' Kopie'+(p.redundancy.replicas===1?'':'n')}</div></td><td><span class="class-badge">${escape(p.compression.toUpperCase())}</span></td><td>${bucketUsage(b,escape)}</td><td data-bucket-throughput="${b.id}">${bucketThroughput(statsEntries(),b.id)}</td><td>${system?'Alle Admins':(b.grants??[]).length+' User'}</td><td><span class="state-badge ${busy?'draining':locked?'detached':''}"><i></i>${busy?'Wird gelöscht':changing?'Wird umgestellt · PG v'+(b.desired_policy.placement_mask_version??'—'):locked?'Gesperrt':'Aktiv'}</span></td><td><div class="row-actions bucket-actions"><button class="row-action" data-bucket-action="clone" data-id="${b.id}" ${disabled}>Kopieren</button><button class="row-action" data-bucket-action="rename" data-id="${b.id}" ${disabled}>Umbenennen</button><button class="row-action danger-action" data-bucket-action="delete" data-id="${b.id}" ${disabled}>Löschen</button></div></td></tr>`;
  }
  function bindRows(){
   for(const bar of $('bucket-rows').querySelectorAll('[data-percent]'))bar.style.width=bar.dataset.percent+'%';
@@ -215,5 +216,6 @@ export function setupBucketViews({connection,escape,toast,showView}){
    $('bucket-action-dialog').close();toast(kind==='clone'?'Bucket wurde kopiert. Benutzerfreigaben können jetzt eingerichtet werden.':kind==='delete'?'Bucket wird gelöscht.':kind==='rename'?'Bucket wurde umbenannt.':b.state==='locked'?'Bucket wurde entsperrt.':'Bucket wurde gesperrt.');await load();
   }catch(err){$('bucket-action-error').textContent=kind==='clone'&&actionRetry.created?'Der Zielbucket ist angelegt. Kopieren erneut versuchen: '+err.message:err.message;if(kind==='clone'&&actionRetry.created)e.submitter.textContent='Kopieren erneut versuchen'}finally{e.submitter.disabled=false}
  });
- return {load,openCreate,clear(){epoch++;clearTimeout(poll);clearTimeout(searchTimer);pager.clear();pageMeta={};userSearchEpoch++;clearTimeout(userSearchTimer);userChoices=[];buckets=[];users=[];render()}};
+ function refreshThroughput(){for(const cell of $('bucket-rows').querySelectorAll('[data-bucket-throughput]'))cell.innerHTML=bucketThroughput(statsEntries(),cell.dataset.bucketThroughput)}
+ return {load,openCreate,refreshThroughput,clear(){epoch++;clearTimeout(poll);clearTimeout(searchTimer);pager.clear();pageMeta={};userSearchEpoch++;clearTimeout(userSearchTimer);userChoices=[];buckets=[];users=[];render()}};
 }

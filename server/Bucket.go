@@ -119,6 +119,7 @@ type BucketDescription struct {
 // detached snapshot. Object methods enforce this bucket's current permissions,
 // policy and placement. Standalone catalog snapshots have no attached server.
 type Bucket struct {
+	io          bucketIO
 	lease       *bucketLease
 	mu          sync.RWMutex
 	usage       bucketUsage
