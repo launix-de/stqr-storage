@@ -28,7 +28,6 @@ type terminalFrame struct {
 }
 
 type wsSession struct {
-	blockControl       atomic.Bool
 	durabilityCap      atomic.Bool
 	versionsSubscribed bool   // guarded by subMu
 	versionSent        string // guarded by subMu

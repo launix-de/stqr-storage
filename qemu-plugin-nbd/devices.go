@@ -157,48 +157,6 @@ func (c *Catalog) Lookup(ctx context.Context, name string) (Metadata, error) {
 	}
 	return m, e
 }
-
-// Resize grows a device without changing its generation or allocating stripes.
-// The caller must hold the bucket's writable block-maintenance lease. Existing
-// Metadata handles retain their previous bounds; look up the device again to
-// access the extension. Shrinking is deliberately rejected.
-// A failed Sync has an unknown durable outcome; retrying the same size is safe.
-func (c *Catalog) Resize(ctx context.Context, device Metadata, size uint64) (Metadata, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	raw, _, err := c.store.Get(ctx, MetadataID(device.Name))
-	if err != nil {
-		return Metadata{}, err
-	}
-	m, err := decodeMetadata(raw)
-	if err != nil {
-		return Metadata{}, err
-	}
-	if m.ID != device.ID || m.Name != device.Name {
-		return Metadata{}, client.ErrPrecondition
-	}
-	if size < m.Size {
-		return Metadata{}, client.ErrRange
-	}
-	oldSize := m.Size
-	m.Size = size
-	if err = m.validate(); err != nil {
-		return Metadata{}, err
-	}
-	if size != oldSize {
-		_, err = c.store.CAS(ctx, MetadataID(m.Name), 0, raw, encodeMetadata(m), client.CASOptions{
-			Scope:           client.CASObject,
-			MutationOptions: client.MutationOptions{RequestID: client.NewRequestID()},
-		})
-		if err != nil {
-			return Metadata{}, err
-		}
-	}
-	if err = c.store.Sync(ctx); err != nil {
-		return Metadata{}, err
-	}
-	return m, nil
-}
 func (c *Catalog) List(ctx context.Context) ([]Metadata, error) {
 	var out []Metadata
 	var after *client.ObjectID

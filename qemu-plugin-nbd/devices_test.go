@@ -123,14 +123,11 @@ func (s *testStore) PutRange(_ context.Context, id client.ObjectID, off uint64, 
 	s.objects[id] = o
 	return client.ObjectInfo{Length: uint64(len(o.data))}, nil
 }
-func (s *testStore) CAS(ctx context.Context, id client.ObjectID, _ uint64, expected, data []byte, opt client.CASOptions) (client.ObjectInfo, error) {
+func (s *testStore) CAS(ctx context.Context, id client.ObjectID, _ uint64, _, data []byte, opt client.CASOptions) (client.ObjectInfo, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	o, exists := s.objects[id]
 	if opt.Absent && exists {
-		return client.ObjectInfo{}, client.ErrPrecondition
-	}
-	if !opt.Absent && (!exists || !bytes.Equal(o.data, expected)) {
 		return client.ObjectInfo{}, client.ErrPrecondition
 	}
 	o = testObject{bytes.Clone(data), o.version + 1}

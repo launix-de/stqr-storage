@@ -20,7 +20,7 @@ func NodeLocalAdminOpcode(op uint16) bool {
 	case UserListPage, VolumeAddWithGroups, VolumePlacementRelease, NodeDrain, NodeShutdown, VolumeAdd, VolumeRemove, VolumeRescan, VolumeGrow, VolumeGrowInfo,
 		VolumeRecoveryStage, VolumeRecoveryCommit, VolumeRecoveryRelease,
 		VolumeCandidates, VolumeCapacityGet, NodeConfigGet, NodeConfigSet,
-		AdminOperationStatus, BlockDeviceList, BlockDeviceResize:
+		AdminOperationStatus:
 		return true
 	}
 	return false

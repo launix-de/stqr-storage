@@ -1,6 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-only
 import {bucketThroughput} from './throughput.js';
-import {setupBlockDevices} from './block-devices.js';
 import {EndlessList} from './endless.js';
 import {newID,Writer} from './protocol.js';
 import {writeBucketPolicy,parseQuota,defaultBucketPolicy} from './bucket-codec.js';
@@ -24,7 +23,6 @@ function bucketUsage(b,escape){
 }
 const permissions=[[1,'Lesen'],[2,'Schreiben'],[4,'Anhängen'],[8,'Löschen']];
 export function setupBucketViews({connection,escape,toast,showView,statsEntries=()=>[]}){
- const disks=setupBlockDevices({connection,escape,toast});
  let groups=[],buckets=[],users=[],epoch=0,poll,editor,createProgress,access,grantRetry,action,actionRetry,editorPending=false;
  let pageMeta={},searchTimer,userChoices=[],userSearchTimer,userSearchEpoch=0;
  let quotaInfo=null,quotaSteps=[],quotaEpoch=0,quotaPoll,grantRows=[],lockRetry;
@@ -58,7 +56,7 @@ export function setupBucketViews({connection,escape,toast,showView,statsEntries=
  function rowHTML(b){
    const p=b.policy,system=b.id===SYSTEM,busy=b.state==='deleting',locked=b.state==='locked';
    const disabled=system||busy?'disabled':'',changing=!!b.desired_policy;
-   return `<tr data-bucket="${b.id}"><td><div class="user-cell"><span class="bucket-avatar">▱</span><div><div class="volume-name"><button type="button" class="bucket-open" data-bucket-edit="${b.id}" ${disabled||changing?'disabled':''}>${escape(b.name)}</button>${system?'<span class="system-label">SYSTEM</span>':''}</div><div class="volume-path">${escape(b.id)}</div></div></div></td><td><span class="class-badge ${p.storage_strategy}">${p.storage_strategy.toUpperCase()}</span><div class="bucket-sub">${escape(groups.find(g=>g.id===p.placement_group)?.name??'PG')} · v${p.placement_mask_version??'—'}</div><div class="bucket-sub">${p.placement_mode==='everywhere'?'Jede Node':p.redundancy.replicas+' Kopie'+(p.redundancy.replicas===1?'':'n')}</div></td><td><span class="class-badge">${escape(p.compression.toUpperCase())}</span></td><td>${bucketUsage(b,escape)}</td><td data-bucket-throughput="${b.id}">${bucketThroughput(statsEntries(),b.id)}</td><td>${system?'Alle Admins':(b.grants??[]).length+' User'}</td><td><span class="state-badge ${busy?'draining':locked?'detached':''}"><i></i>${busy?'Wird gelöscht':changing?'Wird umgestellt · PG v'+(b.desired_policy.placement_mask_version??'—'):locked?'Gesperrt':'Aktiv'}</span></td><td><div class="row-actions bucket-actions"><button class="row-action" data-bucket-action="disks" data-id="${b.id}" ${disabled||locked?'disabled':''}>Disks</button><button class="row-action" data-bucket-action="clone" data-id="${b.id}" ${disabled}>Kopieren</button><button class="row-action" data-bucket-action="rename" data-id="${b.id}" ${disabled}>Umbenennen</button><button class="row-action danger-action" data-bucket-action="delete" data-id="${b.id}" ${disabled}>Löschen</button></div></td></tr>`;
+   return `<tr data-bucket="${b.id}"><td><div class="user-cell"><span class="bucket-avatar">▱</span><div><div class="volume-name"><button type="button" class="bucket-open" data-bucket-edit="${b.id}" ${disabled||changing?'disabled':''}>${escape(b.name)}</button>${system?'<span class="system-label">SYSTEM</span>':''}</div><div class="volume-path">${escape(b.id)}</div></div></div></td><td><span class="class-badge ${p.storage_strategy}">${p.storage_strategy.toUpperCase()}</span><div class="bucket-sub">${escape(groups.find(g=>g.id===p.placement_group)?.name??'PG')} · v${p.placement_mask_version??'—'}</div><div class="bucket-sub">${p.placement_mode==='everywhere'?'Jede Node':p.redundancy.replicas+' Kopie'+(p.redundancy.replicas===1?'':'n')}</div></td><td><span class="class-badge">${escape(p.compression.toUpperCase())}</span></td><td>${bucketUsage(b,escape)}</td><td data-bucket-throughput="${b.id}">${bucketThroughput(statsEntries(),b.id)}</td><td>${system?'Alle Admins':(b.grants??[]).length+' User'}</td><td><span class="state-badge ${busy?'draining':locked?'detached':''}"><i></i>${busy?'Wird gelöscht':changing?'Wird umgestellt · PG v'+(b.desired_policy.placement_mask_version??'—'):locked?'Gesperrt':'Aktiv'}</span></td><td><div class="row-actions bucket-actions"><button class="row-action" data-bucket-action="clone" data-id="${b.id}" ${disabled}>Kopieren</button><button class="row-action" data-bucket-action="rename" data-id="${b.id}" ${disabled}>Umbenennen</button><button class="row-action danger-action" data-bucket-action="delete" data-id="${b.id}" ${disabled}>Löschen</button></div></td></tr>`;
  }
  function bindRows(){
   for(const bar of $('bucket-rows').querySelectorAll('[data-percent]'))bar.style.width=bar.dataset.percent+'%';
@@ -205,7 +203,6 @@ export function setupBucketViews({connection,escape,toast,showView,statsEntries=
   finally{if(access===owner&&$('bucket-create-dialog').open)renderAccess()}
  }
  function openAction(id,kind){
-  if(kind==='disks'){const bucket=buckets.find(b=>b.id===id);if(bucket)disks.open(bucket);return}
   const b=buckets.find(b=>b.id===id);if(!b||b.id===SYSTEM||b.state==='deleting')return;action={bucket:b,kind};actionRetry=null;
   const locked=b.state==='locked',title=kind==='clone'?'Bucket kopieren':kind==='rename'?'Bucket umbenennen':kind==='delete'?'Bucket löschen':locked?'Bucket entsperren':'Bucket sperren';
   $('bucket-action-title').textContent=title;$('bucket-action-submit').textContent=title;$('bucket-action-submit').classList.toggle('danger-button',kind==='delete');$('bucket-action-description').textContent=`„${b.name}“`;$('bucket-action-error').textContent='';
@@ -220,5 +217,5 @@ export function setupBucketViews({connection,escape,toast,showView,statsEntries=
   }catch(err){$('bucket-action-error').textContent=kind==='clone'&&actionRetry.created?'Der Zielbucket ist angelegt. Kopieren erneut versuchen: '+err.message:err.message;if(kind==='clone'&&actionRetry.created)e.submitter.textContent='Kopieren erneut versuchen'}finally{e.submitter.disabled=false}
  });
  function refreshThroughput(){for(const cell of $('bucket-rows').querySelectorAll('[data-bucket-throughput]'))cell.innerHTML=bucketThroughput(statsEntries(),cell.dataset.bucketThroughput)}
- return {load,openCreate,refreshThroughput,clear(){disks.clear();epoch++;clearTimeout(poll);clearTimeout(searchTimer);pager.clear();pageMeta={};userSearchEpoch++;clearTimeout(userSearchTimer);userChoices=[];buckets=[];users=[];render()}};
+ return {load,openCreate,refreshThroughput,clear(){epoch++;clearTimeout(poll);clearTimeout(searchTimer);pager.clear();pageMeta={};userSearchEpoch++;clearTimeout(userSearchTimer);userChoices=[];buckets=[];users=[];render()}};
 }

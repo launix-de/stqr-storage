@@ -3,13 +3,13 @@ import {formatBytes} from './numbers.js';
 // Slider positions are indices into stable, discrete size steps, never bytes.
 export const MIN_VOLUME_SIZE=256n*1024n;
 const UNITS=['K','M','G','T','P'];
-export function parseSize(raw,minimum=MIN_VOLUME_SIZE){
+export function parseSize(raw){
  const match=/^\s*(\d+(?:[.,]\d+)?)\s*([kmgtp]?)(?:i?b)?\s*$/i.exec(raw);
  if(!match)throw Error('Bitte eine Größe wie 50M, 2G oder 52428800 eingeben.');
  const [whole,fraction='']=match[1].replace(',','.').split('.');
  const scale=(match[2]?1024n**BigInt('kmgtp'.indexOf(match[2].toLowerCase())+1):1n),denominator=10n**BigInt(fraction.length);
  const size=(BigInt(whole)*denominator+BigInt(fraction||0))*scale/denominator;
- if(size<minimum||size>0x7fffffffffffffffn)throw Error(`Die Größe muss mindestens ${minimum===MIN_VOLUME_SIZE?'256K':minimum+' Bytes'} betragen und in int64 passen.`);
+ if(size<MIN_VOLUME_SIZE||size>0x7fffffffffffffffn)throw Error('Die Größe muss mindestens 256K betragen und in int64 passen.');
  return size;
 }
 export function sizeLimit(bytes){return bytes/4096n*4096n}
