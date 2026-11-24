@@ -159,7 +159,9 @@ those owners and migrates ranges as capacity and placement requirements change.
 | Dashboard | Users, bucket grants, S3 access keys, quota configuration, node and volume management, live statistics and maintenance operations |
 | Go client | Authenticated, bucket-bound connections, direct routing to range owners, reconnects and request IDs for retry deduplication |
 | S3 | GET/HEAD/PUT/DELETE, range and conditional requests, listing, multipart uploads, server-side copy, bulk delete, checksums, SigV4 and presigned URLs |
-| Linux FUSE | Read/write and readonly mounts, permissions, sparse files, rename, directory removal and offline `--fsck` |
+| Linux FUSE | Read/write and readonly mounts, permissions, sparse files, rename, symlinks, hardlinks for incremental backups, extended attributes and offline `--fsck` |
+| Linux kernel client | Standalone `kstqr` mounts using the native filesystem format; see [kernel documentation](kernel/kstqr/README.md) |
+| Windows client | WinFsp drive-letter client sharing the Linux inode format; build and limits in [windows/](windows/README.md) |
 | Native overlays | Partial-content copy-up, metadata overrides, whiteouts and persisted write whitelists |
 
 Current data placement uses **one primary owner per range**. Adding a node adds
@@ -324,10 +326,11 @@ The current FUSE implementation has these operational constraints:
   content or reconnect replaced lower directories. Lower fsck does not track
   offline uppers' dependencies; it can collect data an upper still needs.
   Keep the lower quiescent during upper reconciliation.
-- **Multi-mount does not yet mean immediate cache coherence.** Subscription-based
-  invalidation is pending. Stable shared readonly content is the clearest fit;
-  changes may remain cached on other mounts. Distributed POSIX locks, writable
-  mmap coherence, symlinks and hard links are outside the current FUSE scope.
+- **Multi-mount has explicit coordination limits.** Object subscriptions invalidate
+  the native cache. Distributed POSIX locks and writable mmap coherence remain
+  separate concerns. Normal Linux filesystem buckets support symlinks and
+  hardlinks; native overlays have additional limits described in the
+  [filesystem guide](docs/filesystem-posix.md).
 - **Native overlays target modest writable namespaces.** Namespace changes
   currently rebuild a sparse manifest, bounded to 64 MiB. This path needs more
   work for very large or intensely modified directory trees.

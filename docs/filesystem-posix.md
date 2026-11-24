@@ -11,6 +11,28 @@ already published under a different upper name, directory lookup fails with
 `EOPNOTSUPP`; it never exposes the upper content through that protected alias.
 This prevents hardlinks from bypassing a path-based overlay whitelist.
 
+## Incremental backups
+
+Normal filesystem buckets support `rsync -aH --link-dest=...` in both Linux
+clients. Keep all snapshot directories in the same mounted bucket. For example,
+with an existing `/mnt/backup/day1`:
+
+```sh
+rsync -aH --link-dest=/mnt/backup/day1 /source/ /mnt/backup/day2/
+```
+
+Unchanged files share their inode with the previous snapshot. Changed files get
+their own inode, and pruning an old snapshot preserves links in the remaining
+snapshots. Treat completed snapshots as immutable: writing an existing hardlink
+modifies every name for that inode. Use fresh destination directories and avoid
+`--inplace`. ACL preservation with `-A` is not supported. Native overlays do not
+support hardlink creation.
+
+The opt-in `TestFilesystemRsyncLinkDest` runs real rsync through a FUSE mount,
+including segmented files, source hardlinks, content and mode changes, pruning
+and offline object collection (`STQR_TEST_FUSE=1`). Kernel link/unlink semantics
+are covered by the kernel smoke test; an rsync run in a kernel VM is separate.
+
 ## Format and upgrade
 
 **Upgrade every filesystem client before using these changes.** The readers
