@@ -243,6 +243,20 @@ network, an SSH tunnel or a TLS reverse proxy for remote access. S3 can be expos
 through an Apache or nginx TLS endpoint using the same HTTP server. The
 [server guide](docs/server.md) describes configuration and access controls.
 
+### Grow storage volumes
+
+In **Nodes/Volumes**, choose **Vergrößern** on the desired storage volume. The
+dialog shows its owning node, backing path, current capacity and available space.
+File and RAM volumes support exact unit input, a discrete slider, quick steps
+and a before/after preview. The target must be 4-KiB aligned and fit within the
+current capacity plus available disk space or RAM budget. Limits can be refreshed
+and are checked again when executing the request.
+
+For raw storage devices, extend the device externally first, then use the dialog
+to adopt its full new capacity. This does not resize an LV or partition itself.
+Growth preserves volume identity and stored objects, also when administered
+through another cluster node. Buckets remain object namespaces.
+
 ### Mount a bucket
 
 Use the bucket's **32-character hexadecimal ID**, not its display name. Replace
