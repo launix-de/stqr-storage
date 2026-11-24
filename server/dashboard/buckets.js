@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-only
+import {bucketThroughput} from './throughput.js';
 import {EndlessList} from './endless.js';
 import {newID,Writer} from './protocol.js';
 import {writeBucketPolicy,parseQuota,defaultBucketPolicy} from './bucket-codec.js';
@@ -10,18 +11,18 @@ function quotaUsageBase(b,escape){
  const l=b.policy.limits,accounting=l.quota_accounting==='logical'?'Logisch':'Physisch';
  if(l.absolute_unlimited)return `<span class="bucket-quota">Unbegrenzt</span><div class="bucket-sub">${accounting}</div>`;
  const quota=BigInt(l.absolute_quota_bytes);
- if(b.used_bytes==null)return `<span class="bucket-quota">${escape(quotaText(quota))}</span><div class="bucket-sub" title="${escape(b.usage_error??'')}">Belegung nicht verfügbar · ${accounting}</div>`;
+ if(b.used_bytes==null)return `<span class="bucket-quota">${escape(sizeLabel(quota))}</span><div class="bucket-sub" title="${escape(b.usage_error??'')}">Belegung nicht verfügbar · ${accounting}</div>`;
  const used=BigInt(b.used_bytes),percent=quota>0n?Number((used*10000n/quota)>10000n?10000n:used*10000n/quota)/100:used>0n?100:0;
- return `<div class="bucket-usage"><div class="usage-label"><strong title="${used} Bytes belegt">${escape(used<1024n?quotaText(used):sizeLabel(used))}</strong><span title="${quota} Bytes Kontingent">von ${escape(quotaText(quota))}</span></div><div class="usage-track" role="progressbar" aria-label="${escape('Kontingent für '+b.name)}" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${percent}" aria-valuetext="${escape(quotaText(used)+' von '+quotaText(quota))}"><i class="usage-used" data-percent="${percent}"></i></div><div class="bucket-sub">${accounting}</div></div>`;
+ return `<div class="bucket-usage"><div class="usage-label"><strong title="${used} Bytes belegt">${escape(used<1024n?quotaText(used):sizeLabel(used))}</strong><span title="${quota} Bytes Kontingent">von ${escape(sizeLabel(quota))}</span></div><div class="usage-track" role="progressbar" aria-label="${escape('Kontingent für '+b.name)}" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${percent}" aria-valuetext="${escape(quotaText(used)+' von '+sizeLabel(quota))}"><i class="usage-used" data-percent="${percent}"></i></div><div class="bucket-sub">${accounting}</div></div>`;
 }
 function bucketUsage(b,escape){
  let html=quotaUsageBase(b,escape),g=BigInt(b.policy.limits.guaranteed_quota_bytes);if(g===0n)return html;
- html+=`<div class="bucket-sub">${escape(quotaText(g))} garantiert${b.guaranteed_remaining_physical!=null?' · '+escape(quotaText(b.guaranteed_remaining_physical))+' physisch geschützt':''}</div>`;
- if(BigInt(b.guarantee_estimate_shortfall??0)>0n)html+=`<div class="error">Zusicherung unterdeckt · ${escape(quotaText(b.guarantee_estimate_shortfall))} Reserve fehlt</div>`;
+ html+=`<div class="bucket-sub">${escape(sizeLabel(g))} garantiert${b.guaranteed_remaining_physical!=null?' · '+escape(sizeLabel(b.guaranteed_remaining_physical))+' physisch geschützt':''}</div>`;
+ if(BigInt(b.guarantee_estimate_shortfall??0)>0n)html+=`<div class="error">Zusicherung unterdeckt · ${escape(sizeLabel(b.guarantee_estimate_shortfall))} Reserve fehlt</div>`;
  return html;
 }
 const permissions=[[1,'Lesen'],[2,'Schreiben'],[4,'Anhängen'],[8,'Löschen']];
-export function setupBucketViews({connection,escape,toast,showView}){
+export function setupBucketViews({connection,escape,toast,showView,statsEntries=()=>[]}){
  let groups=[],buckets=[],users=[],epoch=0,poll,editor,createProgress,access,grantRetry,action,actionRetry,editorPending=false;
  let pageMeta={},searchTimer,userChoices=[],userSearchTimer,userSearchEpoch=0;
  let quotaInfo=null,quotaSteps=[],quotaEpoch=0,quotaPoll,grantRows=[],lockRetry;
@@ -37,7 +38,7 @@ export function setupBucketViews({connection,escape,toast,showView}){
   if(!ids.length){schedulePoll();return}
   try{const page=await connection().listBucketsPage('',Math.max(1,Math.min(1000,ids.length)),$('bucket-search').value.trim(),ids);if(seq!==epoch)return;
    const updates=new Map(page.buckets.map(b=>[b.id,b])),removed=new Set(ids.filter(id=>!updates.has(id)));pager.items=pager.items.filter(b=>!removed.has(b.id)).map(b=>updates.get(b.id)??b);buckets=pager.items;pageMeta.all_total=page.all_total;if(removed.size)pageMeta.total=Math.max(0,(pageMeta.total??buckets.length)-removed.size);
-   for(const row of $('bucket-rows').querySelectorAll('[data-bucket]')){const b=updates.get(row.dataset.bucket);if(removed.has(row.dataset.bucket)){row.remove();continue}if(b){const wrapper=document.createElement('tbody');wrapper.innerHTML=rowHTML(b);row.replaceChildren(...wrapper.firstElementChild.childNodes)}}if(!buckets.length)$('bucket-rows').innerHTML='<tr><td colspan="7" class="empty">Keine passenden Buckets.</td></tr>';bindRows();pager.status();$('bucket-count').textContent=String(pageMeta.total??buckets.length);$('nav-buckets-count').textContent=String(page.all_total);$('bucket-metric-count').textContent=String(page.all_total);
+   for(const row of $('bucket-rows').querySelectorAll('[data-bucket]')){const b=updates.get(row.dataset.bucket);if(removed.has(row.dataset.bucket)){row.remove();continue}if(b){const wrapper=document.createElement('tbody');wrapper.innerHTML=rowHTML(b);row.replaceChildren(...wrapper.firstElementChild.childNodes)}}if(!buckets.length)$('bucket-rows').innerHTML='<tr><td colspan="8" class="empty">Keine passenden Buckets.</td></tr>';bindRows();pager.status();$('bucket-count').textContent=String(pageMeta.total??buckets.length);$('nav-buckets-count').textContent=String(page.all_total);$('bucket-metric-count').textContent=String(page.all_total);
   }catch(e){if(seq===epoch)$('buckets-error').textContent=e.message}finally{if(seq===epoch)schedulePoll()}
  }
  function render({append=false,added=buckets,loading=false}={}){
@@ -49,13 +50,13 @@ export function setupBucketViews({connection,escape,toast,showView}){
   const table=$('bucket-rows');if(append)table.insertAdjacentHTML('beforeend',added.map(rowHTML).join(''));else{
    const previous=new Map([...table.querySelectorAll('[data-bucket]')].map(row=>[row.dataset.bucket,row]));
    const rows=buckets.map(b=>{const wrapper=document.createElement('tbody');wrapper.innerHTML=rowHTML(b);const next=wrapper.firstElementChild,row=previous.get(b.id);if(!row)return next;row.replaceChildren(...next.childNodes);return row});
-   if(rows.length)table.replaceChildren(...rows);else table.innerHTML='<tr><td colspan="7" class="empty">Keine passenden Buckets.</td></tr>';
+   if(rows.length)table.replaceChildren(...rows);else table.innerHTML='<tr><td colspan="8" class="empty">Keine passenden Buckets.</td></tr>';
   }bindRows();
  }
  function rowHTML(b){
    const p=b.policy,system=b.id===SYSTEM,busy=b.state==='deleting',locked=b.state==='locked';
    const disabled=system||busy?'disabled':'',changing=!!b.desired_policy;
-   return `<tr data-bucket="${b.id}"><td><div class="user-cell"><span class="bucket-avatar">▱</span><div><div class="volume-name"><button type="button" class="bucket-open" data-bucket-edit="${b.id}" ${disabled||changing?'disabled':''}>${escape(b.name)}</button>${system?'<span class="system-label">SYSTEM</span>':''}</div><div class="volume-path">${escape(b.id)}</div></div></div></td><td><span class="class-badge ${p.storage_strategy}">${p.storage_strategy.toUpperCase()}</span><div class="bucket-sub">${escape(groups.find(g=>g.id===p.placement_group)?.name??'PG')} · v${p.placement_mask_version??'—'}</div><div class="bucket-sub">${p.placement_mode==='everywhere'?'Jede Node':p.redundancy.replicas+' Kopie'+(p.redundancy.replicas===1?'':'n')}</div></td><td><span class="class-badge">${escape(p.compression.toUpperCase())}</span></td><td>${bucketUsage(b,escape)}</td><td>${system?'Alle Admins':(b.grants??[]).length+' User'}</td><td><span class="state-badge ${busy?'draining':locked?'detached':''}"><i></i>${busy?'Wird gelöscht':changing?'Wird umgestellt · PG v'+(b.desired_policy.placement_mask_version??'—'):locked?'Gesperrt':'Aktiv'}</span></td><td><div class="row-actions bucket-actions"><button class="row-action" data-bucket-action="clone" data-id="${b.id}" ${disabled}>Kopieren</button><button class="row-action" data-bucket-action="rename" data-id="${b.id}" ${disabled}>Umbenennen</button><button class="row-action danger-action" data-bucket-action="delete" data-id="${b.id}" ${disabled}>Löschen</button></div></td></tr>`;
+   return `<tr data-bucket="${b.id}"><td><div class="user-cell"><span class="bucket-avatar">▱</span><div><div class="volume-name"><button type="button" class="bucket-open" data-bucket-edit="${b.id}" ${disabled||changing?'disabled':''}>${escape(b.name)}</button>${system?'<span class="system-label">SYSTEM</span>':''}</div><div class="volume-path">${escape(b.id)}</div></div></div></td><td><span class="class-badge ${p.storage_strategy}">${p.storage_strategy.toUpperCase()}</span><div class="bucket-sub">${escape(groups.find(g=>g.id===p.placement_group)?.name??'PG')} · v${p.placement_mask_version??'—'}</div><div class="bucket-sub">${p.placement_mode==='everywhere'?'Jede Node':p.redundancy.replicas+' Kopie'+(p.redundancy.replicas===1?'':'n')}</div></td><td><span class="class-badge">${escape(p.compression.toUpperCase())}</span></td><td>${bucketUsage(b,escape)}</td><td data-bucket-throughput="${b.id}">${bucketThroughput(statsEntries(),b.id)}</td><td>${system?'Alle Admins':(b.grants??[]).length+' User'}</td><td><span class="state-badge ${busy?'draining':locked?'detached':''}"><i></i>${busy?'Wird gelöscht':changing?'Wird umgestellt · PG v'+(b.desired_policy.placement_mask_version??'—'):locked?'Gesperrt':'Aktiv'}</span></td><td><div class="row-actions bucket-actions"><button class="row-action" data-bucket-action="clone" data-id="${b.id}" ${disabled}>Kopieren</button><button class="row-action" data-bucket-action="rename" data-id="${b.id}" ${disabled}>Umbenennen</button><button class="row-action danger-action" data-bucket-action="delete" data-id="${b.id}" ${disabled}>Löschen</button></div></td></tr>`;
  }
  function bindRows(){
   for(const bar of $('bucket-rows').querySelectorAll('[data-percent]'))bar.style.width=bar.dataset.percent+'%';
@@ -128,14 +129,14 @@ export function setupBucketViews({connection,escape,toast,showView}){
   $('bucket-quota-slider-wrap').hidden=false;$('bucket-quota-max').disabled=!quotaInfo;slider.disabled=!quotaInfo||unlimited;
   if(!quotaInfo){$('bucket-quota-capacity').textContent='Verfügbarer Platz wird ermittelt …';$('bucket-quota-limit').textContent='—';$('bucket-quota-value').textContent='—';input.setCustomValidity('');return}
   const info=quotaInfo;$('bucket-quota-capacity').textContent=`${sizeLabel(info.available)} frei${info.reservedOther?' · '+sizeLabel(info.reservedOther)+' geschützt':''}${info.used?' · '+sizeLabel(info.used)+' bereits genutzt':''}`;
-  $('bucket-quota-min').textContent=quotaText(info.used);$('bucket-quota-limit').textContent=quotaText(info.maximum);$('bucket-quota-limit').title=info.maximum+' Bytes';
+  $('bucket-quota-min').textContent=sizeLabel(info.used);$('bucket-quota-limit').textContent=sizeLabel(info.maximum);$('bucket-quota-limit').title=info.maximum+' Bytes';
   try{const value=parseQuota(input.value);if(!unlimited&&(value<info.used||value>info.maximum))throw Error(`Kontingent muss zwischen ${quotaText(info.used)} und ${quotaText(info.maximum)} liegen.`);
-   input.setCustomValidity('');quotaSteps=sizeSteps(info.maximum,value,info.used,1n);slider.min='0';slider.max=String(Math.max(0,quotaSteps.length-1));slider.step='1';slider.value=String(Math.max(0,quotaSteps.indexOf(value)));$('bucket-quota-value').textContent=unlimited?'Unbegrenzt':quotaText(value);slider.setAttribute('aria-valuetext',unlimited?'Unbegrenzt':quotaText(value));
+   input.setCustomValidity('');quotaSteps=sizeSteps(info.maximum,value,info.used,1n);slider.min='0';slider.max=String(Math.max(0,quotaSteps.length-1));slider.step='1';slider.value=String(Math.max(0,quotaSteps.indexOf(value)));$('bucket-quota-value').textContent=unlimited?'Unbegrenzt':sizeLabel(value);slider.setAttribute('aria-valuetext',unlimited?'Unbegrenzt':quotaText(value));
   }catch(e){input.setCustomValidity(unlimited?'':e.message)}
  }
  $('bucket-quota').oninput=syncQuota;
  $('bucket-quota').onchange=()=>{syncQuota();if($('bucket-quota').validity.valid)$('bucket-quota').value=quotaText(parseQuota($('bucket-quota').value))};
- $('bucket-quota-slider').oninput=()=>{const value=quotaSteps[Number($('bucket-quota-slider').value)];if(value===undefined)return;$('bucket-quota').value=quotaText(value);$('bucket-quota').setCustomValidity('');$('bucket-quota-value').textContent=quotaText(value);$('bucket-quota-slider').setAttribute('aria-valuetext',quotaText(value))};
+ $('bucket-quota-slider').oninput=()=>{const value=quotaSteps[Number($('bucket-quota-slider').value)];if(value===undefined)return;$('bucket-quota').value=quotaText(value);$('bucket-quota').setCustomValidity('');$('bucket-quota-value').textContent=sizeLabel(value);$('bucket-quota-slider').setAttribute('aria-valuetext',quotaText(value))};
  $('bucket-quota-max').onclick=async()=>{await refreshQuota();if(!quotaInfo)return;$('bucket-unlimited').checked=false;$('bucket-quota').value=quotaText(quotaInfo.maximum);updateFields()};
  $('bucket-create-dialog').addEventListener('close',()=>{quotaEpoch++;clearTimeout(quotaPoll)});
 
@@ -215,5 +216,6 @@ export function setupBucketViews({connection,escape,toast,showView}){
    $('bucket-action-dialog').close();toast(kind==='clone'?'Bucket wurde kopiert. Benutzerfreigaben können jetzt eingerichtet werden.':kind==='delete'?'Bucket wird gelöscht.':kind==='rename'?'Bucket wurde umbenannt.':b.state==='locked'?'Bucket wurde entsperrt.':'Bucket wurde gesperrt.');await load();
   }catch(err){$('bucket-action-error').textContent=kind==='clone'&&actionRetry.created?'Der Zielbucket ist angelegt. Kopieren erneut versuchen: '+err.message:err.message;if(kind==='clone'&&actionRetry.created)e.submitter.textContent='Kopieren erneut versuchen'}finally{e.submitter.disabled=false}
  });
- return {load,openCreate,clear(){epoch++;clearTimeout(poll);clearTimeout(searchTimer);pager.clear();pageMeta={};userSearchEpoch++;clearTimeout(userSearchTimer);userChoices=[];buckets=[];users=[];render()}};
+ function refreshThroughput(){for(const cell of $('bucket-rows').querySelectorAll('[data-bucket-throughput]'))cell.innerHTML=bucketThroughput(statsEntries(),cell.dataset.bucketThroughput)}
+ return {load,openCreate,refreshThroughput,clear(){epoch++;clearTimeout(poll);clearTimeout(searchTimer);pager.clear();pageMeta={};userSearchEpoch++;clearTimeout(userSearchTimer);userChoices=[];buckets=[];users=[];render()}};
 }

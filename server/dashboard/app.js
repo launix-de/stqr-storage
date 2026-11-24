@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-only
+import {formatNumber,formatBytes} from './numbers.js';
 import {setupClusterJoin} from './join.js';
 import {NodeConnection,newID} from './protocol.js';
 import {memberIDs,nodeMembership,currentSnapshots,seedMembers} from './membership.js';
@@ -7,6 +8,7 @@ import {setupRecovery} from './recovery.js';
 import {setupForceDisconnect} from './force-disconnect.js';
 import {setupUserViews} from './users.js';
 import {setupPlacementGroups} from './placement-groups.js';
+import {entityRate,nodeRate,throughputHTML,bucketTotals} from './throughput.js';
 import {setupBucketViews} from './buckets.js';
 import {MIN_VOLUME_SIZE,parseSize,sizeSteps,sizeLimit,formatSize,sizeLabel} from './size.js';
 const $=id=>document.getElementById(id),escape=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -16,7 +18,7 @@ const localNode=()=>configView?.config.node.id;
 const volumeConnection=()=>volumeNode&&volumeNode!==localNode()?node.forNode(volumeNode):node;
 const volumeConfig=()=>nodeStates.get(volumeNode)?.config??configView;
 const states=['pending','active','draining','detached','failed'],stateNames=['Ausstehend','Aktiv','Wird geleert','Ausgehängt','Fehler'],classes=['hdd','ssd','ram','ramcache'];
-export function bytes(n){n=BigInt(n??0);const units=['B','KiB','MiB','GiB','TiB','PiB','EiB'];let unit=0,div=1n;while(n>=div*1024n&&unit<units.length-1){div*=1024n;unit++}const v=Number(n*10n/div)/10;return `${v.toLocaleString('de-DE',{maximumFractionDigits:unit?1:0})} ${units[unit]}`}
+export const bytes=formatBytes;
 function toast(message,error=false){const div=document.createElement('div');div.className='toast'+(error?' error-toast':'');div.textContent=message;while($('toasts').children.length>=3)$('toasts').firstElementChild.remove();$('toasts').append(div);setTimeout(()=>div.remove(),error?10000:5000)}
 function setConnected(connected){$('connection').classList.toggle('offline',!connected);$('connection').innerHTML=`<span class="dot"></span>${connected?'Live · alle 3 Sekunden':'Verbindung wird wiederhergestellt'}`;$('refresh').disabled=!connected}
 function beginSession(session){
@@ -52,8 +54,8 @@ const recoveryView=setupRecovery({connection:()=>node,config:()=>configView,stat
 const forceView=setupForceDisconnect({connection:()=>node,config:()=>configView,states:nodeStates,toast,newID,refresh:()=>refreshConfig()});
 $('add-error').insertAdjacentHTML('beforebegin','<section id="volume-pg-selection" class="bucket-form-section"></section>');
 const pgViews=setupPlacementGroups({connection:()=>node,escape,toast,states:nodeStates});
-const bucketViews=setupBucketViews({connection:()=>node,escape,toast,showView});
-const userViews=setupUserViews({connection:()=>node,currentUsername:()=>$('profile-name').textContent,escape,toast,showView,requireLogin,openBucketCreate:options=>bucketViews.openCreate(options)});
+const bucketViews=setupBucketViews({connection:()=>node,escape,toast,showView,statsEntries:()=>currentSnapshots(configView,nodeStates)});
+const userViews=setupUserViews({connection:()=>node,currentUsername:()=>$('profile-name').textContent,escape,toast,showView,requireLogin,openBucketCreate:options=>bucketViews.openCreate(options),statsEntries:()=>currentSnapshots(configView,nodeStates)});
 
 const joinView=setupClusterJoin({connection:()=>node,onJoined:beginSession});
 function applyConfig(view){
@@ -77,7 +79,7 @@ function onStats(s){
  if(entry.snapshot&&s.boot===entry.snapshot.boot&&s.sequence<=entry.snapshot.sequence)return;
  entry.previous=entry.placeholder?null:entry.snapshot;entry.placeholder=false;entry.snapshot=s;entry.received=Date.now();nodeStates.set(s.node,entry);
  if(s.node===localNode()||!snapshot)snapshot=s;
- renderMetrics();renderVolumes();
+ renderMetrics();renderVolumes();bucketViews.refreshThroughput();
  const count=memberIDs(configView)?.size??nodeStates.size;
  $('snapshot-info').textContent=`${count} NODE${count===1?'':'S'} · GEN ${nodeStates.get(localNode())?.snapshot?.generation??s.generation} · ${new Date(Number(s.captured/1000000n)).toLocaleTimeString('de-DE')}`;
  if(!configView||fetchingConfigs.has(s.node))return;
@@ -89,14 +91,16 @@ function renderMetrics(){
  const entries=currentSnapshots(configView,nodeStates);const memberCount=memberIDs(configView)?.size??entries.length;
  const volumes=entries.flatMap(e=>e.snapshot.volumes),t=totals(volumes);
  for(const prefix of ['', 'bucket-']){$(prefix+'metric-capacity').textContent=bytes(t.capacity);$(prefix+'metric-used').textContent=`${bytes(t.allocated)} belegt · ${bytes(t.admission)} nutzbar`;}
- $('metric-volumes').textContent=String(volumes.length);
+ $('metric-volumes').textContent=formatNumber(volumes.length);
  const active=volumes.filter(v=>v.state===1).length,draining=volumes.filter(v=>v.state===2).length;
- $('metric-active').textContent=`${active} aktiv${draining?` · ${draining} im Drain`:''}`;$('nav-count').textContent=String(volumes.length);
+ $('metric-active').textContent=`${active} aktiv${draining?` · ${draining} im Drain`:''}`;$('nav-count').textContent=formatNumber(volumes.length);
  for(const key of ['read','write']){
   let sum=0n,count=0;
   for(const {snapshot:s,previous:p,received}of entries){const seconds=p&&p.boot===s.boot?Number(s.captured-p.captured)/1e9:0;
    if(seconds>0&&s.io[key]>=p.io[key]&&Date.now()-received<10000){sum+=BigInt(Math.round(Number(s.io[key]-p.io[key])/seconds));count++}}
-  for(const prefix of ['', 'bucket-'])$(prefix+'metric-'+key).textContent=count?bytes(sum)+'/s':'—';
+  $('metric-'+key).textContent=count?bytes(sum)+'/s':'—';
+  const logical=bucketTotals(entries)[key==='read'?0:1];
+  $('bucket-metric-'+key).textContent=logical==null?'—':bytes(logical)+'/s';
  }
  const count=memberCount===1?'1 Node':`${memberCount} Nodes`;$('node-count').textContent=count;$('topbar-node-count').textContent=count.toUpperCase();
  const mode=document.querySelector('.mode-card');mode.querySelector('strong').textContent=count;
@@ -111,10 +115,10 @@ function renderVolumes(){
   const s=entry.snapshot,view=entry.config,cfg=view?.config,membership=nodeMembership(configView,id,s),member=membership==='member',byID=new Map((cfg?.volumes??[]).map(v=>[v.id,v])),t=totals(s.volumes),collapsed=entry.collapsed??false;
   const visible=s.volumes.filter(v=>{const c=byID.get(v.id);return `${cfg?.node.name??id} ${c?.name??''} ${v.path} ${classes[v.class]}`.toLowerCase().includes(query)});
   visibleCount+=visible.length;
-  const version=configView?.node_versions?.[id],warning=versionWarning(version),stale=Date.now()-entry.received>=10000,label=versionLabel(version)||(membership==='excluded'?'Ausgeschlossen':membership==='departed'?'Ausgeschieden':entry.placeholder?'Noch keine Statistiken':stale?'Letzter Stand':s.state===0&&s.needRebuild?(s.reason&512n?'Clusteränderung':'Rebuild'):(['Online','Wird geleert','Wartung','Wird beendet','Beitritt','Ausgeschlossen'][s.state]??'Unbekannt'));
-  rows+=`<tr class="node-row ${warning?'version-warning':''}" title="${escape(version?.reason??'')}" data-node="${id}"><td><div class="node-cell"><button class="node-toggle" data-toggle="${id}" aria-label="Volumes ${collapsed?'aufklappen':'einklappen'}" aria-expanded="${!collapsed}">${collapsed?'›':'⌄'}</button><span class="node-symbol">▤</span><div><div class="node-name">${escape(cfg?.node.name??id.slice(0,8))}${id===localNode()?'<span class="node-badge">DIESE NODE</span>':''}</div><div class="node-sub">${escape(id.slice(0,8))} · ${escape(view?.active_listen??'')} ${version?' · '+escape(version.profile.version):''}</div></div></div></td><td><span class="class-badge">${s.volumes.length} VOLUMES</span></td><td>${usage(t)}</td><td class="free-value">${escape(bytes(t.admission))}</td><td><span class="state-badge ${stale?'pending':''}"><i></i>${label}</span></td><td><div class="row-actions"><button class="secondary" data-node-maintenance="${id}" ${!member?'disabled':''}>Wartung</button></div></td></tr>`;
-  if(!collapsed)for(const v of visible){const c=byID.get(v.id),state=states[v.state]??'failed';rows+=`<tr data-volume="${v.id}" data-node="${id}"><td><div class="volume-cell"><span class="volume-symbol">▤</span><div><div class="volume-name">${escape(c?.name??v.path.split('/').pop())}${c?.system?'<span class="system-label">SYSTEM</span>':c?.recovery_only?'<span class="system-label" title="Für die übernommenen Datenbereiche reserviert">GERETTET</span>':''}</div><div class="volume-path" title="${escape(v.path)}">${escape(v.path)}</div></div></div></td><td><span class="class-badge ${classes[v.class]}">${classes[v.class].toUpperCase()}</span></td><td>${usage(v)}</td><td class="free-value">${escape(bytes(v.admission))}</td><td><span class="state-badge ${state}"><i></i>${stateNames[v.state]??'Unbekannt'}</span></td><td><div class="row-actions">${c?.placement_groups_pending?.length?`<button class="row-action" data-finish-pg="${v.id}" data-node="${id}">PG-Listen fortsetzen</button>`:''}<button class="row-action" data-detail="${v.id}" data-node="${id}" aria-label="Details für ${escape(c?.name??v.path)}">Details</button><button class="row-action" data-grow="${v.id}" data-node="${id}" ${!member||!cfg||v.state!==1?'disabled':''}>Vergrößern</button><button class="row-action" data-drain="${v.id}" data-node="${id}" ${!member||!cfg||c?.system||v.state!==1?'disabled':''} title="${c?.system?'Das Admin-Volume bleibt für Systemdaten eingebunden':'Kooperativ aushängen und entfernen'}">Aushängen ↗</button></div></td></tr>`}
-  rows+=`<tr class="add-row"><td colspan="6"><button class="add-volume-button" data-add-node="${id}" ${!member||!cfg?'disabled':''}>＋ Volume hinzufügen</button><button class="row-action" data-recovery-volumes="${id}" ${!member||!cfg?'disabled':''}>Gerettete Volumes</button><span class="add-row-note">Datei, ungemountetes Blockdevice oder RAM</span></td></tr>`;
+  const version=configView?.node_versions?.[id],warning=versionWarning(version),stale=Date.now()-entry.received>=10000,label=versionLabel(version)||(membership==='excluded'?'Ausgeschlossen':membership==='departed'?'Ausgeschieden':entry.placeholder?'Noch keine Statistiken':stale?'Letzter Stand':s.state===0&&s.needRebuild?(s.reason&256n?'Bucket-Bereinigung':s.reason&512n?'Clusteränderung':'Rebuild'):(['Online','Wird geleert','Wartung','Wird beendet','Beitritt','Ausgeschlossen'][s.state]??'Unbekannt'));
+  rows+=`<tr class="node-row ${warning?'version-warning':''}" title="${escape(version?.reason??'')}" data-node="${id}"><td><div class="node-cell"><button class="node-toggle" data-toggle="${id}" aria-label="Volumes ${collapsed?'aufklappen':'einklappen'}" aria-expanded="${!collapsed}">${collapsed?'›':'⌄'}</button><span class="node-symbol">▤</span><div><div class="node-name">${escape(cfg?.node.name??id.slice(0,8))}${id===localNode()?'<span class="node-badge">DIESE NODE</span>':''}</div><div class="node-sub">${escape(id.slice(0,8))} · ${escape(view?.active_listen??'')} ${version?' · '+escape(version.profile.version):''}</div></div></div></td><td><span class="class-badge">${s.volumes.length} VOLUMES</span></td><td>${usage(t)}</td><td class="free-value">${escape(bytes(t.admission))}</td><td>${throughputHTML(nodeRate(entry,'read'),nodeRate(entry,'write'))}</td><td><span class="state-badge ${stale?'pending':''}"><i></i>${label}</span></td><td><div class="row-actions"><button class="secondary" data-node-maintenance="${id}" ${!member?'disabled':''}>Wartung</button></div></td></tr>`;
+  if(!collapsed)for(const v of visible){const c=byID.get(v.id),state=states[v.state]??'failed';rows+=`<tr data-volume="${v.id}" data-node="${id}"><td><div class="volume-cell"><span class="volume-symbol">▤</span><div><div class="volume-name">${escape(c?.name??v.path.split('/').pop())}${c?.system?'<span class="system-label">SYSTEM</span>':c?.recovery_only?'<span class="system-label" title="Für die übernommenen Datenbereiche reserviert">GERETTET</span>':''}</div><div class="volume-path" title="${escape(v.path)}">${escape(v.path)}</div></div></div></td><td><span class="class-badge ${classes[v.class]}">${classes[v.class].toUpperCase()}</span></td><td>${usage(v)}</td><td class="free-value">${escape(bytes(v.admission))}</td><td>${throughputHTML(entityRate(entry,'volumes',v.id,'read'),entityRate(entry,'volumes',v.id,'write'))}</td><td><span class="state-badge ${state}"><i></i>${stateNames[v.state]??'Unbekannt'}</span></td><td><div class="row-actions">${c?.placement_groups_pending?.length?`<button class="row-action" data-finish-pg="${v.id}" data-node="${id}">PG-Listen fortsetzen</button>`:''}<button class="row-action" data-detail="${v.id}" data-node="${id}" aria-label="Details für ${escape(c?.name??v.path)}">Details</button><button class="row-action" data-grow="${v.id}" data-node="${id}" ${!member||!cfg||v.state!==1?'disabled':''}>Vergrößern</button><button class="row-action" data-drain="${v.id}" data-node="${id}" ${!member||!cfg||c?.system||v.state!==1?'disabled':''} title="${c?.system?'Das Admin-Volume bleibt für Systemdaten eingebunden':'Kooperativ aushängen und entfernen'}">Aushängen ↗</button></div></td></tr>`}
+  rows+=`<tr class="add-row"><td colspan="7"><button class="add-volume-button" data-add-node="${id}" ${!member||!cfg?'disabled':''}>＋ Volume hinzufügen</button><button class="row-action" data-recovery-volumes="${id}" ${!member||!cfg?'disabled':''}>Gerettete Volumes</button><span class="add-row-note">Datei, ungemountetes Blockdevice oder RAM</span></td></tr>`;
  }
  if($('volume-rows').dataset.rendered!==rows){$('volume-rows').innerHTML=rows;$('volume-rows').dataset.rendered=rows;}
  $('table-empty').hidden=visibleCount!==0||!query;

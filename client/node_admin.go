@@ -14,10 +14,10 @@ type NodeAdmin struct {
 }
 
 // NodeLocalAdminOpcode is deliberately an allowlist. Users, bucket policies,
-// object commands and recursive proxy calls cannot bypass their own protocols.
+// user mutations, object commands and recursive proxy calls cannot bypass their own protocols.
 func NodeLocalAdminOpcode(op uint16) bool {
 	switch op {
-	case VolumeAddWithGroups, VolumePlacementRelease, NodeDrain, NodeShutdown, VolumeAdd, VolumeRemove, VolumeRescan, VolumeGrow, VolumeGrowInfo,
+	case UserListPage, VolumeAddWithGroups, VolumePlacementRelease, NodeDrain, NodeShutdown, VolumeAdd, VolumeRemove, VolumeRescan, VolumeGrow, VolumeGrowInfo,
 		VolumeRecoveryStage, VolumeRecoveryCommit, VolumeRecoveryRelease,
 		VolumeCandidates, VolumeCapacityGet, NodeConfigGet, NodeConfigSet,
 		AdminOperationStatus:

@@ -4,6 +4,7 @@ package server
 import (
 	"bytes"
 	"encoding/json"
+	"sort"
 
 	"github.com/launix-de/stqr-storage/client"
 	"github.com/launix-de/stqr-storage/volume"
@@ -150,4 +151,94 @@ func authorityEncodingForStore(store *volume.Volume, permitNew bool) (bool, erro
 	defer h.Close()
 	raw, err := h.LocalMetadata()
 	return bytes.HasPrefix(raw, []byte("STVA")), err
+}
+
+// Bucket zero is an unused physical slot, never a claim of namespace authority.
+// Keep logical readers independent of slot order and ignore vacant slots.
+func canonicalAuthorityEntries(record *volumeAuthorityRecord) {
+	out := record.Entries[:0]
+	for _, entry := range record.Entries {
+		if entry.Bucket != (client.ID{}) {
+			out = append(out, entry)
+		}
+	}
+	record.Entries = out
+	sort.Slice(record.Entries, func(i, j int) bool {
+		a, b := record.Entries[i], record.Entries[j]
+		if a.Bucket != b.Bucket {
+			return a.Bucket.String() < b.Bucket.String()
+		}
+		if a.Entry.Start != b.Entry.Start {
+			return string(a.Entry.Start[:]) < string(b.Entry.Start[:])
+		}
+		return a.Entry.OwnerEpoch < b.Entry.OwnerEpoch
+	})
+}
+
+type authoritySlotKey struct {
+	bucket        client.ID
+	start         client.ObjectID
+	prefix        uint16
+	epoch, policy uint64
+}
+
+func authorityKey(e volumeAuthorityEntry) authoritySlotKey {
+	return authoritySlotKey{e.Bucket, e.Entry.Start, e.Entry.PrefixBits, e.Entry.OwnerEpoch, e.Entry.PolicyVersion}
+}
+func authoritySlotSize(e volumeAuthorityEntry) int {
+	return 120 + 40*len(e.Entry.Locations) + 16*len(e.Cohort)
+}
+func marshalStableVolumeAuthority(record volumeAuthorityRecord, compact bool, previous []byte) ([]byte, error) {
+	if !compact || !bytes.HasPrefix(previous, []byte("STVA")) {
+		return marshalVolumeAuthority(record, compact)
+	}
+	var prior volumeAuthorityRecord
+	if err := decodeVolumeAuthority(previous, &prior); err != nil {
+		return nil, err
+	}
+	slots := prior.Entries
+	pending := make(map[authoritySlotKey][]int)
+	for i, e := range record.Entries {
+		k := authorityKey(e)
+		pending[k] = append(pending[k], i)
+	}
+	taken := make([]bool, len(record.Entries))
+	free := make(map[int][]int)
+	for i, old := range slots {
+		found := -1
+		for _, j := range pending[authorityKey(old)] {
+			if !taken[j] && authoritySlotSize(old) == authoritySlotSize(record.Entries[j]) {
+				found = j
+				break
+			}
+		}
+		if found >= 0 && old.Bucket != (client.ID{}) {
+			slots[i] = record.Entries[found]
+			taken[found] = true
+			continue
+		}
+		slots[i].Bucket = client.ID{}
+		slots[i].Active = false
+		slots[i].Fence = [32]byte{}
+		size := authoritySlotSize(old)
+		free[size] = append(free[size], i)
+	}
+	for i, e := range record.Entries {
+		if taken[i] {
+			continue
+		}
+		size := authoritySlotSize(e)
+		vacant := free[size]
+		if len(vacant) > 0 {
+			slots[vacant[0]] = e
+			free[size] = vacant[1:]
+		} else {
+			slots = append(slots, e)
+		}
+	}
+	for len(slots) > 0 && slots[len(slots)-1].Bucket == (client.ID{}) {
+		slots = slots[:len(slots)-1]
+	}
+	record.Entries = slots
+	return encodeVolumeAuthority(record)
 }

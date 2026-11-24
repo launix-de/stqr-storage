@@ -119,3 +119,73 @@ func TestVolumeAuthorityCompactWaitsForEveryAdmittedPeer(t *testing.T) {
 		t.Fatal("activated with offline peer")
 	}
 }
+
+func TestVolumeAuthorityInsertionAndRetirementKeepOtherSlots(t *testing.T) {
+	s := testServer(t)
+	d := addTestVolume(t, s, "authority-slots", "hdd", 2<<20)
+	v := s.volumes[d.VolumeID].store
+	r := authorityFormatFixture()
+	r.Cluster = client.ID(v.Identity().ClusterID)
+	r.Node = client.ID(v.Identity().NodeID)
+	r.Volume = client.ID(v.Identity().VolumeID)
+	if err := writeVolumeAuthorityBudget(v, r, 0, true); err != nil {
+		t.Fatal(err)
+	}
+	free := v.Stats().AdmissionFreePhysical
+	if err := v.SetGuaranteedReserve(free); err != nil {
+		t.Fatal(err)
+	}
+	added := r.Entries[0]
+	added.Bucket = client.ID{3}
+	r.Entries = append([]volumeAuthorityEntry{added}, r.Entries...)
+	if err := writeVolumeAuthority(v, r); err != nil {
+		t.Fatal("insertion rewrote following entries", err)
+	}
+	got, err := readVolumeAuthority(v)
+	if err != nil || !reflect.DeepEqual(got, r) {
+		t.Fatal("inserted authority", err)
+	}
+	h, err := v.Open(false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, err := h.LocalMetadata()
+	h.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.Entries = append(r.Entries[:10:10], r.Entries[11:]...)
+	if err = writeVolumeAuthority(v, r); err != nil {
+		t.Fatal("retirement rewrote following entries", err)
+	}
+	got, err = readVolumeAuthority(v)
+	if err != nil || !reflect.DeepEqual(got, r) {
+		t.Fatal("retired authority", err)
+	}
+	replacement := added
+	replacement.Bucket = client.ID{7}
+	r.Entries = append(r.Entries, replacement)
+	canonicalAuthorityEntries(&r)
+	if err = writeVolumeAuthority(v, r); err != nil {
+		t.Fatal("vacant authority slot was not reused", err)
+	}
+	h, err = v.Open(false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	after, err := h.LocalMetadata()
+	h.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(before) != len(after) {
+		t.Fatal("slot reuse changed physical size", len(before), len(after))
+	}
+	got, err = readVolumeAuthority(v)
+	if err != nil || !reflect.DeepEqual(got, r) {
+		t.Fatal("replacement authority", err)
+	}
+	if v.Stats().GuaranteedRemainingPhysical != free {
+		t.Fatal("slot changes consumed protected quota")
+	}
+}

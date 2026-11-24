@@ -1026,3 +1026,26 @@ envelope, session/CSRF and administrator checks; its response is flushed before
 the daemon reopens under the prepared configuration. Bucket-bound connections
 cannot request join information. The target seed must advertise revision 1 of these optional operations in its
 compatibility profile; an unsupported bootstrap is rejected before local changes.
+
+
+### Dashboard throughput and quantities
+
+Volume and node rates show physical bytes, including journal, index and migration
+work. Bucket summary cards and their individual rows both use logical native
+payload counters; their totals therefore use the same measurement basis. Native
+metadata objects count as payload too. Sparse TRUNC lengths and DELETE lengths
+are not written payload. Successfully replayed requests count delivered traffic.
+
+The user list includes inactive users and reports the same logical traffic by
+authenticated account. `USER_LIST_PAGE` adds decimal-string `read_bytes` and
+`write_bytes` per entry, with page-level `node`, `boot`, and `captured_ns` fields.
+An administrator may delegate this read-only page through `NODE_ADMIN`; user
+mutations remain excluded. The visible list samples each member at three-second
+intervals, independently differences each node's counters and then sums rates.
+Missing/stale observations, restarts and counter resets display an unknown rate
+until a valid sample pair exists. No credentials or password verifiers enter
+these responses. Deleted-account counters are pruned when listing users.
+
+`dashboard/numbers.js` formats displayed quantities centrally with at most one
+fractional digit and German separators. Exact editable byte sizes retain the
+round-tripping `formatSize` encoding so displaying a size never changes a quota.

@@ -53,6 +53,8 @@ func (r *rangeManager) start() {
 			}
 			r.mu.Unlock()
 			var stepErr error
+			moveStarted := time.Now()
+			moved := true
 			if pending != nil {
 				stepErr = r.move(s.ctx, *pending)
 			} else if plan, ok := r.nextPressure(); ok {
@@ -60,9 +62,18 @@ func (r *rangeManager) start() {
 			} else if plan, ok := r.planNext(); ok {
 				stepErr = r.move(s.ctx, plan)
 			} else {
+				moved = false
 				stepErr = r.finishNodeDrain(s.ctx)
 			}
 			r.mu.Lock()
+			if moved && stepErr == nil {
+				elapsed := time.Since(moveStarted)
+				if r.capacityMoveTime == 0 {
+					r.capacityMoveTime = elapsed
+				} else {
+					r.capacityMoveTime = (r.capacityMoveTime*3 + elapsed) / 4
+				}
+			}
 			r.lastError = stepErr
 			r.mu.Unlock()
 			r.work.Unlock()
@@ -158,12 +169,23 @@ func (r *rangeManager) planNext() (rangePlan, bool) {
 	s.mu.RLock()
 	drainingNode := s.cfg.Node.Draining
 	draining := make(map[volume.ID]bool)
+	localVolumes := make(map[volume.ID]bool)
 	for _, managed := range s.volumes {
+		localVolumes[managed.store.Identity().VolumeID] = true
 		if managed.config.State == "draining" {
 			draining[managed.store.Identity().VolumeID] = true
 		}
 	}
 	s.mu.RUnlock()
+	r.mu.Lock()
+	for id := range r.capacityGoals {
+		if !localVolumes[id] {
+			delete(r.capacityGoals, id)
+		}
+	}
+	r.mu.Unlock()
+	var balance capacityMove
+	var balancing bool
 	for _, d := range s.bucketSnapshots() {
 		if d.ID == systemBucket.String() || d.DeletionComplete || d.State == BucketDeleting {
 			continue
@@ -220,8 +242,8 @@ func (r *rangeManager) planNext() (rangePlan, bool) {
 			}
 			volumeDrain := r.rangeOnDraining(before, draining)
 			if !drainingNode && !volumeDrain {
-				if plan, ok := r.planLazyCapacity(d, before, entry, destinations); ok {
-					return plan, true
+				if candidate, ok := r.planLazyCapacity(d, before, entry, destinations); ok && (!balancing || candidate.betterThan(balance)) {
+					balance, balancing = candidate, true
 				}
 				continue
 			}
@@ -231,7 +253,7 @@ func (r *rangeManager) planNext() (rangePlan, bool) {
 
 		}
 	}
-	return rangePlan{}, false
+	return balance.plan, balancing
 }
 
 func (r *rangeManager) planRequiredRangeMove(d BucketDescription, before client.MapPatch, entry client.RangeEntry, destinations []rangeDestination, draining map[volume.ID]bool, drainingNode, volumeDrain bool) (rangePlan, bool) {

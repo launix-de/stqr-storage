@@ -3,6 +3,7 @@ package server
 
 import (
 	"math"
+	"time"
 
 	"github.com/launix-de/stqr-storage/client"
 	"github.com/launix-de/stqr-storage/volume"
@@ -16,20 +17,100 @@ func lazyFreeWatermarks(capacity, free uint64, poolCapacity, poolFree uint64) (u
 		return 0, 0
 	}
 	mean := float64(poolFree) / float64(poolCapacity)
-	start := uint64(float64(capacity) * math.Min(.15, .5*mean))
-	target := uint64(float64(capacity) * math.Min(.20, .75*mean))
+	// The absolute floor protects tiny data volumes; cap it at 10% for
+	// deliberately smaller test/embedded volumes and at half the pool mean.
+	start := min(max(capacity/50, uint64(3<<20)), capacity/10, uint64(float64(capacity)*.5*mean))
+	target := uint64(float64(capacity) * math.Min(.50, .9*mean))
 	if free >= start {
 		return 0, 0
 	}
 	return start, target
 }
 
-func (r *rangeManager) planLazyCapacity(d BucketDescription, before client.MapPatch, entry client.RangeEntry, destinations []rangeDestination) (rangePlan, bool) {
-	var total, free uint64
-	for _, v := range destinations {
-		total = addCapacity(total, v.capacity)
-		free = addCapacity(free, min(v.free, v.capacity))
+// Scheduling hints only: restarts may forget the forecast, never ownership.
+// Once below the start watermark, continue until the goal is reached, even
+// after crossing the start watermark again. Ordinary writes do not start it.
+type capacityGoal struct {
+	sampled   time.Time
+	allocated uint64
+	growth    float64 // smoothed net allocation growth in bytes/second
+	target    uint64
+}
+
+func (g *capacityGoal) observe(v rangeDestination, poolCapacity, poolFree uint64, now time.Time, horizon ...time.Duration) uint64 {
+	if !g.sampled.IsZero() && now.Sub(g.sampled) >= time.Second {
+		seconds := now.Sub(g.sampled).Seconds()
+		growth := float64(0)
+		if v.volume.AllocatedPhysical > g.allocated {
+			growth = float64(v.volume.AllocatedPhysical-g.allocated) / seconds
+		}
+		alpha := 1 - math.Exp(-seconds/10)
+		g.growth += alpha * (growth - g.growth)
+		g.sampled, g.allocated = now, v.volume.AllocatedPhysical
+	} else if g.sampled.IsZero() {
+		g.sampled, g.allocated = now, v.volume.AllocatedPhysical
 	}
+	_, target := lazyFreeWatermarks(v.capacity, v.free, poolCapacity, poolFree)
+	if g.target == 0 && target == 0 {
+		return 0
+	}
+	if g.target != 0 && v.free >= g.target {
+		g.target = 0
+		if target == 0 {
+			return 0
+		}
+	}
+	if poolCapacity == 0 || v.capacity == 0 {
+		return 0
+	}
+	// Forecast a 30-second burst, but never reserve most of an otherwise tight
+	// pool. Existing guarantees/in-flight reservations are excluded from free.
+	ceiling := uint64(float64(v.capacity) * math.Min(.75, .9*float64(poolFree)/float64(poolCapacity)))
+	seconds := 30.0
+	if len(horizon) > 0 {
+		seconds = max(seconds, horizon[0].Seconds())
+	}
+	forecast := uint64(math.Min(float64(ceiling), g.growth*seconds))
+	g.target = min(ceiling, max(g.target, target, forecast))
+	if g.target <= v.free {
+		g.target = 0
+		return 0
+	}
+	return g.target - v.free
+}
+
+func (r *rangeManager) capacityNeed(v rangeDestination, destinations []rangeDestination) uint64 {
+	var total, free uint64
+	for _, d := range destinations {
+		if d.volume.Class == v.volume.Class {
+			total = addCapacity(total, d.capacity)
+			free = addCapacity(free, min(d.free, d.capacity))
+		}
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.capacityGoals == nil {
+		r.capacityGoals = make(map[volume.ID]*capacityGoal)
+	}
+	id := volume.ID(v.volume.ID)
+	g := r.capacityGoals[id]
+	if g == nil {
+		g = &capacityGoal{}
+		r.capacityGoals[id] = g
+	}
+	return g.observe(v, total, free, time.Now(), 4*r.capacityMoveTime)
+}
+
+type capacityMove struct {
+	plan   rangePlan
+	relief uint64 // progress toward the actual reserve, not merely copied bytes
+}
+
+func (a capacityMove) betterThan(b capacityMove) bool {
+	return a.relief > b.relief || a.relief == b.relief && a.plan.Physical < b.plan.Physical
+}
+
+func (r *rangeManager) planLazyCapacity(d BucketDescription, before client.MapPatch, entry client.RangeEntry, destinations []rangeDestination) (capacityMove, bool) {
 	// Every source volume must be individually healthy. An idle new node does not
 	// justify draining a healthy old one; a hot pinned disk is not hidden by the
 	// free space of other local disks.
@@ -42,19 +123,19 @@ func (r *rangeManager) planLazyCapacity(d BucketDescription, before client.MapPa
 			if candidate.node != r.node || candidate.volume.ID != client.ID(id) {
 				continue
 			}
-			_, target := lazyFreeWatermarks(candidate.capacity, candidate.free, total, free)
-			if target > candidate.free && target-candidate.free > need {
-				hot, need = id, target-candidate.free
-				targetFraction = float64(target) / float64(candidate.capacity)
+			deficit := r.capacityNeed(candidate, destinations)
+			if deficit > need {
+				hot, need = id, deficit
+				targetFraction = float64(addCapacity(candidate.free, deficit)) / float64(candidate.capacity)
 			}
 		}
 	}
 	if need == 0 {
-		return rangePlan{}, false
+		return capacityMove{}, false
 	}
 	costOf, closeCosts := r.rangeCosts(before)
 	defer closeCosts()
-	var best rangePlan
+	var best capacityMove
 	known := false
 	for _, destination := range destinations {
 		if destination.node == r.node && destination.volume.ID == client.ID(hot) {
@@ -107,8 +188,9 @@ func (r *rangeManager) planLazyCapacity(d BucketDescription, before client.MapPa
 			continue
 		}
 		plan, e := planRangeMove(before, moving, destination.node, volume.ID(destination.volume.ID), destination.volume.Class, bucketCodec(d.Policy), cost)
-		if e == nil && (!known || plan.Physical < best.Physical) {
-			best, known = plan, true
+		candidate := capacityMove{plan: plan, relief: min(need, released)}
+		if e == nil && (!known || candidate.betterThan(best)) {
+			best, known = candidate, true
 		}
 	}
 	return best, known

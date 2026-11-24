@@ -571,6 +571,20 @@ recovery and release through all members. Passive participant restart preserves
 the fence. Explicit externally fenced node exclusion uses the existing recovery
 contract and retires leases from the preceding membership epoch.
 
+## Publication progress and retries
+
+`stqr-bootctl publish` waits for transient cluster-control barriers using the same
+operation ID. It prints the reason while waiting; Ctrl+C cancels the wait.
+During native import it reports how much of `rootfs.tar` has been read. This is
+input progress, not confirmation that the new release is already published.
+Wait for publication to finish before booting the new release.
+
+A local lock in the staging directory prevents two publishers from importing the
+same prepared image simultaneously. Repeating the command while one is running
+reports that publisher instead of creating another release bucket. Failed imports
+retain their partial release bucket for inspection; the prepared archive and
+existing published release remain available.
+
 ## Troubleshooting
 
 | Symptom | What to check |
