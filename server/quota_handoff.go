@@ -7,7 +7,7 @@ import (
 )
 
 func (r *rangeManager) physicalFootprint(p rangePlan) (uint64, error) {
-	if p.ReplicaAdd || p.ReplicaRemove {
+	if p.ReplicaAdd || p.ReplicaRemove || p.ReplicaPromote || p.ReplicaRelocate {
 		return 0, nil
 	}
 	b, err := r.server.Bucket(volume.ID(p.Before.Bucket))
@@ -84,14 +84,24 @@ func (r *rangeManager) checkPhysicalActivationLocked(t *rangeTxn, transferred ui
 	if err != nil {
 		return err
 	}
-	if t.plan.Source == t.plan.Target {
+	if t.plan.Source == t.plan.Target || t.plan.ReplicaRelocate {
+		retired := volume.ID{}
+		if t.plan.ReplicaRelocate {
+			for _, loc := range t.plan.Before.Entries[0].Locations {
+				if loc.Node == t.plan.Target {
+					retired = volume.ID(loc.Volume)
+				}
+			}
+		}
 		used = 0
 		for _, v := range s.quotaVolumes() {
 			h, err := v.Open(false)
 			if err != nil {
 				return err
 			}
-			retained, err := h.StorageUsageWhere(func(k volume.Key) bool { return k.Bucket == b.ID() && !t.plan.contains(k.Object) }, true)
+			retained, err := h.StorageUsageWhere(func(k volume.Key) bool {
+				return k.Bucket == b.ID() && (retired != (volume.ID{}) && v.Identity().VolumeID != retired || !t.plan.contains(k.Object))
+			}, true)
 			h.Close()
 			if err != nil {
 				return err
@@ -117,7 +127,7 @@ func (r *rangeManager) checkPhysicalActivationLocked(t *rangeTxn, transferred ui
 }
 
 func (r *rangeManager) checkPhysicalSourceLocked(t *rangeTxn, transferred uint64) error {
-	if t.plan.ReplicaAdd || t.plan.ReplicaRemove {
+	if t.plan.ReplicaAdd || t.plan.ReplicaRemove || t.plan.ReplicaPromote || t.plan.ReplicaRelocate {
 		return nil
 	}
 	b, err := r.server.Bucket(volume.ID(t.plan.Before.Bucket))

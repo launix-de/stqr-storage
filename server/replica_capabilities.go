@@ -20,7 +20,7 @@ func replicaPoliciesRequired(descriptions []BucketDescription) bool {
 	return false
 }
 func supportsReplicaPolicies(view *systemView, caps uint64) bool {
-	return view == nil || view.manifest.ReplicationProtocol == 0 && !replicaPoliciesRequired(view.descriptions) || caps&client.CapabilityReplication != 0
+	return view == nil || (view.manifest.ReplicationProtocol == 0 && !replicaPoliciesRequired(view.descriptions)) || (caps&client.CapabilityReplication != 0 && (view.manifest.ReplicationProtocol < 2 || caps&client.CapabilityReplicaTopology != 0))
 }
 func (s *Server) requireReplicaCapabilities(descriptions []BucketDescription, nodes []client.ID) error {
 	view := s.currentSystem.Load()
@@ -34,7 +34,7 @@ func (s *Server) requireReplicaCapabilities(descriptions []BucketDescription, no
 			continue
 		}
 		o := s.peerStats[node]
-		if o == nil || !o.online || o.connection.Capabilities&client.CapabilityReplication == 0 {
+		if o == nil || !o.online || o.connection.Capabilities&(client.CapabilityReplication|client.CapabilityReplicaTopology) != client.CapabilityReplication|client.CapabilityReplicaTopology {
 			return fail(503, "required member lacks replication protocol support")
 		}
 	}
@@ -49,10 +49,10 @@ func (s *Server) preserveReplicaProtocol(bundle *systemBundle, descriptions []Bu
 	if err := decodeControlRecord(bundle.Objects[bundle.Root], &m); err != nil {
 		return err
 	}
-	if m.ReplicationProtocol == 1 {
+	if m.ReplicationProtocol == 2 {
 		return nil
 	}
-	m.ReplicationProtocol = 1
+	m.ReplicationProtocol = 2
 	raw, err := json.Marshal(m)
 	if err == nil {
 		bundle.Root = bundle.add(raw)

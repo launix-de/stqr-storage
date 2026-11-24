@@ -47,7 +47,7 @@ type quotaRangeImage struct {
 func (r *rangeManager) publishQuotaRangesLocked() {
 	image := &quotaRangeImage{sequence: r.journal.sequence, blocked: make(map[client.ID]bool), held: make(map[client.ID]uint64)}
 	for _, t := range r.txns {
-		if t.plan.ReplicaAdd || t.plan.ReplicaRemove {
+		if t.plan.ReplicaAdd || t.plan.ReplicaRemove || t.plan.ReplicaRelocate {
 			continue
 		}
 		if t.plan.Source == r.node && t.plan.Source != t.plan.Target && t.sourceReady.RecordSequence != 0 && t.decision == nil && !t.aborted && !t.forceRetired {

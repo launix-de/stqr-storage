@@ -73,13 +73,44 @@ func (b *Bucket) authorize(p principal, permission BucketPermissions) (BucketDes
 }
 func (b *Bucket) allVolumes() []*volume.Volume {
 	p := b.storageDescription().Policy
-	return b.server.placementVolumesAt(p.PlacementGroup, p.PlacementMaskVersion)
+	return b.withPinnedVolumes(b.server.placementVolumesAt(p.PlacementGroup, p.PlacementMaskVersion))
+}
+
+// A committed handoff can pin a desired-mask destination before every group
+// has completed the PG transition. Reads and retries follow that authority,
+// rather than losing the copy behind the still-effective old PG filter.
+func (b *Bucket) withPinnedVolumes(all []*volume.Volume) []*volume.Volume {
+	s := b.server
+	image := s.placement.Load()
+	if s.controller == nil || s.control == nil || image == nil {
+		return all
+	}
+	ids := image.pins[placementNodeKey{client.ID(b.ID()), s.control.ledger.node}]
+	if len(ids) == 0 {
+		return all
+	}
+	seen := make(map[volume.ID]bool, len(all))
+	for _, store := range all {
+		seen[store.Identity().VolumeID] = true
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, id := range ids {
+		if seen[volume.ID(id)] {
+			continue
+		}
+		managed := s.volumes[id.String()]
+		if managed != nil && !managed.config.System && !managed.config.RecoveryOnly {
+			all = append(all, managed.store)
+		}
+	}
+	return all
 }
 func (b *Bucket) localVolumes() []*volume.Volume { return b.volumesFor(b.Describe()) }
 func (b *Bucket) volumesFor(d BucketDescription) []*volume.Volume {
 	all := b.server.placementVolumesAt(d.Policy.PlacementGroup, d.Policy.PlacementMaskVersion)
 	if len(d.LocalVolumes) == 0 {
-		return all
+		return b.withPinnedVolumes(all)
 	}
 	allowed := map[string]bool{}
 	for _, id := range d.LocalVolumes {
@@ -91,7 +122,7 @@ func (b *Bucket) volumesFor(d BucketDescription) []*volume.Volume {
 			out = append(out, v)
 		}
 	}
-	return out
+	return b.withPinnedVolumes(out)
 }
 func bucketClass(policy BucketPolicy) volume.Class {
 	switch policy.StorageStrategy {

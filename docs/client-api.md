@@ -164,8 +164,9 @@ Protocol-peer tests additionally cover request multiplexing, cancellation and a
 committed mutation whose connection fails before the reply. Multinode routing, logical/physical absolute quotas and volume-backed guaranteed
 reservations are implemented, including migration and restart. Synchronous
 HDD/SSD replication uses ALL confirmation and accounts physical usage on every
-required copy. RAM replication and general relocation of existing replica sets
-remain unsupported; see [replication limits](replication.md).
+required copy. PG mask changes and drains relocate existing disk replica sets
+through durable handoffs. RAM replication and forced reconciliation after losing
+a participant remain unsupported; see [replication limits](replication.md).
 
 ## Native readonly and overlay mounts
 

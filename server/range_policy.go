@@ -205,6 +205,11 @@ func (r *rangeManager) policyPlacementCost(before client.MapPatch, moving client
 			return 0, 0, err
 		}
 	}
+	abortCost, err := r.replicaAbortCost(before, moving)
+	if err != nil {
+		return 0, 0, err
+	}
+	cost = addCapacity(cost, abortCost)
 	if target == r.node {
 		r.server.mu.RLock()
 		managed := r.server.volumes[destination.String()]

@@ -1053,6 +1053,18 @@ Der Ablauf gilt für alle v1-Strategien: HDD/SSD flushen Daten und Commitbelege 
 4. Jede Replica veröffentlicht nach lokal wirksamem COMMIT ihre neue Version atomar, bevor sie COMMITTED meldet. Bis dahin bleiben Reads auf ihrer vorherigen committed Version möglich; PREPARE oder das Warten auf andere Replikate errichtet keine Read-Sperre. Replica-Reads benötigen keine Primary-Validierung oder globale Read-Freigabebarriere und dürfen keinen nur vorbereiteten Stand bedienen. Erst nach ALL-COMMITTED publiziert der Primary den Index-/Versionsstand und liefert den Q-Erfolg; zu diesem Zeitpunkt muss die bestätigte Version auf allen erforderlichen Replikaten lesbar sein. Eine spätere geordnete Mutation darf sie ersetzen. Bereits laufende Reads dürfen ihren zuvor aufgenommenen konsistenten Snapshot beenden.
 5. Nach Crash werden vorbereitete/committete Sequenzen und Originalantworten abgeglichen. Unbestätigte Operationen dürfen ein unknown Outcome haben; bestätigte niemals verschwinden oder doppelt wirken. Fehlt eine erforderliche Replica, wartet der Abschluss bis Reconnect oder explizitem administrativem Membership-/Policywechsel. Ein solcher Wechsel kann keine verlorenen Bytes rekonstruieren.
 
+#### 11.1.2 Umplatzierung bestehender Disk-Replikatgruppen
+
+Implementiert sind PG-Node-/Volume-Maskenwechsel und explizites Node-/Volume-Draining innerhalb derselben Storage-Strategie. Zulässige Kopien bleiben erhalten. Ein Volume-Wechsel auf derselben Node verwendet COPY/CATCH_UP, Source-Fencing und einen dauerhaften Cutover; anschließend werden nur die nicht mehr benötigten Daten und Retry-Belege des alten Volumes freigegeben. Bereits bestätigte konkrete Volume-Pins bleiben während gemischter wirksamer PG-Versionen lesbar, auch wenn die alte effektive PG-Maske das neue Ziel noch nicht enthält.
+
+Ein Node-Ersatz baut zunächst eine zusätzliche vollständige Kopie auf. Bis zur separaten, online bestätigten Entfernung der alten Kopie kann das erforderliche Set N+1 Kopien enthalten; ALL gilt für dieses gesamte Zwischen-Set. Deshalb werden zusätzlicher physischer Platz und bei begrenzter physischer Quota entsprechende Credits benötigt. Fehlende Kapazität berechtigt nicht zur vorherigen Verringerung der Redundanz.
+
+Soll der Primary wechseln, fencet der lebende bisherige Primary die Range dauerhaft und übergibt die Rolle an eine bereits committed Replica. READY/Commit binden dieselbe Range und erhöhen ihre Owner-Epoch; logische Quota-Credits wechseln genau einmal den Primary, physische Credits bleiben auf den unveränderten Kopien. Bestätigte Versionen und ursprüngliche Retry-Antworten bleiben erhalten. Terminale Fehlantworten werden vor READY ebenfalls vom bisherigen Primary übernommen, auch wenn ein altes Replikat den Prepare ohne eigenen Beleg abgelehnt hatte; ein Primary-Wechsel darf einen früher abgebrochenen Request nicht nachträglich ausführen. Quelle und Ziel können vor/nach der Entscheidung neu starten und dieselbe Übergabe wiederaufnehmen. Eine Offline-Kopie wird weder durch einen Timeout entfernt noch zur neuen Schreibautorität erklärt.
+
+Beim expliziten Austritt einer EVERYWHERE-Node kann deren Kopie nach sicherer Übergabe entfernt werden. Bis zum ALL-bestätigten Membershipwechsel erzwingen Writes weiterhin die bisherige Kopienzahl und warten deshalb; erst die committed kleinere Membership reduziert den Bedarf. Ein bloßer Volume-Drain verändert EVERYWHERE dagegen nicht und benötigt ein anderes zugelassenes Volume derselben Node oder eine explizite Policy-/Membershipänderung.
+
+Die neuen Übergaben benötigen Capability **16384**, Plan-Schema 5 (`replica_promote`) beziehungsweise 6 (`replica_relocate`) und den dauerhaft erhaltenen Replikationsprotokoll-Marker 2 im System-Manifest. Marker 1 bleibt lesbar; Aktivierung von Marker 2 benötigt Unterstützung aller Mitglieder und verhindert anschließend den Beitritt alter Peers auch nach Löschung des letzten replizierten Buckets. Kapazitäts-/lastgetriebenes Rebalancing bestehender Mehrfachgruppen, Storage-Strategiewechsel und FORCE-Reconciliation verlorener Teilnehmer bleiben eigener Ausbau.
+
 ### 11.2 Erasure Coding (Roadmap)
 
 - Policy z. B. `EC(k=4,m=2)`; Range-Group ordnet `DATA_i`/`PARITY_i` zu konkreten Nodes/Volumes zu.
@@ -1428,8 +1440,9 @@ Nur authentifizierte NODE-Rolle, gebunden an Membership-Epoch. In der Tabelle be
 | 0x1072 | QUOTA_PHYSICAL / Q | `JSON(GlobalClaim)` => `JSON{Node,Volumes:[{ID,Class,Free,Active,Usage:[{Bucket,Logical,Physical,Objects}]}]}`; ausschließlich für den eigenen identischen ALL-Slot, Kandidaten für physische Zusagen |
 | 0x1073 | QUOTA_PREVIEW / Q | `bucket:ID` => `JSON{volume_id:remaining_own_physical,...}`; nur authentisierte Cluster-Mitglieder, administrative Vorschau, kein Admission-Beleg |
 | 0x1074 | REPLICA_MUTATION_CHUNK / Q | `header:Blob(ReplicaMutationHeaderV1),offset:u64,data:Blob` => leer; strikt fortlaufend, höchstens 1 MiB je Chunk |
-| 0x1075 | REPLICA_REMOVE_READY / Q | `schema:u16=1,plan:Digest` => `proof:Proof`; dauerhafte Bereitschaft für einen reservierten Replica-Remove ohne offenen Datencommit |
-| 0x1076 | REPLICA_REMOVE_CLEANUP / Q | `schema:u16=1,plan:Digest` => leer; entfernt nach verbindlichem Replica-Remove nur die tatsächlich nicht mehr lokal erforderlichen Objekt-/Retry-Kopien |
+| 0x1075 | REPLICA_TOPOLOGY_READY / Q | `schema:u16=1,plan:Digest` => `proof:Proof`; bei Plan-Schema 5 zusätzlich `logical_used:u64`; dauerhafte Bereitschaft für Replica-Remove oder Primary-Rollenübergabe ohne offenen Datencommit, an den reservierten Plan gebunden |
+| 0x1076 | REPLICA_TOPOLOGY_CLEANUP / Q | `schema:u16=1,plan:Digest` => leer; entfernt nach verbindlichem Replica-Remove oder Volume-Wechsel nur die auf dem alten Volume tatsächlich nicht mehr erforderlichen Objekt-/Retry-Kopien, vor Target-DONE |
+| 0x1077 | REPLICA_ABORT_HISTORY / Q, Capability 16384 | `schema:u16=1,plan:Digest,count:V,(RequestRecord,binding_epoch:u64,binding_sequence:u64,set_hash:Digest,status:u16,previous_version:u64,previous_length:u64)*`; höchstens 64 Records, nur terminale Abbrüche der reservierten Range vom bisherigen Primary an das Ziel; dauerhafte Übernahme vor READY, keine Payload-/COMMIT-Übernahme |
 | 0x1071 | VOLUME_RECOVERY_READY / Q | `claim:Blob(ControlClaim),image:Digest` => `ready:Proof`; ausschließlich vom im Claim gebundenen Teilnehmer an das Übernahmeziel, nur für die identische lokal persistierte READY-Entscheidung |
 
 
@@ -1517,6 +1530,9 @@ RangeHandoffPlan = schema:u16=2,before:Blob(MapPatch),after:Blob(MapPatch),
                    moving_prefix:u16,compression:u8,physical_reserve:u64,attempt:ID
 # Plan-Schema 3 ergänzt replica_add:Bool=true; Schema 4 replica_remove:Bool=true.
 # Beide verändern die ganze Parent-Range und erhalten deren Primary-Location.
+# Schema 5 ergänzt replica_promote:Bool=true (nur Rollenwechsel).
+# Schema 6 ergänzt replica_relocate:Bool=true (ein Volume auf derselben Node).
+# Schema 3..6 sind exklusiv; 5/6 benötigen Capability 16384 und Protokoll-Marker 2.
 RangeHandoffCommit = schema:u16=2,plan:Digest,snapshot:Digest,
                      source_ready:Proof,target_ready:Proof,logical_used:u64
 # Schema 3 ergänzt quota_used:u64 für physische Absolute-Credits.

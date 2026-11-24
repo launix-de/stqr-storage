@@ -3,7 +3,6 @@ package server
 
 import (
 	"context"
-	"crypto/sha256"
 	"fmt"
 	"io"
 	"os"
@@ -46,26 +45,46 @@ func (r *rangeManager) move(ctx context.Context, p rangePlan) (retErr error) {
 	committed := t.decision != nil
 	fenced := t.fenced
 	r.mu.Unlock()
-	if !committed && p.ReplicaRemove {
-		stage = "replica removal agreement"
+	if !committed && (p.ReplicaRemove || p.ReplicaPromote) {
+		stage = "replica topology agreement"
 		if err := r.fence(id); err != nil {
 			return err
 		}
-		digest := sha256.Sum256(mustRangeWire(p))
+		used := uint64(0)
+		if p.ReplicaPromote {
+			for _, store := range r.sourceVolumes(p) {
+				n, err := r.replicaLogicalUsage(p, store)
+				if err != nil {
+					return err
+				}
+				used = addCapacity(used, n)
+			}
+		}
+		if err := r.sendReplicaAbortHistory(ctx, p); err != nil {
+			return err
+		}
+		digest := replicaTopologyDigest(p, used)
 		e := rangeMessage(peerReplicaTopologyReady, id)
 		body, err := r.call(ctx, p.Target, peerReplicaTopologyReady, e.B)
 		if err != nil {
 			return err
 		}
+		if p.ReplicaPromote {
+			d := client.Decoder{B: body}
+			body = d.Take(56)
+			if d.U64() != used || d.Done() != nil {
+				return errControlConflict
+			}
+		}
 		target, err := client.DecodeProof(body)
 		if err != nil {
 			return err
 		}
-		source, err := r.ready(id, digest, true, 0, 0)
+		source, err := r.ready(id, digest, true, used, 0)
 		if err != nil {
 			return err
 		}
-		if _, err = r.commit(rangeCommit{ID: id, Digest: digest, Source: source, Target: target}); err != nil {
+		if _, err = r.commit(rangeCommit{ID: id, Digest: digest, LogicalUsed: used, Source: source, Target: target}); err != nil {
 			return err
 		}
 		committed = true
@@ -95,6 +114,10 @@ func (r *rangeManager) move(ctx context.Context, p rangePlan) (retErr error) {
 		}
 		stage = "final local destination codec"
 		if err := r.reencodeLocalDestination(ctx, p); err != nil {
+			return err
+		}
+		stage = "abort history"
+		if err := r.sendReplicaAbortHistory(ctx, p); err != nil {
 			return err
 		}
 		stage = "final snapshot"
@@ -132,7 +155,7 @@ func (r *rangeManager) move(ctx context.Context, p rangePlan) (retErr error) {
 		return client.ErrProtocol
 	}
 	stage = "source cleanup"
-	if p.ReplicaAdd || p.ReplicaRemove {
+	if p.ReplicaAdd || p.ReplicaRemove || p.ReplicaPromote || p.ReplicaRelocate {
 		for _, loc := range p.Before.Entries[0].Locations {
 			if loc.Node != p.Source && loc.Node != p.Target {
 				if err := r.sendHistory(ctx, loc.Node, [32]byte{}); err != nil {
@@ -144,6 +167,12 @@ func (r *rangeManager) move(ctx context.Context, p rangePlan) (retErr error) {
 	if err := r.cleanup(ctx, p); err != nil {
 		return err
 	}
+	if p.ReplicaRemove || p.ReplicaRelocate {
+		e := rangeMessage(peerReplicaTopologyCleanup, id)
+		if _, err = r.call(ctx, p.Target, peerReplicaTopologyCleanup, e.B); err != nil {
+			return err
+		}
+	}
 	stage = "target DONE"
 	e := rangeMessage(peerRangeDone, id)
 	body, err = r.call(ctx, p.Target, peerRangeDone, e.B)
@@ -154,12 +183,7 @@ func (r *rangeManager) move(ctx context.Context, p rangePlan) (retErr error) {
 	if err != nil || targetDone.Node != p.Target {
 		return client.ErrProtocol
 	}
-	if p.ReplicaRemove {
-		e := rangeMessage(peerReplicaTopologyCleanup, id)
-		if _, err = r.call(ctx, p.Target, peerReplicaTopologyCleanup, e.B); err != nil {
-			return err
-		}
-	}
+
 	stage = "source DONE"
 	if _, err := r.done(id, &targetDone); err != nil {
 		return err
@@ -227,7 +251,7 @@ func (r *rangeManager) announce(p rangePlan, c rangeCommit) {
 }
 
 func (r *rangeManager) cleanup(ctx context.Context, p rangePlan) error {
-	if p.ReplicaAdd || p.ReplicaRemove {
+	if p.ReplicaAdd || p.ReplicaRemove || p.ReplicaPromote || p.ReplicaRelocate {
 		return nil
 	}
 	for _, v := range r.sourceVolumes(p) {

@@ -110,6 +110,50 @@ func TestReplicaReadyIsDurableEvenWithAcceptedOption(t *testing.T) {
 	}
 }
 
+func TestReplicaAbortHistoryRestoreDurabilityAndConflicts(t *testing.T) {
+	disk := newCrash(8 << 20)
+	v, err := Format(disk, FormatOptions{Class: SSD})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := testPut(v, testKey(2), []byte("accepted"), Options{Accepted: true}); err != nil {
+		t.Fatal(err)
+	}
+	record := ReplicaRecord{State: ReplicaAborted, AbortStatus: 507, Binding: ReplicaBinding{Epoch: 1, Sequence: 4, SetHash: [32]byte{1}}, Request: RequestRecord{ID: testID(77), Key: testKey(1), Fingerprint: [32]byte{5}, Result: Result{Info: Info{Version: 1, Length: 8}}}}
+	h, _ := v.Open(true)
+	if err := h.RestoreReplicaAbort(record, Options{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.RestoreReplicaAbort(record, Options{}); err != nil {
+		t.Fatal("idempotent import", err)
+	}
+	conflict := record
+	conflict.Request.Fingerprint[0]++
+	if err := h.RestoreReplicaAbort(conflict, Options{}); !errors.Is(err, ErrRequestID) {
+		t.Fatal("changed failure fingerprint accepted", err)
+	}
+	h.Close()
+	recovered, err := Open(disk.crash(), OpenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h, _ = recovered.Open(true)
+	found, ok, err := h.ReplicaStatus(record.Request.ID)
+	if err != nil || !ok || found.AbortStatus != 507 || found.State != ReplicaAborted {
+		t.Fatalf("failure import was not durable: %+v %v", found, err)
+	}
+	if err := h.ForgetRequest(record.Request.ID); err != nil {
+		t.Fatal("terminal failure reclamation", err)
+	}
+	if _, ok, err := h.ReplicaStatus(record.Request.ID); err != nil || ok {
+		t.Fatal("failed outcome was not reclaimed", err)
+	}
+	h.Close()
+	if err := recovered.Scrub(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestReplicaAbortReleasesStorageAndFencesBinding(t *testing.T) {
 	v, _ := memoryVolume(t, 4<<20)
 	k, id := testKey(1), testID(7)

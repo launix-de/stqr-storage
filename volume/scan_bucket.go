@@ -86,3 +86,35 @@ func (h *Handle) ScanRequestRecords(after *ID, limit int) ([]RequestRecord, erro
 		return out, err
 	})
 }
+
+func (h *Handle) ScanReplicaRecords(after *ID, limit int) ([]ReplicaRecord, error) {
+	return withHandle(h, false, func(v *Volume) ([]ReplicaRecord, error) {
+		if limit < 1 || limit > 4096 {
+			return nil, ErrRange
+		}
+		lower, upper := indexKey{2}, indexKey{3}
+		if after != nil {
+			lower = replicaKey(*after)
+		}
+		var out []ReplicaRecord
+		stop := errors.New("replica scan page complete")
+		err := v.walkIndexBounds(lower, upper, func(x indexEntry) error {
+			if after != nil && !lessKey(lower, x.Key) {
+				return nil
+			}
+			record, err := v.replicaAt(x.Value)
+			if err != nil {
+				return err
+			}
+			out = append(out, record)
+			if len(out) == limit {
+				return stop
+			}
+			return nil
+		})
+		if errors.Is(err, stop) {
+			err = nil
+		}
+		return out, err
+	})
+}

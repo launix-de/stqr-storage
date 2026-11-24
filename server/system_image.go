@@ -174,7 +174,7 @@ func (s *Server) captureSystemImage(membership client.Membership, sequence, gene
 		manifest.QuotaProtocol = 1
 	}
 	if replicaPoliciesRequired(s.bucketSnapshots()) {
-		manifest.ReplicationProtocol = 1
+		manifest.ReplicationProtocol = max(manifest.ReplicationProtocol, 2)
 	}
 	if len(reserves) > 0 {
 		manifest.QuotaReserves = reserves[0]
@@ -414,7 +414,7 @@ func decodeSystemView(root volume.ObjectID, load func(volume.ObjectID) ([]byte, 
 	if err := validateRecoveryOrigins(view); err != nil {
 		return nil, err
 	}
-	if m.ReplicationProtocol > 1 || replicaPoliciesRequired(view.descriptions) && m.ReplicationProtocol != 1 {
+	if m.ReplicationProtocol > 2 || replicaPoliciesRequired(view.descriptions) && m.ReplicationProtocol == 0 {
 		return nil, volume.ErrCorrupt
 	}
 	if err := validatePhysicalReservations(view); err != nil {

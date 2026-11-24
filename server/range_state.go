@@ -63,7 +63,9 @@ type rangeTxn struct {
 	cancellationProof                                             client.Proof
 	abortObjectCursor                                             *volume.ObjectID
 	abortRequestCursor                                            *volume.ID
+	abortReplicaCursor                                            *volume.ID
 	abortObjectsDone, abortRequestsDone                           bool
+	abortReplicasDone                                             bool
 	snapshot                                                      *rangeSnapshot
 	plan                                                          rangePlan
 	lease                                                         sync.RWMutex
@@ -370,6 +372,9 @@ func (r *rangeManager) reserve(p rangePlan, sourceBoot ...client.ID) error {
 	if p.Source != r.node && p.Target != r.node {
 		return errControlConflict
 	}
+	if (p.ReplicaPromote || p.ReplicaRelocate) && r.server.currentSystem.Load().manifest.ReplicationProtocol < 2 {
+		return errControlConflict
+	}
 	current, known := r.server.routingPatch(volume.ID(p.Before.Bucket), volume.ObjectID(p.Before.Begin))
 	if !known || !reflect.DeepEqual(current.Entries, p.Before.Entries) {
 		return errControlConflict
@@ -390,7 +395,7 @@ func (r *rangeManager) reserve(p rangePlan, sourceBoot ...client.ID) error {
 	if p.Target == r.node {
 		r.server.mu.RLock()
 		managed := r.server.volumes[p.Volume.String()]
-		active := managed != nil && managed.config.State == "active" && !managed.config.RecoveryOnly && (!r.server.cfg.Node.Draining || p.Source == p.Target)
+		active := managed != nil && (managed.config.State == "active" || p.ReplicaRemove && managed.config.State == "draining") && !managed.config.RecoveryOnly && (!r.server.cfg.Node.Draining || p.Source == p.Target || p.ReplicaRemove)
 		r.server.mu.RUnlock()
 		if !active {
 			return volume.ErrFull
@@ -484,7 +489,11 @@ func (r *rangeManager) destination(p rangePlan) (*volume.Volume, error) {
 	if p.Compression != bucketCodec(policy) {
 		return nil, errControlConflict
 	}
-	if !bucketClass(policy).Allows(managed.store.Identity().Class) || !s.placementGroups.Load().allowsVersion(policy.PlacementGroup, policy.PlacementMaskVersion, node, p.Volume.String()) {
+	placementPolicy := policy
+	if !p.ReplicaRemove && d.DesiredPolicy != nil && (p.ReplicaAdd || p.ReplicaRelocate || p.ReplicaPromote) {
+		placementPolicy = *d.DesiredPolicy
+	}
+	if !bucketClass(placementPolicy).Allows(managed.store.Identity().Class) || !s.placementGroups.Load().allowsVersion(placementPolicy.PlacementGroup, placementPolicy.PlacementMaskVersion, node, p.Volume.String()) {
 		return nil, volume.ErrFull
 	}
 	return managed.store, nil
@@ -590,7 +599,7 @@ func (r *rangeManager) commitWithForce(c rangeCommit, force *controlClaim) (proo
 	defer r.server.opMu.Unlock()
 	r.mu.Lock()
 	activation := r.txns[c.ID]
-	needsActivation := activation != nil && activation.plan.Target == r.node && activation.decision == nil && !activation.plan.ReplicaRemove
+	needsActivation := activation != nil && activation.plan.Target == r.node && activation.decision == nil && !activation.plan.ReplicaRemove && !activation.plan.ReplicaPromote
 	needsSource := activation != nil && activation.plan.Source == r.node && activation.decision == nil
 	r.mu.Unlock()
 	if needsSource {
@@ -741,7 +750,7 @@ func (r *rangeManager) incoming(bucket volume.ID, object volume.ObjectID) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	for _, t := range r.txns {
-		if !t.plan.ReplicaRemove && r.active(t) && t.plan.Target == r.node && t.plan.Source != r.node && t.decision == nil && volume.ID(t.plan.Before.Bucket) == bucket && t.plan.contains(object) {
+		if !t.plan.ReplicaRemove && !t.plan.ReplicaPromote && !t.plan.ReplicaRelocate && r.active(t) && t.plan.Target == r.node && t.plan.Source != r.node && t.decision == nil && volume.ID(t.plan.Before.Bucket) == bucket && t.plan.contains(object) {
 			return true
 		}
 	}
