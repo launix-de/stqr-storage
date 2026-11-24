@@ -192,9 +192,10 @@ downloads spool a consistent snapshot (at most 1 GiB per request) before streami
 outside volume locks. A learned single-node RAM runtime is retained across client
 reconnects; requests from a lost runtime return 410.
 
-Multinode data replication and nonempty RAM/disk conversions remain unsupported
-and return 501. Logical/physical absolute quotas and guaranteed reservations are
-implemented for the current single-copy data path.
+HDD/SSD data replication uses durable ALL confirmation; see [replication](replication.md)
+for recovery, placement and remaining limits. Multi-copy RAM writes and nonempty
+RAM/disk conversions remain unsupported and return 501. Logical/physical absolute
+quotas and guaranteed reservations are implemented, including disk replica accounting.
 There is no fabricated redundancy/quota success or implicit user bucket creation.
 
 The working tree remains uncommitted until the requested UI/volume-management review.
@@ -862,10 +863,11 @@ must already be effective before release. Failed/interrupted additions retain th
 volume and show **PG-Listen fortsetzen**; retries do not create another volume.
 These operations can also target another node through the existing node wrapper.
 
-Current implementation limits still apply: multiple synchronous data replicas,
-EC, active read caches and nonempty disk/RAM conversion
-are not implemented. Moving these settings into a PG does not enable them;
-unsupported replica/conversion requests fail explicitly.
+The PG editor supports HDD/SSD copy counts and EVERYWHERE with ALL confirmation.
+It preserves the selected count across other policy edits and limits RAM to a
+single copy in count mode. EC, active read caches, RAM replication and nonempty
+disk/RAM conversion remain unavailable. General relocation/replacement of an
+existing multi-copy set also remains pending; see [replication](replication.md).
 
 Validation covers shared policy changes with individual quotas and payloads,
 legacy migration/restart, persistent offline intents, two-node convergence,

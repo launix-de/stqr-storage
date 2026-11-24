@@ -484,12 +484,15 @@ func TestDaemonPrimaryRestartAbortsOrphanedPrepareWithoutLosingAcknowledgedData(
 
 func TestDaemonReplicaSetDoesNotWaitForUnrelatedOfflineThirdMember(t *testing.T) {
 	source, target := startAutomaticDaemonPair(t, false)
+	source.node.mu.RLock()
 	cfg := copyConfig(source.node.cfg)
+	source.node.mu.RUnlock()
+	seed := PeerConfig{NodeID: cfg.Node.ID, URL: cfg.Node.Advertise}
 	cfg.Node.ID = newID()
 	cfg.Node.Name = "metadata-only-third"
 	cfg.Node.DataDir = "."
 	cfg.Volumes = nil
-	cfg.Peers = []PeerConfig{{NodeID: source.node.cfg.Node.ID, URL: source.node.cfg.Node.Advertise}}
+	cfg.Peers = []PeerConfig{seed}
 	cfg.ControlVersion = 0
 	cfg.RangeVersion = 0
 	cfg.QuotaVersion = 0
