@@ -15,6 +15,11 @@ type RequestRecord struct {
 }
 
 func (v *Volume) restoreLocked(k Key, info Info, source ExtentSource, opts Options) error {
+	if busy, err := v.pending(k); err != nil {
+		return err
+	} else if busy {
+		return ErrBusy
+	}
 	if info.Version == 0 || !info.Compression.valid() || info.Deleted && info.Length != 0 || opts.Compression != nil && *opts.Compression != info.Compression {
 		return ErrRange
 	}

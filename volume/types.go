@@ -15,7 +15,7 @@ const (
 	PageSize        = 4096
 	BlockSize       = 1 << 20
 	MinVolumeSize   = 256 << 10
-	FormatVersion   = 3
+	FormatVersion   = 4
 	pageHeaderSize  = 64
 	pagePayload     = PageSize - pageHeaderSize
 	superblockBytes = 2 * PageSize
@@ -143,6 +143,7 @@ type Options struct {
 	InFlightAllowance               uint64 // trusted physical allowance; never consumes bucket guarantees
 	restoreSameVersion              bool
 	restoreSegmented                bool
+	prepare                         *ReplicaBinding
 }
 
 type Extent struct {

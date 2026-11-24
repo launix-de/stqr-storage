@@ -268,7 +268,7 @@ func (s *Server) executeObjectSubscription(m client.Message, ws *wsSession, p pr
 		return nil, 0, err
 	}
 	defer h.Close()
-	if err = s.checkObjectBinding(ctx, key.Bucket, key.Object); err != nil {
+	if err = s.checkObjectBinding(ctx, key.Bucket, key.Object, true); err != nil {
 		return nil, 0, err
 	}
 	info, err := h.Stat(key)

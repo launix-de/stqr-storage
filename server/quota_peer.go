@@ -221,7 +221,11 @@ func (s *Server) fulfillQuotaDemand(h quotaDemand) {
 		s.opMu.Unlock()
 		return
 	}
-	if err := s.checkObjectOwner(h.bucket, h.object); err != nil && !h.activation {
+	physicalReplica := false
+	if bucket, err := s.Bucket(h.bucket); err == nil {
+		physicalReplica = quotaPolicy(bucket.storageDescription()).Limits.Accounting == "physical"
+	}
+	if err := s.checkObjectOwner(h.bucket, h.object, physicalReplica); err != nil && !h.activation {
 		s.opMu.Unlock()
 		q.fulfilled(h.bucket, h.object)
 		return

@@ -428,7 +428,7 @@ gesonderte Erweiterungen; solche Policies werden weiterhin mit 501 abgelehnt.
 
 - Zentrale PG-Option **`compression`**: `raw`, `gzip`, `lz4`, `xz`; Standard `raw`. Das Volumeformat trägt das tatsächlich gewählte Verfahren je Objektversion, zusätzlich Block-/Extent-Metadaten zur unabhängigen Dekodierung (§9.8). Die native API liest/schreibt immer logische unkomprimierte Bytes.
 - Änderungen des Verfahrens sind Storage-Policy-Änderungen für NEXT. Bei Migration werden Quellbytes dekodiert und gemäß Zielpolicy neu kodiert; `raw` bedeutet dabei gegebenenfalls Dekompression. Erst danach ist die Zielpolicy erfüllt. Reine Re-Kompression darf Objektversion, logische Länge, APPEND-Offsets oder Request-ID-Ergebnisse nicht ändern.
-- **`placement_mode=count`** nutzt die konfigurierte Replikationsanzahl. **`placement_mode=everywhere`** bedeutet eine vollständige Kopie auf **jeder** aktiven Mitgliedsnode, einschließlich datenhaltender Nodes ohne sonstiges Bucket-Placement. Dies ist die explizite Darstellung von „replication=unendlich“, kein numerischer Überlauf/Sentinel in replicas.
+- **`placement_mode=count`** nutzt die konfigurierte Replikationsanzahl. **`placement_mode=everywhere`** bedeutet eine vollständige Kopie auf **jeder durch die PG-Knotenmaske zugelassenen Mitgliedsnode**, einschließlich Nodes ohne bisheriges Bucket-Placement. Offline-Nodes bleiben erforderlich, solange ihre Mitgliedschaft bzw. die wirksame PG-Zuweisung besteht; ein Timeout verkleinert das Set nicht. Auf jeder solchen Node muss ein gemäß PG-Volumemaske geeignetes Volume bereitstehen. Die System-PG umfasst alle Mitglieder. Dies ist die explizite Darstellung von „replication=unendlich“, kein numerischer Überlauf/Sentinel in replicas.
 - EVERYWHERE behält einen Primary zur Mutationsordnung; alle Nodes sind lesefähige Replikate. ALL-ACK umfasst alle aktiven erforderlichen Mitglieder. Join baut die neue Kopie vor ihrer verbindlichen Aktivierung auf, Leave entfernt sie erst mit dem Membership-Wechsel. Temporärer Ausfall entfernt sie nicht. Ein Join muss auf jeder neuen Node genügend passenden physischen Disk-/RAM-Platz reservieren oder wird mit 507 abgelehnt.
 - EVERYWHERE ist mit HDD, SSD und RAM kombinierbar; CACHE bleibt reserviert für später. Jede Node braucht die passende Speicherklasse (HDD darf SSD nutzen). Das globale physische Accounting zählt alle Kopien; die logische Bucket-Nutzung weiterhin nur einmal. EC und EVERYWHERE werden nicht kombiniert.
 
@@ -1312,11 +1312,11 @@ Nur authentifizierte NODE-Rolle, gebunden an Membership-Epoch. In der Tabelle be
 | 0x1019 | FINALIZE_READY / P | `round:RoundID,decision:Decision,proof:Proof` |
 | 0x101a | FINALIZE_COMMIT / P | `round:RoundID,decision:Decision,certificate:Certificate` |
 | 0x101b | FINALIZE_APPLIED / P | `round:RoundID,decision:Decision,proof:Proof` |
-| 0x101c | REPLICA_PREPARE / P | `membership:u64,range:RangeRef,owner_epoch:u64,sequence:u64,mutation:Mutation` |
-| 0x101d | REPLICA_READY / P | `operation:ID,sequence:u64,status:V,proof:Proof` |
-| 0x101e | REPLICA_COMMIT / P | `operation:ID,sequence:u64,certificate:Certificate` |
-| 0x101f | REPLICA_COMMITTED / P | `operation:ID,sequence:u64,digest:Digest` |
-| 0x1020 | REPLICA_ABORT / P | `operation:ID,sequence:u64` |
+| 0x101c | REPLICA_PREPARE / Q | `header:Blob(ReplicaMutationHeaderV1)` => `already_prepared:u8`; reserviert einen begrenzten Payload-Transfer oder bestätigt denselben persistierten Request |
+| 0x101d | REPLICA_READY / Q | `header:Blob(ReplicaMutationHeaderV1)` => leer nach vollständiger Prüfung und dauerhaftem unsichtbarem Prepare; Primär-Fingerprint und Originalergebnis müssen exakt stimmen |
+| 0x101e | REPLICA_COMMIT / Q | `header:Blob(ReplicaMutationHeaderV1)` => leer erst nach dauerhafter Entscheidung und lokaler atomarer Veröffentlichung; ausschließlich gebundener Primary |
+| 0x101f | REPLICA_COMMITTED / Q | `header:Blob(ReplicaMutationHeaderV1)` => `state:u8`; persistierter Zustand des identischen gebundenen Requests, kein neuer Commit |
+| 0x1020 | REPLICA_ABORT / Q | `header:Blob(ReplicaMutationHeaderV1)` => leer; nur vor Commit, behält Abort-Beleg gegen verspätetes Prepare |
 | 0x1021 | CONTROL_PREPARE / P | `change:ControlChange` |
 | 0x1022 | CONTROL_READY / P | `decision:Decision,status:V,proof:Proof` |
 | 0x1023 | CONTROL_COMMIT / P | `decision:Decision,certificate:Certificate` |
@@ -1387,6 +1387,9 @@ Nur authentifizierte NODE-Rolle, gebunden an Membership-Epoch. In der Tabelle be
 | 0x1070 | FORCE_ADOPT_COMMIT / Q | `schema:u16,user:ID,username:Text,request:Blob(FORCE_DISCONNECT-Body),proposal:Blob(GlobalProposal),ready:Blob(Certificate),witness:Proof` => `applied:Proof`; übernimmt ausschließlich eine bereits verbindliche, lokal vorbereitete Elternentscheidung |
 | 0x1072 | QUOTA_PHYSICAL / Q | `JSON(GlobalClaim)` => `JSON{Node,Volumes:[{ID,Class,Free,Active,Usage:[{Bucket,Logical,Physical,Objects}]}]}`; ausschließlich für den eigenen identischen ALL-Slot, Kandidaten für physische Zusagen |
 | 0x1073 | QUOTA_PREVIEW / Q | `bucket:ID` => `JSON{volume_id:remaining_own_physical,...}`; nur authentisierte Cluster-Mitglieder, administrative Vorschau, kein Admission-Beleg |
+| 0x1074 | REPLICA_MUTATION_CHUNK / Q | `header:Blob(ReplicaMutationHeaderV1),offset:u64,data:Blob` => leer; strikt fortlaufend, höchstens 1 MiB je Chunk |
+| 0x1075 | REPLICA_REMOVE_READY / Q | `schema:u16=1,plan:Digest` => `proof:Proof`; dauerhafte Bereitschaft für einen reservierten Replica-Remove ohne offenen Datencommit |
+| 0x1076 | REPLICA_REMOVE_CLEANUP / Q | `schema:u16=1,plan:Digest` => leer; entfernt nach verbindlichem Replica-Remove nur die tatsächlich nicht mehr lokal erforderlichen Objekt-/Retry-Kopien |
 | 0x1071 | VOLUME_RECOVERY_READY / Q | `claim:Blob(ControlClaim),image:Digest` => `ready:Proof`; ausschließlich vom im Claim gebundenen Teilnehmer an das Übernahmeziel, nur für die identische lokal persistierte READY-Entscheidung |
 
 
@@ -1472,6 +1475,8 @@ niemals eine fehlende READY-Bestätigung ersetzen.
 RangeHandoffPlan = schema:u16=2,before:Blob(MapPatch),after:Blob(MapPatch),
                    source:ID,target:ID,volume:ID,moving_start:OID,
                    moving_prefix:u16,compression:u8,physical_reserve:u64,attempt:ID
+# Plan-Schema 3 ergänzt replica_add:Bool=true; Schema 4 replica_remove:Bool=true.
+# Beide verändern die ganze Parent-Range und erhalten deren Primary-Location.
 RangeHandoffCommit = schema:u16=2,plan:Digest,snapshot:Digest,
                      source_ready:Proof,target_ready:Proof,logical_used:u64
 # Schema 3 ergänzt quota_used:u64 für physische Absolute-Credits.
@@ -1479,6 +1484,13 @@ RangeObjectRecord = bucket:ID,object:OID,version:u64,length:u64,
                     compression:u8,deleted:Bool
 RangeRequestRecord = request:ID,record:RangeObjectRecord,
                      fingerprint:Digest,offset:u64
+ReplicaMutationHeaderV1 = JSON{Schema:1,Volume:ID,Request:RequestRecord,
+                              Binding:{Epoch:u64,Sequence:u64,SetHash:Digest},
+                              PreviousVersion:u64,Opcode:u8,Offset:u64,Length:u64,
+                              Expected:Base64,Options:MutationOptions}
+# RequestRecord bindet ID, Key{Bucket,Object}, Fingerprint und Result{Info,Offset}.
+# Opcode: 1 PUT, 2 PUT_RANGE, 3 APPEND, 4 TRUNC, 5 DELETE, 6 CAS.
+# Zustände: 1 PREPARED, 2 DECIDED, 3 PUBLISHED, 4 ABORTED.
 ```
 
 `attempt` ist eine vor der ersten Reservierung erzeugte, von Retries unverändert

@@ -32,7 +32,7 @@ func bindObjectRequest(ctx context.Context, m client.Message) context.Context {
 // Mutations call this under opMu; reads call it after acquiring the snapshot
 // handle. An upload can outlive a handoff, so its initial parse is insufficient
 // to authorize a final write or to label a new RAM era with an old runtime ID.
-func (s *Server) checkObjectBinding(ctx context.Context, bucket volume.ID, object volume.ObjectID) error {
+func (s *Server) checkObjectBinding(ctx context.Context, bucket volume.ID, object volume.ObjectID, replicaRead ...bool) error {
 	binding, bound := ctx.Value(objectBindingKey{}).(objectBinding)
 	if s.controller == nil {
 		return nil
@@ -46,7 +46,7 @@ func (s *Server) checkObjectBinding(ctx context.Context, bucket volume.ID, objec
 	}
 	owned := false
 	for _, loc := range entry.Locations {
-		if loc.Role == 0 && loc.Node == s.control.ledger.node {
+		if (loc.Role == 0 || len(replicaRead) > 0 && replicaRead[0] && loc.Role == 1) && loc.Node == s.control.ledger.node {
 			owned = true
 			break
 		}

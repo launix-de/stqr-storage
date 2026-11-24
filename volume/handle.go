@@ -18,7 +18,9 @@ import (
 // and Close. Callbacks must not reenter the handle or its volume. Volume's
 // management methods and standalone Stat acquire locks and must be called
 // outside a handle session.
-// A write handle excludes all other volume access; a read handle excludes writes.
+// A write handle excludes other mutations; a read handle excludes publication.
+// PrepareMutation alone admits readers during its private payload staging, so
+// large uploads never hide the previous committed object behind a network read.
 // Multiple mutations under a write handle are individually committed, not one
 // transaction. AddCleanup is only a fallback for abandoned handles: the runtime
 // does not guarantee when or whether a cleanup executes. Explicit Close releases
@@ -132,12 +134,9 @@ func (h *Handle) AllocatedPhysical(k Key) (uint64, error) {
 		if err != nil {
 			return 0, err
 		}
-		total := o.Size + uint64(len(o.ListBlocks))*listBytes
-		for _, span := range o.Spans {
-			total += span.Capacity
-			if !span.Direct {
-				total += checksumsSize(span)
-			}
+		total := o.Size
+		for _, a := range objectAllocations(o) {
+			total += a.n
 		}
 		return total, nil
 	})

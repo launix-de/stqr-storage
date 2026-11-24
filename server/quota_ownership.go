@@ -35,7 +35,21 @@ func (s *Server) refreshQuotaOwnership(v *volume.Volume) error {
 			return false
 		}
 		entry, known := image.lookup(client.ID(k.Bucket), client.ObjectID(k.Object))
-		if !known || entry.State == 4 || entry.State == 5 || len(entry.Locations) == 0 || entry.Locations[0].Node != client.ID(node) {
+		if !known || entry.State == 4 || entry.State == 5 || len(entry.Locations) == 0 {
+			return false
+		}
+		if len(entry.Locations) > 1 {
+			for _, loc := range entry.Locations {
+				if loc.Role <= 1 && loc.Node == client.ID(node) {
+					if loc.Volume != (client.ID{}) {
+						return loc.Volume == client.ID(id)
+					}
+					return !imported && general
+				}
+			}
+			return false
+		}
+		if entry.Locations[0].Node != client.ID(node) {
 			return false
 		}
 		if entry.Locations[0].Volume != (client.ID{}) {

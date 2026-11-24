@@ -29,6 +29,12 @@ func (v *Volume) Compact() error {
 // released only after payload, index and byte-exact free ranges commit together.
 // It requires a suitable free destination; no permanent second bank is reserved.
 func (v *Volume) compactLocked() error {
+	if v.preparing {
+		return ErrBusy
+	}
+	if err := v.walkIndexBounds(indexKey{3}, indexKey{4}, func(indexEntry) error { return ErrBusy }); err != nil {
+		return err
+	}
 	if v.sb.Moving {
 		if e := v.resumeMoveLocked(); e != nil {
 			return e
@@ -49,6 +55,15 @@ func (v *Volume) compactLocked() error {
 				o, e := v.loadObject(r.Key)
 				if e != nil {
 					return e
+				}
+				if objectAliases(o) {
+					if e = v.rewriteObject(r.Key, o, o.Info.Compression, Options{}); e != nil {
+						return e
+					}
+					o, e = v.loadObject(r.Key)
+					if e != nil {
+						return e
+					}
 				}
 				if !o.Info.Deleted {
 					for i := range o.Spans {
@@ -128,6 +143,11 @@ func (v *Volume) rewriteObject(k Key, old *object, codec Compression, opts Optio
 	return nil
 }
 func (v *Volume) recompressLocked(k Key, codec Compression, opts Options) error {
+	if busy, err := v.pending(k); err != nil {
+		return err
+	} else if busy {
+		return ErrBusy
+	}
 	if !codec.valid() {
 		return ErrRange
 	}
@@ -185,6 +205,32 @@ func (v *Volume) scrubLocked() error {
 	}
 	buf := make([]byte, BlockSize)
 	return v.walkIndex(func(x indexEntry) error {
+		if x.Key[0] == 3 {
+			return nil
+		}
+		if x.Key[0] == 2 {
+			r, e := v.replicaAt(x.Value)
+			if e != nil {
+				return e
+			}
+			if r.object == 0 {
+				return nil
+			}
+			o, e := v.loadObjectAt(r.object)
+			if e != nil {
+				return e
+			}
+			for _, s := range o.Spans {
+				for off := uint64(0); off < s.Length; {
+					n := min(uint64(len(buf)), s.Length-off)
+					if e = v.readSpan(s, buf[:n], off); e != nil {
+						return e
+					}
+					off += n
+				}
+			}
+			return nil
+		}
 		if x.Key[0] == 1 {
 			var id ID
 			copy(id[:], x.Key[1:17])
@@ -226,6 +272,9 @@ func (v *Volume) Export(dst io.Writer) error {
 	defer v.mu.RUnlock()
 	if e := v.check(false); e != nil {
 		return e
+	}
+	if err := v.walkIndexBounds(indexKey{3}, indexKey{4}, func(indexEntry) error { return ErrBusy }); err != nil {
+		return err
 	}
 	enc := json.NewEncoder(dst)
 	if e := enc.Encode(snapshotFrame{Kind: "STQR-SNAPSHOT-2"}); e != nil {

@@ -49,6 +49,36 @@ func (c *Client) routeMessage(m *Message) (string, ID, error) {
 	if len(addresses) == 0 {
 		return c.endpoint, ID{}, nil
 	}
+	// A failed primary transport may change a read source, never the write
+	// authority. Select only nodes in this object's committed replica set.
+	read := m.Opcode == 0x0100 || m.Opcode == 0x0101 || m.Opcode == 0x0107 || m.Opcode == ObjectSubscribe
+	c.mu.Lock()
+	if read && c.paused[owner] {
+		for _, loc := range entry.Locations {
+			if loc.Role != 1 || c.paused[loc.Node] {
+				continue
+			}
+			found := false
+			for _, address := range addresses {
+				u, e := url.Parse(address)
+				if e != nil {
+					continue
+				}
+				u.Scheme = "ws"
+				u.Path = "/api/ws"
+				if c.routers[u.String()] == loc.Node {
+					owner = loc.Node
+					addresses = []string{address}
+					found = true
+					break
+				}
+			}
+			if found {
+				break
+			}
+		}
+	}
+	c.mu.Unlock()
 	u, err := url.Parse(addresses[0])
 	if err != nil {
 		return c.endpoint, ID{}, nil

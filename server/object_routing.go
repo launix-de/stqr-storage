@@ -29,7 +29,7 @@ func (s *Server) routingPatch(bucket volume.ID, id volume.ObjectID) (client.MapP
 	return patch, true
 }
 
-func (s *Server) checkObjectOwner(bucket volume.ID, id volume.ObjectID) error {
+func (s *Server) checkObjectOwner(bucket volume.ID, id volume.ObjectID, replicaRead ...bool) error {
 	if s.controller == nil {
 		return nil
 	}
@@ -42,7 +42,7 @@ func (s *Server) checkObjectOwner(bucket volume.ID, id volume.ObjectID) error {
 	}
 	node := s.control.ledger.node
 	for _, loc := range patch.Entries[0].Locations {
-		if loc.Role == 0 && loc.Node == node {
+		if (loc.Role == 0 || len(replicaRead) > 0 && replicaRead[0] && loc.Role == 1) && loc.Node == node {
 			if patch.Entries[0].State == 4 {
 				return fail(503, "range is waiting for recovered volumes")
 			}

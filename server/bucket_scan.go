@@ -110,6 +110,8 @@ func (s *Server) executeMaintenance(ctx context.Context, op *objectMutation, d *
 
 // Merge copies before excluding tombstones: a newer tombstone must hide an old
 // live copy. Cursor progress includes tombstones and the zero object address.
+type replicaScanKey struct{}
+
 func (b *Bucket) scan(ctx context.Context, description BucketDescription, after *volume.ObjectID, limit int) ([]volume.ObjectRecord, volume.ObjectID, bool, error) {
 	return b.scanPlacement(ctx, description, after, limit, b.server.placement.Load(), nil)
 }
@@ -172,7 +174,7 @@ func (b *Bucket) scanPlacement(ctx context.Context, description BucketDescriptio
 				entry, known := placement.lookup(client.ID(b.ID()), client.ObjectID(r.Key.Object))
 				owned := false
 				for _, loc := range entry.Locations {
-					if loc.Role == 0 && loc.Node == b.server.control.ledger.node && entry.State != 4 && b.server.volumeAllowedForEntry(client.ID(b.ID()), entry, v.Identity().VolumeID, view) {
+					if (loc.Role == 0 || ctx.Value(replicaScanKey{}) == true && loc.Role == 1) && loc.Node == b.server.control.ledger.node && entry.State != 4 && b.server.volumeAllowedForEntry(client.ID(b.ID()), entry, v.Identity().VolumeID, view) {
 						owned = true
 					}
 				}

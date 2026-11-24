@@ -78,6 +78,9 @@ func (r *controlRuntime) execute(op uint16, body []byte, actor client.ID) ([]byt
 			}
 			r.server.opMu.Lock()
 			defer r.server.opMu.Unlock()
+			if err := r.server.checkPendingReplicas(nil); err != nil {
+				return nil, err
+			}
 			if claim.Exclusion == nil && len(r.server.pendingQuotaGrants()) != 0 {
 				return nil, fail(503, "quota grants must settle before global control")
 			}

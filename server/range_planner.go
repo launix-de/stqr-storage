@@ -155,6 +155,12 @@ func (r *rangeManager) planNext() (rangePlan, bool) {
 		if d.ID == systemBucket.String() || d.DeletionComplete || d.State == BucketDeleting {
 			continue
 		}
+		if plan, ok := r.planReplicaAdd(d); ok {
+			return plan, true
+		}
+		if plan, ok := r.planReplicaRemove(d); ok {
+			return plan, true
+		}
 		if d.Policy.StorageStrategy == "ram" {
 			if plan, ok := r.planRuntimeReset(d); ok {
 				return plan, true

@@ -32,6 +32,8 @@ import (
 // this package. They may reserve physical capacity and manage the lifecycle.
 type Volume struct {
 	mu               sync.RWMutex
+	preparing        bool
+	prepareCond      *sync.Cond
 	accountMu        sync.Mutex
 	accounting       map[ID]bucketAllocation
 	owned            map[ID]bucketAllocation
@@ -250,6 +252,9 @@ func Open(dev VolumeIO, o OpenOptions) (*Volume, error) {
 }
 func (v *Volume) publish(s Superblock) error { t := v.transaction(); t.sb = s; return t.commit(false) }
 func (v *Volume) check(write bool) error {
+	if write && v.preparing {
+		return ErrBusy
+	}
 	if v.closed {
 		return ErrClosed
 	}
@@ -313,6 +318,9 @@ func (v *Volume) Sync() error {
 func (v *Volume) Close() error {
 	v.mu.Lock()
 	defer v.mu.Unlock()
+	for v.preparing {
+		v.prepareCond.Wait()
+	}
 	if v.closed {
 		return nil
 	}

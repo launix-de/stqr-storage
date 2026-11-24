@@ -11,10 +11,9 @@ import (
 	"github.com/launix-de/stqr-storage/volume"
 )
 
-// v1 data movement has one authoritative primary (data replication is optional
-// and not advertised here). Only that primary can initiate its handoff. Generic
-// multi-replica coordinator races remain a separate measured design; this plan
-// never elects another writer when its source is offline.
+// A range has one authoritative writer. Primary handoffs and explicit replica
+// additions/removals share the durable scoped journal. Only the current primary
+// initiates these transitions; an offline source never triggers writer election.
 type rangePlan struct {
 	Attempt        client.ID
 	Before, After  client.MapPatch
@@ -23,6 +22,8 @@ type rangePlan struct {
 	Moving         client.RangeEntry
 	Compression    volume.Compression
 	Physical       uint64
+	ReplicaAdd     bool
+	ReplicaRemove  bool
 }
 
 func (p rangePlan) marshal() ([]byte, error) {
@@ -39,6 +40,12 @@ func (p rangePlan) marshal() ([]byte, error) {
 	if p.Attempt != (client.ID{}) {
 		schema = 2
 	}
+	if p.ReplicaAdd {
+		schema = 3
+	}
+	if p.ReplicaRemove {
+		schema = 4
+	}
 	e.U16(schema)
 	e.Blob(before)
 	e.Blob(after)
@@ -49,8 +56,14 @@ func (p rangePlan) marshal() ([]byte, error) {
 	e.U16(p.Moving.PrefixBits)
 	e.U8(uint8(p.Compression))
 	e.U64(p.Physical)
-	if schema == 2 {
+	if schema >= 2 {
 		e.ID(p.Attempt)
+	}
+	if schema == 3 {
+		e.Bool(p.ReplicaAdd)
+	}
+	if schema == 4 {
+		e.Bool(p.ReplicaRemove)
 	}
 	if err := p.validate(); err != nil {
 		return nil, err
@@ -67,13 +80,25 @@ func decodeRangePlan(b []byte) (rangePlan, error) {
 	p.Moving.PrefixBits = d.U16()
 	p.Compression = volume.Compression(d.U8())
 	p.Physical = d.U64()
-	if schema == 2 {
+	if schema == 2 || schema == 3 || schema == 4 {
 		p.Attempt = d.ID()
 		if p.Attempt == (client.ID{}) {
 			return rangePlan{}, client.ErrProtocol
 		}
 	}
-	if (schema != 1 && schema != 2) || a != nil || bErr != nil || d.Done() != nil {
+	if schema == 3 {
+		p.ReplicaAdd = d.Bool()
+		if !p.ReplicaAdd {
+			return rangePlan{}, client.ErrProtocol
+		}
+	}
+	if schema == 4 {
+		p.ReplicaRemove = d.Bool()
+		if !p.ReplicaRemove {
+			return rangePlan{}, client.ErrProtocol
+		}
+	}
+	if (schema != 1 && schema != 2 && schema != 3 && schema != 4) || a != nil || bErr != nil || d.Done() != nil {
 		return rangePlan{}, client.ErrProtocol
 	}
 	if err := p.validate(); err != nil {
@@ -91,6 +116,50 @@ func (p rangePlan) validate() error {
 		return client.ErrProtocol
 	}
 	old := p.Before.Entries[0]
+	if p.ReplicaRemove {
+		if p.ReplicaAdd || len(old.Locations) < 2 || p.Source != old.Locations[0].Node || p.Source == p.Target || len(p.After.Entries) != 1 || p.Moving.Start != old.Start || p.Moving.PrefixBits != old.PrefixBits {
+			return client.ErrProtocol
+		}
+		next := p.After.Entries[0]
+		if old.OwnerEpoch == ^uint64(0) || next.OwnerEpoch != old.OwnerEpoch+1 || next.PolicyVersion < old.PolicyVersion || next.Start != old.Start || next.PrefixBits != old.PrefixBits || next.State != old.State || next.Runtime != old.Runtime {
+			return client.ErrProtocol
+		}
+		var retained []client.Location
+		removed := false
+		for _, loc := range old.Locations {
+			if loc.Node == p.Target {
+				if loc.Role != 1 || loc.Volume != client.ID(p.Volume) {
+					return client.ErrProtocol
+				}
+				removed = true
+				continue
+			}
+			retained = append(retained, loc)
+		}
+		if !removed || !reflect.DeepEqual(retained, next.Locations) {
+			return client.ErrProtocol
+		}
+		return nil
+	}
+	if p.ReplicaAdd {
+		if len(old.Locations) == 0 || old.Locations[0].Role != 0 || old.Locations[0].Node != p.Source || p.Source == p.Target || len(p.After.Entries) != 1 || p.Moving.Start != old.Start || p.Moving.PrefixBits != old.PrefixBits {
+			return client.ErrProtocol
+		}
+		next := p.After.Entries[0]
+		if old.OwnerEpoch == ^uint64(0) || next.OwnerEpoch != old.OwnerEpoch+1 || next.PolicyVersion < old.PolicyVersion || next.Start != old.Start || next.PrefixBits != old.PrefixBits || next.State != old.State || next.Runtime != old.Runtime || len(next.Locations) != len(old.Locations)+1 || !reflect.DeepEqual(next.Locations[:len(old.Locations)], old.Locations) {
+			return client.ErrProtocol
+		}
+		added := next.Locations[len(old.Locations)]
+		if added.Node != p.Target || added.Volume != client.ID(p.Volume) || added.Role != 1 {
+			return client.ErrProtocol
+		}
+		for _, loc := range old.Locations {
+			if loc.Node == p.Target {
+				return client.ErrProtocol
+			}
+		}
+		return nil
+	}
 	if len(old.Locations) != 1 || old.Locations[0].Role != 0 || old.Locations[0].Node != p.Source || old.OwnerEpoch == ^uint64(0) || p.Moving.PrefixBits < old.PrefixBits {
 		return client.ErrProtocol
 	}

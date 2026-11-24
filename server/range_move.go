@@ -3,6 +3,7 @@ package server
 
 import (
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"io"
 	"os"
@@ -45,6 +46,30 @@ func (r *rangeManager) move(ctx context.Context, p rangePlan) (retErr error) {
 	committed := t.decision != nil
 	fenced := t.fenced
 	r.mu.Unlock()
+	if !committed && p.ReplicaRemove {
+		stage = "replica removal agreement"
+		if err := r.fence(id); err != nil {
+			return err
+		}
+		digest := sha256.Sum256(mustRangeWire(p))
+		e := rangeMessage(peerReplicaTopologyReady, id)
+		body, err := r.call(ctx, p.Target, peerReplicaTopologyReady, e.B)
+		if err != nil {
+			return err
+		}
+		target, err := client.DecodeProof(body)
+		if err != nil {
+			return err
+		}
+		source, err := r.ready(id, digest, true, 0, 0)
+		if err != nil {
+			return err
+		}
+		if _, err = r.commit(rangeCommit{ID: id, Digest: digest, Source: source, Target: target}); err != nil {
+			return err
+		}
+		committed = true
+	}
 	stage = "RAM handoff recovery"
 	ramHandled, err := r.prepareRAMRecovery(ctx, p, t, committed)
 	if err != nil {
@@ -107,6 +132,15 @@ func (r *rangeManager) move(ctx context.Context, p rangePlan) (retErr error) {
 		return client.ErrProtocol
 	}
 	stage = "source cleanup"
+	if p.ReplicaAdd || p.ReplicaRemove {
+		for _, loc := range p.Before.Entries[0].Locations {
+			if loc.Node != p.Source && loc.Node != p.Target {
+				if err := r.sendHistory(ctx, loc.Node, [32]byte{}); err != nil {
+					return err
+				}
+			}
+		}
+	}
 	if err := r.cleanup(ctx, p); err != nil {
 		return err
 	}
@@ -119,6 +153,12 @@ func (r *rangeManager) move(ctx context.Context, p rangePlan) (retErr error) {
 	targetDone, err := client.DecodeProof(body)
 	if err != nil || targetDone.Node != p.Target {
 		return client.ErrProtocol
+	}
+	if p.ReplicaRemove {
+		e := rangeMessage(peerReplicaTopologyCleanup, id)
+		if _, err = r.call(ctx, p.Target, peerReplicaTopologyCleanup, e.B); err != nil {
+			return err
+		}
 	}
 	stage = "source DONE"
 	if _, err := r.done(id, &targetDone); err != nil {
@@ -187,6 +227,9 @@ func (r *rangeManager) announce(p rangePlan, c rangeCommit) {
 }
 
 func (r *rangeManager) cleanup(ctx context.Context, p rangePlan) error {
+	if p.ReplicaAdd || p.ReplicaRemove {
+		return nil
+	}
 	for _, v := range r.sourceVolumes(p) {
 		var after *volume.ObjectID
 		for {

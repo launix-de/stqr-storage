@@ -462,15 +462,19 @@ func (r *rangeManager) destination(p rangePlan) (*volume.Volume, error) {
 	}
 	d := b.Describe()
 	policy := d.Policy
-	if d.DesiredPolicy != nil && p.movingPolicyVersion() == d.DesiredPolicy.Version {
+	if !p.ReplicaRemove && d.DesiredPolicy != nil && p.movingPolicyVersion() == d.DesiredPolicy.Version {
 		policy = *d.DesiredPolicy
 	}
-	if p.movingPolicyVersion() != policy.Version {
+	if !p.ReplicaRemove && p.movingPolicyVersion() != policy.Version {
 		return nil, errControlConflict
 	}
 	for _, entry := range p.After.Entries {
-		if entry.Start == p.Moving.Start && entry.PrefixBits == p.Moving.PrefixBits && entry.Locations[0].Class != uint8(managed.store.Identity().Class) {
-			return nil, errControlConflict
+		if entry.Start == p.Moving.Start && entry.PrefixBits == p.Moving.PrefixBits {
+			for _, loc := range entry.Locations {
+				if loc.Node == p.Target && loc.Volume == client.ID(p.Volume) && loc.Class != uint8(managed.store.Identity().Class) {
+					return nil, errControlConflict
+				}
+			}
 		}
 	}
 	if p.Compression != bucketCodec(policy) {
@@ -489,6 +493,11 @@ func (r *rangeManager) fence(id [32]byte) error {
 	r.mu.Unlock()
 	if t == nil {
 		return errControlConflict
+	}
+	if err := r.server.checkPendingReplicas(func(k volume.Key) bool {
+		return client.ID(k.Bucket) == t.plan.Before.Bucket && t.plan.contains(k.Object)
+	}); err != nil {
+		return err
 	}
 	t.lease.Lock()
 	defer t.lease.Unlock()
@@ -577,7 +586,7 @@ func (r *rangeManager) commitWithForce(c rangeCommit, force *controlClaim) (proo
 	defer r.server.opMu.Unlock()
 	r.mu.Lock()
 	activation := r.txns[c.ID]
-	needsActivation := activation != nil && activation.plan.Target == r.node && activation.decision == nil
+	needsActivation := activation != nil && activation.plan.Target == r.node && activation.decision == nil && !activation.plan.ReplicaRemove
 	needsSource := activation != nil && activation.plan.Source == r.node && activation.decision == nil
 	r.mu.Unlock()
 	if needsSource {
@@ -728,7 +737,7 @@ func (r *rangeManager) incoming(bucket volume.ID, object volume.ObjectID) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	for _, t := range r.txns {
-		if r.active(t) && t.plan.Target == r.node && t.plan.Source != r.node && t.decision == nil && volume.ID(t.plan.Before.Bucket) == bucket && t.plan.contains(object) {
+		if !t.plan.ReplicaRemove && r.active(t) && t.plan.Target == r.node && t.plan.Source != r.node && t.decision == nil && volume.ID(t.plan.Before.Bucket) == bucket && t.plan.contains(object) {
 			return true
 		}
 	}

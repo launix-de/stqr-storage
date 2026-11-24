@@ -29,7 +29,7 @@ func (c *clusterController) finishBucketPolicies(ctx context.Context) {
 		if description.DesiredPolicy == nil || description.State == BucketDeleting {
 			continue
 		}
-		if !samePlacementPolicy(description.Policy, *description.DesiredPolicy) {
+		if !samePlacementPolicy(description.Policy, *description.DesiredPolicy) && !s.replicaPolicyInPlace(description) {
 			if err := s.scopes.syncArchives(ctx); err != nil {
 				return
 			}
@@ -62,7 +62,7 @@ func (c *clusterController) finishBucketPolicies(ctx context.Context) {
 			if err != nil {
 				return nil, err
 			}
-			if samePlacementPolicy(expected.Policy, *expected.DesiredPolicy) {
+			if samePlacementPolicy(expected.Policy, *expected.DesiredPolicy) || s.replicaPolicyInPlace(expected) {
 				for _, node := range request.Claim.Required {
 					e := client.Encoder{}
 					e.Blob(claim)
@@ -111,7 +111,7 @@ func (c *clusterController) finishBucketPolicies(ctx context.Context) {
 			}
 			complete = true
 			return draft, nil
-		})
+		}, client.ID(bucket))
 		return
 	}
 }
@@ -128,6 +128,7 @@ func (s *Server) applyBucketCodec(body []byte, actor client.ID) ([]byte, error) 
 		return nil, fail(403, "invalid codec transition authority")
 	}
 	var after *volume.ObjectID
+	ctx := context.WithValue(s.ctx, replicaScanKey{}, true)
 	for {
 		if err := s.ctx.Err(); err != nil {
 			return nil, err
@@ -144,10 +145,10 @@ func (s *Server) applyBucketCodec(body []byte, actor client.ID) ([]byte, error) 
 				return false, errControlConflict
 			}
 			description := b.Describe()
-			if description.Revision != revision || description.DesiredPolicy == nil || bucketCodec(*description.DesiredPolicy) != codec || !samePlacementPolicy(description.Policy, *description.DesiredPolicy) {
+			if description.Revision != revision || description.DesiredPolicy == nil || bucketCodec(*description.DesiredPolicy) != codec || !(samePlacementPolicy(description.Policy, *description.DesiredPolicy) || s.replicaPolicyInPlace(description)) {
 				return false, errControlConflict
 			}
-			records, next, more, err := b.scan(s.ctx, description, after, 128)
+			records, next, more, err := b.scan(ctx, description, after, 128)
 			if err != nil {
 				return false, err
 			}

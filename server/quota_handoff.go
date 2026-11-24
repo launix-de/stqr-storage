@@ -7,6 +7,9 @@ import (
 )
 
 func (r *rangeManager) physicalFootprint(p rangePlan) (uint64, error) {
+	if p.ReplicaAdd || p.ReplicaRemove {
+		return 0, nil
+	}
 	b, err := r.server.Bucket(volume.ID(p.Before.Bucket))
 	if err != nil {
 		return 0, err
@@ -114,6 +117,9 @@ func (r *rangeManager) checkPhysicalActivationLocked(t *rangeTxn, transferred ui
 }
 
 func (r *rangeManager) checkPhysicalSourceLocked(t *rangeTxn, transferred uint64) error {
+	if t.plan.ReplicaAdd || t.plan.ReplicaRemove {
+		return nil
+	}
 	b, err := r.server.Bucket(volume.ID(t.plan.Before.Bucket))
 	if err != nil {
 		return err

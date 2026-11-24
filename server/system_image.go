@@ -25,6 +25,7 @@ type systemManifest struct {
 	VolumeRecoveries     []volumeRecoveryOrigin     `json:",omitempty"`
 	QuotaReserves        []quotaPhysicalReservation `json:",omitempty"`
 	QuotaProtocol        uint16                     `json:",omitempty"`
+	ReplicationProtocol  uint16                     `json:",omitempty"`
 	Quotas               []quotaAllocation          `json:",omitempty"`
 	Shutdown             *clusterShutdown           `json:",omitempty"`
 	Schema               uint16
@@ -165,11 +166,15 @@ func (s *Server) captureSystemImage(membership client.Membership, sequence, gene
 	manifest := systemManifest{Schema: 1, Cluster: membership.Cluster, Sequence: sequence, Membership: membership, Generation: generation, Revision: revision}
 	if view := s.currentSystem.Load(); view != nil {
 		manifest.QuotaProtocol = view.manifest.QuotaProtocol
+		manifest.ReplicationProtocol = view.manifest.ReplicationProtocol
 		manifest.Shutdown = view.manifest.Shutdown
 		manifest.VolumeRecoveries = cloneRecoveryOrigins(view.manifest.VolumeRecoveries)
 	}
 	if quotaPoliciesRequired(s.bucketSnapshots()) {
 		manifest.QuotaProtocol = 1
+	}
+	if replicaPoliciesRequired(s.bucketSnapshots()) {
+		manifest.ReplicationProtocol = 1
 	}
 	if len(reserves) > 0 {
 		manifest.QuotaReserves = reserves[0]
@@ -408,6 +413,9 @@ func decodeSystemView(root volume.ObjectID, load func(volume.ObjectID) ([]byte, 
 	}
 	if err := validateRecoveryOrigins(view); err != nil {
 		return nil, err
+	}
+	if m.ReplicationProtocol > 1 || replicaPoliciesRequired(view.descriptions) && m.ReplicationProtocol != 1 {
+		return nil, volume.ErrCorrupt
 	}
 	if err := validatePhysicalReservations(view); err != nil {
 		return nil, err

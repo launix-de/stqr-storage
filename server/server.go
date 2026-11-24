@@ -82,6 +82,7 @@ type Server struct {
 	quotaHooked            map[volume.ID]*volume.Volume
 	quotas                 *quotaManager
 	scopes                 *rangeManager
+	replicas               *replicaManager
 }
 
 func Open(opts Options) (s *Server, err error) {
@@ -287,6 +288,9 @@ func Open(opts Options) (s *Server, err error) {
 	if e = s.restoreQuotaProtection(); e != nil {
 		return s, e
 	}
+	if e = s.initReplicas(); e != nil {
+		return s, e
+	}
 	if e = s.recoverOperations(); e != nil {
 		return s, e
 	}
@@ -339,6 +343,9 @@ func Open(opts Options) (s *Server, err error) {
 		s.startQuotaWorker()
 	}
 	s.startKnownPeers()
+	if s.controller != nil {
+		s.replicas.start()
+	}
 	if s.controller != nil {
 		s.controller.start()
 	}

@@ -89,6 +89,40 @@ func (v *Volume) initAccounting() error {
 }
 func (v *Volume) accountRecord(k indexKey) (ID, bucketAllocation, error) {
 	var a bucketAllocation
+	if k[0] == 3 {
+		return k.object().Bucket, a, nil
+	}
+	if k[0] == 2 {
+		var id ID
+		copy(id[:], k[1:17])
+		r, found, err := v.loadReplica(id)
+		if err != nil || !found {
+			return ID{}, a, err
+		}
+		a.records, a.metadata = 1, replicaBytes
+		if r.object != 0 {
+			a.metadata += receiptBytes
+			o, err := v.loadObjectAt(r.object)
+			if err != nil {
+				return ID{}, a, err
+			}
+			a.metadata += o.Size
+			old, err := v.loadObject(r.Request.Key)
+			if errors.Is(err, ErrNotFound) {
+				old = nil
+			} else if err != nil {
+				return ID{}, a, err
+			}
+			for _, allocation := range exclusiveAllocations(o, old) {
+				if allocation.meta {
+					a.metadata += allocation.n
+				} else {
+					a.payload += allocation.n
+				}
+			}
+		}
+		return r.Request.Key.Bucket, a, nil
+	}
 	if k[0] == 0 {
 		key := k.object()
 		o, err := v.loadObject(key)
@@ -99,15 +133,16 @@ func (v *Volume) accountRecord(k indexKey) (ID, bucketAllocation, error) {
 			return ID{}, a, err
 		}
 		a.records = 1
-		a.metadata = o.Size + uint64(len(o.ListBlocks))*listBytes
+		a.metadata = o.Size
 		if !o.Info.Deleted {
 			a.logical = o.Info.Length
 			a.objects = 1
 		}
-		for _, s := range o.Spans {
-			a.payload += s.Capacity
-			if !s.Direct {
-				a.metadata += checksumsSize(s)
+		for _, allocation := range objectAllocations(o) {
+			if allocation.meta {
+				a.metadata += allocation.n
+			} else {
+				a.payload += allocation.n
 			}
 		}
 		return key.Bucket, a, nil
@@ -239,20 +274,9 @@ func (h *Handle) StorageUsageWhere(include func(Key) bool, authoritative ...bool
 		}
 		selected := make(map[ID]bucketAllocation)
 		err := v.walkIndex(func(x indexEntry) error {
-			var key Key
-			if x.Key[0] == 0 {
-				key = x.Key.object()
-			} else {
-				var id ID
-				copy(id[:], x.Key[1:17])
-				d, found, err := v.loadDedupe(id)
-				if err != nil {
-					return err
-				}
-				if !found {
-					return ErrCorrupt
-				}
-				key = d.Key
+			key, err := v.recordKey(x.Key)
+			if err != nil {
+				return err
 			}
 			if !include(key) {
 				return nil
@@ -362,11 +386,15 @@ func (v *Volume) SetOwnershipFilter(stamp any, include func(Key, bool) bool) err
 	return nil
 }
 func (v *Volume) recordKey(key indexKey) (Key, error) {
-	if key[0] == 0 {
+	if key[0] == 0 || key[0] == 3 {
 		return key.object(), nil
 	}
 	var id ID
 	copy(id[:], key[1:17])
+	if key[0] == 2 {
+		r, _, err := v.loadReplica(id)
+		return r.Request.Key, err
+	}
 	d, _, err := v.loadDedupe(id)
 	return d.Key, err
 }
@@ -401,6 +429,9 @@ func (v *Volume) ownedUsage(selected, all map[ID]bucketAllocation, sb Superblock
 }
 
 func (v *Volume) recordImported(key indexKey) (bool, error) {
+	if key[0] == 2 || key[0] == 3 {
+		return false, nil
+	}
 	if key[0] == 0 {
 		o, err := v.loadObject(key.object())
 		if errors.Is(err, ErrNotFound) {

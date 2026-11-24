@@ -152,7 +152,7 @@ func (c *clusterController) admitDiscovered(ctx context.Context) {
 		if hasControlNode(membershipIDs(base.Membership), peer.Node) {
 			continue
 		}
-		if !supportsRecoveryOrigins(s.currentSystem.Load(), peer.Capabilities) || !supportsQuotaPolicies(s.currentSystem.Load(), peer.Capabilities) {
+		if !supportsRecoveryOrigins(s.currentSystem.Load(), peer.Capabilities) || !supportsQuotaPolicies(s.currentSystem.Load(), peer.Capabilities) || !supportsReplicaPolicies(s.currentSystem.Load(), peer.Capabilities) {
 			// Do not bind a join that cannot decode the immutable parent graph.
 			// It may reconnect after upgrading; no membership reset is implied.
 			continue
@@ -209,6 +209,29 @@ func (c *clusterController) patches(membership client.Membership, descriptions [
 		}
 		if patch.Bucket == (client.ID{}) {
 			patch = client.MapPatch{Bucket: client.ID(id), ToEnd: true, Entries: []client.RangeEntry{{PolicyVersion: description.Policy.Version, OwnerEpoch: 1, Locations: []client.Location{{Node: c.coordinator.ledger.node, Class: uint8(bucketClass(description.Policy))}}}}}
+			if c.server.scopes != nil && description.Policy.Redundancy.Mode == "replication" {
+				destinations, _ := c.server.scopes.destinations(description)
+				need := c.server.requiredReplicas(description.Policy, membership)
+				var copies []client.Location
+				seen := map[client.ID]bool{}
+				// Prefer the coordinator when eligible, then distinct failure domains.
+				for pass := 0; pass < 2; pass++ {
+					for _, target := range destinations {
+						if seen[target.node] || (pass == 0) != (target.node == c.coordinator.ledger.node) {
+							continue
+						}
+						if len(copies) >= need {
+							break
+						}
+						copies = append(copies, client.Location{Node: target.node, Volume: target.volume.ID, Class: target.volume.Class, Role: 1})
+						seen[target.node] = true
+					}
+				}
+				if len(copies) == need && need > 1 {
+					copies[0].Role = 0
+					patch.Entries[0].Locations = copies
+				}
+			}
 			if description.Policy.StorageStrategy == "ram" {
 				patch.Entries[0].Runtime = c.server.boot
 			}
@@ -385,10 +408,8 @@ func (c *clusterController) finishReservedChange(ctx context.Context, claim cont
 	if err := c.server.requireQuotaCapabilities(descriptions, required); err != nil {
 		return nil, 0, err
 	}
-	for _, description := range descriptions {
-		if description.ID != systemBucket.String() && !description.DeletionComplete && description.Policy.PlacementMode == "everywhere" && len(membership.Members) > 1 {
-			return nil, 0, fail(501, "ordinary EVERYWHERE buckets require data replication support")
-		}
+	if err := c.server.requireReplicaCapabilities(descriptions, required); err != nil {
+		return nil, 0, err
 	}
 	patches := c.patches(membership, descriptions)
 	origins, err := c.server.recoveryOriginsForChange(patches, exclusion)
@@ -428,6 +449,9 @@ func (c *clusterController) finishReservedChange(ctx context.Context, claim cont
 		return nil, 0, err
 	}
 	if err := c.server.preserveQuotaProtocol(bundle, descriptions); err != nil {
+		return nil, 0, err
+	}
+	if err := c.server.preserveReplicaProtocol(bundle, descriptions); err != nil {
 		return nil, 0, err
 	}
 	if err := c.server.setRecoveryBundle(bundle, patches, origins, exclusion); err != nil {
