@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-3.0-only
 import argparse
+import subprocess
 from common import cli, ctl, extract, nbd, qemu, require, staging
 
 def main():
@@ -33,8 +34,12 @@ def main():
             qemu(socket, args)
             extract(socket, work, args.kernel_version)
         ctl(args.config, 'publish', target, work)
-        ctl(args.config, 'gc', target)
-    print('Published', target)
+        print('Published', target, flush=True)
+        try:
+            ctl(args.config, 'gc', target)
+        except subprocess.CalledProcessError:
+            raise RuntimeError(f'Image {target} is published, but cleanup failed. Disconnect bucket clients and retry: networkboot/bin/stqr-bootctl --config {args.config} gc {target}') from None
+    print('Cleanup complete', flush=True)
 
 if __name__ == '__main__':
     cli(main)

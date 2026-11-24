@@ -86,6 +86,17 @@ class Workflows(unittest.TestCase):
         ctl.assert_any_call('stqr.yaml', 'publish', 'ubuntu', unittest.mock.ANY)
         self.assertFalse(any('create' in call.args or 'init-disk' in call.args for call in ctl.call_args_list))
 
+    def test_gc_failure_reports_image_already_published(self):
+        script = load('prepare-system')
+        @contextlib.contextmanager
+        def disk(*args):
+            yield Path('/private/disk.sock')
+        def command(config, op, *args):
+            if op == 'gc':
+                raise subprocess.CalledProcessError(1, ['gc'])
+        with patch.object(sys, 'argv', ['prepare-system', '--publish-only', 'ubuntu']), patch.object(script, 'staging', side_effect=disk), patch.object(script, 'require'), patch.object(script, 'ctl', side_effect=command), patch.object(script, 'nbd', side_effect=disk), patch.object(script, 'extract'), contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()), self.assertRaisesRegex(RuntimeError, 'ubuntu is published, but cleanup failed'):
+            script.main()
+
     def test_guest_uses_explicit_raw_format_for_readonly_nbd(self):
         import common
         with patch.object(common, 'run') as run:
