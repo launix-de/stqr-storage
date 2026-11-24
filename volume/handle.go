@@ -282,6 +282,12 @@ func (h *Handle) ForgetRequest(id ID) error {
 	return h.do(true, func(v *Volume) error { return v.forgetRequestLocked(id) })
 }
 
+// ForgetRequests atomically removes at most 4096 settled retry records in one
+// durable commit. Active replica transactions remain protected.
+func (h *Handle) ForgetRequests(ids []ID) error {
+	return h.do(true, func(v *Volume) error { return v.forgetRequestsLocked(ids) })
+}
+
 // Recompress changes physical encoding, preserving object bytes and retries.
 func (h *Handle) Recompress(k Key, codec Compression) error {
 	return h.RecompressWithOptions(k, codec, Options{})

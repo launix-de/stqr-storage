@@ -272,45 +272,70 @@ func (v *Volume) operationStatusLocked(id ID) (Result, bool, error) {
 	d, found, e := v.loadDedupe(id)
 	return d.Result, found, e
 }
-func (v *Volume) forgetRequestLocked(id ID) error {
-	if id == (ID{}) {
+func (v *Volume) forgetRequestLocked(id ID) error { return v.forgetRequestsLocked([]ID{id}) }
+
+// Batch retry-record cleanup shares one WAL commit. No part is published if
+// any supplied ID still owns a prepared replica or an unfinished abort fence.
+func (v *Volume) forgetRequestsLocked(ids []ID) error {
+	if len(ids) > 4096 {
 		return ErrRange
 	}
-	r, hasReplica, err := v.loadReplica(id)
-	if err != nil {
-		return err
-	}
-	if hasReplica && r.State != ReplicaPublished && r.State != ReplicaAborted {
-		return ErrBusy
-	}
-	if hasReplica && r.State == ReplicaAborted {
-		pending, err := v.lookup(pendingKey(r.Request.Key))
+	seen := make(map[ID]bool, len(ids))
+	t := v.transaction()
+	changed := false
+	defer t.close()
+	for _, id := range ids {
+		if seen[id] {
+			return ErrRange
+		}
+		seen[id] = true
+
+		if id == (ID{}) {
+			return ErrRange
+		}
+		r, hasReplica, err := v.loadReplica(id)
 		if err != nil {
 			return err
 		}
-		if pending == r.base {
+		if hasReplica && r.State != ReplicaPublished && r.State != ReplicaAborted {
 			return ErrBusy
 		}
-	}
-	off, e := v.lookup(requestKey(id))
-	if e != nil || off == 0 && !hasReplica {
-		return e
-	}
-	t := v.transaction()
-	if hasReplica {
-		t.release(r.base, replicaBytes, true)
-		if e = t.remove(&t.sb.ObjectRoot, replicaKey(id)); e != nil {
+		if hasReplica && r.State == ReplicaAborted {
+			pending, err := v.lookup(pendingKey(r.Request.Key))
+			if err != nil {
+				return err
+			}
+			if pending == r.base {
+				return ErrBusy
+			}
+		}
+		off, e := v.lookup(requestKey(id))
+		if e != nil {
 			return e
 		}
-	}
-	if off != 0 {
-		t.release(off, receiptBytes, true)
-		if e = t.remove(&t.sb.ObjectRoot, requestKey(id)); e != nil {
-			return e
+		if off == 0 && !hasReplica {
+			continue
 		}
+		if hasReplica {
+			t.release(r.base, replicaBytes, true)
+			if e = t.remove(&t.sb.ObjectRoot, replicaKey(id)); e != nil {
+				return e
+			}
+		}
+		if off != 0 {
+			t.release(off, receiptBytes, true)
+			if e = t.remove(&t.sb.ObjectRoot, requestKey(id)); e != nil {
+				return e
+			}
+		}
+		changed = true
+	}
+	if !changed {
+		return nil
 	}
 	return t.commit(false)
 }
+
 func oldPieces(v *Volume, o *object, limit, cutStart, cutEnd uint64) []payloadPiece {
 	var pieces []payloadPiece
 	if o == nil || o.Info.Deleted {
