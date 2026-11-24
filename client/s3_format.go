@@ -11,7 +11,8 @@ import (
 )
 
 // STS3 v2: all integers little endian, no implicit padding. The 80-byte header
-// is directly addressable by Go/C/Rust. Flags occupy bytes 8..11 (bit 0 deleted).
+// is directly addressable by Go/C/Rust. Flags occupy bytes 8..11 (bit 0 deleted,
+// bit 1 public-read).
 // Payload:12..43, size:44..51, mtime Unix ns:52..59, MD5 ETag:60..75.
 // Metadata length:76..79. Text key and two sorted pair maps follow, then payload.
 const S3HeaderSize = 80
@@ -35,6 +36,9 @@ func encodeS3Object(o S3Object) ([]byte, error) {
 	var flags uint32
 	if o.Deleted {
 		flags = 1
+	}
+	if o.PublicRead {
+		flags |= 2
 	}
 	e.U32(flags)
 	e.B = append(e.B, o.Payload[:]...)
@@ -66,7 +70,7 @@ func encodeS3Object(o S3Object) ([]byte, error) {
 	return e.B, nil
 }
 func validS3Header(b []byte) bool {
-	return len(b) >= S3HeaderSize && string(b[:4]) == "STS3" && (binary.LittleEndian.Uint16(b[4:6]) == 2 && binary.LittleEndian.Uint16(b[6:8]) == 0 || binary.LittleEndian.Uint16(b[4:6]) == 3 && binary.LittleEndian.Uint16(b[6:8]) > 0 && binary.LittleEndian.Uint16(b[6:8]) <= 10000) && binary.LittleEndian.Uint32(b[8:12])&^uint32(1) == 0
+	return len(b) >= S3HeaderSize && string(b[:4]) == "STS3" && (binary.LittleEndian.Uint16(b[4:6]) == 2 && binary.LittleEndian.Uint16(b[6:8]) == 0 || binary.LittleEndian.Uint16(b[4:6]) == 3 && binary.LittleEndian.Uint16(b[6:8]) > 0 && binary.LittleEndian.Uint16(b[6:8]) <= 10000) && binary.LittleEndian.Uint32(b[8:12])&^uint32(3) == 0
 }
 func decodeS3Header(b []byte) (S3Object, error) {
 	var o S3Object
@@ -79,6 +83,7 @@ func decodeS3Header(b []byte) (S3Object, error) {
 		return o, ErrS3Format
 	}
 	o.Deleted = binary.LittleEndian.Uint32(b[8:12])&1 != 0
+	o.PublicRead = binary.LittleEndian.Uint32(b[8:12])&2 != 0
 	copy(o.Payload[:], b[12:44])
 	o.Size = binary.LittleEndian.Uint64(b[44:52])
 	o.Modified = time.Unix(0, int64(binary.LittleEndian.Uint64(b[52:60]))).UTC()

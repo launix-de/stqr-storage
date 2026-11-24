@@ -91,6 +91,9 @@ func (s *Server) serveS3(w http.ResponseWriter, r *http.Request) {
 		s3Error(w, 503, "ServiceUnavailable", "Node admission is pending")
 		return
 	}
+	if s.servePublicS3(w, r) {
+		return
+	}
 	p, bodySHA, err := s.authenticateS3(r)
 	if err != nil {
 		status := statusOf(err)
@@ -150,6 +153,10 @@ func (s *Server) serveS3(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer closeAPI()
+	if _, ok := q["acl"]; ok && key != "" {
+		s.serveS3ACL(w, r, api, b, key)
+		return
+	}
 	if s.serveS3Multipart(w, r, p, api, name, key) {
 		return
 	}
@@ -258,6 +265,10 @@ func (s *Server) serveS3Read(w http.ResponseWriter, r *http.Request, api *client
 }
 func (s *Server) serveS3ReadAttempt(w http.ResponseWriter, r *http.Request, api *client.S3, key string) error {
 	o, e := api.Head(r.Context(), key)
+	if r.Context().Value(publicS3Context{}) == true && (e == nil && !o.PublicRead || errors.Is(e, client.ErrNotFound)) {
+		s3Error(w, 403, "AccessDenied", "Access denied")
+		return nil
+	}
 	if e != nil {
 		s3Failure(w, e)
 		return nil
@@ -368,8 +379,14 @@ func s3Range(header string, size uint64) (uint64, uint64, error) {
 }
 func s3PutOptions(r *http.Request) (client.S3PutOptions, error) {
 	opt := client.S3PutOptions{Headers: map[string]string{}, Metadata: map[string]string{}, Checksums: map[string]string{}, IfMatch: r.Header.Get("If-Match")}
-	if acl := r.Header.Get("X-Amz-Acl"); acl != "" && acl != "private" {
-		return opt, fail(501, "only private ACL is supported")
+	if acl := r.Header.Get("X-Amz-Acl"); acl != "" && acl != "private" && acl != "public-read" {
+		return opt, fail(501, "supported canned ACLs are private and public-read")
+	}
+	opt.PublicRead = r.Header.Get("X-Amz-Acl") == "public-read"
+	for _, h := range []string{"X-Amz-Grant-Read", "X-Amz-Grant-Read-Acp", "X-Amz-Grant-Write-Acp", "X-Amz-Grant-Full-Control"} {
+		if r.Header.Get(h) != "" {
+			return opt, fail(501, "explicit grant headers are unsupported")
+		}
 	}
 	for _, h := range []string{"X-Amz-Server-Side-Encryption", "X-Amz-Server-Side-Encryption-Customer-Algorithm", "X-Amz-Tagging", "X-Amz-Object-Lock-Mode", "X-Amz-Object-Lock-Retain-Until-Date", "X-Amz-Object-Lock-Legal-Hold"} {
 		if r.Header.Get(h) != "" {

@@ -33,6 +33,7 @@ type S3 struct{ store S3Store }
 func NewS3(store S3Store) *S3 { return &S3{store: store} }
 
 type S3Object struct {
+	PublicRead    bool
 	Schema        int
 	Key           string
 	Payload       ObjectID
@@ -46,6 +47,7 @@ type S3Object struct {
 	Deleted       bool
 }
 type S3PutOptions struct {
+	PublicRead         bool
 	Headers, Metadata  map[string]string
 	Checksums          map[string]string // algorithm (CRC32/CRC32C/SHA1/SHA256) -> base64
 	SHA256, ContentMD5 string            // lowercase hex; empty means no supplied checksum
@@ -168,7 +170,7 @@ func (s *S3) Put(ctx context.Context, key string, src io.Reader, size uint64, op
 	if opt.ContentMD5 != "" && !strings.EqualFold(opt.ContentMD5, etag) || opt.SHA256 != "" && !strings.EqualFold(opt.SHA256, digest) {
 		return S3Object{}, ErrS3Checksum
 	}
-	o := S3Object{Schema: 2, Key: key, Payload: S3MetadataID(key), Size: size, ETag: etag, Modified: time.Now().UTC(), Headers: opt.Headers, Metadata: opt.Metadata}
+	o := S3Object{Schema: 2, PublicRead: opt.PublicRead, Key: key, Payload: S3MetadataID(key), Size: size, ETag: etag, Modified: time.Now().UTC(), Headers: opt.Headers, Metadata: opt.Metadata}
 	if opt.ETag != "" {
 		o.ETag = opt.ETag
 	}

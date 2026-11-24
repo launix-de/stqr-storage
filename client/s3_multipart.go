@@ -46,6 +46,7 @@ type S3CompletedPart struct {
 	Checksums map[string]string
 }
 type S3Upload struct {
+	PublicRead                          bool
 	ID, Key, Owner                      string
 	State                               uint32
 	Created, Updated                    time.Time
@@ -98,7 +99,11 @@ func s3ReadMap(d *Decoder) map[string]string {
 func encodeS3Upload(u S3Upload) ([]byte, error) {
 	e := Encoder{B: []byte("STMU")}
 	e.U16(1)
-	e.U16(0)
+	if u.PublicRead {
+		e.U16(1)
+	} else {
+		e.U16(0)
+	}
 	e.U32(u.State)
 	e.U32(0)
 	e.U64(uint64(u.Updated.UnixNano()))
@@ -148,9 +153,14 @@ func putU32(b []byte, n uint32) {
 func decodeS3Upload(raw []byte, info ObjectInfo) (S3Upload, error) {
 	var u S3Upload
 	d := Decoder{B: raw}
-	if string(d.Take(4)) != "STMU" || d.U16() != 1 || d.U16() != 0 {
+	if string(d.Take(4)) != "STMU" || d.U16() != 1 {
 		return u, ErrS3Format
 	}
+	flags := d.U16()
+	if flags&^uint16(1) != 0 {
+		return u, ErrS3Format
+	}
+	u.PublicRead = flags&1 != 0
 	u.State = d.U32()
 	size := d.U32()
 	u.Updated = time.Unix(0, int64(d.U64())).UTC()
@@ -277,7 +287,7 @@ func (s *S3) CreateMultipart(ctx context.Context, key, owner, algorithm, checksu
 		return S3Upload{}, ErrRange
 	}
 	now := time.Now().UTC()
-	u := S3Upload{ID: NewRequestID().String(), Key: key, Owner: owner, Created: now, Updated: now, Headers: opt.Headers, Metadata: opt.Metadata, Algorithm: algorithm, ChecksumType: checksumType}
+	u := S3Upload{PublicRead: opt.PublicRead, ID: NewRequestID().String(), Key: key, Owner: owner, Created: now, Updated: now, Headers: opt.Headers, Metadata: opt.Metadata, Algorithm: algorithm, ChecksumType: checksumType}
 	return s.saveUpload(ctx, u, strings.NewReader(""), true)
 }
 func multipartTemp() (*os.File, error) {
@@ -564,7 +574,7 @@ func (s *S3) FinishMultipart(ctx context.Context, u S3Upload) (S3Object, error) 
 		}
 	}
 	etag := hex.EncodeToString(md.Sum(nil)) + fmt.Sprintf("-%d", index)
-	result, e = s.Put(ctx, u.Key, io.MultiReader(readers...), size, S3PutOptions{Headers: headers, Metadata: u.Metadata, Checksums: expected, Publication: &u.Publication, Modified: u.PublishTime, ETag: etag})
+	result, e = s.Put(ctx, u.Key, io.MultiReader(readers...), size, S3PutOptions{PublicRead: u.PublicRead, Headers: headers, Metadata: u.Metadata, Checksums: expected, Publication: &u.Publication, Modified: u.PublishTime, ETag: etag})
 	if errors.Is(e, ErrS3Checksum) || errors.Is(e, ErrRange) || errors.Is(e, ErrFull) || errors.Is(e, syscall.ENOSPC) || errors.Is(e, syscall.EDQUOT) {
 		return result, s.restoreMultipartOpen(ctx, u, snapshot, e)
 	}
