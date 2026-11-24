@@ -573,6 +573,9 @@ func (s *Server) executeGlobalAdmin(m client.Message, actor principal) ([]byte, 
 	c := s.controller
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if s.joinRequested.Load() {
+		return nil, 503, fail(503, "node is joining another cluster")
+	}
 	if _, err := c.resume(s.ctx); err != nil {
 		return nil, 0, err
 	}

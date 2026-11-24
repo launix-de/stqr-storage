@@ -340,5 +340,8 @@ func currentOperationSemantics() map[string]operationSemantics {
 		result[fmt.Sprintf("%04x", op)] = operationSemantics{Emit: 1, Min: 1, Max: 1}
 	}
 	result[fmt.Sprintf("%04x", peerCowCapture)] = operationSemantics{Emit: 2, Min: 2, Max: 2}
+	for _, op := range []uint16{clusterJoinStatus, clusterJoinInfo, clusterJoinPrepare} {
+		result[fmt.Sprintf("%04x", op)] = operationSemantics{Emit: 1, Min: 1, Max: 1}
+	}
 	return result
 }
