@@ -53,6 +53,11 @@ authority. A replica read requires neither a primary call nor a failure timeout.
 
 ## Placement and policy changes
 
+The dashboard PG editor accepts a copy count for HDD/SSD or EVERYWHERE within
+the PG node selection. Changing compression or masks preserves the selected
+count. EVERYWHERE encodes zero as the count and disables the count input. The
+editor limits RAM to one copy in count mode until RAM replication is available.
+
 Empty buckets can begin with their complete pinned replica set. If the required
 set cannot yet be built, writes wait rather than acknowledging one copy. An
 addition to existing data uses the durable range handoff journal: bulk COPY

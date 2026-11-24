@@ -143,8 +143,10 @@ On transport loss, operations reconnect and reuse their request ID. Cancellation
 of a potentially sent mutation returns `UnknownOutcomeError` with that ID; retry
 it unchanged. `StatusError` preserves server status/follow headers and maps 404,
 412, 507 and 501 to ErrNotFound, ErrPrecondition, ErrFull and ErrNotImplemented.
-No blind HTTP redirect forwards credentials to another host. Segmented routing,
-learned ownership/RAM runtime IDs and replica routing are explicit multinode TODOs.
+No blind HTTP redirect forwards credentials to another host. The Go SDK uses
+segmented routing and learns ownership/RAM runtime IDs. Reads may use a committed
+replica when the primary transport is unavailable; writes retain primary authority.
+The C and kernel clients do not yet follow multinode redirects.
 
 The server dispatches object operations to its RAM-resident `Bucket` instances,
 with current account/bucket authorization and persistent descriptions in the
@@ -160,9 +162,10 @@ queue size), conditional writes, durable retries after drain/restart, bucket
 isolation, quota limits, grant revocation, codec/tier changes and RAM resets.
 Protocol-peer tests additionally cover request multiplexing, cancellation and a
 committed mutation whose connection fails before the reply. Multinode routing, logical/physical absolute quotas and volume-backed guaranteed
-reservations are implemented for the current single-copy path, including migration
-and restart. Multiple synchronous data replicas remain explicitly unsupported;
-the server never acknowledges unimplemented redundancy.
+reservations are implemented, including migration and restart. Synchronous
+HDD/SSD replication uses ALL confirmation and accounts physical usage on every
+required copy. RAM replication and general relocation of existing replica sets
+remain unsupported; see [replication limits](replication.md).
 
 ## Native readonly and overlay mounts
 
