@@ -2,6 +2,7 @@
 package server
 
 import (
+	"bytes"
 	"embed"
 	"encoding/json"
 	"errors"
@@ -90,6 +91,10 @@ func (s *Server) Handler() http.Handler {
 		}
 		if r.URL.Path == "/" && r.Method == http.MethodGet {
 			b, _ := dashboard.ReadFile("dashboard/index.html")
+			if s.joinPending() || s.joinRequested.Load() {
+				b = bytes.Replace(b, []byte(`id="join-login-pending" hidden`), []byte(`id="join-login-pending"`), 1)
+				b = bytes.Replace(b, []byte(`class="login-note"`), []byte(`class="login-note" hidden`), 1)
+			}
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
 			w.Write(b)
 			return
@@ -168,10 +173,30 @@ func (s *Server) Handler() http.Handler {
 				httpError(w, 400, errors.New("expected one binary STQR request"))
 				return
 			}
+			if m.Opcode == clusterJoinInfo && p.User.Role == "ADMIN" {
+				w.Header().Set(compatibilityHeader, profileHeader(s.protocolVersion()))
+				profile, err := decodeProfile(r.Header)
+				if err == nil {
+					err = checkPeerMessage(s.protocolVersion(), profile, m)
+				}
+				if err != nil {
+					httpError(w, 426, err)
+					return
+				}
+			}
 			body, status := s.dispatchAs(m, nil, p)
 			w.Header().Set("Content-Type", "application/octet-stream")
 			w.WriteHeader(status)
 			w.Write(client.EncodeMessage(client.Message{Kind: client.Response, Opcode: m.Opcode, ID: m.ID, Body: body}))
+			if m.Opcode == clusterJoinPrepare && status == 202 {
+				if f, ok := w.(http.Flusher); ok {
+					f.Flush()
+				}
+				select {
+				case s.joinSignal <- struct{}{}:
+				default:
+				}
+			}
 		case r.URL.Path == "/api/volumes" && r.Method == "GET":
 			writeJSON(w, 200, s.CollectStats(client.StatsFilter{}))
 		case r.URL.Path == "/api/volumes" && r.Method == "POST":

@@ -230,6 +230,13 @@ Use the dashboard to add a data volume, create a bucket and grant a user access.
 The reserved admin volume stores accounts and bucket descriptions separately
 from your application data.
 
+To add a fresh installation to an existing cluster, prepare any data volumes and
+choose **Join cluster** in the dashboard before creating application buckets.
+Enter a cluster node URI and administrator credentials; the node adopts the
+cluster accounts and policies while keeping its prepared volumes. The
+[join guide](docs/server.md#join-a-cluster-from-the-dashboard) describes eligibility
+and network requirements.
+
 By default, access is restricted to loopback clients. The daemon currently
 serves plain HTTP/WebSocket, including Basic authentication. Use a protected
 network, an SSH tunnel or a TLS reverse proxy for remote access. S3 can be exposed

@@ -60,6 +60,16 @@ func (s *Server) dispatchAs(m client.Message, ws *wsSession, p principal) ([]byt
 			return client.ResponseBody(403, nil, "bucket connection has no administrative privileges"), 403
 		}
 	}
+	if m.Opcode >= clusterJoinStatus && m.Opcode <= clusterJoinPrepare {
+		if ws != nil && m.Opcode == clusterJoinPrepare {
+			return client.ResponseBody(400, nil, "use the native HTTP message endpoint for join"), 400
+		}
+		body, status, err := s.executeClusterJoin(m, p)
+		if err != nil {
+			return client.ResponseBody(status, nil, err.Error()), status
+		}
+		return client.ResponseBody(status, body, ""), status
+	}
 	if m.Opcode == nodeVersionsMessage {
 		if !p.isAdmin() {
 			return client.ResponseBody(403, nil, "administrator required"), 403
