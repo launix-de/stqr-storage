@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-only
+import {setupClusterJoin} from './join.js';
 import {NodeConnection,newID} from './protocol.js';
 import {memberIDs,nodeMembership,currentSnapshots,seedMembers} from './membership.js';
 import {versionWarning,versionLabel} from './node-versions.js';
@@ -19,6 +20,7 @@ export function bytes(n){n=BigInt(n??0);const units=['B','KiB','MiB','GiB','TiB'
 function toast(message,error=false){const div=document.createElement('div');div.className='toast'+(error?' error-toast':'');div.textContent=message;while($('toasts').children.length>=3)$('toasts').firstElementChild.remove();$('toasts').append(div);setTimeout(()=>div.remove(),error?10000:5000)}
 function setConnected(connected){$('connection').classList.toggle('offline',!connected);$('connection').innerHTML=`<span class="dot"></span>${connected?'Live · alle 3 Sekunden':'Verbindung wird wiederhergestellt'}`;$('refresh').disabled=!connected}
 function beginSession(session){
+ joinView.stop();
  $('login').hidden=true;$('app').hidden=false;$('profile-name').textContent=session.username;userViews.clear();bucketViews.clear();pgViews.clear();node?.stop();nodeStates.clear();fetchingConfigs.clear();snapshot=null;configView=null;volumeNode=null;
  const connection=node=new NodeConnection(session.csrf_token,connected=>{if(node===connection)setConnected(connected)},stats=>{if(node===connection)onStats(stats)});
  connection.onOpen=async()=>{try{const [cfg]=await Promise.all([connection.getConfig(),connection.subscribeVersions(),connection.subscribeStats(),userViews.load(),bucketViews.load()]);if(node===connection)applyConfig(cfg)}catch(e){if(node===connection)toast(e.message,true)}};
@@ -35,7 +37,7 @@ function beginSession(session){
 }
 
 async function sessionFetch(method='GET',headers={}){return fetch('/api/session',{method,headers,credentials:'same-origin'})}
-$('login-form').addEventListener('submit',async e=>{e.preventDefault();const submit=e.submitter;submit.disabled=true;$('login-error').textContent='';try{const raw=new TextEncoder().encode(`${$('username').value}:${$('password').value}`);const response=await sessionFetch('POST',{Authorization:'Basic '+btoa(Array.from(raw,b=>String.fromCharCode(b)).join(''))});if(!response.ok){const failure=await response.json().catch(()=>({}));throw Error(response.status===401?'Benutzername oder Passwort ist nicht korrekt.':response.status===403&&failure.error==='administrator required'?'Für das Dashboard ist ein Administratorkonto erforderlich.':response.status===403?'Zugriff auf das Dashboard verweigert.':'Anmeldung nicht möglich.')}const data=await response.json();$('password').value='';beginSession(data)}catch(e){$('login-error').textContent=e.message}finally{submit.disabled=false}});
+$('login-form').addEventListener('submit',async e=>{e.preventDefault();const submit=e.submitter;submit.disabled=true;$('login-error').textContent='';try{const raw=new TextEncoder().encode(`${$('username').value}:${$('password').value}`);const response=await sessionFetch('POST',{Authorization:'Basic '+btoa(Array.from(raw,b=>String.fromCharCode(b)).join(''))});if(!response.ok){const failure=await response.json().catch(()=>({}));throw Error(response.status===503?'Die Node wartet auf die Aufnahme durch den Cluster. Bitte anschließend mit dem Zielkonto anmelden.':response.status===401?'Benutzername oder Passwort ist nicht korrekt.':response.status===403&&failure.error==='administrator required'?'Für das Dashboard ist ein Administratorkonto erforderlich.':response.status===403?'Zugriff auf das Dashboard verweigert.':'Anmeldung nicht möglich.')}const data=await response.json();$('password').value='';beginSession(data)}catch(e){$('login-error').textContent=e.message}finally{submit.disabled=false}});
 $('logout').addEventListener('click',async()=>{try{await sessionFetch('DELETE',{'X-CSRF-Token':node.csrf})}catch{}node?.stop();$('app').hidden=true;$('login').hidden=false;$('password').focus()});
 function showView(view){
  for(const b of document.querySelectorAll('[data-view]'))b.classList.toggle('selected',b.dataset.view===view);
@@ -53,7 +55,9 @@ const pgViews=setupPlacementGroups({connection:()=>node,escape,toast,states:node
 const bucketViews=setupBucketViews({connection:()=>node,escape,toast,showView});
 const userViews=setupUserViews({connection:()=>node,currentUsername:()=>$('profile-name').textContent,escape,toast,showView,requireLogin,openBucketCreate:options=>bucketViews.openCreate(options)});
 
+const joinView=setupClusterJoin({connection:()=>node,onJoined:beginSession});
 function applyConfig(view){
+ joinView.refresh();
  configView=view;const id=view.config.node.id,entry=nodeStates.get(id)??{};entry.config=view;nodeStates.set(id,entry);seedMembers(view,nodeStates);
  snapshot=entry.snapshot??snapshot;volumeNode??=id;
  $('config-location').textContent=view.config_path;$('restart-notice').hidden=!view.restart_required;
@@ -68,6 +72,7 @@ async function refreshConfig(target=localNode()){
 }
 let capacity=null,steps=[],selectedSizes={0:50n*1024n*1024n,2:50n*1024n*1024n};
 function onStats(s){
+ joinView.refresh();
  const entry=nodeStates.get(s.node)??{};
  if(entry.snapshot&&s.boot===entry.snapshot.boot&&s.sequence<=entry.snapshot.sequence)return;
  entry.previous=entry.placeholder?null:entry.snapshot;entry.placeholder=false;entry.snapshot=s;entry.received=Date.now();nodeStates.set(s.node,entry);

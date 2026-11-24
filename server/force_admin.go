@@ -44,6 +44,9 @@ func decodeForceDisconnectMode(body []byte, recovery bool) (forceDisconnectReque
 }
 
 func (s *Server) forceFrozen() bool {
+	if s.joinRequested.Load() {
+		return true
+	}
 	if s.control == nil {
 		return false
 	}

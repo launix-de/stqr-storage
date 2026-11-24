@@ -97,3 +97,46 @@ func (v *Volume) VerifyIdentity(cluster, node, id ID) error {
 	}
 	return nil
 }
+
+// CheckEmpty includes tombstones, retry receipts and private replica records.
+// Zero live payload bytes alone do not make a volume eligible for a new cluster.
+func (v *Volume) CheckEmpty() error {
+	v.mu.RLock()
+	defer v.mu.RUnlock()
+	if err := v.check(false); err != nil {
+		return err
+	}
+	return v.walkIndex(func(indexEntry) error { return ErrBusy })
+}
+
+// JoinEmptyCluster preserves a prepared volume's ID, size and allocation format.
+// The caller must exclusively own the volume and persist its join intent first.
+// Repeating the same transition after a crash is safe; ordinary Bind remains
+// strict about cluster identity.
+func (v *Volume) JoinEmptyCluster(previous, next, node, id ID) error {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	if err := v.check(true); err != nil {
+		return err
+	}
+	identity := v.sb.Identity
+	if previous == (ID{}) || next == (ID{}) || node == (ID{}) || id == (ID{}) ||
+		identity.NodeID != node || identity.VolumeID != id ||
+		(identity.ClusterID != previous && identity.ClusterID != next) {
+		return ErrIdentity
+	}
+	if err := v.walkIndex(func(indexEntry) error { return ErrBusy }); err != nil {
+		return err
+	}
+	if identity.ClusterID == next {
+		return nil
+	}
+	// Old local ownership provenance belongs to the abandoned empty cluster.
+	if err := v.setLocalMetadataLocked(nil, Options{}, nil); err != nil {
+		return err
+	}
+	s := v.sb
+	s.Identity.ClusterID = next
+	s.Generation++
+	return v.publish(s)
+}
