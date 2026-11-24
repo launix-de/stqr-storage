@@ -166,6 +166,48 @@ func (h *Handle) ScanReplicas(fn func(ReplicaRecord) error) error {
 	})
 }
 
+// RestoreReplicaAbort transfers a terminal failure after a migration fence.
+// It cannot import private prepared data or overwrite a published operation.
+func (h *Handle) RestoreReplicaAbort(record ReplicaRecord, opts Options) error {
+	return h.do(true, func(v *Volume) error {
+		if err := v.flushDeferred(); err != nil {
+			return err
+		}
+		if record.State != ReplicaAborted || record.AbortStatus < 400 || record.AbortStatus > 599 || record.Request.ID == (ID{}) || !record.Request.Result.Info.Compression.valid() || record.Binding.Epoch == 0 || record.Binding.Sequence == 0 || record.Binding.SetHash == ([32]byte{}) {
+			return ErrRange
+		}
+		if _, found, err := v.loadDedupe(record.Request.ID); err != nil {
+			return err
+		} else if found {
+			return ErrRequestID
+		}
+		prior, found, err := v.loadReplica(record.Request.ID)
+		if err != nil {
+			return err
+		}
+		if found {
+			if prior.State != ReplicaAborted || prior.Request != record.Request || prior.Binding != record.Binding {
+				return ErrRequestID
+			}
+			if prior.AbortStatus == record.AbortStatus {
+				return nil
+			}
+		}
+		if pending, err := v.pending(record.Request.Key); err != nil {
+			return err
+		} else if pending {
+			return ErrBusy
+		}
+		record.base, record.object, record.receipt = prior.base, 0, 0
+		t := v.transaction()
+		defer t.close()
+		if err := t.saveReplica(&record); err != nil {
+			return err
+		}
+		return t.commitReserved(opts.UseGuaranteed, opts.InFlightAllowance, opts.GuaranteedAllowance)
+	})
+}
+
 func (h *Handle) ScanPendingReplicas(fn func(ReplicaRecord) error) error {
 	return h.do(false, func(v *Volume) error {
 		return v.walkIndexBounds(indexKey{3}, indexKey{4}, func(x indexEntry) error {

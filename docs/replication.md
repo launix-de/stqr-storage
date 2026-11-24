@@ -66,7 +66,43 @@ The primary retains its data and original retry receipts. Existing replicas
 learn the new map before the primary releases the fence.
 
 Count reductions require the departing replica online, obtain durable scoped
-proofs, activate the smaller set and reclaim only that retired copy. An offline
+proofs, activate the smaller set and reclaim only that retired copy.
+
+PG node/volume mask changes and explicit volume/node drains also relocate existing
+multi-copy sets within their storage strategy. The planner preserves valid copies.
+A same-node volume change copies from the live primary to the new pinned volume,
+fences the range for final catch-up, commits that location and only then reclaims
+the retired volume's data and retry receipts. Intermediate committed pins remain
+readable even while the PG's effective mask still describes other old locations.
+
+Replacing a node first adds a full required copy, so the intermediate set can
+contain N+1 copies. Every intermediate required copy participates in ALL writes.
+Only after COPY/CATCH_UP/ACTIVATE does a separate online removal retire the old
+copy. This requires spare disk space and, for a finite physical quota, enough
+credits for that temporary extra copy. Insufficient capacity leaves the existing
+set intact rather than reducing redundancy.
+
+If the primary itself must move, the current live primary durably fences its
+range before handing the role to an existing committed replica. This changes no
+payload or retained retry response and transfers logical quota credits once;
+physical credits stay on the nodes already storing the copies. Terminal failed
+request outcomes are also transferred from the old primary before READY: a
+follower which rejected PREPARE before storing it must retain the same failure
+after becoming primary. Imported abort records are durable, reserve metadata
+space and are reclaimed from retired volumes only after cutover. Neither node can
+invent a new writer after a timeout. The regular handoff journal resumes the
+same READY/decision after either participant restarts. An offline required old
+copy prevents a new relocation plan; an already bound handoff waits for its exact
+participants. Forced reconciliation after losing one of them remains unavailable.
+
+An explicit EVERYWHERE node leave may retire the leaving copy after the remaining
+copies are committed and all membership participants are online. Until the
+ALL-member membership change commits, the old required count still applies and
+writes wait. They resume under the smaller committed membership. A volume drain
+alone does not remove a node from EVERYWHERE: it needs another allowed local
+volume or an explicit policy/membership change.
+
+ An offline
 node is never removed because of a timeout. Codec-only changes of an otherwise
 valid set freeze that bucket, rewrite every required copy while preserving
 versions/receipts, and activate the new central PG version after ALL confirmation.
@@ -80,30 +116,34 @@ replicas, private metadata and staged allocations to their actual volumes.
 
 Volume format 4 adds private replica records to the durable object index. Readers
 accept formats 2/3/4; the next durable write uses format 4. The system manifest
-retains a replication protocol marker even after the last replicated bucket is
-deleted, so older peers cannot join a cluster with incompatible range history.
+retains replication protocol marker 2 (marker 1 remains readable) even after the
+last replicated bucket is deleted, so older peers cannot join a cluster with incompatible range history.
 
 Accepted client requests currently use the stronger fully durable ALL path for
 replicated ranges. Private prepare/commit records never enter a volatile accepted
 overlay. Single-copy accepted writes keep physical quota accounting up to date
 before their checkpoint. Durability capability 8192 is separate from recovery
 fence clearance (1024), physical quotas (2048) and replication (4096); the C and
-Go clients share that assignment. Exclusive bucket-lease acquisition waits for
-pending replica transactions before granting a new owner access.
+Go clients share that assignment. Replica topology capability 16384 gates the
+new role/volume handoffs; old nodes cannot join protocol-2 history even after
+the last replicated bucket is deleted. Activating that history requires all
+members to advertise the topology capability. Exclusive bucket-lease acquisition
+waits for pending replica transactions before granting a new owner access.
 
 RAM replica bootstrap/restore and all-copy runtime loss still require their
 own boot-bound recovery implementation. Multi-copy RAM writes return 501.
-Automatic relocation of existing multi-copy groups, replica-set replacement
-across changed volume masks, and forced promotion/reconciliation of a surviving
-data replica are not implemented by this change. Such unfinished transitions
-remain pending; the server does not pick a raw highest-version object as a new
-primary or silently discard a required offline copy.
+Capacity/load-driven rebalancing of existing multi-copy groups, changing their
+storage strategy, and forced promotion/reconciliation of a surviving data replica
+remain separate work. Such unfinished transitions stay pending; the server does
+not pick a raw highest-version object as a new primary or silently discard a required offline copy.
 
 Tests cover torn writes/sync failures in prepare, decision and publication;
 nonblocking reads during staging; sparse and compressed copy-on-write; retained
 request replies; replica add/remove; central codec changes; logical/physical
-quotas; and an opt-in two-host SSH test with remote process crash/restart and
-reads while the primary is offline. Run that test with `STQR_TEST_SSH`,
+quotas; primary/follower volume drains under concurrent appends; disjoint node-mask
+replacement with compression changes; and both participant restarts before/after
+the handoff decision. An opt-in two-host SSH test also covers remote process
+crash/restart and reads while the primary is offline. Run that test with `STQR_TEST_SSH`,
 `STQR_TEST_LOCAL_IP`, `STQR_TEST_REMOTE_IP` and `STQR_TEST_BINARY` set, then
 `go test ./server -run '^TestSSHReplicationAcceptance$' -v -count=1`. The binary
 must be built from the same source. The fixture owns a unique temporary remote

@@ -213,6 +213,9 @@ func (c *clusterController) reconcileExcludedScopes(ctx context.Context, claim c
 	// and a delayed target credit after it could allocate the same bytes twice.
 	for _, pair := range plans {
 		p := pair.plan
+		if (p.ReplicaPromote || p.ReplicaRelocate) && (!hasControlNode(claim.Required, p.Source) || !hasControlNode(claim.Required, p.Target)) {
+			return nil, fail(501, "replica topology handoff requires both participants; forced replica reconciliation is not implemented")
+		}
 		committed := false
 		for _, report := range pair.reports {
 			committed = committed || report.Decision != nil
@@ -367,6 +370,9 @@ func (r *rangeManager) finishCommitForExclusion(claim controlClaim, p rangePlan)
 }
 
 func (r *rangeManager) promoteForExclusion(claim controlClaim, p rangePlan) error {
+	if p.ReplicaPromote || p.ReplicaRelocate {
+		return fail(501, "forced replica topology reconciliation is not implemented")
+	}
 	r.server.opMu.Lock()
 	defer r.server.opMu.Unlock()
 	r.mu.Lock()

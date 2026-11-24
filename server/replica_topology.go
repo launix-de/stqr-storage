@@ -2,7 +2,6 @@
 package server
 
 import (
-	"crypto/sha256"
 	"github.com/launix-de/stqr-storage/client"
 	"github.com/launix-de/stqr-storage/volume"
 )
@@ -23,7 +22,7 @@ func (s *Server) replicaTopologyMessage(m client.Message, actor client.ID) ([]by
 	defer s.opMu.Unlock()
 	r.mu.Lock()
 	t := r.txns[id]
-	valid := t != nil && t.plan.ReplicaRemove && t.plan.Source == actor && t.plan.Target == r.node && !t.aborted && !t.forceRetired
+	valid := t != nil && (t.plan.ReplicaRemove || t.plan.ReplicaPromote || t.plan.ReplicaRelocate) && t.plan.Source == actor && t.plan.Target == r.node && !t.aborted && !t.forceRetired
 	r.mu.Unlock()
 	if !valid {
 		return nil, errControlConflict
@@ -34,11 +33,34 @@ func (s *Server) replicaTopologyMessage(m client.Message, actor client.ID) ([]by
 		return nil, err
 	}
 	if m.Opcode == peerReplicaTopologyReady {
-		proof, err := r.ready(id, sha256.Sum256(mustRangeWire(t.plan)), false, 0, 0)
+		if !t.plan.ReplicaRemove && !t.plan.ReplicaPromote {
+			return nil, errControlConflict
+		}
+		used := uint64(0)
+		if t.plan.ReplicaPromote {
+			store, err := r.destination(t.plan)
+			if err != nil {
+				return nil, err
+			}
+			used, err = r.replicaLogicalUsage(t.plan, store)
+			if err != nil {
+				return nil, err
+			}
+		}
+		proof, err := r.ready(id, replicaTopologyDigest(t.plan, used), false, used, 0)
 		if err != nil {
 			return nil, err
 		}
-		return proof.MarshalBinary()
+		wire, err := proof.MarshalBinary()
+		if err != nil {
+			return nil, err
+		}
+		if t.plan.ReplicaPromote {
+			e := client.Encoder{B: wire}
+			e.U64(used)
+			wire = e.B
+		}
+		return wire, nil
 	}
 	r.mu.Lock()
 	committed := t.decision != nil
@@ -47,7 +69,15 @@ func (s *Server) replicaTopologyMessage(m client.Message, actor client.ID) ([]by
 		return nil, errControlConflict
 	}
 	s.mu.RLock()
-	managed := s.volumes[t.plan.Volume.String()]
+	retired := t.plan.Volume
+	if t.plan.ReplicaRelocate {
+		for _, loc := range t.plan.Before.Entries[0].Locations {
+			if loc.Node == r.node {
+				retired = volume.ID(loc.Volume)
+			}
+		}
+	}
+	managed := s.volumes[retired.String()]
 	s.mu.RUnlock()
 	if managed == nil {
 		return nil, volume.ErrNotFound
@@ -63,7 +93,7 @@ func (s *Server) replicaTopologyMessage(m client.Message, actor client.ID) ([]by
 			return false
 		}
 		for _, loc := range entry.Locations {
-			if loc.Node == r.node && loc.Role <= 1 && (loc.Volume == (client.ID{}) || loc.Volume == client.ID(t.plan.Volume)) {
+			if loc.Node == r.node && loc.Role <= 1 && (loc.Volume == (client.ID{}) || loc.Volume == client.ID(retired)) {
 				return true
 			}
 		}
@@ -109,18 +139,40 @@ func (s *Server) replicaTopologyMessage(m client.Message, actor client.ID) ([]by
 		last := records[len(records)-1].ID
 		after = &last
 	}
+	var replicaAfter *volume.ID
+	for {
+		records, err := h.ScanReplicaRecords(replicaAfter, 128)
+		if err != nil {
+			return nil, err
+		}
+		if len(records) == 0 {
+			break
+		}
+		for _, record := range records {
+			if record.State == volume.ReplicaAborted && client.ID(record.Request.Key.Bucket) == t.plan.Before.Bucket && t.plan.contains(record.Request.Key.Object) && !owned(record.Request.Key) {
+				if err := h.ForgetRequest(record.Request.ID); err != nil {
+					return nil, err
+				}
+			}
+		}
+		last := records[len(records)-1].Request.ID
+		replicaAfter = &last
+	}
 	return nil, nil
 }
 
 func (r *rangeManager) planReplicaRemove(d BucketDescription) (rangePlan, bool) {
-	if d.DesiredPolicy == nil || d.Policy.StorageStrategy == "ram" {
+	if d.Policy.StorageStrategy == "ram" {
 		return rangePlan{}, false
 	}
-	goal := *d.DesiredPolicy
-	if goal.StorageStrategy != d.Policy.StorageStrategy || goal.Compression != d.Policy.Compression {
+	goal := d.Policy
+	if d.DesiredPolicy != nil {
+		goal = *d.DesiredPolicy
+	}
+	if goal.StorageStrategy != d.Policy.StorageStrategy {
 		return rangePlan{}, false
 	}
-	need := r.server.requiredReplicas(goal, r.server.currentSystem.Load().manifest.Membership)
+	need := r.replicaRemovalCount(goal)
 	if need < 1 {
 		return rangePlan{}, false
 	}
@@ -136,7 +188,15 @@ func (r *rangeManager) planReplicaRemove(d BucketDescription) (rangePlan, bool) 
 		if !ok {
 			continue
 		}
-		removed := entry.Locations[len(entry.Locations)-1]
+		index := len(entry.Locations) - 1
+		for i := 1; i < len(entry.Locations); i++ {
+			_, draining := r.replicaLocationState(entry.Locations[i])
+			if draining || !r.server.replicaLocationAllowed(goal, entry.Locations[i]) {
+				index = i
+				break
+			}
+		}
+		removed := entry.Locations[index]
 		if removed.Role != 1 || removed.Volume == (client.ID{}) {
 			continue
 		}
@@ -149,13 +209,13 @@ func (r *rangeManager) planReplicaRemove(d BucketDescription) (rangePlan, bool) 
 		}
 		next := entry
 		next.OwnerEpoch++
-		next.Locations = append([]client.Location(nil), entry.Locations[:len(entry.Locations)-1]...)
-		if len(next.Locations) == need {
+		next.Locations = append(append([]client.Location(nil), entry.Locations[:index]...), entry.Locations[index+1:]...)
+		if goal.Compression == d.Policy.Compression && r.server.replicaSetSatisfies(goal, next.Locations) {
 			next.PolicyVersion = goal.Version
 		}
 		after := before
 		after.Entries = []client.RangeEntry{next}
-		p := rangePlan{Attempt: client.NewRequestID(), Before: before, After: after, Source: r.node, Target: removed.Node, Volume: volume.ID(removed.Volume), Moving: entry, Compression: bucketCodec(goal), ReplicaRemove: true}
+		p := rangePlan{Attempt: client.NewRequestID(), Before: before, After: after, Source: r.node, Target: removed.Node, Volume: volume.ID(removed.Volume), Moving: entry, Compression: bucketCodec(d.Policy), ReplicaRemove: true}
 		if p.validate() == nil {
 			return p, true
 		}

@@ -15,15 +15,17 @@ import (
 // additions/removals share the durable scoped journal. Only the current primary
 // initiates these transitions; an offline source never triggers writer election.
 type rangePlan struct {
-	Attempt        client.ID
-	Before, After  client.MapPatch
-	Source, Target client.ID
-	Volume         volume.ID
-	Moving         client.RangeEntry
-	Compression    volume.Compression
-	Physical       uint64
-	ReplicaAdd     bool
-	ReplicaRemove  bool
+	Attempt         client.ID
+	Before, After   client.MapPatch
+	Source, Target  client.ID
+	Volume          volume.ID
+	Moving          client.RangeEntry
+	Compression     volume.Compression
+	Physical        uint64
+	ReplicaAdd      bool
+	ReplicaRemove   bool
+	ReplicaPromote  bool
+	ReplicaRelocate bool
 }
 
 func (p rangePlan) marshal() ([]byte, error) {
@@ -46,6 +48,12 @@ func (p rangePlan) marshal() ([]byte, error) {
 	if p.ReplicaRemove {
 		schema = 4
 	}
+	if p.ReplicaPromote {
+		schema = 5
+	}
+	if p.ReplicaRelocate {
+		schema = 6
+	}
 	e.U16(schema)
 	e.Blob(before)
 	e.Blob(after)
@@ -65,6 +73,12 @@ func (p rangePlan) marshal() ([]byte, error) {
 	if schema == 4 {
 		e.Bool(p.ReplicaRemove)
 	}
+	if schema == 5 {
+		e.Bool(p.ReplicaPromote)
+	}
+	if schema == 6 {
+		e.Bool(p.ReplicaRelocate)
+	}
 	if err := p.validate(); err != nil {
 		return nil, err
 	}
@@ -80,7 +94,7 @@ func decodeRangePlan(b []byte) (rangePlan, error) {
 	p.Moving.PrefixBits = d.U16()
 	p.Compression = volume.Compression(d.U8())
 	p.Physical = d.U64()
-	if schema == 2 || schema == 3 || schema == 4 {
+	if schema >= 2 && schema <= 6 {
 		p.Attempt = d.ID()
 		if p.Attempt == (client.ID{}) {
 			return rangePlan{}, client.ErrProtocol
@@ -98,7 +112,19 @@ func decodeRangePlan(b []byte) (rangePlan, error) {
 			return rangePlan{}, client.ErrProtocol
 		}
 	}
-	if (schema != 1 && schema != 2 && schema != 3 && schema != 4) || a != nil || bErr != nil || d.Done() != nil {
+	if schema == 5 {
+		p.ReplicaPromote = d.Bool()
+		if !p.ReplicaPromote {
+			return rangePlan{}, client.ErrProtocol
+		}
+	}
+	if schema == 6 {
+		p.ReplicaRelocate = d.Bool()
+		if !p.ReplicaRelocate {
+			return rangePlan{}, client.ErrProtocol
+		}
+	}
+	if (schema < 1 || schema > 6) || a != nil || bErr != nil || d.Done() != nil {
 		return rangePlan{}, client.ErrProtocol
 	}
 	if err := p.validate(); err != nil {
@@ -116,6 +142,21 @@ func (p rangePlan) validate() error {
 		return client.ErrProtocol
 	}
 	old := p.Before.Entries[0]
+	flags := 0
+	for _, flag := range []bool{p.ReplicaAdd, p.ReplicaRemove, p.ReplicaPromote, p.ReplicaRelocate} {
+		if flag {
+			flags++
+		}
+	}
+	if flags > 1 {
+		return client.ErrProtocol
+	}
+	if (p.ReplicaPromote || p.ReplicaRelocate) && p.Attempt == (client.ID{}) {
+		return client.ErrProtocol
+	}
+	if p.ReplicaPromote || p.ReplicaRelocate {
+		return p.validateReplicaTransition(old)
+	}
 	if p.ReplicaRemove {
 		if p.ReplicaAdd || len(old.Locations) < 2 || p.Source != old.Locations[0].Node || p.Source == p.Target || len(p.After.Entries) != 1 || p.Moving.Start != old.Start || p.Moving.PrefixBits != old.PrefixBits {
 			return client.ErrProtocol

@@ -271,11 +271,20 @@ func (v *Volume) forgetRequestLocked(id ID) error {
 	if err != nil {
 		return err
 	}
-	if hasReplica && r.State != ReplicaPublished {
+	if hasReplica && r.State != ReplicaPublished && r.State != ReplicaAborted {
 		return ErrBusy
 	}
+	if hasReplica && r.State == ReplicaAborted {
+		pending, err := v.lookup(pendingKey(r.Request.Key))
+		if err != nil {
+			return err
+		}
+		if pending == r.base {
+			return ErrBusy
+		}
+	}
 	off, e := v.lookup(requestKey(id))
-	if e != nil || off == 0 {
+	if e != nil || off == 0 && !hasReplica {
 		return e
 	}
 	t := v.transaction()
@@ -285,9 +294,11 @@ func (v *Volume) forgetRequestLocked(id ID) error {
 			return e
 		}
 	}
-	t.release(off, receiptBytes, true)
-	if e = t.remove(&t.sb.ObjectRoot, requestKey(id)); e != nil {
-		return e
+	if off != 0 {
+		t.release(off, receiptBytes, true)
+		if e = t.remove(&t.sb.ObjectRoot, requestKey(id)); e != nil {
+			return e
+		}
 	}
 	return t.commit(false)
 }

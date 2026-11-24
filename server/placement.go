@@ -18,10 +18,14 @@ type placementImage struct {
 	Membership, Generation, Revision uint64
 	data                             []byte
 	count                            int
+	pins                             map[placementNodeKey][]client.ID
 }
 
+type placementNodeKey struct{ bucket, node client.ID }
+
 func buildPlacement(patches []client.MapPatch) (*placementImage, error) {
-	image := &placementImage{}
+	image := &placementImage{pins: make(map[placementNodeKey][]client.ID)}
+	pinned := make(map[placementNodeKey]map[client.ID]bool)
 	type item struct {
 		bucket client.ID
 		entry  client.RangeEntry
@@ -47,6 +51,22 @@ func buildPlacement(patches []client.MapPatch) (*placementImage, error) {
 		for _, entry := range p.Entries {
 			entries = append(entries, item{p.Bucket, entry})
 			locations += len(entry.Locations)
+			if entry.State == 4 || entry.State == 5 {
+				continue
+			}
+			for _, loc := range entry.Locations {
+				if loc.Role > 1 || loc.Volume == (client.ID{}) {
+					continue
+				}
+				key := placementNodeKey{p.Bucket, loc.Node}
+				if pinned[key] == nil {
+					pinned[key] = make(map[client.ID]bool)
+				}
+				if !pinned[key][loc.Volume] {
+					pinned[key][loc.Volume] = true
+					image.pins[key] = append(image.pins[key], loc.Volume)
+				}
+			}
 		}
 	}
 	size := uint64(len(entries))*placementHeaderBytes + uint64(locations)*placementLocationBytes

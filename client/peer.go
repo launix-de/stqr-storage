@@ -18,6 +18,9 @@ const CapabilityVolumeRecovery uint64 = 256
 // Persistent target cancellation proofs can clear a rescued source's fence.
 const CapabilityRecoveryFenceClearance uint64 = 1024
 const CapabilityReplication uint64 = 4096
+
+// Replica role/volume handoffs and replication protocol marker 2.
+const CapabilityReplicaTopology uint64 = 16384
 const NodeHelloMessage uint16 = 0x1000
 
 type NodeHello struct {

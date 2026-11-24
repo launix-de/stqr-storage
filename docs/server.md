@@ -866,8 +866,11 @@ These operations can also target another node through the existing node wrapper.
 The PG editor supports HDD/SSD copy counts and EVERYWHERE with ALL confirmation.
 It preserves the selected count across other policy edits and limits RAM to a
 single copy in count mode. EC, active read caches, RAM replication and nonempty
-disk/RAM conversion remain unavailable. General relocation/replacement of an
-existing multi-copy set also remains pending; see [replication](replication.md).
+disk/RAM conversion remain unavailable. PG mask changes and drains relocate
+existing disk replica sets while retaining ALL writes on intermediate sets.
+Primary role changes require the live old primary and durable fencing; forced
+replica reconciliation and load-driven balancing remain separate work. See
+[replication](replication.md) for temporary capacity and upgrade requirements.
 
 Validation covers shared policy changes with individual quotas and payloads,
 legacy migration/restart, persistent offline intents, two-node convergence,

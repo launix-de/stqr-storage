@@ -440,6 +440,12 @@ func (r *rangeManager) call(ctx context.Context, node client.ID, opcode uint16, 
 	}
 
 	if node == r.node {
+		if opcode == peerReplicaAbortHistory {
+			return r.server.receiveReplicaAbortHistory(client.Message{Kind: client.Request, Opcode: opcode, Body: body}, r.node)
+		}
+		if opcode == peerReplicaTopologyReady || opcode == peerReplicaTopologyCleanup {
+			return r.server.replicaTopologyMessage(client.Message{Kind: client.Request, Opcode: opcode, Body: body}, r.node)
+		}
 		return r.server.rangePeerMessage(client.Message{Kind: client.Request, Opcode: opcode, Body: body}, r.node, r.server.boot)
 	}
 	return (peerControlParticipants{runtime: r.server.control}).call(ctx, node, opcode, body)

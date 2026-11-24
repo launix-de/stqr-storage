@@ -156,6 +156,9 @@ func (r *rangeManager) planNext() (rangePlan, bool) {
 		if d.ID == systemBucket.String() || d.DeletionComplete || d.State == BucketDeleting {
 			continue
 		}
+		if plan, ok := r.planReplicaRelocation(d); ok {
+			return plan, true
+		}
 		if plan, ok := r.planReplicaAdd(d); ok {
 			return plan, true
 		}
@@ -430,7 +433,7 @@ func (r *rangeManager) finishEmptyDrains() error {
 			if txn.plan.Target == r.node && txn.plan.Volume == id {
 				busy = true
 			}
-			if txn.plan.Source == r.node {
+			if txn.plan.Source == r.node || txn.plan.ReplicaRelocate && txn.plan.Target == r.node {
 				for _, location := range txn.plan.Before.Entries[0].Locations {
 					if location.Volume == (client.ID{}) || volume.ID(location.Volume) == id {
 						busy = true

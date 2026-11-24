@@ -17,7 +17,7 @@ func (r *rangeManager) collectAbortedImports() error {
 	var txn *rangeTxn
 	for _, id := range r.order {
 		t := r.txns[id]
-		if !t.aborted || t.plan.Target != r.node || t.abortObjectsDone && t.abortRequestsDone {
+		if !t.aborted || t.plan.Target != r.node || t.abortObjectsDone && t.abortRequestsDone && t.abortReplicasDone {
 			continue
 		}
 		busy := false
@@ -42,6 +42,7 @@ func (r *rangeManager) collectAbortedImports() error {
 	if managed == nil {
 		txn.abortObjectsDone = true
 		txn.abortRequestsDone = true
+		txn.abortReplicasDone = true
 		return nil
 	}
 	store := managed.store
@@ -100,6 +101,39 @@ func (r *rangeManager) collectAbortedImports() error {
 		} else {
 			next := records[len(records)-1].Key.Object
 			txn.abortObjectCursor = &next
+		}
+		return nil
+	}
+	if txn.abortRequestsDone {
+		records, err := h.ScanReplicaRecords(txn.abortReplicaCursor, 64)
+		h.Close()
+		if err != nil {
+			return err
+		}
+		var obsolete []volume.ID
+		for _, record := range records {
+			if record.State == volume.ReplicaAborted && record.Request.Key.Bucket == volume.ID(txn.plan.Before.Bucket) && txn.plan.contains(record.Request.Key.Object) && !locallyOwned(record.Request.Key) {
+				obsolete = append(obsolete, record.Request.ID)
+			}
+		}
+		h, err := store.Open(true)
+		if err != nil {
+			return err
+		}
+		for _, id := range obsolete {
+			if err = h.ForgetRequest(id); err != nil {
+				break
+			}
+		}
+		h.Close()
+		if err != nil {
+			return err
+		}
+		if len(records) == 0 {
+			txn.abortReplicasDone = true
+		} else {
+			last := records[len(records)-1].Request.ID
+			txn.abortReplicaCursor = &last
 		}
 		return nil
 	}

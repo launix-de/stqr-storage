@@ -261,6 +261,15 @@ func (s *Server) dispatchAs(m client.Message, ws *wsSession, p principal) ([]byt
 			}
 			return client.ResponseBody(200, result, ""), 200
 		}
+		if m.Opcode == peerReplicaAbortHistory {
+			actor, _ := parseID(p.User.ID)
+			result, err := s.receiveReplicaAbortHistory(m, client.ID(actor))
+			if err != nil {
+				status := statusOf(err)
+				return client.ResponseBody(status, nil, err.Error()), status
+			}
+			return client.ResponseBody(200, result, ""), 200
+		}
 		if m.Opcode >= peerReplicaPrepare && m.Opcode <= peerReplicaAbort || m.Opcode >= peerReplicaChunk && m.Opcode <= peerReplicaTopologyCleanup {
 			actor, _ := parseID(p.User.ID)
 			result, err := s.replicaPeerMessage(m, client.ID(actor))
@@ -577,7 +586,7 @@ func (s *Server) execute(m client.Message, ws *wsSession) ([]byte, int, error) {
 			s.control.ledger.mu.Unlock()
 		}
 		if s.scopes != nil {
-			caps |= client.CapabilityRangeHandoff | client.CapabilityExclusion | client.CapabilityControlRecovery | client.CapabilityVolumeRecovery | client.CapabilityRecoveryFenceClearance | client.CapabilityPhysicalQuotas | client.CapabilityReplication
+			caps |= client.CapabilityRangeHandoff | client.CapabilityExclusion | client.CapabilityControlRecovery | client.CapabilityVolumeRecovery | client.CapabilityRecoveryFenceClearance | client.CapabilityPhysicalQuotas | client.CapabilityReplication | client.CapabilityReplicaTopology
 		}
 		if s.retiring() {
 			caps |= client.CapabilityRetiringNode

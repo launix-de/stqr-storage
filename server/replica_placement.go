@@ -135,7 +135,7 @@ func (r *rangeManager) planReplicaAdd(d BucketDescription) (rangePlan, bool) {
 			next := entry
 			next.OwnerEpoch++
 			next.Locations = append(append([]client.Location(nil), entry.Locations...), client.Location{Node: destination.node, Volume: destination.volume.ID, Role: 1, Class: destination.volume.Class})
-			if len(next.Locations) == need && goal.Compression == d.Policy.Compression {
+			if goal.Compression == d.Policy.Compression && r.server.replicaSetSatisfies(goal, next.Locations) {
 				next.PolicyVersion = goal.Version
 			}
 			after := before
