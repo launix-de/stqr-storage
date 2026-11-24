@@ -335,7 +335,9 @@ host, path and query when putting the endpoint behind TLS.
 `stqr-nbd` exposes named virtual disks from one bucket over a private Unix NBD
 socket. QEMU uses its existing NBD driver; the guest can create an ordinary
 filesystem on each exported disk. Missing stripes read as zeros, and complete
-discarded stripes return their payload allocation to STQR.
+discarded stripes return their payload allocation to STQR. Devices can grow
+sparsely through the library or `stqr-nbd resize`, including through a running
+exporter's private control socket. Reconnect NBD clients to discover the new size.
 
 ```sh
 make -C qemu-plugin-nbd

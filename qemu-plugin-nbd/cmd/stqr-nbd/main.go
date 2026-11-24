@@ -28,7 +28,7 @@ func run() (result error) {
 	serial := f.String("serial", "", "serial (default device UUID)")
 	limit := f.Int("max-connections", 64, "simultaneous NBD connections")
 	f.Usage = func() {
-		fmt.Fprintln(f.Output(), "Usage: stqr-nbd --config FILE --bucket NAME [OPTIONS] create DEVICE\n       stqr-nbd --config FILE --bucket NAME list|info DEVICE\n       stqr-nbd --config FILE --bucket NAME --socket PATH serve\nAll named devices in the bucket are NBD exports. Stripes are 1 MiB; no data cache.")
+		fmt.Fprintln(f.Output(), "Usage: stqr-nbd --config FILE --bucket NAME [OPTIONS] create DEVICE\n       stqr-nbd --config FILE --bucket NAME list|info DEVICE\n       stqr-nbd --config FILE --bucket NAME --size BYTES resize DEVICE\n       stqr-nbd --socket PATH --size BYTES resize DEVICE\n       stqr-nbd --config FILE --bucket NAME --socket PATH serve\nAll named devices in the bucket are NBD exports. Stripes are 1 MiB; no data cache.")
 		f.PrintDefaults()
 	}
 	if e := f.Parse(os.Args[1:]); e != nil {
@@ -38,6 +38,18 @@ func run() (result error) {
 	if len(args) < 1 {
 		f.Usage()
 		return fmt.Errorf("command required")
+	}
+	if args[0] == "resize" {
+		if *ro || len(args) != 2 || *size == 0 {
+			return fmt.Errorf("resize needs a device name, --size and writable connection")
+		}
+		if *socket != "" {
+			m, err := nbd.ResizeExport(context.Background(), *socket, args[1], *size)
+			if err != nil {
+				return err
+			}
+			return json.NewEncoder(os.Stdout).Encode(m)
+		}
 	}
 	c, e := nbd.LoadConfig(*cfg)
 	if e != nil {
@@ -64,6 +76,16 @@ func run() (result error) {
 	}
 	defer func() { result = errors.Join(result, b.Close()) }()
 	switch args[0] {
+	case "resize":
+		m, err := b.Lookup(ctx, args[1])
+		if err != nil {
+			return err
+		}
+		m, err = b.Resize(ctx, m, *size)
+		if err != nil {
+			return err
+		}
+		return json.NewEncoder(os.Stdout).Encode(m)
 	case "create":
 		if *ro || len(args) != 2 {
 			return fmt.Errorf("create needs a device name and writable connection")
