@@ -20,7 +20,7 @@ func Open(ctx context.Context, url, username, password string, id client.BucketI
 	if e != nil {
 		return nil, e
 	}
-	if e = c.BeginBlockMaintenance(ctx, readonly); e != nil {
+	if e = c.BeginObjectLease(ctx, readonly); e != nil {
 		c.Close()
 		return nil, e
 	}

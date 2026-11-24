@@ -69,7 +69,7 @@ Writes use native accepted operations. NBD FLUSH, FUA and clean disconnect use
 explicit bucket Sync barriers. Ordinary writes need a later FLUSH/FUA for durable
 completion; force-killing an exporter does not substitute for a flush.
 
-One exporter holds a socket-scoped exclusive block lease (`0x011c`), with
+One exporter holds a socket-scoped generic exclusive object lease (`0x011c`), with
 READ+WRITE or READ-only authorization. It admits one writer per named device;
 different devices run concurrently on the shared connection. Multiple readonly
 connections are supported by a readonly exporter. The NBD multi-connection flag
@@ -84,7 +84,7 @@ lease grant. The original owning socket remains pinned; losing it stops the SDK
 from continuing and triggers orphan cleanup. A passive participant restart keeps
 the fence. A network timeout alone never releases ownership.
 
-Internal range migration remains available while a native block lease is held.
+Internal range migration remains available while a generic object lease is held.
 Local capacity exhaustion immediately wakes the range worker; the native client
 waits through retryable responses and continues the same request after handoff.
 Placement classes/groups still apply, and genuine cluster exhaustion returns a
@@ -93,15 +93,18 @@ their placement fence so an offline inventory cannot change underneath them.
 
 Writable exports advertise NBD TRIM. Enable `discard=unmap` on QEMU's NBD block
 node (the networkboot builder does this automatically), then run `fstrim` inside
-the guest. A discarded complete 1-MiB stripe is deleted as a native object,
-returning its payload allocation to STQR. Partial stripes are zeroed through
+the guest. With DELETE permission a discarded complete 1-MiB stripe is deleted
+as a native object. With WRITE permission alone, the client replaces its payload
+with an empty object instead; its small object header remains. Both forms release
+the stripe payload allocation. Partial stripes are zeroed through
 PUT_RANGE; adjacent data survives. Missing stripes and sparse tails remain
 unallocated. Repeated partial discards do not accumulate a bitmap: only a single
 request covering a complete stripe deletes that stripe. FLUSH/FUA also persist
 discard operations. Readonly exports reject TRIM.
 
-Native READ+WRITE block grants cover deleting stripes during an exclusive RW
-lease. Ordinary object DELETE still requires its separate DELETE grant. TRIM
+Exclusive object leases preserve the ordinary per-operation grants. Native
+DELETE always requires DELETE permission; the WRITE-only fallback belongs to the
+NBD client, and the server never recognizes disk/stripe metadata. TRIM
 releases space inside STQR volumes; it does not shrink the configured volume file
 or promise a physical SSD discard through the host storage stack. WRITE_ZEROES,
 online resize and structured allocation-status replies remain unimplemented.

@@ -216,6 +216,23 @@ func (c *Catalog) ReadAt(ctx context.Context, m Metadata, dst []byte, off uint64
 			data, info, e = c.store.Get(ctx, id)
 		} else {
 			data, info, e = c.store.GetRange(ctx, id, at, n)
+			var status *client.StatusError
+			if errors.Is(e, client.ErrRange) || (errors.As(e, &status) && status.Status == 400) {
+				// Object ranges are bounded by payload length. Disk holes/tails are
+				// interpreted here, never by the storage server. No extra Stat is needed
+				// for ordinary reads within a populated stripe.
+				info, e = c.store.Stat(ctx, id)
+				if e == nil {
+					if info.Length > StripeSize {
+						return client.ErrProtocol
+					}
+					if at >= info.Length {
+						data = nil
+					} else {
+						data, info, e = c.store.GetRange(ctx, id, at, min(n, info.Length-at))
+					}
+				}
+			}
 		}
 		if e != nil && !errors.Is(e, client.ErrNotFound) {
 			return e
@@ -275,11 +292,15 @@ func (c *Catalog) Trim(ctx context.Context, m Metadata, off, length uint64) erro
 		if err != nil && !errors.Is(err, client.ErrNotFound) {
 			return err
 		}
-		if err == nil {
+		if err == nil && info.Length > 0 {
 			if at == 0 && n == StripeSize {
 				err = c.store.Delete(ctx, id, client.DeleteOptions{Accepted: true, RequestID: client.NewRequestID()})
 				if errors.Is(err, client.ErrNotFound) {
 					err = nil
+				} else if errors.Is(err, client.ErrUnauthorized) {
+					// WRITE permits replacing stripe payload, not native DELETE. Keep
+					// the representation decision here instead of a server device exception.
+					_, err = c.store.Put(ctx, id, nil, client.PutOptions{Accepted: true, RequestID: client.NewRequestID()})
 				}
 			} else if at < info.Length {
 				count := min(n, info.Length-at)

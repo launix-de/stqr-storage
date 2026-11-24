@@ -397,7 +397,7 @@ func (b *Bucket) cowMaintenanceAllowed(ctx context.Context, p principal) bool {
 	if b.maintenance == nil {
 		return true
 	}
-	if b.maintenance.blockDevice.Load() {
+	if b.maintenance.objectLease.Load() {
 		return true
 	}
 	if owner, _ := ctx.Value(cowLocalOwnerKey{}).(*connectionAuthorization); owner != nil && owner == b.maintenance {

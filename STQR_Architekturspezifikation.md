@@ -1350,7 +1350,7 @@ Normale Clients bekommen ausschließlich Objektzugriff und die dafür nötigen R
 | 0x0119 | BUCKET_SYNC / Q, Capability 8192 | `bucket:ID,mark:CommitMark` => bestätigter `CommitMark`; alter Boot => 410 |
 | 0x011a | DURABILITY_NOTICE / P, Capability 8192 | `mark:CommitMark`; vor einem Subscription-Update mit akzeptiertem Zustand |
 | 0x011b | BUCKET_STATFS / Q | `bucket:ID` => `used:u64,total:u64,free:u64,available:u64,quota:u64,quota_limited:Bool`; authentifizierter Bucket-Grant genügt; ohne Quota verfügbarer nutzbarer Cluster-Platz, mit Quota zusätzlich begrenzt; siehe `docs/space.md` |
-| 0x011c | BUCKET_BLOCK_MAINTENANCE / Q | `ObjectRef,readonly:Bool` => `mode:u8=1,token:ID`; ALL-Member-Blockdevice-Lease, READ sowie bei RW WRITE; PUT/PUT_RANGE zusätzlich zu Recovery-CAS/DELETE, RO verbietet alle Mutationen. Native RW-Block-Leases dürfen Stripe-DELETE als WRITE für Discard ausführen; gewöhnliche Objektclients und private Clear-/Clone-Frontends behalten den DELETE-Grant. Ursprüngliche Sitzung bleibt gebunden, geroutete Hilfssockets führen den Grant im Header X-STQR-Maintenance mit. Native Block-Leases erlauben interne Range-Migrationen; private Clear-/Clone-Leases halten die Platzierung fest. Bei lokalem Platzmangel wird sofort eine gezielte Kapazitätsmigration geweckt; 503 lässt den Client mit gleicher Request-ID warten und nach dem Cutover fortsetzen. 507 erst bei fehlendem geeignetem Cluster-Platz. |
+| 0x011c | BUCKET_OBJECT_LEASE / Q | `ObjectRef,readonly:Bool` => `mode:u8=1,token:ID`; allgemeine exklusive Objekt-Lease über ALL-Mitglieder. READ sowie bei RW WRITE zum Erwerb; jede Objektoperation behält ihren regulären Grant, DELETE erfordert immer DELETE. RO verbietet alle Mutationen. Der alte Name BUCKET_BLOCK_MAINTENANCE bleibt als SDK-Alias erhalten. Der Server interpretiert keine FS-/Disk-/Stripe-Formate. Ursprüngliche Sitzung bleibt gebunden, geroutete Hilfssockets führen den Grant im Header X-STQR-Maintenance mit. Allgemeine Objekt-Leases erlauben interne Range-Migrationen; private Clear-/Clone-Inventuren halten die Platzierung fest. Bei Platzmangel wird gezielte Kapazitätsmigration geweckt; 503 lässt den Client mit gleicher Request-ID warten. 507 erst bei fehlendem geeignetem Cluster-Platz. |
 | 0x011d | BUCKET_MAINTENANCE_END / Q | `ObjectRef` => leer; nur ursprüngliche Owner-Sitzung; ALL-Freigabe vor ACK |
 
 CAS-Scope `0 RANGE,1 OBJECT`; OP_STATUS-State `0 UNKNOWN,1 PENDING,2 COMMITTED,3 FAILED,4 EXPIRED`. UNKNOWN/EXPIRED ist keine Zusicherung „nie ausgeführt“. ObjectUpdate-Change `0 REPLACE,1 RANGE_WRITE,2 APPEND,3 TRUNC,4 DELETE,5 RESYNC_REQUIRED`. SUBSCRIBE/UNSUBSCRIBE/ACK benötigen HELLO-Capability `512`; ohne Unterstützung gilt Q => 501 und F wird nicht gesendet. Die initiale SUBSCRIBE-Antwort belegt keinen Update-Journalplatz und benötigt daher kein zusätzliches ACK; während des Snapshot-Aufbaus bereits gepufferte Updates und spätere Push-Updates werden weiter über ihren Cursor bestätigt. Die erste Implementierung publiziert vollständige Replacement-Snapshots, DELETE oder explizites RESYNC_REQUIRED; unvollständige oder unbekannte Teilupdate-Sätze invalidieren den Client-Snapshot.
@@ -2608,3 +2608,25 @@ Die privaten COW-Bodies sind im v2-Codec wie folgt aufgebaut. `ObjectID` hat 32 
 Metadatenproben liefern eine Null-Transfer-ID ohne Extents und reservieren keinen Payload-Snapshot. Nur der öffentliche Readpfad darf eine vorhandene erforderliche Replica als Quelle wählen; die Sicherung vor Mutationen bleibt beim wirksamen Primary. `graphProof` bezeichnet die veröffentlichten Verbindungen, keine Inhaltsversion. Eine implizite Abwesenheit darf nur als expliziter Tombstone mit leerer Quelle materialisiert werden. GET_RANGE sichert höchstens die angefragten Bytes und den optionalen Bytevergleich (maximal zwei Bereiche); ein Write sichert stets die vollständige Präimage. Der optionale Range-Zusatz von COW_CAPTURE wird durch Opcode-Semantik 2 ausgehandelt. Die Auflösung ist rekursiv über Ketten und Verzweigungen, mit besuchten Buckets gegen Zyklen. Materialisierung direkter Nachbarn bewahrt deren gesamte transitiv abhängige Sicht; beim Entfernen eines Zwischen-Buckets bleiben die unterschiedlichen Nachbar-Sichten erhalten. Logische Quotas zählen geerbte Bytes genau einmal; die Clone-Veröffentlichung prüft endliche Zielquotas vorab. Ein verbundenes COW-Teilnetz ist auf 4096 Buckets begrenzt; weitere Clones werden vor der Veröffentlichung abgewiesen.
 
 Die Implementierung schreibt native Volumes im Format 5 und akzeptiert die bekannten Formate 2/3/4/5. Veraltete Inhaltszähler werden beim Lesen ignoriert; bekannte alte Request-Receipts bleiben für Wiederholungen gültig. Beim nächsten Schreiben wird der Header auf Format 5 umgestellt, sodass inkompatible ältere Binaries nicht weiterschreiben. Unbekannte Formate werden ohne Neuformatierung abgewiesen. Der Upgrade-Vertrag wird für alle Git-Format-Checkpoints mit echten Datensätzen und zwei Wiederanläufen geprüft; Downgrades bleiben unzulässig.
+
+
+### Clientformat-Grenze und Hintergrundarbeit
+
+FUSE, kstqr und WinFsp interpretieren das gemeinsame Dateisystemformat ausschließlich
+im Client. QEMU/NBD interpretiert seine Geräte-Metadaten und systematisch benannten
+1-MiB-Stripes ebenfalls im Client. Der Server bietet Buckets und undurchsichtige
+Objekte mit GET, PUT, PUT_RANGE, APPEND, TRUNC, DELETE und byteweisem CAS unter dem
+Volume-Lock; PUT/Range-PUT/CAS ändern bestehende Objekte in-place und besitzen keine
+Objektversionsnummern. Das integrierte S3-Frontend verwendet dieselben Objektmethoden.
+Allgemeine exklusive Objekt-Leases sind unabhängig vom Nutzdatenformat. Für TRIM
+wählt allein der NBD-Client DELETE oder bei WRITE-only das Leeren des Stripe-Payloads.
+
+Priorität 1 gilt ausführbaren Benutzer-I/Os, Priorität 2 Umschichtungen laut
+Rebuild-Map und Priorität 3 physischer Bucket-Bereinigung. Ein atomarer Speicherschritt
+wird fertiggestellt; vor dem nächsten begrenzten Schritt wird die Priorität erneut
+geprüft. Auf entfernte Peers wartende RPCs halten keine lokale I/O-Priorität fest.
+Die bestätigte Löschvormerkung macht den Bucket sofort unerreichbar und wird in
+nachfolgende Generationen übernommen. Physische Bereinigung ist kein Abschlusskriterium
+der ankündigenden Generation. Jede Node arbeitet in kleinen Idle-Portionen weiter,
+überspringt belegte Sperren und meldet ihren lokalen Abschluss. Erst danach kann eine
+kurze spätere Kontrollentscheidung die verbleibenden Verwaltungsreste abschließen.

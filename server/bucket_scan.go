@@ -19,7 +19,7 @@ func (b *Bucket) underMaintenance() bool {
 func (b *Bucket) blocksPlacementChange() bool {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
-	return b.maintenance != nil && (b.lease == nil || b.lease.Released || !b.lease.Block || !b.lease.AllowHandoff)
+	return b.maintenance != nil && (b.lease == nil || b.lease.Released || !b.lease.ObjectIO || !b.lease.AllowHandoff)
 }
 
 func (ws *wsSession) releaseMaintenance() {
@@ -60,8 +60,8 @@ func (s *Server) executeMaintenance(ctx context.Context, op *objectMutation, d *
 		return nil, 200, nil
 	}
 
-	if view := s.currentSystem.Load(); view != nil && s.controller != nil && (op.message.Opcode == client.BucketMaintenance || op.message.Opcode == client.BucketBlockMaintenance) {
-		block := op.message.Opcode == client.BucketBlockMaintenance
+	if view := s.currentSystem.Load(); view != nil && s.controller != nil && (op.message.Opcode == client.BucketMaintenance || op.message.Opcode == client.BucketObjectLease) {
+		objectIO := op.message.Opcode == client.BucketObjectLease
 		if s.control != nil {
 			s.control.ledger.mu.Lock()
 			busy := s.control.ledger.slot != nil
@@ -71,13 +71,13 @@ func (s *Server) executeMaintenance(ctx context.Context, op *objectMutation, d *
 			}
 		}
 		readonly := false
-		if block {
+		if objectIO {
 			readonly = d.Bool()
 		}
 		if d.Done() != nil {
 			return nil, 0, client.ErrProtocol
 		}
-		if err := s.beginClusterLease(ctx, b, ws, p, op.message.ID, block, readonly); err != nil {
+		if err := s.beginClusterLease(ctx, b, ws, p, op.message.ID, objectIO, readonly); err != nil {
 			return nil, 0, err
 		}
 		e := client.Encoder{B: []byte{1}}
@@ -101,8 +101,8 @@ func (s *Server) executeMaintenance(ctx context.Context, op *objectMutation, d *
 	if description.State != BucketActive || description.DesiredPolicy != nil {
 		return nil, 0, fail(409, "bucket lifecycle transition in progress")
 	}
-	if op.message.Opcode == client.BucketMaintenance || op.message.Opcode == client.BucketBlockMaintenance {
-		block := op.message.Opcode == client.BucketBlockMaintenance
+	if op.message.Opcode == client.BucketMaintenance || op.message.Opcode == client.BucketObjectLease {
+		objectIO := op.message.Opcode == client.BucketObjectLease
 		if s.control != nil {
 			s.control.ledger.mu.Lock()
 			busy := s.control.ledger.slot != nil
@@ -112,7 +112,7 @@ func (s *Server) executeMaintenance(ctx context.Context, op *objectMutation, d *
 			}
 		}
 		readonly := false
-		if block {
+		if objectIO {
 			readonly = d.Bool()
 		}
 		if view := s.currentSystem.Load(); view != nil && len(view.manifest.Membership.Members) > 1 {
@@ -122,7 +122,7 @@ func (s *Server) executeMaintenance(ctx context.Context, op *objectMutation, d *
 			return nil, 0, fail(400, "invalid maintenance request")
 		}
 		permission := BucketDelete
-		if block {
+		if objectIO {
 			permission = BucketRead
 			if !readonly {
 				permission = BucketWrite
@@ -141,12 +141,12 @@ func (s *Server) executeMaintenance(ctx context.Context, op *objectMutation, d *
 		}
 		s.wsMu.Unlock()
 		if busy {
-			return nil, 0, fail(409, "bucket is connected elsewhere; unmount all clients before fsck")
+			return nil, 0, fail(409, "bucket is connected elsewhere; close other clients before acquiring an exclusive lease")
 		}
 		b.mu.Lock()
 		b.maintenance = ws.authorization
-		ws.authorization.blockDevice.Store(block)
-		ws.authorization.blockReadOnly.Store(block && readonly)
+		ws.authorization.objectLease.Store(objectIO)
+		ws.authorization.leaseReadOnly.Store(objectIO && readonly)
 		b.mu.Unlock()
 		return nil, 200, nil
 	}
