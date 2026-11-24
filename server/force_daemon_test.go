@@ -296,6 +296,13 @@ func checkExclusionWithSurvivingHandoff(t *testing.T, restartRAMSource bool) {
 	if err := r.reserve(survivingPlan); err != nil {
 		t.Fatal(err)
 	}
+	// Drive the same pre-reservation history transfer as rangeManager.move.
+	// The third node need not have received the first handoff's asynchronous
+	// announcement yet. Reserving against that stale map must be rejected;
+	// this fixture must not rely on gossip winning a timing race.
+	if err := r.sendHistory(ctx, survivingPlan.Target, survivingPlan.id()); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := r.call(ctx, survivingPlan.Target, peerRangeReserve, mustRangeWire(survivingPlan)); err != nil {
 		t.Fatal(err)
 	}
