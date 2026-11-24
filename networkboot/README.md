@@ -15,19 +15,19 @@ Secure-Boot configuration is already supported.
 Install Go 1.24+, Python 3, QEMU (`qemu-system-x86_64`, `qemu-io`), libguestfs
 (`guestfish`), dnsmasq, standalone iPXE BIOS/EFI loaders, GNU tar and
 squashfs-tools. PAM development headers and a C compiler are needed for the PAM
-module. This directory is its own Go module, with the parent STQR checkout as
-its SDK dependency.
+module. `ip` (iproute2) is used to detect the boot network. This directory is its
+own Go module, with the parent STQR checkout as its SDK dependency.
 
 ```sh
 make -C networkboot all pam
-cp networkboot/config.example.json /private/path/boot-admin.json
-chmod 600 /private/path/boot-admin.json
-# Edit URI, username and password before using it.
 ```
 
-Builder operations and the default STQR-upper gateway require a STQR administrator and enough configured storage.
-Passwords are read from a private JSON file, not command arguments. The examples
-use a local HTTP node; deploy transport according to your network policy.
+Run the tools from the directory containing your existing **`stqr.yaml`**.
+They read the node's listen address and `auth.bootstrap_admin` credentials from
+that private file, without modifying it. No second credentials file is needed.
+An optional `--config PATH` selects another YAML or a private credentials JSON.
+Builder operations and the default STQR-upper gateway require an administrator
+and enough configured storage.
 Build/run the updated STQR server too: older nodes do not have clear/clone.
 Run `libguestfs-test-tool` if appliance startup fails. On hosts whose `/boot`
 kernel is unreadable by the build user, set `SUPERMIN_KERNEL` to a readable copy
@@ -39,12 +39,11 @@ as a side effect of building or displaying help.
 ## Install a template
 
 ```sh
-networkboot/prepare-system \
-  --config /private/path/boot-admin.json \
-  --bucket ubuntu-desktop-v1 \
-  --install-image /images/ubuntu.iso \
-  --disk-gib 32 --memory 4096 --cpus 2
+networkboot/prepare-system ubuntu-desktop-v1 /images/ubuntu.iso
 ```
+
+Defaults are a sparse 32-GiB disk, 4 GiB of VM RAM and two vCPUs; optional flags
+can override them.
 
 The command creates a new bucket and a sparse named `disk.raw` block device, starts
 an exclusive local Unix-socket NBD export and opens the installer in QEMU.
@@ -85,12 +84,10 @@ installation writes and rootfs archives.
 
 ```sh
 # Keep v1 and edit a clone:
-networkboot/edit-image --config /private/path/boot-admin.json \
-  --bucket ubuntu-desktop-v1 --to-bucket ubuntu-desktop-v2
+networkboot/edit-image ubuntu-desktop-v1 --to-bucket ubuntu-desktop-v2
 
 # Or edit the same bucket:
-networkboot/edit-image --config /private/path/boot-admin.json \
-  --bucket ubuntu-desktop-v2
+networkboot/edit-image ubuntu-desktop-v2
 ```
 
 Install packages or apply updates in the QEMU window, then shut down. Extraction
@@ -103,8 +100,7 @@ Use a new bucket for a release you want to retain or roll back to.
 ## QEMU block-device interface
 
 ```sh
-networkboot/bin/stqr-bootctl --config /private/path/boot-admin.json \
-  --socket /private/path/disk.sock nbd ubuntu-desktop-v1
+networkboot/bin/stqr-bootctl --socket /private/path/disk.sock nbd ubuntu-desktop-v1
 
 qemu-system-x86_64 \
   -blockdev '{"driver":"nbd","server":{"type":"unix","path":"/private/path/disk.sock"},"node-name":"stqr"}' \
@@ -135,9 +131,9 @@ Server commands `BUCKET_CLEAR` (`0x2028`) and `BUCKET_CLONE` (`0x2029`) are now
 available to administrators:
 
 ```sh
-networkboot/bin/stqr-bootctl --config /private/path/boot-admin.json create copy
-networkboot/bin/stqr-bootctl --config /private/path/boot-admin.json clone source copy
-networkboot/bin/stqr-bootctl --config /private/path/boot-admin.json clear copy
+networkboot/bin/stqr-bootctl create copy
+networkboot/bin/stqr-bootctl clone source copy
+networkboot/bin/stqr-bootctl clear copy
 ```
 
 Both buckets must be idle/active; a clone destination must be empty. Cloning
@@ -159,12 +155,15 @@ routed cluster object protocol.
 ## Boot gateway
 
 ```sh
-sudo networkboot/serve --config /private/path/boot-admin.json \
-  --base-bucket ubuntu-desktop-v2 \
-  --server 192.168.1.10 --interface eno1 --clients 192.168.1.0/24 \
-  --bios-loader /usr/lib/ipxe/undionly.kpxe \
-  --efi-loader /usr/lib/ipxe/ipxe.efi --upper stqr --upper-gib 4
+sudo networkboot/serve ubuntu-desktop-v2
 ```
+
+The gateway detects the interface on the IPv4 default route, its IPv4 address
+and the matching client subnet. It prints the selected network before startup.
+If the machine has an ambiguous network configuration, it asks for explicit
+`--interface` / `--server` overrides rather than selecting an arbitrary LAN.
+Loader paths, ports, `--upper` (default `stqr`) and upper size (default 4 GiB)
+already have defaults. No network settings need to be added to `stqr.yaml`.
 
 `--check` resolves the bucket and checks configuration/dependencies without
 starting services. `--no-dhcp` uses an existing externally configured PXE setup.

@@ -27,6 +27,10 @@ qemu-system-x86_64 \
   -device virtio-blk-pci,drive=data
 ```
 
+`--config` is optional: by default the tool reads the existing `./stqr.yaml`
+(node listen address and bootstrap administrator credentials). The private JSON
+shown above can be used for a dedicated non-administrator.
+
 Create the bucket and grant the user READ+WRITE first. Names resolve through
 BUCKET_INFO; `--bucket-id` accepts a hexadecimal bucket ID instead. Flags precede
 the command. `--readonly` needs READ only. `--default-export NAME` optionally

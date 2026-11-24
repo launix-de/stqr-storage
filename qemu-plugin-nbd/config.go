@@ -7,12 +7,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"strings"
 	"time"
 
 	"github.com/launix-de/stqr-storage/client"
+	"gopkg.in/yaml.v3"
 )
 
 type Config struct {
@@ -35,13 +37,51 @@ func LoadConfig(path string) (Config, error) {
 	if !st.Mode().IsRegular() || st.Mode().Perm()&0077 != 0 || st.Size() > 65536 {
 		return c, fmt.Errorf("credentials file must be private (0600), regular and <=64 KiB")
 	}
-	d := json.NewDecoder(io.LimitReader(f, 65537))
-	d.DisallowUnknownFields()
-	if e = d.Decode(&c); e != nil {
+	raw, e := io.ReadAll(io.LimitReader(f, 65537))
+	if e != nil {
 		return c, e
 	}
-	if e = d.Decode(new(any)); e != io.EOF {
-		return c, fmt.Errorf("credentials file must contain exactly one JSON object")
+	if bytes.HasPrefix(bytes.TrimSpace(raw), []byte("{")) {
+		d := json.NewDecoder(bytes.NewReader(raw))
+		d.DisallowUnknownFields()
+		if e = d.Decode(&c); e != nil {
+			return c, e
+		}
+		if e = d.Decode(new(any)); e != io.EOF {
+			return c, fmt.Errorf("credentials file must contain exactly one JSON object")
+		}
+	} else {
+		var node struct {
+			Node struct {
+				Listen    string `yaml:"listen"`
+				Advertise string `yaml:"advertise"`
+			} `yaml:"node"`
+			Auth struct {
+				Admin struct {
+					Username string `yaml:"username"`
+					Password string `yaml:"password"`
+				} `yaml:"bootstrap_admin"`
+			} `yaml:"auth"`
+		}
+		if e = yaml.Unmarshal(raw, &node); e != nil {
+			return c, fmt.Errorf("invalid STQR YAML configuration")
+		}
+		c.Username, c.Password = node.Auth.Admin.Username, node.Auth.Admin.Password
+		if node.Node.Listen != "" {
+			host, port, err := net.SplitHostPort(node.Node.Listen)
+			if err != nil {
+				return c, fmt.Errorf("invalid node.listen")
+			}
+			if host == "" || host == "0.0.0.0" {
+				host = "127.0.0.1"
+			}
+			if host == "::" {
+				host = "::1"
+			}
+			c.URL = "http://" + net.JoinHostPort(host, port)
+		} else {
+			c.URL = node.Node.Advertise
+		}
 	}
 	if c.URL == "" || c.Username == "" || c.Password == "" {
 		return c, fmt.Errorf("uri, username and password required")

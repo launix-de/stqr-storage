@@ -7,9 +7,11 @@ from common import ctl, extract, nbd, qemu, require
 
 def main():
     p = argparse.ArgumentParser(description='Install a Linux VM directly on a bucket-backed NBD disk, then publish its rootfs')
-    p.add_argument('--config', required=True, help='private STQR credentials JSON')
-    p.add_argument('--bucket', required=True, help='new rootfs bucket name')
-    p.add_argument('--install-image', required=True, type=Path)
+    p.add_argument('--config', default='stqr.yaml', help='STQR YAML (default: ./stqr.yaml) or private credentials JSON')
+    p.add_argument('bucket_name', nargs='?', help='new rootfs bucket name')
+    p.add_argument('image', nargs='?', type=Path, help='installer ISO')
+    p.add_argument('--bucket', help=argparse.SUPPRESS)
+    p.add_argument('--install-image', type=Path, help=argparse.SUPPRESS)
     p.add_argument('--disk-gib', type=int, default=32)
     p.add_argument('--memory', type=int, default=4096)
     p.add_argument('--cpus', type=int, default=2)
@@ -17,6 +19,16 @@ def main():
     p.add_argument('--kernel-version')
     p.add_argument('--work-dir', default='/var/tmp', help='local archive staging directory; needs disk space')
     args = p.parse_args()
+    if args.bucket_name and args.bucket:
+        p.error('specify the bucket only once')
+    args.bucket = args.bucket_name or args.bucket
+    if not args.bucket:
+        p.error('bucket name required')
+    if args.image and args.install_image:
+        p.error('specify the install image only once')
+    args.install_image = args.image or args.install_image
+    if not args.install_image:
+        p.error('installer ISO required')
     require('qemu-system-x86_64', 'guestfish', 'sort')
     ctl(args.config, 'check-exclusive', args.bucket)
     if args.memory<512 or args.cpus<1:

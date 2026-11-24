@@ -15,6 +15,7 @@ require (
 	github.com/hanwen/go-fuse/v2 v2.12.1 // indirect
 	github.com/rasky/go-xdr v0.0.0-20170124162913-1a41d1a06c93 // indirect
 	golang.org/x/sys v0.32.0 // indirect
+	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
 
 replace github.com/launix-de/stqr-storage => ..

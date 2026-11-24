@@ -6,8 +6,9 @@ from common import ctl, extract, nbd, qemu, require
 
 def main():
     p = argparse.ArgumentParser(description='Boot an existing bucket disk in QEMU; optionally clone before editing')
-    p.add_argument('--config', required=True)
-    p.add_argument('--bucket', required=True, help='base bucket')
+    p.add_argument('--config', default='stqr.yaml', help='STQR YAML (default: ./stqr.yaml) or private credentials JSON')
+    p.add_argument('bucket_name', nargs='?', help='base bucket')
+    p.add_argument('--bucket', help=argparse.SUPPRESS)
     p.add_argument('--to-bucket', help='new destination bucket; original remains unchanged')
     p.add_argument('--memory', type=int, default=4096)
     p.add_argument('--cpus', type=int, default=2)
@@ -15,6 +16,11 @@ def main():
     p.add_argument('--kernel-version')
     p.add_argument('--work-dir', default='/var/tmp', help='local archive staging directory; needs disk space')
     args = p.parse_args()
+    if args.bucket_name and args.bucket:
+        p.error('specify the bucket only once')
+    args.bucket = args.bucket_name or args.bucket
+    if not args.bucket:
+        p.error('bucket name required')
     require('qemu-system-x86_64', 'guestfish', 'sort')
     ctl(args.config, 'check-exclusive', args.bucket)
     if args.memory<512 or args.cpus<1:

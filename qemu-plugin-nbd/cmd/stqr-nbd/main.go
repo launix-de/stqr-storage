@@ -16,7 +16,7 @@ import (
 
 func run() (result error) {
 	f := flag.NewFlagSet("stqr-nbd", flag.ContinueOnError)
-	cfg := f.String("config", "", "private JSON: uri, username, password")
+	cfg := f.String("config", "stqr.yaml", "STQR YAML or private JSON credentials file")
 	bucket := f.String("bucket", "", "bucket name")
 	bucketID := f.String("bucket-id", "", "bucket ID instead of name")
 	size := f.Uint64("size", 0, "virtual bytes (multiple of 512)")

@@ -78,13 +78,36 @@ def cache_release(args):
         return digest,release,exports
 
 
+def boot_network(interface=None, server=None, clients=None):
+    """Infer the boot LAN from the default route and its configured IPv4 subnet."""
+    if interface and server and clients:
+        return interface, server, clients
+    if not interface:
+        routes=json.loads(subprocess.check_output(['ip','-j','-4','route','show','default'],text=True))
+        devices={route['dev'] for route in routes if 'dev' in route}
+        if len(devices)!=1:
+            raise ValueError('cannot select a unique boot interface; specify --interface')
+        interface=devices.pop()
+    addresses=json.loads(subprocess.check_output(['ip','-j','-4','addr','show','dev',interface],text=True))
+    candidates=[a for link in addresses for a in link.get('addr_info',[]) if a.get('scope')=='global']
+    if server:
+        candidates=[a for a in candidates if a['local']==server]
+    if len(candidates)!=1:
+        raise ValueError('cannot select a unique boot IPv4 address; specify --interface and --server')
+    address=candidates[0]
+    server=server or address['local']
+    clients=clients or str(ipaddress.ip_network(f"{server}/{address['prefixlen']}",strict=False))
+    return interface,server,clients
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument('--config', required=True)
-    p.add_argument('--base-bucket', required=True)
-    p.add_argument('--server', required=True, help='own IPv4 address reachable by clients')
-    p.add_argument('--interface', required=True)
-    p.add_argument('--clients', required=True, help='allowed client CIDR')
+    p.add_argument('--config', default='stqr.yaml', help='STQR YAML (default: ./stqr.yaml) or private credentials JSON')
+    p.add_argument('bucket', nargs='?', help='published base bucket')
+    p.add_argument('--base-bucket', help=argparse.SUPPRESS)
+    p.add_argument('--server', help='own IPv4 address reachable by clients')
+    p.add_argument('--interface', help='boot interface (default: default-route interface)')
+    p.add_argument('--clients', help='allowed client CIDR')
     p.add_argument('--bios-loader', type=Path, default=Path('/usr/lib/ipxe/undionly.kpxe'))
     p.add_argument('--efi-loader', type=Path, default=Path('/usr/lib/ipxe/ipxe.efi'))
     p.add_argument('--cache', type=Path, default=Path('/var/lib/stqr-networkboot'))
@@ -96,6 +119,15 @@ def main():
     p.add_argument('--max-sessions', type=int, default=64)
     p.add_argument('--check', action='store_true', help='validate dependencies/config without starting services')
     args = p.parse_args()
+    if args.bucket and args.base_bucket:
+        p.error('specify the base bucket only once')
+    args.base_bucket = args.bucket or args.base_bucket
+    if not args.base_bucket:
+        p.error('base bucket required')
+    try:
+        args.interface,args.server,args.clients=boot_network(args.interface,args.server,args.clients)
+    except (ValueError,OSError,subprocess.CalledProcessError) as error:
+        p.error(str(error))
     require('tar', 'mksquashfs', *([] if args.no_dhcp else ['dnsmasq']))
     if not (BIN / 'stqr-boot-nfs').is_file():
         p.error('run make first')
@@ -103,6 +135,7 @@ def main():
         p.error('supply standalone iPXE BIOS and EFI loaders (not QEMU ROM files)')
     if not all(1 <= port <= 65535 for port in [args.http_port, args.nfs_port]):
         p.error('invalid port')
+    print(f'Boot network: {args.interface}, server {args.server}, clients {args.clients}', flush=True)
     config = dnsmasq_config(args.server, args.interface, args.clients, '/TFTP', args.http_port)
     ctl(args.config, 'resolve', args.base_bucket)
     if args.upper_gib<=0 or args.max_sessions<=0:

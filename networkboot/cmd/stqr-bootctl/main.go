@@ -138,28 +138,8 @@ func create(ctx context.Context, c config, name string) (client.ID, error) {
 	return id, err
 }
 func loadConfig(path string) (config, error) {
-	var c config
-	f, err := os.Open(path)
-	if err != nil {
-		return c, err
-	}
-	defer f.Close()
-	st, err := f.Stat()
-	if err != nil {
-		return c, err
-	}
-	if !st.Mode().IsRegular() || st.Mode().Perm()&0077 != 0 || st.Size() > 65536 {
-		return c, errors.New("config must be a regular private file (0600, <=64 KiB)")
-	}
-	dec := json.NewDecoder(io.LimitReader(f, 65537))
-	dec.DisallowUnknownFields()
-	if err = dec.Decode(&c); err != nil {
-		return c, err
-	}
-	if c.URI == "" || c.Username == "" || c.Password == "" {
-		return c, errors.New("config requires uri, username, password")
-	}
-	return c, nil
+	c, err := nbd.LoadConfig(path)
+	return config{URI: c.URL, Username: c.Username, Password: c.Password}, err
 }
 func connect(ctx context.Context, c config, name string) (*client.Client, error) {
 	id, err := resolve(ctx, c, name)
@@ -279,7 +259,7 @@ func fetch(ctx context.Context, c config, bucket, dir string) error {
 }
 func run() error {
 	flags := flag.NewFlagSet("stqr-bootctl", flag.ContinueOnError)
-	cfg := flags.String("config", "", "private JSON credentials file")
+	cfg := flags.String("config", "stqr.yaml", "STQR YAML or private JSON credentials file")
 	size := flags.Uint64("size", 32<<30, "virtual disk bytes")
 	socket := flags.String("socket", "", "NBD Unix socket")
 	device := flags.String("device", "disk.raw", "named block device/default export")
