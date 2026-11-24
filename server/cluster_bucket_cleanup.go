@@ -5,6 +5,7 @@ import (
 	"context"
 	"github.com/launix-de/stqr-storage/client"
 	"github.com/launix-de/stqr-storage/volume"
+	"time"
 )
 
 const peerBucketPurge uint16 = 0x1049
@@ -149,7 +150,7 @@ func (s *Server) purgeDeletedBucket(body []byte, actor client.ID) ([]byte, error
 					return false, err
 				}
 				defer h.Close()
-				records, err := h.ScanBucketObjects(bucket, after, 128)
+				records, err := h.ScanBucketObjects(bucket, after, 32)
 				if err != nil {
 					return false, err
 				}
@@ -168,6 +169,13 @@ func (s *Server) purgeDeletedBucket(body []byte, actor client.ID) ([]byte, error
 			}
 			if done {
 				break
+			}
+			// Yield outside opMu/the volume lock. Cleanup must not monopolize a
+			// busy device, even when the next index page is already cached.
+			select {
+			case <-s.ctx.Done():
+				return nil, s.ctx.Err()
+			case <-time.After(2 * time.Millisecond):
 			}
 		}
 		var cursor *volume.ID
@@ -189,19 +197,21 @@ func (s *Server) purgeDeletedBucket(body []byte, actor client.ID) ([]byte, error
 					return false, err
 				}
 				defer h.Close()
-				records, err := h.ScanRequestRecords(cursor, 128)
+				records, err := h.ScanRequestRecords(cursor, 64)
 				if err != nil {
 					return false, err
 				}
 				if len(records) == 0 {
 					return true, nil
 				}
+				var forgotten []volume.ID
 				for _, record := range records {
 					if record.Key.Bucket == bucket {
-						if err := h.ForgetRequest(record.ID); err != nil {
-							return false, err
-						}
+						forgotten = append(forgotten, record.ID)
 					}
+				}
+				if err := h.ForgetRequests(forgotten); err != nil {
+					return false, err
 				}
 				next := records[len(records)-1].ID
 				cursor = &next
@@ -212,6 +222,13 @@ func (s *Server) purgeDeletedBucket(body []byte, actor client.ID) ([]byte, error
 			}
 			if done {
 				break
+			}
+			// Yield outside opMu/the volume lock. Cleanup must not monopolize a
+			// busy device, even when the next index page is already cached.
+			select {
+			case <-s.ctx.Done():
+				return nil, s.ctx.Err()
+			case <-time.After(2 * time.Millisecond):
 			}
 		}
 	}
