@@ -18,3 +18,9 @@ coverage/
 /control.stqr
 /quota.stqr
 /ranges.stqr
+
+# CI dependencies, reports and disposable artifacts.
+node_modules/
+**/bin/
+/.compat-reports/
+__pycache__/

@@ -209,9 +209,12 @@ func TestDaemonReplicaAddPreservesPrimaryDataAndOriginalReceipts(t *testing.T) {
 	if err != nil || retry != original {
 		t.Fatalf("old retry %+v %v", retry, err)
 	}
-	if _, err = b.Append(ctx, actor, id, []byte("!"), volume.Options{RequestID: volume.ID(client.NewRequestID())}); err != nil {
-		t.Fatal(err)
-	}
+	// The range move can finish before the asynchronous central policy commit
+	// releases its write barrier. Retry only that transient 503, with one ID.
+	mutation := volume.Options{RequestID: volume.ID(client.NewRequestID())}
+	retryReplicaMutation(t, ctx, func() (volume.Result, error) {
+		return b.Append(ctx, actor, id, []byte("!"), mutation)
+	})
 	data, _, err := follower.Get(ctx, actor, id)
 	if err != nil || string(data) != "existing!" {
 		t.Fatalf("active replica %q %v", data, err)

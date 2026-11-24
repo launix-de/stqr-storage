@@ -2248,6 +2248,9 @@ Mit künstlich kleinen Volumes (z. B. **4, 8, 16, 32 und 64 MiB**) und determini
 - Kontinuierlicher Chaos-Test über viele Generationen mit Seed-Reproduktion.
 - Migration großer Range-Anzahl bei intermittierenden Schreiblastspitzen.
 - Rolling Upgrade/Format-Version-Mismatch.
+- Verbindliche Git-Checkpoints: Vor jeder Änderung persistenter Formate (insbesondere Systemstrukturen, Volumes, Filesystem und Blockdevices) MUSS der vorherige kompatible Stand als Release oder Checkpoint getaggt und der Tag veröffentlicht werden. Bestehende Tags bleiben unverändert.
+- Die Format-CI MUSS jeden Git-Tag auschecken, dessen Server und Frontends bauen, damit persistente Testdaten einschließlich FS, Blockdevices und S3 erzeugen und den alten Prozess beenden. Anschließend startet ausschließlich die getestete neue Version auf denselben Dateien und prüft alle erzeugten Daten anhand unabhängig erfasster Inhalte und Metadaten auf Korrektheit und Konsistenz. Ein weiterer Neustart prüft die Persistenz des eingelesenen beziehungsweise migrierten Stands. Fehlende Producer, leere Testmengen und übersprungene Tags dürfen keinen erfolgreichen Check ergeben; ältere Tags benötigen gegebenenfalls explizite Adapter.
+- Reguläre Operations-, Recovery- und Clustertests laufen zusätzlich. CI-Cluster verwenden mehrere Prozesse beziehungsweise Serverinstanzen auf localhost mit getrennten Ports. Aktivierte Jobs und der Formatprüfer sind in `docs/ci.md` beschrieben.
 - Scrub und Rebuild nach gezielten Datenfehlern.
 - Konsistenzmodell mit History-Checker prüfen: totale Mutationsordnung pro Objekt, atomare lokale Read-Snapshots und Sichtbarkeit bestätigter Writes auf allen erforderlichen Replikaten für danach beginnende Reads. Während laufender Mutationen sind unterschiedliche Replica-Versionen und Versionsrückschritte beim Replikawechsel zulässig. Verzögerte PREPARE-/COMMIT-Zustellung darf Reads des letzten lokal committed Stands nicht bis zum Write-Abschluss blockieren.
 
