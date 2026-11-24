@@ -94,7 +94,8 @@ func (v *Volume) moveTarget(s dataSpan) (uint64, bool, error) {
 	var target uint64
 	found := false
 	e := treeWalk(v.node, v.sb.FreeRoot, func(x treeEntry) error {
-		start := keyOffset(x.key)
+		// Compaction must preserve the same payload bounds as allocation.
+		start := max(keyOffset(x.key), dataStart)
 		if s.Capacity >= PageSize {
 			start = align(start)
 		}

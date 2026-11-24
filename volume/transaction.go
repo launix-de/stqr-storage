@@ -81,9 +81,9 @@ func (t *transaction) spillPages() error {
 	return nil
 }
 func overlap(a, b allocation) bool { return a.off < b.off+b.n && b.off < a.off+a.n }
-func (t *transaction) candidate(start, length, n, alignment uint64) (uint64, bool) {
+func (t *transaction) candidate(start, length, n, alignment, minimum uint64) (uint64, bool) {
 	end := start + length
-	off := (start + alignment - 1) / alignment * alignment
+	off := (max(start, minimum) + alignment - 1) / alignment * alignment
 	for off <= end && n <= end-off {
 		blocked := false
 		if t.v.deferred != nil && overlap(allocation{off, n, false}, t.v.deferred.journal) {
@@ -114,7 +114,11 @@ func (t *transaction) candidate(start, length, n, alignment uint64) (uint64, boo
 
 var stopTree = errors.New("tree scan complete")
 
-func (t *transaction) findSpace(n, a uint64, tail bool) (uint64, uint64, uint64, error) {
+func (t *transaction) findSpace(n, a uint64, tail bool, lower ...uint64) (uint64, uint64, uint64, error) {
+	minimum := uint64(0)
+	if len(lower) != 0 {
+		minimum = lower[0]
+	}
 	var start, length, chosen uint64
 	var visit func(uint64) error
 	visit = func(off uint64) error {
@@ -140,7 +144,7 @@ func (t *transaction) findSpace(n, a uint64, tail bool) (uint64, uint64, uint64,
 			if tail && s%PageSize == 0 && x.value >= PageSize {
 				continue
 			}
-			if c, ok := t.candidate(s, x.value, n, a); ok {
+			if c, ok := t.candidate(s, x.value, n, a, minimum); ok {
 				start, length, chosen = s, x.value, c
 				return stopTree
 			}
@@ -165,7 +169,7 @@ func (t *transaction) findSpace(n, a uint64, tail bool) (uint64, uint64, uint64,
 		if tail && x.off%PageSize == 0 && x.n >= PageSize {
 			continue
 		}
-		if off, ok := t.candidate(x.off, x.n, n, a); ok {
+		if off, ok := t.candidate(x.off, x.n, n, a, minimum); ok {
 			return x.off, x.n, off, nil
 		}
 	}
@@ -223,11 +227,17 @@ func (t *transaction) alloc(n uint64, meta bool) (uint64, error) {
 	if n >= PageSize {
 		a = PageSize
 	}
-	s, l, off, e := t.findSpace(n, a, n < PageSize)
+	// Retired initial index pages remain available for metadata, but object
+	// descriptors require payloads at or above dataStart.
+	minimum := uint64(0)
+	if !meta {
+		minimum = dataStart
+	}
+	s, l, off, e := t.findSpace(n, a, n < PageSize, minimum)
 	_ = s
 	_ = l
 	if e == ErrFull && n < PageSize {
-		_, _, off, e = t.findSpace(n, a, false)
+		_, _, off, e = t.findSpace(n, a, false, minimum)
 	}
 	if e != nil {
 		return 0, e
