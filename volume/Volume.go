@@ -31,6 +31,10 @@ import (
 // Cluster placement, authentication, quotas across volumes, and UI are outside
 // this package. They may reserve physical capacity and manage the lifecycle.
 type Volume struct {
+	deferred          *deferredGroup
+	staging           map[uint64][]byte
+	durableGeneration uint64
+
 	mu               sync.RWMutex
 	preparing        bool
 	prepareCond      *sync.Cond
@@ -197,7 +201,7 @@ func newVolume(dev VolumeIO, s Superblock, o OpenOptions) *Volume {
 	if _, ok := dev.(*meteredIO); !ok {
 		dev = &meteredIO{VolumeIO: dev}
 	}
-	return &Volume{dev: dev, sb: s, limit: s.Identity.Size, cache: newCache(o.CacheEntries, o.CacheBytes), nodes: newNodeCache(o.CacheEntries, o.CacheBytes), state: Active}
+	return &Volume{dev: dev, sb: s, durableGeneration: s.Generation, limit: s.Identity.Size, cache: newCache(o.CacheEntries, o.CacheBytes), nodes: newNodeCache(o.CacheEntries, o.CacheBytes), state: Active}
 }
 func Open(dev VolumeIO, o OpenOptions) (*Volume, error) {
 	if a, ok := dev.(interface{ Alignment() uint32 }); ok {
@@ -250,7 +254,14 @@ func Open(dev VolumeIO, o OpenOptions) (*Volume, error) {
 	}
 	return v, nil
 }
-func (v *Volume) publish(s Superblock) error { t := v.transaction(); t.sb = s; return t.commit(false) }
+func (v *Volume) publish(s Superblock) error {
+	if err := v.flushDeferred(); err != nil {
+		return err
+	}
+	t := v.transaction()
+	t.sb = s
+	return t.commit(false)
+}
 func (v *Volume) check(write bool) error {
 	if write && v.preparing {
 		return ErrBusy
@@ -270,6 +281,15 @@ func (v *Volume) check(write bool) error {
 	return nil
 }
 func (v *Volume) write(b []byte, off uint64) error {
+	if v.staging != nil {
+		return v.stageWrite(b, off)
+	}
+	if err := v.flushDeferred(); err != nil {
+		return err
+	}
+	return v.rawWrite(b, off)
+}
+func (v *Volume) rawWrite(b []byte, off uint64) error {
 	if e := writeFullAt(v.dev, b, off); e != nil {
 		v.failed = e
 		if errors.Is(e, syscall.ENOSPC) || errors.Is(e, syscall.EDQUOT) || errors.Is(e, ErrFull) {
@@ -280,6 +300,12 @@ func (v *Volume) write(b []byte, off uint64) error {
 	return nil
 }
 func (v *Volume) sync() error {
+	if err := v.flushDeferred(); err != nil {
+		return err
+	}
+	return v.rawSync()
+}
+func (v *Volume) rawSync() error {
 	if e := v.dev.Sync(); e != nil {
 		v.failed = e
 		if errors.Is(e, syscall.ENOSPC) || errors.Is(e, syscall.EDQUOT) || errors.Is(e, ErrFull) {
@@ -324,9 +350,15 @@ func (v *Volume) Close() error {
 	if v.closed {
 		return nil
 	}
+	var flushErr error
+	if v.failed == nil {
+		flushErr = v.flushDeferred()
+	}
 	v.closed = true
 	v.state = Detached
-	e := v.dev.Close()
+	e := errors.Join(flushErr, v.dev.Close())
+	v.deferred = nil
+	v.staging = nil
 	if v.onClose != nil {
 		v.onClose()
 	}

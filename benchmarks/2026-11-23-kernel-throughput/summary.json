@@ -1,0 +1,122 @@
+[
+  {
+    "case": "baseline",
+    "test": "missing_stat_ops_s",
+    "samples": [
+      2028.512,
+      1853.889,
+      1861.47
+    ],
+    "median": 1861.47,
+    "min": 1853.889,
+    "max": 2028.512
+  },
+  {
+    "case": "improved",
+    "test": "missing_stat_ops_s",
+    "samples": [
+      948650.582,
+      1031862.794,
+      1034744.79
+    ],
+    "median": 1031862.794,
+    "min": 948650.582,
+    "max": 1034744.79
+  },
+  {
+    "case": "baseline",
+    "test": "parallel_small_read_files_s",
+    "samples": [
+      598.929,
+      571.856,
+      577.695
+    ],
+    "median": 577.695,
+    "min": 571.856,
+    "max": 598.929
+  },
+  {
+    "case": "improved",
+    "test": "parallel_small_read_files_s",
+    "samples": [
+      236388.828,
+      384361.588,
+      130359.905
+    ],
+    "median": 236388.828,
+    "min": 130359.905,
+    "max": 384361.588
+  },
+  {
+    "case": "baseline",
+    "test": "seq_read_mib_s",
+    "samples": [
+      0.754,
+      30.082,
+      30.57
+    ],
+    "median": 30.082,
+    "min": 0.754,
+    "max": 30.57
+  },
+  {
+    "case": "improved",
+    "test": "seq_read_mib_s",
+    "samples": [
+      46.605,
+      10268.759,
+      12779.063
+    ],
+    "median": 10268.759,
+    "min": 46.605,
+    "max": 12779.063
+  },
+  {
+    "case": "baseline",
+    "test": "small_read_files_s",
+    "samples": [
+      584.017,
+      585.094,
+      582.983
+    ],
+    "median": 584.017,
+    "min": 582.983,
+    "max": 585.094
+  },
+  {
+    "case": "improved",
+    "test": "small_read_files_s",
+    "samples": [
+      160321.043,
+      231616.776,
+      237203.079
+    ],
+    "median": 231616.776,
+    "min": 160321.043,
+    "max": 237203.079
+  },
+  {
+    "case": "baseline",
+    "test": "stat_ops_s",
+    "samples": [
+      626.425,
+      608.476,
+      584.387
+    ],
+    "median": 608.476,
+    "min": 584.387,
+    "max": 626.425
+  },
+  {
+    "case": "improved",
+    "test": "stat_ops_s",
+    "samples": [
+      10501.31,
+      456403.646,
+      456000.413
+    ],
+    "median": 456000.413,
+    "min": 10501.31,
+    "max": 456403.646
+  }
+]

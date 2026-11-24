@@ -16,6 +16,8 @@ import (
 // Payload range reads keep the streaming/range path rather than populating a
 // second whole-file cache beside the kernel page cache.
 type SubscriptionStore struct {
+	accepted bool
+
 	client       *Client
 	life         context.Context
 	cancel       context.CancelFunc
@@ -288,6 +290,7 @@ func (c *SubscriptionStore) CAS(ctx context.Context, id ObjectID, off uint64, ex
 		return ObjectInfo{}, err
 	}
 	defer release()
+	opt.Accepted = opt.Accepted || c.accepted
 	info, err := c.client.CAS(ctx, id, off, expected, replacement, opt)
 	// A failed precondition may race an update on another socket. Drop that
 	// snapshot now, rather than spinning CAS retries against a stale local copy.
@@ -375,3 +378,8 @@ func (o *OverlayFilesystem) watchChanges(fn func(ObjectID)) (func(), bool) {
 func (o *OverlayFilesystem) subscribed(id ObjectID, version uint64) bool {
 	return o.upper.subscribed(id, version) || o.lower.subscribed(id, version)
 }
+
+// EnableAcceptedWrites opts this filesystem wrapper into weaker write ACKs.
+// Unsupported nodes retain the durable path. Call Sync at filesystem barriers.
+func (c *SubscriptionStore) EnableAcceptedWrites()          { c.accepted = true }
+func (c *SubscriptionStore) Sync(ctx context.Context) error { return c.client.Sync(ctx) }

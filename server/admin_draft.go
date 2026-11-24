@@ -161,6 +161,7 @@ func (s *Server) newAdminPreview() (_ *Server, err error) {
 		if live := s.bucketsByID[id]; live != nil {
 			live.mu.RLock()
 			b.maintenance = live.maintenance
+			b.lease = live.lease
 			live.mu.RUnlock()
 		}
 	}

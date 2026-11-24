@@ -1,0 +1,18 @@
+# Example: adjust working directory and bucket before enabling.
+[Unit]
+Description=STQR network boot gateway
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/etc/stqr
+ExecStart=/usr/sbin/stqr-networkboot ubuntu-desktop-v1
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+TimeoutStopSec=120
+KillMode=mixed
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,7 @@
+# Example only: merge into the desired login/sshd/display-manager PAM stack.
+# A matching local/NSS account and a granted username_home bucket must exist.
+# Place before an earlier 'sufficient' auth rule can skip this module.
+auth required pam_stqr.so
+# Retain your distribution's account rules; STQR auth does not create Unix users.
+# Place the home mount before pam_systemd starts services needing the home.
+session required pam_stqr.so

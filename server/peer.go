@@ -105,6 +105,7 @@ type peerConnection struct {
 	Capabilities    uint64
 	incoming        chan client.Message
 	controlIncoming chan client.Message
+	leaseIncoming   chan client.Message
 	ready           chan struct{}
 }
 
@@ -141,18 +142,20 @@ func (s *Server) dialPeer(ctx context.Context, address string, expected client.I
 	lifetime, cancel := context.WithCancel(s.ctx)
 	p := &peerConnection{server: s, conn: conn, ctx: lifetime, cancel: cancel, pending: map[client.ID]peerPending{}, outgoing: make(chan client.Message, sendQueueCapacity), pushes: make(chan client.Message, 64), incoming: make(chan client.Message, receiveQueueCapacity), ready: make(chan struct{})}
 	p.controlIncoming = make(chan client.Message, receiveQueueCapacity)
+	p.leaseIncoming = make(chan client.Message, receiveQueueCapacity)
 	s.mu.Lock()
 	if s.closed {
 		s.mu.Unlock()
 		p.close()
 		return nil, errors.New("server is stopping")
 	}
-	s.workers.Add(4)
+	s.workers.Add(5)
 	s.mu.Unlock()
 	go func() { defer s.workers.Done(); p.writeLoop() }()
 	go func() { defer s.workers.Done(); p.readLoop() }()
 	go func() { defer s.workers.Done(); p.requestLoop() }()
 	go func() { defer s.workers.Done(); p.controlRequestLoop() }()
+	go func() { defer s.workers.Done(); p.dispatchRequestQueue(p.leaseIncoming) }()
 	success := false
 	defer func() {
 		if !success {
@@ -311,7 +314,9 @@ func (p *peerConnection) readLoop() {
 			pending.result <- decodePeerReply(m, pending.opcode)
 		case client.Request, client.FireAndForget:
 			queue := p.incoming
-			if isControlPeerRequest(m) {
+			if isLeaseCoordinatorRequest(m) {
+				queue = p.leaseIncoming
+			} else if isControlPeerRequest(m) {
 				queue = p.controlIncoming
 			}
 			select {

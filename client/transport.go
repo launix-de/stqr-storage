@@ -49,6 +49,9 @@ type outboundObject struct {
 }
 type uploadFunc func(context.Context, *objectTransport, *pendingObject, ID) error
 type objectTransport struct {
+	capabilities uint64
+	endpoint     string
+
 	capacityChanged    chan struct{}
 	subscriptionClient *Client
 	conn               *websocket.Conn
@@ -287,6 +290,15 @@ func (t *objectTransport) readLoop() {
 				}
 				t.fail(ErrClosed)
 				return
+			}
+			if m.Opcode == DurabilityNotice {
+				if t.subscriptionClient != nil {
+					if err := t.subscriptionClient.observeDurability(t, m.Body); err != nil {
+						t.fail(err)
+						return
+					}
+				}
+				continue
 			}
 			if m.Opcode == ObjectUpdateMessage || m.Opcode == SubscriptionMoved {
 				if t.subscriptionClient != nil {

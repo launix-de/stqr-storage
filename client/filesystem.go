@@ -65,7 +65,9 @@ func OpenFilesystem(ctx context.Context, store FilesystemStore, opt FSOptions) (
 			mode = 0755
 		}
 		body, _ := encodeFSDirectory(nil)
-		node := fsNode{kind: fsDirectory, mode: mode & 07777, uid: opt.UID, gid: opt.GID, mtime: uint64(time.Now().UnixNano()), blob: fsBlob{length: uint64(len(body)), inline: body}}
+		node := fsNode{extended: true, links: 2, kind: fsDirectory, mode: mode & 07777, uid: opt.UID, gid: opt.GID, mtime: uint64(time.Now().UnixNano()), blob: fsBlob{length: uint64(len(body)), inline: body}}
+		node.atime = node.mtime
+		node.ctime = node.mtime
 		_, err = store.CAS(ctx, FilesystemRootID(), 0, nil, encodeFSNode(node), CASOptions{Scope: CASObject, MutationOptions: MutationOptions{RequestID: NewRequestID(), Absent: true}})
 		if err != nil && !errors.Is(err, ErrPrecondition) {
 			return nil, err
@@ -93,7 +95,7 @@ func (f *Filesystem) load(ctx context.Context, id ObjectID) (fsNode, ObjectInfo,
 	return s.node, s.info, err
 }
 func fsInfo(id ObjectID, n fsNode, info ObjectInfo) FSInfo {
-	return FSInfo{ID: id, Version: info.Version, Size: n.blob.length, Mode: n.mode, UID: n.uid, GID: n.gid, MtimeNS: n.mtime, AtimeNS: n.atime, CtimeNS: n.ctime, Directory: n.kind == fsDirectory, Removed: n.removed}
+	return FSInfo{Kind: FSKind(n.kind), Nlink: fsLinks(n), ID: id, Version: info.Version, Size: n.blob.length, Mode: n.mode, UID: n.uid, GID: n.gid, MtimeNS: n.mtime, AtimeNS: n.atime, CtimeNS: n.ctime, Directory: n.kind == fsDirectory, Removed: n.removed}
 }
 func (f *Filesystem) Stat(ctx context.Context, id ObjectID) (FSInfo, error) {
 	n, i, err := f.load(ctx, id)
@@ -211,6 +213,9 @@ func (f *Filesystem) editDirectory(ctx context.Context, id ObjectID, fn func([]F
 		if uint64(len(data)) > f.directoryMemoryLimit {
 			return syscall.ENOMEM
 		}
+		if err = f.directoryLinks(ctx, n, entries); err != nil {
+			return err
+		}
 		n.blob, err = f.blobFromBytes(ctx, data)
 		n.mtime = n.ctime
 		return err
@@ -227,12 +232,32 @@ func (f *Filesystem) Create(ctx context.Context, parent ObjectID, name string, m
 	if !validFSName(name) {
 		return FSInfo{}, syscall.EINVAL
 	}
-	n := fsNode{kind: fsFile, mode: mode & 07777, uid: uid, gid: gid, mtime: uint64(time.Now().UnixNano())}
+	kind := uint8(fsFile)
 	if directory {
-		n.kind = fsDirectory
-		body, _ := encodeFSDirectory(nil)
-		n.blob = fsBlob{length: uint64(len(body)), inline: body}
+		kind = fsDirectory
 	}
+	return f.createNode(ctx, parent, name, mode, uid, gid, kind, nil)
+}
+func (f *Filesystem) createNode(ctx context.Context, parent ObjectID, name string, mode, uid, gid uint32, kind uint8, content []byte) (FSInfo, error) {
+	if f.readOnly {
+		return FSInfo{}, syscall.EROFS
+	}
+	if !validFSName(name) {
+		return FSInfo{}, syscall.EINVAL
+	}
+	n := fsNode{kind: kind, mode: mode & 07777, uid: uid, gid: gid, mtime: uint64(time.Now().UnixNano())}
+	n.atime = n.mtime
+	n.ctime = n.mtime
+	if kind == fsDirectory {
+		n.extended = true
+		n.links = 2
+		content, _ = encodeFSDirectory(nil)
+	}
+	if kind > fsDirectory {
+		n.extended = true
+		n.links = 1
+	}
+	n.blob = fsBlob{length: uint64(len(content)), inline: append([]byte(nil), content...)}
 	id, err := f.putImmutable(ctx, encodeFSNode(n))
 	if err != nil {
 		return FSInfo{}, err
@@ -401,26 +426,7 @@ func (f *Filesystem) SetAttributes(ctx context.Context, id ObjectID, a FSAttribu
 // Unlink removes a file name while retaining its inode for existing handles.
 // Removed files remain readable through open handles until offline collection.
 func (f *Filesystem) Unlink(ctx context.Context, parent ObjectID, name string) error {
-	if f.readOnly {
-		return syscall.EROFS
-	}
-	if !validFSName(name) {
-		return syscall.EINVAL
-	}
-	return f.editDirectory(ctx, parent, func(entries []FSEntry) ([]FSEntry, error) {
-		i := findFSEntry(entries, name)
-		if i < 0 {
-			return nil, syscall.ENOENT
-		}
-		n, _, err := f.load(ctx, entries[i].ID)
-		if err != nil {
-			return nil, err
-		}
-		if n.kind == fsDirectory {
-			return nil, syscall.EISDIR
-		}
-		return append(entries[:i], entries[i+1:]...), nil
-	})
+	return f.unlinkNode(ctx, parent, name)
 }
 
 // Rename atomically moves a name, replacing a compatible destination if present.
@@ -428,11 +434,16 @@ func (f *Filesystem) Rename(ctx context.Context, parent ObjectID, name string, n
 	return f.RenameWithFlags(ctx, parent, name, newParent, newName, 0)
 }
 
-// Sync performs no additional flush: no dirty data is buffered by this frontend.
-// All prior completed mutations already received the store's durable CAS ACK.
+// Sync checkpoints all observed writes, including dependent immutable objects.
+// Stores without deferred durability already give durable mutation ACKs.
 func (f *Filesystem) Sync(ctx context.Context, id ObjectID) error {
-	_, err := f.Stat(ctx, id)
-	return err
+	if _, err := f.Stat(ctx, id); err != nil {
+		return err
+	}
+	if s, ok := f.store.(interface{ Sync(context.Context) error }); ok {
+		return s.Sync(ctx)
+	}
+	return nil
 }
 
 func (f *Filesystem) CheckWrite(ctx context.Context, id ObjectID) error {

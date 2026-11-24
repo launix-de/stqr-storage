@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -27,6 +28,8 @@ type terminalFrame struct {
 }
 
 type wsSession struct {
+	durabilityCap atomic.Bool
+
 	terminal        chan terminalFrame
 	server          *Server
 	ctx             context.Context
@@ -45,6 +48,7 @@ type wsSession struct {
 	telemetry       *statsSendQueue
 	requests        chan client.Message
 	controlRequests chan client.Message
+	leaseRequests   chan client.Message
 	subMu           sync.Mutex
 	subscription    client.ID
 	filter          client.StatsFilter
@@ -119,6 +123,7 @@ func (s *Server) serveWebSocket(w http.ResponseWriter, r *http.Request, p princi
 	ws := &wsSession{authorization: authorization, ctx: sessionCtx, cancel: sessionCancel, server: s, conn: conn, request: r, principal: p, done: make(chan struct{}), terminal: make(chan terminalFrame, 1), responses: make(chan []byte, sendQueueCapacity), telemetry: newStatsSendQueue(), requests: make(chan client.Message, receiveQueueCapacity)}
 	if p.isPeer() {
 		ws.controlRequests = make(chan client.Message, receiveQueueCapacity)
+		ws.leaseRequests = make(chan client.Message, receiveQueueCapacity)
 	}
 	s.mu.Lock()
 	if s.closed || (s.shortStopping.Load() || s.drainClosing.Load()) && !p.isPeer() {
@@ -129,7 +134,7 @@ func (s *Server) serveWebSocket(w http.ResponseWriter, r *http.Request, p princi
 	}
 	s.workers.Add(2)
 	if ws.controlRequests != nil {
-		s.workers.Add(1)
+		s.workers.Add(2)
 	}
 	s.wsMu.Lock()
 	s.sockets[ws] = struct{}{}
@@ -145,6 +150,7 @@ func (s *Server) serveWebSocket(w http.ResponseWriter, r *http.Request, p princi
 	go func() { defer s.workers.Done(); ws.requestLoop() }()
 	if ws.controlRequests != nil {
 		go func() { defer s.workers.Done(); ws.controlRequestLoop() }()
+		go func() { defer s.workers.Done(); ws.auxiliaryRequestLoop(ws.leaseRequests) }()
 	}
 	for {
 		kind, b, e := conn.ReadMessage()
@@ -164,6 +170,16 @@ func (s *Server) serveWebSocket(w http.ResponseWriter, r *http.Request, p princi
 		if m.Kind != client.Request && m.Kind != client.FireAndForget {
 			return
 		}
+		if isLeaseCoordinatorRequest(m) && ws.leaseRequests != nil && authorization.peerVerified.Load() {
+			select {
+			case ws.leaseRequests <- m:
+			case <-ws.done:
+				return
+			default:
+				return
+			}
+			continue
+		}
 		if isControlPeerRequest(m) && ws.controlRequests != nil && authorization.peerVerified.Load() {
 			select {
 			case ws.controlRequests <- m:
@@ -174,7 +190,7 @@ func (s *Server) serveWebSocket(w http.ResponseWriter, r *http.Request, p princi
 			}
 			continue
 		}
-		if m.Opcode >= 0x0100 && m.Opcode <= 0x0108 || m.Opcode == client.ObjectSubscribe || m.Opcode == client.BucketMaintenance || m.Opcode == client.BucketScan {
+		if m.Opcode >= 0x0100 && m.Opcode <= 0x0108 || m.Opcode == client.ObjectSubscribe || m.Opcode == client.ObjectAccepted || m.Opcode == client.BucketBlockMaintenance || m.Opcode == client.BucketMaintenanceEnd || m.Opcode == client.BucketStatFS || m.Opcode == client.BucketSync || m.Opcode == client.BucketMaintenance || m.Opcode == client.BucketScan {
 			if !ws.registerObjectContext(m.ID) {
 				return
 			}
@@ -267,7 +283,7 @@ func (ws *wsSession) requestLoop() {
 			if status == 0 {
 				continue
 			}
-			if m.Opcode >= 0x0100 && m.Opcode <= 0x0108 || m.Opcode == client.ObjectSubscribe || m.Opcode == client.BucketMaintenance || m.Opcode == client.BucketScan {
+			if m.Opcode >= 0x0100 && m.Opcode <= 0x0108 || m.Opcode == client.ObjectSubscribe || m.Opcode == client.ObjectAccepted || m.Opcode == client.BucketBlockMaintenance || m.Opcode == client.BucketMaintenanceEnd || m.Opcode == client.BucketStatFS || m.Opcode == client.BucketSync || m.Opcode == client.BucketMaintenance || m.Opcode == client.BucketScan {
 				ws.releaseObjectContext(m.ID)
 			}
 			if m.Kind == client.Request {
@@ -357,13 +373,14 @@ func (ws *wsSession) pushStats(snapshot client.StatsSnapshot) {
 // Delegated administration may synchronously coordinate its caller. Keep one
 // bounded, separate worker so the ordinary peer queue can process those control
 // callbacks. Object operations retain their original ordered session worker.
-func (ws *wsSession) controlRequestLoop() {
+func (ws *wsSession) controlRequestLoop() { ws.auxiliaryRequestLoop(ws.controlRequests) }
+func (ws *wsSession) auxiliaryRequestLoop(queue <-chan client.Message) {
 	defer ws.close()
 	for {
 		select {
 		case <-ws.done:
 			return
-		case m := <-ws.controlRequests:
+		case m := <-queue:
 			p, ok := ws.principalNow()
 			if !ok {
 				return

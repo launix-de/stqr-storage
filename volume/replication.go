@@ -141,6 +141,7 @@ func (h *Handle) PrepareMutation(op uint8, k Key, offset, length uint64, src io.
 			}
 		}
 		opts.prepare = &binding
+		opts.Accepted = false // ALL disk prepare is durable even for an accepted client request.
 		return v.mutateWithRetryLocked(op, k, offset, length, src, expected, opts)
 	})
 }
@@ -212,6 +213,9 @@ func (h *Handle) DecideReplica(id ID, binding ReplicaBinding) error {
 }
 func (h *Handle) PublishReplica(id ID, binding ReplicaBinding) (Result, error) {
 	return withHandle(h, true, func(v *Volume) (Result, error) {
+		if err := v.flushDeferred(); err != nil {
+			return Result{}, err
+		}
 		r, ok, err := v.loadReplica(id)
 		if err != nil {
 			return Result{}, err

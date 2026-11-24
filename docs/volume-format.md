@@ -1,4 +1,4 @@
-# Volume library and on-volume format 3
+# Volume library and on-volume format 4
 
 The implementation is the Go package `github.com/launix-de/stqr-storage/volume`.
 There are no UI handlers, CLI commands, or networking code. Runtime files live in
@@ -30,6 +30,12 @@ writers invoked under a lock must not reenter the same volume. When composing
 operations on different volumes, callers must establish a consistent lock order.
 The server is responsible for cluster ownership, replication, bucket access and
 quotas across volumes. `Bind` persists/checks the node/cluster identity.
+
+`PrepareMutation` is the deliberate exception to the write handle's read
+exclusion: private payload staging admits readers of the previous committed
+index. Other mutations remain excluded until staging finishes, and local WAL
+application/publication reacquires the write lock. Closing waits for this
+private staging phase before releasing the device.
 
 `Volume.Stat` is an independent general metadata query. All other object access
 is exclusively through a handle from `Volume.Open(write bool)`; there is no
@@ -103,12 +109,20 @@ An explicit codec change uses `Recompress`, preserving the logical version.
 can replace a corrupted physical representation at the same logical version.
 These are trusted server primitives, not authority to perform a cluster cutover.
 
-## Packed format 3
+## Packed format 4
 
-The packed object layout from format 2 is retained. Format 3 adds a private
+The packed object layout from format 2 is retained. Format 3 added a private
 management-root pointer and length at superblock offsets 160 and 168. Format-2
 volumes open without copying data and are upgraded on the next transaction.
-Older binaries reject version 3; a downgrade after writing is unsupported.
+Format 4 adds checksummed private replication records: index kind 2 stores the
+original request/result, epoch, sequence, replica-set hash, protocol state and
+staged descriptor/receipt references; kind 3 indexes pending decisions by object.
+Prepared payload is not reachable through the visible kind-0 object record.
+Publication replaces the object pointer and installs its kind-1 retry receipt in
+one transaction. Unchanged encoded allocations remain shared until retirement;
+allocation accounting and freeing use the union of referenced intervals.
+Readers accept formats 2 and 3 and upgrade on their next write. Older binaries
+reject version 4; a downgrade after writing is unsupported.
 
 The physical layout starts with two alternating 4096-byte superblocks, two
 commit-anchor pages and eight redo scratch pages (32 KiB). The initial object
@@ -214,6 +228,12 @@ shared-page images, so a torn write cannot damage adjacent small objects. Old lo
 pages become reusable after checkpoint publication. Ambiguous I/O errors fence
 the open volume until recovery. Nonzero RequestIDs retain independently indexed
 results until explicitly forgotten.
+
+Free-tree edits that only shift a range boundary update its key in place,
+without merging and splitting nodes unnecessarily. Finalization claims newly
+allocated tree pages before processing the next retired range, including pages
+allocated by a preceding free-tree edit. This preserves allocation accounting
+when coalescing retires a page created within the same transaction.
 
 ### Defragmentation and capacity changes
 

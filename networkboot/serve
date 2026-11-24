@@ -1,0 +1,245 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-3.0-only
+"""Supervise isolated Proxy-DHCP/TFTP, HTTP and a readonly NFSv3 release."""
+import argparse
+import hashlib
+import fcntl
+import http.server
+import ipaddress
+import json
+import os
+from pathlib import Path
+import shutil
+import signal
+import subprocess
+import tarfile
+import tempfile
+import threading
+import time
+import urllib.parse
+from sessions import Sessions
+from common import cli, BIN, ctl, require, run
+
+
+def dnsmasq_config(server, interface, clients, tftp, http_port):
+    if not interface or any(c not in 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.:-' for c in interface):
+        raise ValueError('invalid interface name')
+    network = ipaddress.ip_network(clients, strict=False)
+    ipaddress.IPv4Address(server)
+    return f'''port=0
+interface={interface}
+bind-interfaces
+log-dhcp
+dhcp-range={network.network_address},proxy,{network.netmask}
+dhcp-match=set:ipxe,175
+dhcp-match=set:efi64,option:client-arch,7
+dhcp-match=set:efi64,option:client-arch,9
+dhcp-boot=tag:ipxe,http://{server}:{http_port}/boot.ipxe
+dhcp-boot=tag:!ipxe,tag:!efi64,undionly.kpxe,,{server}
+dhcp-boot=tag:!ipxe,tag:efi64,ipxe.efi,,{server}
+pxe-service=tag:!ipxe,x86PC,"STQR networkboot",undionly.kpxe,{server}
+pxe-service=tag:!ipxe,BC_EFI,"STQR networkboot",ipxe.efi,{server}
+pxe-service=tag:!ipxe,X86-64_EFI,"STQR networkboot",ipxe.efi,{server}
+enable-tftp
+tftp-root={tftp}
+'''
+
+
+def cache_release(args):
+    with tempfile.TemporaryDirectory(prefix='release-',dir=args.cache) as temporary:
+        work=Path(temporary)
+        ctl(args.config, 'fetch', args.base_bucket, work)
+        digest = hashlib.sha256((work / 'manifest.json').read_bytes()).hexdigest()
+        release = args.cache / digest
+        if not release.exists():
+            root = work / 'root'
+            root.mkdir()
+            # Only administrator-published images are accepted. GNU tar refuses
+            # extraction through directory symlinks; reject path traversal too.
+            with tarfile.open(work / 'rootfs.tar') as archive:
+                for item in archive:
+                    if item.name.startswith('/') or '..' in Path(item.name).parts:
+                        raise RuntimeError('unsafe archive member')
+            run('tar', '--extract', '--file', work / 'rootfs.tar', '--directory', root,
+                '--numeric-owner', '--same-owner', '--acls', '--xattrs', '--xattrs-include=*')
+            export = work / 'export'
+            export.mkdir()
+            run('mksquashfs', root, export / 'rootfs.squashfs', '-noappend', '-comp', 'gzip', '-no-progress')
+            shutil.rmtree(root)
+            (work / 'rootfs.tar').unlink()
+            os.rename(work, release)
+            work.mkdir()  # TemporaryDirectory retains ownership of this path only.
+        exports = args.cache / 'exports'
+        exports.mkdir(exist_ok=True)
+        release_export = exports / digest
+        release_export.mkdir(exist_ok=True)
+        if not (release_export / 'rootfs.squashfs').exists():
+            os.link(release / 'export/rootfs.squashfs', release_export / 'rootfs.squashfs')
+        return digest,release,exports
+
+
+def boot_network(interface=None, server=None, clients=None):
+    """Infer the boot LAN from the default route and its configured IPv4 subnet."""
+    if interface and server and clients:
+        return interface, server, clients
+    if not interface:
+        routes=json.loads(subprocess.check_output(['ip','-j','-4','route','show','default'],text=True))
+        devices={route['dev'] for route in routes if 'dev' in route}
+        if len(devices)!=1:
+            raise ValueError('cannot select a unique boot interface; specify --interface')
+        interface=devices.pop()
+    addresses=json.loads(subprocess.check_output(['ip','-j','-4','addr','show','dev',interface],text=True))
+    candidates=[a for link in addresses for a in link.get('addr_info',[]) if a.get('scope')=='global']
+    if server:
+        candidates=[a for a in candidates if a['local']==server]
+    if len(candidates)!=1:
+        raise ValueError('cannot select a unique boot IPv4 address; specify --interface and --server')
+    address=candidates[0]
+    server=server or address['local']
+    clients=clients or str(ipaddress.ip_network(f"{server}/{address['prefixlen']}",strict=False))
+    return interface,server,clients
+
+
+def main():
+    p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument('--config', default='stqr.yaml', help='STQR YAML (default: ./stqr.yaml) or private credentials JSON')
+    p.add_argument('bucket', nargs='?', help='published base bucket')
+    p.add_argument('--base-bucket', help=argparse.SUPPRESS)
+    p.add_argument('--server', help='own IPv4 address reachable by clients')
+    p.add_argument('--interface', help='boot interface (default: default-route interface)')
+    p.add_argument('--clients', help='allowed client CIDR')
+    p.add_argument('--bios-loader', type=Path, default=Path('/usr/lib/ipxe/undionly.kpxe'))
+    p.add_argument('--efi-loader', type=Path, default=Path('/usr/lib/ipxe/ipxe.efi'))
+    p.add_argument('--cache', type=Path, default=Path('/var/lib/stqr-networkboot'))
+    p.add_argument('--http-port', type=int, default=8088)
+    p.add_argument('--nfs-port', type=int, default=2049)
+    p.add_argument('--no-dhcp', action='store_true', help='use externally configured DHCP/TFTP')
+    p.add_argument('--upper', choices=['stqr', 'ram'], default='stqr', help='per-boot STQR bucket or client RAM upper')
+    p.add_argument('--upper-gib', type=int, default=4)
+    p.add_argument('--max-sessions', type=int, default=64)
+    p.add_argument('--check', action='store_true', help='validate dependencies/config without starting services')
+    args = p.parse_args()
+    if args.bucket and args.base_bucket:
+        p.error('specify the base bucket only once')
+    args.base_bucket = args.bucket or args.base_bucket
+    if not args.base_bucket:
+        p.error('base bucket required')
+    try:
+        args.interface,args.server,args.clients=boot_network(args.interface,args.server,args.clients)
+    except (ValueError,OSError,subprocess.CalledProcessError) as error:
+        p.error(str(error))
+    require('tar', 'mksquashfs', *([] if args.no_dhcp else ['dnsmasq']))
+    if not (BIN / 'stqr-boot-nfs').is_file():
+        p.error('run make first')
+    if not args.no_dhcp and not all(f.is_file() for f in [args.bios_loader, args.efi_loader]):
+        p.error('supply standalone iPXE BIOS and EFI loaders (not QEMU ROM files)')
+    if not all(1 <= port <= 65535 for port in [args.http_port, args.nfs_port]):
+        p.error('invalid port')
+    print(f'Boot network: {args.interface}, server {args.server}, clients {args.clients}', flush=True)
+    config = dnsmasq_config(args.server, args.interface, args.clients, '/TFTP', args.http_port)
+    ctl(args.config, 'resolve', args.base_bucket)
+    if args.upper_gib<=0 or args.max_sessions<=0:
+        p.error('upper size and session limit must be positive')
+    if args.upper=='stqr':
+        ctl(args.config, 'check-exclusive', args.base_bucket)
+    if args.check:
+        print(config)
+        return
+    if os.geteuid() != 0:
+        p.error('root required to restore rootfs ownership/metadata and run Proxy-DHCP')
+    args.cache.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if args.cache.is_symlink() or args.cache.stat().st_uid != 0 or args.cache.stat().st_mode & 0o022:
+        p.error('cache must be root-owned and not writable by other users')
+    lockfile = (args.cache / 'gateway.lock').open('w')
+    fcntl.flock(lockfile, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    sessions = Sessions(args.config, args.server, args.cache / 'uppers', args.upper_gib,args.max_sessions) if args.upper=='stqr' else None
+    children = []
+    stop = threading.Event()
+    reload_release = threading.Event()
+    signal.signal(signal.SIGHUP,lambda *_: reload_release.set())
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        signal.signal(sig, lambda *_: stop.set())
+    with tempfile.TemporaryDirectory(prefix='stage-', dir=args.cache) as temporary:
+        work = Path(temporary)
+        digest,release,exports=cache_release(args)
+        tftp_directory = tempfile.TemporaryDirectory(prefix='stqr-tftp-')
+        tftp = Path(tftp_directory.name)
+        os.chmod(tftp, 0o755)
+        if not args.no_dhcp:
+            shutil.copyfile(args.bios_loader, tftp / 'undionly.kpxe')
+            shutil.copyfile(args.efi_loader, tftp / 'ipxe.efi')
+        def boot_script(version, upper_port=None):
+            extra=f' stqr.upper-port={upper_port}' if upper_port else ''
+            return (f'#!ipxe\nkernel http://{args.server}:{args.http_port}/releases/{version}/vmlinuz '
+                    f'boot=stqr root=/dev/nfs ip=dhcp stqr.server={args.server} '
+                    f'stqr.nfsport={args.nfs_port} stqr.release={version}{extra}\n'
+                    f'initrd http://{args.server}:{args.http_port}/releases/{version}/initrd.img\nboot\n').encode()
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def reply(self, body):
+                self.send_response(200);self.send_header('Content-Length',str(len(body)));self.end_headers();self.wfile.write(body)
+            def do_GET(self):
+                url=urllib.parse.urlsplit(self.path)
+                if url.path=='/boot.ipxe':
+                    self.reply((f'#!ipxe\n:retry\nchain http://{args.server}:{args.http_port}/session.ipxe?mac=${{net0/mac:hexraw}} || goto wait\nexit\n:wait\nsleep 2\ngoto retry\n').encode())
+                elif url.path=='/session.ipxe':
+                    mac=urllib.parse.parse_qs(url.query).get('mac',[''])[0].lower()
+                    if len(mac)!=12 or any(c not in '0123456789abcdef' for c in mac) or ipaddress.ip_address(self.client_address[0]) not in ipaddress.ip_network(args.clients,strict=False):
+                        self.send_error(403);return
+                    try:
+                        port=sessions.allocate(mac,self.client_address[0]) if sessions else None
+                        self.reply(boot_script(digest,port))
+                    except (RuntimeError,subprocess.CalledProcessError) as error:
+                        print(f'Boot allocation failed: {error}',flush=True);self.send_error(503)
+                elif url.path.startswith('/releases/') and not url.query:
+                    parts=url.path.split('/')
+                    if len(parts)!=4 or len(parts[2])!=64 or any(c not in '0123456789abcdef' for c in parts[2]) or parts[3] not in ('vmlinuz','initrd.img'):
+                        self.send_error(404);return
+                    f=args.cache/parts[2]/parts[3]
+                    if not f.is_file():self.send_error(404);return
+                    self.send_response(200);self.send_header('Content-Length',str(f.stat().st_size));self.end_headers()
+                    with f.open('rb') as source:shutil.copyfileobj(source,self.wfile)
+                else:self.send_error(404)
+        httpd = http.server.ThreadingHTTPServer((args.server, args.http_port), Handler)
+        httpd.daemon_threads = True
+        thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+        thread.start()
+        try:
+            children.append(subprocess.Popen([str(BIN / 'stqr-boot-nfs'), '--root', str(exports),
+                '--listen', f'{args.server}:{args.nfs_port}', '--allow', args.clients, '--release', hashlib.sha256(b'STQR networkboot NFS namespace v1').hexdigest()]))
+            # Do not advertise boot services if the NFS endpoint failed to start.
+            time.sleep(.3)
+            if children[-1].poll() is not None:
+                raise RuntimeError('NFS startup failed')
+            if not args.no_dhcp:
+                conf = work / 'dnsmasq.conf'
+                conf.write_text(dnsmasq_config(args.server, args.interface, args.clients, tftp, args.http_port))
+                run('dnsmasq', '--test', '--conf-file=' + str(conf))
+                children.append(subprocess.Popen(['dnsmasq', '--keep-in-foreground', '--conf-file=' + str(conf), '--pid-file=']))
+            print(f'Serving {args.base_bucket}, immutable release {digest}', flush=True)
+            while not stop.wait(.5):
+                if reload_release.is_set():
+                    reload_release.clear()
+                    try:
+                        new_digest,_,_=cache_release(args)
+                        digest=new_digest
+                        print(f'Activated release {digest} for new boots',flush=True)
+                    except Exception as error:
+                        print(f'Reload failed; keeping {digest}: {error}',flush=True)
+                if any(child.poll() is not None for child in children):
+                    raise RuntimeError('a boot service stopped unexpectedly')
+        finally:
+            httpd.shutdown(); httpd.server_close(); thread.join()
+            if sessions:
+                sessions.close()
+            for child in children:
+                if child.poll() is None:
+                    child.terminate()
+            for child in children:
+                try:
+                    child.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    child.kill(); child.wait()
+            tftp_directory.cleanup()
+
+if __name__ == '__main__':
+    cli(main)

@@ -177,8 +177,24 @@ func (s *Server) verifyFrontend(body []byte, actor client.ID) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	if _, err := b.authorize(grant.principal, grant.principal.frontendPermission); err != nil {
+	// This attests the originating HTTP capability. Namespace exclusion is
+	// checked separately by bindConnection, including a lease token on auxiliary
+	// transports. Do not reject an owner's routed socket merely because its
+	// original HTTP principal predates acquisition of that lease.
+	current, err := s.findAccount(grant.principal.User.Name)
+	if err != nil || current.ID != grant.principal.User.ID || current.Disabled || frontendAccountRevision(current) != frontendAccountRevision(grant.principal.User) {
+		return nil, ErrBucketForbidden
+	}
+	uid, err := bucketID(current.ID)
+	if err != nil {
 		return nil, err
+	}
+	info, err := b.Info(uid, current.Role == "ADMIN")
+	if err != nil {
+		return nil, err
+	}
+	if info.Permissions&grant.principal.frontendPermission == 0 {
+		return nil, ErrBucketForbidden
 	}
 	return nil, nil
 }

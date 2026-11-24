@@ -32,6 +32,10 @@ package client
 // per entry; a nonzero version denotes a range of that lower inode, not raw
 // upper data. Only native overlays supply a lower store. Lower data is verified
 // against the captured inode version; changed bases report ESTALE.
+// v5 retains the v4 layout and appends links:u32, xattr_count:u32,
+// (name:Text,value:Blob)* in sorted name order. Kind=3 is an inline symlink,
+// 4 a FIFO and 5 a Unix socket; the latter two have empty content. Attribute
+// limits and link publication/recovery are documented in docs/filesystem-posix.md.
 // Namespace intents use "STFT", v1:u16, state:u8 (pending=0,
 // committed=1, aborted=2), count:u32, (inode:OID, expected_version:u64,
 // before:Blob, after:Blob)* in OID order. Locked inode heads contain "STFL",
@@ -56,6 +60,9 @@ const (
 	fsMaxDepth   = 16
 	fsFile       = 1
 	fsDirectory  = 2
+	fsSymlink    = 3
+	fsFIFO       = 4
+	fsSocket     = 5
 )
 
 var ErrFSFormat = errors.New("client: invalid filesystem object")
@@ -85,6 +92,9 @@ type fsNode struct {
 	blob           fsBlob
 	removed        bool   // v2 directory tombstone; prevents creates through stale handles
 	writePath      string // original authorized overlay path for unlinked open files
+	links          uint32
+	extended       bool
+	xattrs         map[string][]byte
 }
 
 // FSEntry addresses another inode in the same bucket; files and directories use
@@ -95,7 +105,19 @@ type FSEntry struct {
 }
 
 // FSInfo describes the inode snapshot used by an operation.
+type FSKind uint8
+
+const (
+	FSRegular   FSKind = fsFile
+	FSDirectory FSKind = fsDirectory
+	FSSymlink   FSKind = fsSymlink
+	FSFIFO      FSKind = fsFIFO
+	FSSocket    FSKind = fsSocket
+)
+
 type FSInfo struct {
+	Kind             FSKind
+	Nlink            uint32
 	ID               ObjectID
 	Version, Size    uint64
 	Mode, UID, GID   uint32
@@ -110,7 +132,9 @@ func validFSName(name string) bool {
 }
 func encodeFSNode(n fsNode) []byte {
 	e := Encoder{B: []byte("STFS")}
-	if n.atime != 0 || n.ctime != 0 {
+	if n.extended || len(n.xattrs) != 0 || n.kind > fsDirectory {
+		e.U16(5)
+	} else if n.atime != 0 || n.ctime != 0 {
 		e.U16(4)
 	} else if n.blob.source != (ObjectID{}) || n.writePath != "" {
 		e.U16(3)
@@ -137,15 +161,28 @@ func encodeFSNode(n fsNode) []byte {
 		e.U8(n.blob.depth)
 		e.B = append(e.B, n.blob.root[:]...)
 	}
-	if n.atime != 0 || n.ctime != 0 || n.blob.source != (ObjectID{}) || n.writePath != "" {
+	if n.extended || len(n.xattrs) != 0 || n.kind > fsDirectory || n.atime != 0 || n.ctime != 0 || n.blob.source != (ObjectID{}) || n.writePath != "" {
 		e.Bool(n.removed)
 		e.Text(n.writePath)
-		if n.atime != 0 || n.ctime != 0 {
+		if n.extended || len(n.xattrs) != 0 || n.kind > fsDirectory || n.atime != 0 || n.ctime != 0 {
 			e.U64(n.atime)
 			e.U64(n.ctime)
 		}
 	} else if n.removed {
 		e.Bool(true)
+	}
+	if n.extended || len(n.xattrs) != 0 || n.kind > fsDirectory {
+		e.U32(fsLinks(n))
+		names := make([]string, 0, len(n.xattrs))
+		for name := range n.xattrs {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		e.U32(uint32(len(names)))
+		for _, name := range names {
+			e.Text(name)
+			e.Blob(n.xattrs[name])
+		}
 	}
 	return e.B
 }
@@ -159,7 +196,7 @@ func decodeFSNode(data []byte) (fsNode, error) {
 		return n, ErrFSFormat
 	}
 	version := d.U16()
-	if version != 1 && version != 2 && version != 3 && version != 4 {
+	if version != 1 && version != 2 && version != 3 && version != 4 && version != 5 {
 		return n, ErrFSFormat
 	}
 	n.kind = d.U8()
@@ -205,13 +242,39 @@ func decodeFSNode(data []byte) (fsNode, error) {
 			return n, ErrFSFormat
 		}
 	}
-	if version == 4 {
+	if version >= 4 {
 		n.atime = d.U64()
 		n.ctime = d.U64()
 	} else {
 		n.atime, n.ctime = n.mtime, n.mtime
 	}
-	if d.Done() != nil || (n.kind != fsFile && n.kind != fsDirectory) || n.mode & ^uint32(07777) != 0 || n.blob.length > math.MaxInt64 {
+	if version == 5 {
+		n.extended = true
+		n.links = d.U32()
+		start := len(d.B)
+		count := d.U32()
+		if count > fsXattrCount {
+			return n, ErrFSFormat
+		}
+		n.xattrs = make(map[string][]byte, count)
+		previous := ""
+		for i := uint32(0); i < count; i++ {
+			name := d.Text()
+			value := d.Blob()
+			if d.Err != nil || !validXattrName(name) || name <= previous || len(value) > fsXattrValue || start-len(d.B) > fsXattrTotal {
+				return n, ErrFSFormat
+			}
+			n.xattrs[name] = append([]byte(nil), value...)
+			previous = name
+		}
+	}
+	if (n.kind > fsDirectory && version < 5) || (n.kind == fsSymlink && (n.blob.root != (ObjectID{}) || n.blob.source != (ObjectID{}) || n.blob.length == 0 || n.blob.length > 4095 || strings.ContainsRune(string(n.blob.inline), 0))) || ((n.kind == fsFIFO || n.kind == fsSocket) && n.blob.length != 0) {
+		return n, ErrFSFormat
+	}
+	if n.kind == fsDirectory && !n.removed && n.extended && n.links == 0 {
+		return n, ErrFSFormat
+	}
+	if d.Done() != nil || (n.kind < fsFile || n.kind > fsSocket) || n.mode & ^uint32(07777) != 0 || n.blob.length > math.MaxInt64 {
 		return n, ErrFSFormat
 	}
 	return n, nil

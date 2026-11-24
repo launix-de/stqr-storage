@@ -999,6 +999,38 @@ Für die Neuanlage kann `Precondition.absent=true` mit Offset 0 und ohne expecte
 
 ---
 
+### 10.8 Explizite Durability-Barrieren (Capability 8192)
+
+Native Mutationen behalten standardmäßig ihren bisherigen Durable-ACK. Ein Client
+kann nach HELLO-Aushandlung mit `OBJECT_ACCEPTED` ausdrücklich einen schwächeren
+ACK anfordern: die vollständige Mutation samt CAS-/Versions-/Retry-Zustand ist
+sichtbar, aber möglicherweise noch nicht dauerhaft. `CommitMark = boot:ID,
+sequence:u64` bezeichnet einen Bucket-Präfix auf genau einer Node-Inkarnation.
+`BUCKET_SYNC` bestätigt diesen Präfix erst nach dem Checkpoint aller betroffenen
+Volumes gemäß Storage-Strategie. RAM bleibt ausdrücklich flüchtig. Neue Writes
+nach dem erfassten Präfix dürfen weiterlaufen; es gibt keine globale Lesesperre.
+
+Receipts werden auch bei Reads und vor Subscription-Updates übertragen. Vor einer
+referenzveröffentlichenden Mutation auf einem anderen Owner synchronisiert das SDK
+die beobachteten Vorgänger. Lokal wird beim Wechsel des Zielvolumes zuerst der
+vorherige Bucket-Präfix gespeichert. So darf ein dauerhafter Inode nicht auf
+verlorene Daten-/Indexobjekte zeigen. Das ist keine Multi-Object-Transaktion.
+
+Die erste Implementierung benutzt einen begrenzten Seiten-Overlay und vorhandene
+Redo-Checkpoints; ausschließlich im dauerhaften Freispeicherbild freie Seiten
+dürfen vorab direkt geschrieben werden. Crash-Recovery stellt den alten oder den
+vollständigen neuen Volume-Checkpoint her. Platz-/Budgetgrenzen dürfen auf den
+stärkeren ACK zurückfallen. Durability-Modus gehört nicht zum Retry-Fingerprint;
+ein identischer Retry darf einen zuvor akzeptierten Erfolg dauerhaft bestätigen.
+Marken fremder/neuer Boot-Inkarnationen werden mit 410 abgelehnt; die erste Version
+führt keine rebootübergreifende Receipt-Historie. SDKs dürfen unbestätigte Marken
+nicht stillschweigend verwerfen.
+
+FUSE/Kernel verwenden Barrieren für `fsync`, `fdatasync`, `msync(MS_SYNC)`,
+`O_SYNC`/`O_DSYNC` und Dateisystem-Sync. Normales Close ist keine Pflichtbarriere.
+S3 und vorhandene native Clients behalten den Durable-ACK. Die Details und
+Implementierungsgrenzen stehen in [docs/durability.md](docs/durability.md).
+
 ## 11. Replikation, Erasure Coding und Read-Replicas
 
 ### 11.1 Replikation für HDD, SSD und RAM
@@ -1070,7 +1102,7 @@ STABLE -> PREPARED -> COPYING -> CATCHING_UP -> CUTOVER -> CLEANUP -> STABLE
 - Routet ein Client aufgrund falscher oder veralteter Informationen an den alten oder einen unzuständigen Node, antwortet dieser mit **301/302** und einem variablen Folgeheader mit Bucket/Range, aktueller bekannter Map-Version, Ownership-Epoch sowie zuständiger Node-ID und Kontaktadresse(n). `301` bezeichnet die committed Neuzuordnung; `302` eine vorübergehende Weiterleitung zu einem aktuell zulässigen Ziel. Ein bloß vorbereitetes NEXT-Ziel ist noch kein gültiger autoritativer Owner.
 - Routing-Hinweise werden nur an berechtigte Clients ausgegeben. Kann ein Node die aktuelle Zuständigkeit nicht verlässlich ermitteln, antwortet er mit `503`/`STALE_MAP` und bekannten Map-Kontaktstellen, statt einen ungeprüften Owner zu behaupten. Ist die alte Node bereits offline, lädt das SDK nach Verbindungsfehlern die Map über andere bekannte Clusterkontakte neu.
 - Bei nicht erreichbarem Primary kann das SDK eine im aktuellen Replica-Set enthaltene erreichbare Kopie für GET/GET_RANGE/STAT wählen. Eine gültige Replica liest auch ohne vorherigen Failure-Timeout; ein Transportfehler gibt ihr aber niemals Schreibrechte. Der Client übernimmt den Routing-Hinweis bzw. aktualisiert die Map und wiederholt Mutationen mit **derselben Request-ID**. Redirects erzeugen keinen mutierenden Effekt. Redirect-Schleifen werden begrenzt und lösen einen Map-Refresh aus.
-- **Ein Erfolgs-ACK garantiert die Einhaltung des zum Commit wirksamen Placements und der zugehörigen Policy**, einschließlich gültiger Schreibautorität, erforderlicher Kopien, tatsächlicher Speicherstrategie und Commitstand. HDD/SSD sind durable; RAM ist ausdrücklich an die Lebensdauer seiner Prozesse/Replikate gebunden und CACHE später verlustbehaftet. Eine veraltete Client-Map schwächt diese Zusage nicht. Bei einem Retry bestätigt eine gespeicherte Erfolgsantwort den ursprünglichen Commit; spätere Placement-Übergänge müssen dessen Daten entsprechend dem vereinbarten Disk-/RAM-Lebensdauervertrag erhalten.
+- **Ein Durable-Erfolgs-ACK (Standard; ein expliziter ACCEPTED-ACK nach §10.8 bestätigt zunächst nur die atomare Übernahme) garantiert die Einhaltung des zum Commit wirksamen Placements und der zugehörigen Policy**, einschließlich gültiger Schreibautorität, erforderlicher Kopien, tatsächlicher Speicherstrategie und Commitstand. HDD/SSD sind durable; RAM ist ausdrücklich an die Lebensdauer seiner Prozesse/Replikate gebunden und CACHE später verlustbehaftet. Eine veraltete Client-Map schwächt diese Zusage nicht. Bei einem Retry bestätigt eine gespeicherte Erfolgsantwort den ursprünglichen Commit; spätere Placement-Übergänge müssen dessen Daten entsprechend dem vereinbarten Disk-/RAM-Lebensdauervertrag erhalten.
 - Ein drainender Node darf noch vorhandene Daten ausliefern, solange er für diesen Read weiterhin autorisiert ist und deren Aktualität nachweisen kann: vor Cutover als Owner, danach nur als weiterhin gültige Lesekopie bzw. mit Owner-validierter Version. Bloße Existenz alter Bytes reicht nach Update/Delete/TRUNC nicht. Andernfalls antwortet er mit Redirect.
 - Alte Primaries werden gefenced und dürfen nach Cutover keine neuen Schreib-ACKs für die alte Autorität ausstellen. Für Read-Caches gilt die separate Validierungssemantik. Nach vollständigem Drain erfolgt `GOAWAY` auf allen Client-Verbindungen (§3.3).
 
@@ -1143,7 +1175,7 @@ Eine **binäre WebSocket-Message ist exakt eine STQR-Message**; kein zusätzlich
 - F bedeutet „kein Warten auf Remote-Antwort“, nicht unbeschränkte Speicherbelegung. Senden erfolgt über eine begrenzte Queue; volle Queue gibt lokal `WOULD_BLOCK` zurück. Kritische Kontrollpushes werden journalisiert und nach Reconnect wiederholt. Telemetrie darf zusammengefasst werden.
 - P hat keine direkte Antwort. Semantische READY-/APPLIED-/ACK-Pushes sind eigene Nachrichten mit RoundID/Sequenz als Kausalbezug; sie sind nötig, obwohl kein synchroner Request/Response-Call verwendet wird.
 
-**Status und Folgeheader:** 200 vollständige Daten/Erfolg, 201 angelegt, 202 Adminoperation angenommen, 206 Bereich, 301 committed anderer Owner inkl. MapPatch, 302 temporäres gültiges Ziel, 400 ungültig, 401 Auth, 403 ACL, 404 fehlendes Objekt, 409 Kontrollkonflikt, 410 verlorene Range, 412 CAS/Precondition, 416 Bereich, 499 abgebrochener Stream, 501 spätere/nicht unterstützte Funktion, 503 derzeit nicht ausführbar, 507 physischer Platz/Quota fehlt. Numerische Werte als V, weil sie nicht in u8 passen. Tags: `1=ObjectInfo`, `2=MapPatch`, `3=Text Fehler`, `4=u64 RetryAfterMS` (Hinweis, kein Failure-Timeout), `5=ID OperationID`, `6=Vec(NodeAddress)`, `7=RangeResult`, `8=ID SubscriptionID`. Unbekannte optionale TLVs werden übersprungen. Erfolgsantworten können Map-Patches als Optimierung tragen. Bei HDD/SSD ist runtime_id Null, bei RAM aus §8.1.1 abgeleitet. Policy.storage_strategy kann CACHE nur mit späterer Capability enthalten. RAM unterstützt SINGLE und REPLICATION wie HDD/SSD; ERASURE bleibt für alle Strategien ein späteres Feature.
+**Status und Folgeheader:** 200 vollständige Daten/Erfolg, 201 angelegt, 202 Adminoperation angenommen, 206 Bereich, 301 committed anderer Owner inkl. MapPatch, 302 temporäres gültiges Ziel, 400 ungültig, 401 Auth, 403 ACL, 404 fehlendes Objekt, 409 Kontrollkonflikt, 410 verlorene Range, 412 CAS/Precondition, 416 Bereich, 499 abgebrochener Stream, 501 spätere/nicht unterstützte Funktion, 503 derzeit nicht ausführbar, 507 physischer Platz/Quota fehlt. Numerische Werte als V, weil sie nicht in u8 passen. Tags: `1=ObjectInfo`, `2=MapPatch`, `3=Text Fehler`, `4=u64 RetryAfterMS` (Hinweis, kein Failure-Timeout), `5=ID OperationID`, `6=Vec(NodeAddress)`, `7=RangeResult`, `8=ID SubscriptionID`, `48=CommitMark` (Capability 8192, noch nicht bestätigter Bucket-Präfix). Unbekannte optionale TLVs werden übersprungen. Erfolgsantworten können Map-Patches als Optimierung tragen. Bei HDD/SSD ist runtime_id Null, bei RAM aus §8.1.1 abgeleitet. Policy.storage_strategy kann CACHE nur mit späterer Capability enthalten. RAM unterstützt SINGLE und REPLICATION wie HDD/SSD; ERASURE bleibt für alle Strategien ein späteres Feature.
 
 ### 13.3 Gemeinsame binäre Strukturen
 
@@ -1273,6 +1305,12 @@ Normale Clients bekommen ausschließlich Objektzugriff und die dafür nötigen R
 | 0x0115 | BUCKET_MAINTENANCE / Q, Single-Node | `object:ObjectRef` (OID=0, nur Bucket relevant) => leer; exklusive Wartung an die Bucket-WebSocket-Sitzung binden |
 | 0x0116 | BUCKET_SCAN / Q, Single-Node | `object:ObjectRef` (OID=0), `after:Opt(OID),limit:u32` (1..1000) => `count:u32,(id:OID,info:ObjectInfo)*,next:Opt(OID)`; nur in eigener Wartungssitzung |
 | 0x0117 | BUCKET_OBJECT_LIST / Q | `object:ObjectRef` (OID=0), `after:Opt(OID),limit:u32` (1..1000) => `count:u32,(id:OID,info:ObjectInfo)*,next:Opt(OID)`; normale READ-Inventur ohne Wartungssperre, aktuelle Sicht in OID-Reihenfolge, keine Namen-/Prefix-Sortierung |
+| 0x0118 | OBJECT_ACCEPTED / Q, Capability 8192 | `object:ObjectRef,opcode:u16,remaining_native_body` => ursprüngliches Mutationsresultat; Tag 48 trägt den CommitMark; nur vollständige INLINE-Mutationen |
+| 0x0119 | BUCKET_SYNC / Q, Capability 8192 | `bucket:ID,mark:CommitMark` => bestätigter `CommitMark`; alter Boot => 410 |
+| 0x011a | DURABILITY_NOTICE / P, Capability 8192 | `mark:CommitMark`; vor einem Subscription-Update mit akzeptiertem Zustand |
+| 0x011b | BUCKET_STATFS / Q | `bucket:ID` => `used:u64,total:u64,free:u64,available:u64,quota:u64,quota_limited:Bool`; authentifizierter Bucket-Grant genügt; ohne Quota verfügbarer nutzbarer Cluster-Platz, mit Quota zusätzlich begrenzt; siehe `docs/space.md` |
+| 0x011c | BUCKET_BLOCK_MAINTENANCE / Q | `ObjectRef,readonly:Bool` => `mode:u8=1,token:ID`; ALL-Member-Blockdevice-Lease, READ sowie bei RW WRITE; PUT/PUT_RANGE zusätzlich zu Recovery-CAS/DELETE, RO verbietet alle Mutationen; ursprüngliche Sitzung bleibt gebunden, geroutete Hilfssockets führen den Grant im Header X-STQR-Maintenance mit. Native Block-Leases erlauben interne Range-Migrationen; private Clear-/Clone-Leases halten die Platzierung fest. Bei lokalem Platzmangel wird sofort eine gezielte Kapazitätsmigration geweckt; 503 lässt den Client mit gleicher Request-ID warten und nach dem Cutover fortsetzen. 507 erst bei fehlendem geeignetem Cluster-Platz. |
+| 0x011d | BUCKET_MAINTENANCE_END / Q | `ObjectRef` => leer; nur ursprüngliche Owner-Sitzung; ALL-Freigabe vor ACK |
 
 CAS-Scope `0 RANGE,1 OBJECT`; OP_STATUS-State `0 UNKNOWN,1 PENDING,2 COMMITTED,3 FAILED,4 EXPIRED`. UNKNOWN/EXPIRED ist keine Zusicherung „nie ausgeführt“. ObjectUpdate-Change `0 REPLACE,1 RANGE_WRITE,2 APPEND,3 TRUNC,4 DELETE,5 RESYNC_REQUIRED`. SUBSCRIBE/UNSUBSCRIBE/ACK benötigen HELLO-Capability `512`; ohne Unterstützung gilt Q => 501 und F wird nicht gesendet. Die erste Implementierung publiziert vollständige Replacement-Snapshots, DELETE oder explizites RESYNC_REQUIRED; unvollständige oder unbekannte Teilupdate-Sätze invalidieren den Client-Snapshot.
 
@@ -1378,7 +1416,7 @@ Nur authentifizierte NODE-Rolle, gebunden an Membership-Epoch. In der Tabelle be
 | 0x1061 | QUOTA_REQUEST / Q | `schema:u16=1,transfer:ID,bucket:ID,quota_epoch:ID,needed:u64` => `granted:Bool,[grant:Blob(QuotaGrant)]`; Spender bucht freie Credits vor der Antwort dauerhaft aus |
 | 0x1062 | QUOTA_GRANT / Q | `grant:QuotaGrant` => `received:Proof`; Empfänger schreibt die Gutschrift vor der Antwort dauerhaft, Wiederholung bleibt idempotent |
 | 0x1063 | QUOTA_ACK / Q | `schema:u16=1,transfer:ID,received:Proof` => leer; nur der gebundene Empfänger bestätigt den Transfer |
-| 0x1064 | BUCKET_OWNER_USAGE / Q | `schema:u16=1,bucket:ID,user:ID,username:Text,owner_map_digest:Digest` => `used:u64`; nur delegierte aktuelle Admins, pro Owner inkrementell gepflegte Live-Bytes; Map-Abweichung oder notwendiger unerreichbarer Owner liefert 503 statt Teilmessung |
+| 0x1064 | BUCKET_OWNER_USAGE / Q | `schema:u16,bucket:ID,user:ID,username:Text,owner_map_digest:Digest` => `used:u64`; Schema 1 für delegierte aktuelle Admins, Schema 2 nur zwischen aktuellen Cluster-Mitgliedern für interne Kapazitäts-/Reservierungsaggregation (`user=0,username=""`); pro Owner inkrementell gepflegte Live-Bytes; Map-Abweichung oder notwendiger unerreichbarer Owner liefert 503 statt Teilmessung |
 | 0x1065 | FORCE_ADMIN_REQUEST / Q | `schema:u16=1,user:ID,username:Text,operation:ID,body:Blob(FORCE_DISCONNECT)` => `status:u16,result:Blob`; Empfänger prüft aktuellen Admin selbst und koordiniert nur als niedrigste verbleibende Node-ID |
 | 0x1066 | FORCE_RANGE_ENVELOPE / Q | `schema:u16=1,claim:Blob(GlobalClaim),opcode:u16,body:Blob` => Antwort des inneren Range-Kommandos; ausschließlich unter exakt eigenem FORCE-Slot und mit gebundenem Peer, nur Snapshot-/Probe-/State-/Commit-Recovery |
 | 0x1067 | FORCE_RANGE_RECOVERY / Q | `schema:u16=1,claim:Blob(GlobalClaim),action:u8,payload`; `0:offset:u64` => JSON `{Next,Done,Reports}` (max. 24 Teilnehmerstände); `1:plan:Blob(RangeHandoffPlan)` bricht unbestätigtes Angebot ab; `2:plan:Blob` beendet einen durch Ausschluss unvollendbaren committed Teilnehmerclaim; `3:plan:Blob` vervollständigt einen bestehenden Source-COMMIT am überlebenden Ziel; `4:plan:Blob` sichert einen versiegelten Zielstand zur Übernahme durch den FORCE-Systemgraph; Aktionen 1..4 => leer |
@@ -1778,6 +1816,9 @@ ADMIN oder ausdrücklich ADMIN_READ für reine Leseoperationen. `C` bedeutet glo
 | 0x2021 | USER_LIST / Q | leer => `users:Vec(User)`; nach Benutzername sortiert, ausschließlich öffentliche Accountfelder, keine Passwortverifier |
 | 0x2022 | BUCKET_LIST / Q | `after_name:Text,limit:u32` (1..1000) => `page_json:Text` mit `{buckets:[BucketDescription...],next:Text}`; leeres after_name startet, leeres next beendet die Liste; nur Admin, User-Freigaben als Unterarray je Bucket, keine internen Retry-Belege; Listenansicht ergänzt bei endlicher logischer Quota `used_bytes:u64` als Live-Belegung (bei Lesefehlern stattdessen `usage_error:Text`, niemals eine vorgetäuschte Nullbelegung) |
 | 0x2023 | BUCKET_QUOTA_CAPACITY / Q | `bucket:ID,strategy:u8,object_size_profile:u8,previous_overhead_ppm:u32` => `used:u64,available_physical:u64,reserved_other_physical:u64,maximum:u64,nodes:u32,overhead_ppm:u32,profiles:Vec(key:u8,label:Text,typical_bytes:u64,overhead_ppm:u32)`; ID null = neuer Bucket; Profil 255 bewahrt eine bestehende Pauschale, sonst wird sie aus dem Format berechnet |
+| 0x2028 | BUCKET_CLEAR / Q, Admin | `bucket:ID` => `objects:u64`; offline, Single-Node-Maintenance; persistente Replay-Sperre |
+| 0x2029 | BUCKET_CLONE / Q, Admin | `source:ID,target:ID` => `objects:u64`; Ziel leer, beide offline; kopiert IDs/Payloads, keine Versionen/Grants |
+| 0x202a | BUCKET_MAINTENANCE_STATUS / Q, Admin | leer => leer nach rein lesendem Capability-/Erreichbarkeits-Preflight aller Mitglieder; vor jeder Bucket-Allokation |
 | 0x201e | VOLUME_CAPACITY_GET / Q / L | leer => `filesystem_available:u64,ram_available:u64,ram_limit:u64`; Available-Wert für das aktive Volume-Verzeichnis, verfügbarer System-RAM und wirksame RAM-Grenze nach optionalem Budget |
 | 0x2024 | NODE_ADMIN_REQUEST / Q/F / L | `target:ID,opcode:u16,body:Blob` => Status/Folgeheader/result des inneren Befehls; Operations-ID bleibt die ID des äußeren Requests; kein beliebiges URL-Ziel |
 | 0x2025 | USER_S3_KEY_LIST / Q | `user_id:ID` => `access_key_ids:Vec(Text)`; nur IDs, keine Secrets |
@@ -1919,9 +1960,9 @@ Der aktuelle Single-Node-Transport kann bereits HELLO, Objekt-Wireformate, Chunk
 ### 14.3 C-/Rust-Anbindung und Blockdevice-Library
 
 - C erhält eine versionierte Handle-ABI mit expliziten Ownership-/Bufferregeln; Rust native Wrapper/async-Anbindung. Ob C auf Go-c-shared oder einen eigenen Codec setzt, bleibt eine Implementierungsentscheidung.
-- Die Blockdevice-Library ist ein Satz von Dateien im Go-Package `client` und später über die C-ABI einbindbar. Oberfläche: `ReadAt`, `WriteAt`, `Flush`, `Trim`, `Resize`, Größen-/Fehlerabfrage; später QEMU-Blockdriver, optional NBD-Adapter derselben Library.
-- Image = in normalen Objekten gespeichertes Manifest plus nummerierte **1-MiB-Datenobjekte**. Kleinere 512-B-/4-KiB-Blöcke verwenden GET_RANGE/PUT_RANGE; Grenzübertritte werden aufgeteilt. Ein 1-MiB-Objekt ist keine Mindest-I/O-Größe.
-- Manifeständerungen verwenden CAS. Verteilte partielle Updates erhalten die native Atomizität pro Objektoperation; mehrteilige Writes über mehrere Objekte sind keine native Multi-Object-Transaktion. `FLUSH` reicht bis zum Durable-ACK aller zuvor bestätigungspflichtigen Mutationen; `TRIM` und Vergrößerung müssen Null-Leseverhalten und physische Freigabe korrekt umsetzen.
+- Die Blockdevice-Library liegt im Go-Package `qemu-plugin-nbd` und nutzt die native Clientbibliothek. Implementiert sind `ReadAt`, `WriteAt`, `Sync`, benannte Geräte und Standard-NBD für QEMU; `Trim`, `Resize` sowie eine C-ABI bleiben Ausbau.
+- Gerät = genau ein binäres Metadatenobjekt plus systematisch adressierte **1-MiB-Datenobjekte**, ohne Segmentliste. Kleinere 512-B-/4-KiB-Blöcke verwenden GET_RANGE/PUT_RANGE; Grenzübertritte werden aufgeteilt. Ein 1-MiB-Objekt ist keine Mindest-I/O-Größe.
+- Das Metadatenobjekt wird über CAS angelegt. Verteilte partielle Updates erhalten die native Atomizität pro Objektoperation; mehrteilige Writes über mehrere Objekte sind keine native Multi-Object-Transaktion. `FLUSH` reicht bis zum Durable-ACK aller zuvor bestätigungspflichtigen Mutationen; `TRIM` und Vergrößerung müssen Null-Leseverhalten und physische Freigabe korrekt umsetzen.
 
 ### 14.4 FUSE auf mehreren Hosts
 
@@ -2259,7 +2300,7 @@ Hier stehen nur noch nicht entschiedene Details. Bereits geklärt sind: Intranet
 ### 20.4 Frontends und spätere Features
 
 - Multi-Mount-FUSE: CAS-/Intent-Protokolle für Rename/Link/Unlink über mehrere Metadatenobjekte und Recovery. Alte Testcaches sind bis SUBSCRIBE erlaubt; bei dessen Einführung müssen Cache-/Kernel-Sichtbarkeit konsistent umgesetzt werden.
-- S3: binäre Objektformate mit Metadaten-/Payload-Envelope und native Inventur für LIST sowie Prefix/Pagination. LIST und Range-GET gehören zum ersten integrierten Umfang; Multipart einschließlich Recovery/Cleanup sowie Copy, Sammellöschen und Bucket-Discovery sind implementierter Umfang. Blockdevice: ABI, Flush-/Trim-/Resize-Vertrag und QEMU-Adapter.
+- S3: binäre Objektformate mit Metadaten-/Payload-Envelope und native Inventur für LIST sowie Prefix/Pagination. LIST und Range-GET gehören zum ersten integrierten Umfang; Multipart einschließlich Recovery/Cleanup sowie Copy, Sammellöschen und Bucket-Discovery sind implementierter Umfang. Blockdevice: NBD-Frontend mit Flush/FUA und Standard-QEMU-Anbindung ist implementiert; Trim/Resize und verteilte Exklusion bleiben Ausbau.
 - SUBSCRIBE/UNSUBSCRIBE: Journal-Retention, Resync für langsame Leser, Relay-/Reconnect-Handoff und Ende durch Rechteentzug. Snapshot-/Versionsbarriere und Übergabe bei Migration stehen bereits fest.
 - CACHE-Strategie: Verdrängungs-/Miss-Verhalten und Klassenwahl; bis dahin reserviert und Aktivierung mit 501 ablehnen. RAM-Replikation und Replica-Restore gehören zu v1.
 - ENet: Channel-Pool, optionale cgo-Builds, HTTP-Authentifizierung zur Sessionbindung, Transportversion und Ordered-Stream-Reconnect-Barrieren; RELIABLE_UNORDERED ist kein nativer ENet-Modus (§13.9). Keine TLS-/Zertifikatsabhängigkeit hinzufügen.
@@ -2341,7 +2382,7 @@ STQR reduziert einige spezifische Zielkonflikte anderer Systeme, **beseitigt abe
 - **ALL-Barrieren und Warten:** Ein einzelner persistenter Node ist nicht host-ausfallsicher. Bereits vor einer Rebuild-Runde fehlende Nodes blockieren unabhängiges Online-Rebalancing nicht; ihr Placement bleibt eingefroren. Fehlende erforderliche Replikate blockieren betroffene Writes, fehlende Mitglieder globale Membership-/Admin-Entscheidungen und nach Bindung ausfallende Rundenteilnehmer den laufenden Rebuild. Warten bis Reconnect oder administrativem Forceful Disconnect bleibt in diesen Fällen eine bewusste Verfügbarkeitsgrenze.
 - **Hot Objects:** Splitting isoliert ein heißes Objekt, verteilt aber dessen Writes nicht. Read-Cache-Skalierung funktioniert nur mit einer korrekten Versions-/Invalidierungsstrategie.
 - **S3/POSIX/Block:** `LIST` braucht eine Namenssicht (derzeit Inventur der S3-Envelopes); FUSE braucht Dateisystemmetadaten und Semantik; NBD braucht Flush/Discard/partielle Writes. Diese Gateways sind nicht bloß ein Protokoll-Wrapper.
-- **Crash-Durability:** `ACK` darf nur nach persistenter Daten- und Recovery-Information erfolgen; SSD-/HDD-Controller müssen Flush/FUA korrekt unterstützen. Group Commit kann Flush-Aufwand zusammenfassen, aber nicht umgehen.
+- **Crash-Durability:** Der Standard-/Durable-ACK und ein erfolgreicher SYNC dürfen nur nach persistenter Daten- und Recovery-Information erfolgen; der explizite ACCEPTED-ACK (§10.8) ist eine schwächere Zusage; SSD-/HDD-Controller müssen Flush/FUA korrekt unterstützen. Group Commit kann Flush-Aufwand zusammenfassen, aber nicht umgehen.
 
 ### 23.3 Vergleich – ohne unbewiesene Überlegenheit
 
@@ -2353,7 +2394,7 @@ STQR reduziert einige spezifische Zielkonflikte anderer Systeme, **beseitigt abe
 | Platzierung nach echten Bytes | Geplant | Teilweise via externe/ergänzende Mechanismen | Vorhanden | Volumenbasierte Mechanismen |
 | Clientseitig direktes Routing | Geplant | Ja, native Ceph-Clients | Teils / abhängig vom Request-Pfad | Ja, je nach API-Pfad |
 | Kleine Objekte | Beispiel-Workload 2–250 KiB, kein Größenlimit | Allgemeiner Object Store | Datenbankorientiert | Blob-orientierte Engine |
-| Native VM-/Dateisystem-Integration | NBD/FUSE geplant | Reif: RBD/CephFS | Nicht primärer Zweck | Verschiedene Frontends |
+| Native VM-/Dateisystem-Integration | FUSE und NBD-Frontend; exklusive NBD-Exports mit ALL-Member-Leases | Reif: RBD/CephFS | Nicht primärer Zweck | Verschiedene Frontends |
 | Produktionsreife | Erst zu entwickeln | Hoch | Hoch | Etabliert |
 
 Diese Tabelle bewertet **Ausrichtung und Architektur**, nicht aktuelle Benchmark-Sieger oder zugesicherte Eigenschaften einer noch nicht implementierten Version.
@@ -2455,3 +2496,7 @@ Die drei wichtigsten technischen Verträge sind:
 Diese Verträge haben Vorrang vor einer einzelnen Performanceoptimierung. Damit ist STQR als **Single-Node-First, Range-Partitioned Distributed Object Store** vollständig genug umrissen, um die Detailprotokolle und einen implementierbaren Go-Prototyp daraus abzuleiten.
 
 Die Bucket-Kontingentwahl verwendet dieselben dekadisch gestuften, bidirektionalen Größenregler wie Volumes und einen „Maximum“-Knopf. Grundlage ist freier nutzbarer Platz der passenden Datenvolumes über die verfügbaren Node-Kapazitätsbilder, abzüglich ungenutzter Garantien anderer Buckets; der Admin-Speicher bleibt ausgeschlossen. Beim absoluten Kontingent eines vorhandenen Buckets kommt seine bereits genutzte logische Größe hinzu. Die Umrechnung in planbare logische Bytes berücksichtigt das gewählte Profil „Typische Objektgröße“, darunter „1M (Blockdevices)“. Ein Prozentfeld wird nicht angezeigt. Der aktuelle Collector liefert die einzelne lokale Node; Peer-Aggregation verwendet später dieselben Kapazitätsbilder ohne erfundene Remote-Werte.
+
+### Networkboot- und QEMU-Frontend
+
+`networkboot/` enthält den separaten Boot-Gateway; `qemu-plugin-nbd/` enthält die Blockdevice-Library, den NBD-Exporter und den Linux-NBD-Connector. QEMU nutzt Standard-NBD ohne Neukompilierung. Ein Bucket enthält beliebig viele benannte Geräte: genau ein binäres Metadatenobjekt je Gerät (Generation-ID, Größe, Name, Hersteller/Modell/Seriennummer) und systematisch adressierte 1-MiB-Stripes, ohne Segmentliste. Kleinere I/Os verwenden direkt GET_RANGE/PUT_RANGE ohne vollständiges Read-Modify-Write; fehlende Stripes liefern Nullen. Kein zusätzlicher Client-Datencache. Format und Adressberechnung stehen in `qemu-plugin-nbd/README.md`. Exklusive NBD-Exports, GC, Clear und Clone verwenden persistente ALL-Member-Leases. Die Admin-Volume-Journale speichern Membership-Epoch, Sequenz-Hochwassermarke und pro Grant einen frischen Server-Token. Owner-Socket-Verlust bzw. Owner-Neustart lösen die geordnete Freigabe aus; bloße Netzunterbrechung führt nicht zur Entsperrung. Geroutete Objekt-I/Os bleiben direkt. Der Bootpfad nutzt HTTP, NFSv3, SquashFS und ein privates temporäres ext4-Overlay auf einem NBD/STQR-Bucket (optional RAM); PAM aktiviert separat persönliche `username_home`-Buckets. Details, Metadatenvertrag und aktuelle Grenzen stehen in `networkboot/README.md`.

@@ -30,6 +30,16 @@ func (c *Client) CheckFilesystem(ctx context.Context) (FSCheckResult, error) {
 }
 
 func (c *Client) beginMaintenance(ctx context.Context) error {
+	return c.beginMaintenanceCommand(ctx, BucketMaintenance, false)
+}
+
+// BeginBlockMaintenance exclusively binds a bucket for direct ranged block I/O.
+// The lease is socket-scoped and cannot reconnect after loss.
+func (c *Client) BeginBlockMaintenance(ctx context.Context, readonly bool) error {
+	return c.beginMaintenanceCommand(ctx, BucketBlockMaintenance, readonly)
+}
+
+func (c *Client) beginMaintenanceCommand(ctx context.Context, opcode uint16, readonly bool) error {
 	t, err := c.connection(ctx)
 	if err != nil {
 		return err
@@ -43,10 +53,24 @@ func (c *Client) beginMaintenance(ctx context.Context) error {
 	c.mu.Unlock()
 	e := Encoder{}
 	c.objectRef(&e, ObjectID{})
-	r, err := c.do(ctx, BucketMaintenance, e.B, NewRequestID(), false, nil)
+	if opcode == BucketBlockMaintenance {
+		e.Bool(readonly)
+	}
+	token := NewRequestID()
+	c.mu.Lock()
+	c.maintenanceToken = token
+	c.mu.Unlock()
+	r, err := c.do(ctx, opcode, e.B, token, false, nil)
 	defer r.close()
-	if err == nil && len(r.result) != 0 {
-		err = ErrProtocol
+	if err == nil {
+		if len(r.result) == 17 && r.result[0] == 1 {
+			c.mu.Lock()
+			copy(c.maintenanceToken[:], r.result[1:])
+			c.distributedMaintenance = true
+			c.mu.Unlock()
+		} else if len(r.result) != 0 {
+			err = ErrProtocol
+		}
 	}
 	return err
 }
@@ -110,7 +134,7 @@ func (c *Client) scanObjectEntries(ctx context.Context, after *ObjectID, limit u
 	return objects, next, nil
 }
 
-func checkFilesystem(ctx context.Context, store fsCheckStore) (FSCheckResult, error) {
+func checkFilesystem(ctx context.Context, store fsCheckStore, opaqueRoots ...ObjectID) (FSCheckResult, error) {
 	var result FSCheckResult
 	if raw, _, err := store.Get(ctx, FilesystemRootID()); err == nil && len(raw) >= 4 && string(raw[:4]) == "STOR" {
 		return result, ErrOverlayNeedsLower
@@ -127,6 +151,25 @@ func checkFilesystem(ctx context.Context, store fsCheckStore) (FSCheckResult, er
 	mark := newFSCheckMarker(store, inventory)
 	if err := mark.inode(ctx, FilesystemRootID(), true); err != nil {
 		return result, fmt.Errorf("fsck validation; nothing deleted: %w", err)
+	}
+	for id, record := range mark.links {
+		refs := mark.references[id]
+		if record.kind == fsDirectory {
+			if refs != 1 {
+				return result, fmt.Errorf("directory has multiple parents: %w", ErrFSFormat)
+			}
+		} else if refs != uint64(record.count) {
+			return result, fmt.Errorf("inode %s link count does not match namespace; nothing deleted: %w", id, ErrFSFormat)
+		}
+	}
+	for _, id := range opaqueRoots {
+		if _, ok := inventory[id]; !ok {
+			return result, fmt.Errorf("missing opaque root %s; nothing deleted: %w", id, ErrNotFound)
+		}
+		if role := mark.roles[id]; role != 0 && role != 4 {
+			return result, ErrFSFormat
+		}
+		mark.roles[id] = 4
 	}
 	return filesystemSweep(ctx, store, inventory, mark.roles)
 }
@@ -159,7 +202,7 @@ func filesystemInventory(ctx context.Context, store fsCheckStore) (map[ObjectID]
 	return inventory, nil
 }
 func newFSCheckMarker(store fsCheckStore, inventory map[ObjectID]ObjectInfo) *fsCheckMarker {
-	return &fsCheckMarker{store: store, inventory: inventory, roles: map[ObjectID]uint8{}, indexes: map[ObjectID]fsCheckIndex{}, visiting: map[ObjectID]bool{}, lowerSources: map[ObjectID]fsCheckLower{}}
+	return &fsCheckMarker{references: map[ObjectID]uint64{}, links: map[ObjectID]fsCheckLinks{}, store: store, inventory: inventory, roles: map[ObjectID]uint8{}, indexes: map[ObjectID]fsCheckIndex{}, visiting: map[ObjectID]bool{}, lowerSources: map[ObjectID]fsCheckLower{}}
 }
 func filesystemSweep(ctx context.Context, store fsCheckStore, inventory map[ObjectID]ObjectInfo, roles map[ObjectID]uint8) (FSCheckResult, error) {
 	result := FSCheckResult{Scanned: uint64(len(inventory)), Reachable: uint64(len(roles))}
@@ -194,7 +237,13 @@ type fsCheckIndex struct {
 	length uint64
 	depth  uint8
 }
+type fsCheckLinks struct {
+	kind  uint8
+	count uint32
+}
 type fsCheckMarker struct {
+	references   map[ObjectID]uint64
+	links        map[ObjectID]fsCheckLinks
 	store        fsCheckStore
 	inventory    map[ObjectID]ObjectInfo
 	roles        map[ObjectID]uint8
@@ -224,6 +273,11 @@ func (m *fsCheckMarker) object(ctx context.Context, id ObjectID, role uint8) ([]
 }
 
 func (m *fsCheckMarker) inode(ctx context.Context, id ObjectID, root bool) error {
+	if m.references == nil {
+		m.references = map[ObjectID]uint64{}
+		m.links = map[ObjectID]fsCheckLinks{}
+	}
+	m.references[id]++
 	if len(m.visiting) >= 1024 {
 		return fmt.Errorf("directory nesting exceeds fsck limit: %w", ErrFSFormat)
 	}
@@ -241,6 +295,7 @@ func (m *fsCheckMarker) inode(ctx context.Context, id ObjectID, root bool) error
 	if err != nil {
 		return err
 	}
+	m.links[id] = fsCheckLinks{kind: node.kind, count: fsLinks(node)}
 	if root && node.kind != fsDirectory {
 		return ErrFSFormat
 	}
@@ -311,4 +366,17 @@ func (m *fsCheckMarker) segment(ctx context.Context, segment fsSegment, depth ui
 		}
 	}
 	return nil
+}
+
+// BeginMaintenance excludes other bucket clients until Close. It is intended for
+// offline tools and exclusive block-device exports. It never reconnects after a
+// lost session, and fails if distributed exclusion is unavailable.
+func (c *Client) BeginMaintenance(ctx context.Context) error { return c.beginMaintenance(ctx) }
+
+// CheckFilesystemWithOpaqueRoots validates the filesystem graph while retaining
+// application-owned opaque objects. Call BeginMaintenance successfully first,
+// then read/validate the application's root manifest under that same exclusion.
+// A dedicated connection must be closed afterward. Missing roots abort the sweep.
+func (c *Client) CheckFilesystemWithOpaqueRoots(ctx context.Context, roots []ObjectID) (FSCheckResult, error) {
+	return checkFilesystem(ctx, c, roots...)
 }

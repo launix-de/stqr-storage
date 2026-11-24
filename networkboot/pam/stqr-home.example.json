@@ -1,0 +1,5 @@
+{
+  "uri": "http://127.0.0.1:7419",
+  "bootctl": "/usr/libexec/stqr-bootctl",
+  "mount_helper": "/sbin/mount.kstqr"
+}

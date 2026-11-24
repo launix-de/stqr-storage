@@ -1,0 +1,53 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-3.0-only
+import argparse
+from pathlib import Path
+import tempfile
+from common import cli, ctl, extract, nbd, qemu, require
+
+def main():
+    p = argparse.ArgumentParser(description='Install a Linux VM directly on a bucket-backed NBD disk, then publish its rootfs')
+    p.add_argument('--config', default='stqr.yaml', help='STQR YAML (default: ./stqr.yaml) or private credentials JSON')
+    p.add_argument('bucket_name', nargs='?', help='new rootfs bucket name')
+    p.add_argument('image', nargs='?', type=Path, help='installer ISO')
+    p.add_argument('--bucket', help=argparse.SUPPRESS)
+    p.add_argument('--install-image', type=Path, help=argparse.SUPPRESS)
+    p.add_argument('--disk-gib', type=int, default=32)
+    p.add_argument('--memory', type=int, default=4096)
+    p.add_argument('--cpus', type=int, default=2)
+    p.add_argument('--uefi', help='optional OVMF firmware file; also pass it when editing')
+    p.add_argument('--kernel-version')
+    p.add_argument('--resume', action='store_true', help='reuse an unpublished installation disk after an interrupted installation')
+    p.add_argument('--work-dir', default='/var/tmp', help='local archive staging directory; needs disk space')
+    args = p.parse_args()
+    if args.bucket_name and args.bucket:
+        p.error('specify the bucket only once')
+    args.bucket = args.bucket_name or args.bucket
+    if not args.bucket:
+        p.error('bucket name required')
+    if args.image and args.install_image:
+        p.error('specify the install image only once')
+    args.install_image = args.image or args.install_image
+    if not args.install_image:
+        p.error('installer ISO required')
+    require('qemu-system-x86_64', 'guestfish', 'sort')
+    ctl(args.config, 'check-exclusive', args.bucket)
+    if args.memory<512 or args.cpus<1:
+        p.error("memory must be at least 512 MiB and CPU count positive")
+    if not args.install_image.is_file() or args.disk_gib <= 0:
+        p.error('a local installer image and positive disk size are required')
+    if args.resume:
+        ctl(args.config, '--size', str(args.disk_gib << 30), 'check-install-disk', args.bucket)
+    else:
+        ctl(args.config, 'create', args.bucket)
+        ctl(args.config, '--size', str(args.disk_gib << 30), 'init-disk', args.bucket)
+    with tempfile.TemporaryDirectory(prefix='stqr-prepare-', dir=args.work_dir) as work:
+        with nbd(args.config, args.bucket, work) as socket:
+            qemu(socket, args, args.install_image)
+            extract(socket, work, args.kernel_version)
+        ctl(args.config, 'publish', args.bucket, work)
+        ctl(args.config, 'gc', args.bucket)
+    print('Published', args.bucket)
+
+if __name__ == '__main__':
+    cli(main)

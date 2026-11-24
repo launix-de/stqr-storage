@@ -110,7 +110,7 @@ func (b *Bucket) scanCluster(ctx context.Context, description BucketDescription,
 			}
 		} else {
 			e := client.Encoder{}
-			e.U16(1)
+			e.U16(2)
 			e.ID(client.ID(b.ID()))
 			actor, actorErr := parseID(p.User.ID)
 			if actorErr != nil {
@@ -129,6 +129,13 @@ func (b *Bucket) scanCluster(ctx context.Context, description BucketDescription,
 				e.B = append(e.B, after[:]...)
 			}
 			e.U32(uint32(limit))
+			token := client.ID{}
+			if p.connection != nil {
+				if l := p.connection.lease.Load(); l != nil {
+					token = l.Token
+				}
+			}
+			e.ID(token)
 			body, callErr := (peerControlParticipants{runtime: s.control}).call(ctx, node, peerBucketInventory, e.B)
 			if callErr != nil {
 				// Normal pages use the already pushed map. Only a rejected/stale
@@ -240,7 +247,11 @@ func (s *Server) receiveBucketInventory(ctx context.Context, body []byte, actor 
 		after = &id
 	}
 	limit := d.U32()
-	if schema != 1 || d.Done() != nil || bucket == systemBucket || limit < 1 || limit > 1000 || required != BucketRead && required != BucketWrite && required != BucketAppend && required != BucketDelete {
+	token := client.ID{}
+	if schema == 2 {
+		token = d.ID()
+	}
+	if schema != 1 && schema != 2 || d.Done() != nil || bucket == systemBucket || limit < 1 || limit > 1000 || required != BucketRead && required != BucketWrite && required != BucketAppend && required != BucketDelete {
 		return nil, client.ErrProtocol
 	}
 	view := s.currentSystem.Load()
@@ -255,7 +266,17 @@ func (s *Server) receiveBucketInventory(ctx context.Context, body []byte, actor 
 	if err != nil {
 		return nil, err
 	}
-	description, err := b.authorize(principal{User: account, frontendPermission: required}, BucketRead)
+	p := principal{User: account, frontendPermission: required}
+	if token != (client.ID{}) {
+		l := s.leaseRecord(b)
+		if l == nil || l.Released || l.Token != token || l.User != user.String() {
+			return nil, ErrBucketForbidden
+		}
+		auth := &connectionAuthorization{bucket: b, bucketID: b.ID(), accountID: l.User, permissions: BucketRead}
+		auth.lease.Store(l)
+		p.connection = auth
+	}
+	description, err := b.authorize(p, BucketRead)
 	if err != nil {
 		return nil, err
 	}

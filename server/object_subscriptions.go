@@ -109,6 +109,17 @@ func (r *objectSubscriptionRegistry) sendLocked(sub *objectSubscription, u clien
 		sub.ws.close()
 		return false
 	}
+	if sub.ws.durabilityCap.Load() {
+		if mark, ok := sub.ws.server.acceptedMark(sub.key.Bucket); ok {
+			notice := client.EncodeMessage(client.Message{Kind: client.Push, Opcode: client.DurabilityNotice, Body: mark.MarshalBinary()})
+			select {
+			case sub.ws.responses <- notice:
+			default:
+				sub.ws.close()
+				return false
+			}
+		}
+	}
 	frame := client.EncodeMessage(client.Message{Kind: client.Push, Opcode: client.ObjectUpdateMessage, ID: client.NewRequestID(), Body: body})
 	select {
 	case sub.ws.responses <- frame:

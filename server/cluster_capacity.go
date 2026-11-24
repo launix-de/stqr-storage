@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"math"
+	"sort"
 	"time"
 
 	"github.com/launix-de/stqr-storage/client"
@@ -28,27 +29,69 @@ func (b *Bucket) clusterLogicalUsage(ctx context.Context, p principal) (uint64, 
 	return b.clusterUsageAs(ctx, p, b.storageDescription().Policy.Limits.Accounting)
 }
 func (b *Bucket) clusterUsageAs(ctx context.Context, p principal, accounting string) (uint64, error) {
+	return b.clusterUsageMode(ctx, p, accounting, false)
+}
+
+// Internal capacity aggregation reveals only the authorized bucket totals to clients.
+// Member nodes may query maintained counters for reservation accounting.
+func (b *Bucket) clusterUsage(ctx context.Context, p principal, internal bool) (uint64, error) {
+	return b.clusterUsageMode(ctx, p, b.storageDescription().Policy.Limits.Accounting, internal)
+}
+func (b *Bucket) clusterUsageMode(ctx context.Context, p principal, accounting string, internal bool) (uint64, error) {
 	s := b.server
 	entries := s.placement.Load().bucketEntries(client.ID(b.ID()))
 	stamp := inventoryStamp(entries, client.ID{})
-	actor, err := parseID(p.User.ID)
-	if err != nil {
-		return 0, ErrBucketForbidden
+	var actor volume.ID
+	if !internal {
+		var err error
+		actor, err = parseID(p.User.ID)
+		if err != nil {
+			return 0, ErrBucketForbidden
+		}
 	}
 	var total uint64
-	for _, node := range s.inventoryOwners(b.ID()) {
+	owners := s.inventoryOwners(b.ID())
+	if accounting == "physical" {
+		seen := map[client.ID]bool{}
+		for _, entry := range entries {
+			for _, loc := range entry.Locations {
+				if loc.Role <= 1 {
+					seen[loc.Node] = true
+				}
+			}
+		}
+		owners = nil
+		for node := range seen {
+			owners = append(owners, node)
+		}
+		sort.Slice(owners, func(i, j int) bool { return owners[i].String() < owners[j].String() })
+	}
+	for _, node := range owners {
 		e := client.Encoder{}
 		schema := uint16(1)
 		if accounting == "physical" {
 			schema = 2
 		}
+		if internal {
+			schema = 2
+			if accounting == "physical" {
+				schema = 3
+			}
+		}
 		e.U16(schema)
 		e.ID(client.ID(b.ID()))
 		e.ID(client.ID(actor))
-		e.Text(p.User.Name)
+		if internal {
+			e.Text("")
+		} else {
+			e.Text(p.User.Name)
+		}
 		ownerStamp := inventoryStamp(entries, node)
+		if accounting == "physical" {
+			ownerStamp = stamp
+		}
 		e.B = append(e.B, ownerStamp[:]...)
-		if schema == 2 {
+		if accounting == "physical" {
 			e.U8(1)
 		}
 		body, err := (peerControlParticipants{runtime: s.control}).call(ctx, node, peerBucketUsage, e.B)
@@ -79,6 +122,10 @@ func (b *Bucket) clusterUsageAs(ctx context.Context, p principal, accounting str
 }
 
 func (s *Server) administrativeQuotaCapacity(id volume.ID, strategy uint8, p principal, selection ...BucketPolicy) (bucketQuotaCapacity, error) {
+	return s.quotaCapacitySnapshot(s.ctx, id, strategy, p, false, selection...)
+}
+
+func (s *Server) quotaCapacitySnapshot(ctx context.Context, id volume.ID, strategy uint8, p principal, internal bool, selection ...BucketPolicy) (bucketQuotaCapacity, error) {
 	view := s.currentSystem.Load()
 	if s.controller == nil || view == nil || len(view.manifest.Membership.Members) <= 1 {
 		return s.bucketQuotaCapacity(id, strategy, selection...)
@@ -86,7 +133,7 @@ func (s *Server) administrativeQuotaCapacity(id volume.ID, strategy uint8, p pri
 	if strategy > 2 {
 		return bucketQuotaCapacity{}, fail(400, "invalid storage strategy")
 	}
-	ctx, cancel := context.WithTimeout(s.ctx, 3*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
 	var used uint64
 	group := ""
@@ -102,7 +149,7 @@ func (s *Server) administrativeQuotaCapacity(id volume.ID, strategy uint8, p pri
 		if len(selection) > 0 {
 			accounting = selection[0].Limits.Accounting
 		}
-		used, err = b.clusterUsageAs(ctx, p, accounting)
+		used, err = b.clusterUsageMode(ctx, p, accounting, internal)
 		if err != nil {
 			return bucketQuotaCapacity{}, err
 		}
@@ -118,7 +165,7 @@ func (s *Server) administrativeQuotaCapacity(id volume.ID, strategy uint8, p pri
 	images := map[client.ID]client.StatsSnapshot{local.Node: local}
 	s.peerStatsMu.RLock()
 	for node, observation := range s.peerStats {
-		if observation.snapshot != nil {
+		if observation.snapshot != nil && (!internal || observation.online) {
 			images[node] = *observation.snapshot
 		}
 	}
@@ -151,7 +198,6 @@ func (s *Server) administrativeQuotaCapacity(id volume.ID, strategy uint8, p pri
 		nodes = append(nodes, node)
 	}
 	var guarantees [3]uint64
-
 	if s.currentSystem.Load() != view {
 		return bucketQuotaCapacity{}, fail(503, "cluster configuration changed during capacity measurement")
 	}

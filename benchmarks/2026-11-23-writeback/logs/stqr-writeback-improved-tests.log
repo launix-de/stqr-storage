@@ -1,0 +1,17 @@
+=== RUN   TestKSTQRVirtualMachine
+    kstqr_linux_test.go:420: KSTQR_WRITE_BENCH {"test":"direct_write_fsync","rep":0,"seconds":0.082454868,"rate":97.023,"unit":"MiB/s","cas":24,"batches":0,"folios":0,"snapshot_ns":5490,"prepare_ns":71438581,"publish_ns":5528883,"retries":0}
+    kstqr_linux_test.go:420: KSTQR_WRITE_BENCH {"test":"mmap_dense_msync","rep":0,"seconds":0.011926243,"rate":83.849,"unit":"MiB/s","cas":3,"batches":1,"folios":256,"snapshot_ns":841,"prepare_ns":8572001,"publish_ns":482575,"retries":0}
+    kstqr_linux_test.go:420: KSTQR_WRITE_BENCH {"test":"mmap_sparse_msync","rep":0,"seconds":0.097523775,"rate":1.282,"unit":"MiB/s","cas":96,"batches":32,"folios":32,"snapshot_ns":16584928,"prepare_ns":56367045,"publish_ns":23106303,"retries":0}
+    kstqr_linux_test.go:420: KSTQR_WRITE_BENCH {"test":"mmap_4k_commit","rep":0,"seconds":0.041075774,"rate":779.048,"unit":"commits/s","cas":32,"batches":32,"folios":32,"snapshot_ns":14853019,"prepare_ns":15069,"publish_ns":25836727,"retries":0}
+    kstqr_linux_test.go:420: KSTQR_WRITE_BENCH {"test":"direct_write_fsync","rep":1,"seconds":0.086008253,"rate":93.014,"unit":"MiB/s","cas":24,"batches":0,"folios":0,"snapshot_ns":5200,"prepare_ns":73926159,"publish_ns":6504392,"retries":0}
+    kstqr_linux_test.go:420: KSTQR_WRITE_BENCH {"test":"mmap_dense_msync","rep":1,"seconds":0.012095180,"rate":82.678,"unit":"MiB/s","cas":3,"batches":1,"folios":256,"snapshot_ns":821,"prepare_ns":8775713,"publish_ns":552526,"retries":0}
+    kstqr_linux_test.go:420: KSTQR_WRITE_BENCH {"test":"mmap_sparse_msync","rep":1,"seconds":0.104905954,"rate":1.192,"unit":"MiB/s","cas":96,"batches":32,"folios":32,"snapshot_ns":17579891,"prepare_ns":59299718,"publish_ns":23169773,"retries":0}
+    kstqr_linux_test.go:420: KSTQR_WRITE_BENCH {"test":"mmap_4k_commit","rep":1,"seconds":0.043765349,"rate":731.172,"unit":"commits/s","cas":32,"batches":32,"folios":32,"snapshot_ns":17861999,"prepare_ns":13972,"publish_ns":25478483,"retries":0}
+    kstqr_linux_test.go:420: KSTQR_WRITE_BENCH {"test":"direct_write_fsync","rep":2,"seconds":0.083088016,"rate":96.283,"unit":"MiB/s","cas":24,"batches":0,"folios":0,"snapshot_ns":4689,"prepare_ns":70577605,"publish_ns":7902356,"retries":0}
+    kstqr_linux_test.go:420: KSTQR_WRITE_BENCH {"test":"mmap_dense_msync","rep":2,"seconds":0.012777429,"rate":78.263,"unit":"MiB/s","cas":3,"batches":1,"folios":256,"snapshot_ns":941,"prepare_ns":8780251,"publish_ns":659146,"retries":0}
+    kstqr_linux_test.go:420: KSTQR_WRITE_BENCH {"test":"mmap_sparse_msync","rep":2,"seconds":0.103222105,"rate":1.211,"unit":"MiB/s","cas":96,"batches":32,"folios":32,"snapshot_ns":15100850,"prepare_ns":61199402,"publish_ns":22247578,"retries":0}
+    kstqr_linux_test.go:420: KSTQR_WRITE_BENCH {"test":"mmap_4k_commit","rep":2,"seconds":0.043606202,"rate":733.841,"unit":"commits/s","cas":32,"batches":32,"folios":32,"snapshot_ns":14447199,"prepare_ns":15759,"publish_ns":28759762,"retries":0}
+    kstqr_linux_test.go:420: device none mounted on /mnt with fstype kstqr 	stqr: cache_hits=224 cache_misses=257 rpc_get=144 rpc_range=102 rpc_cas=507 read_windows=30 writeback_batches=195 writeback_folios=960 writeback_bytes=3932160 writeback_errors=0 writeback_ns=449858055 write_snapshot_ns=96445868 write_prepare_ns=418981275 write_publish_ns=170228504 write_retries=0
+--- PASS: TestKSTQRVirtualMachine (7.48s)
+PASS
+ok  	github.com/launix-de/stqr-storage/server	7.484s

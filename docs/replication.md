@@ -76,6 +76,14 @@ accept formats 2/3/4; the next durable write uses format 4. The system manifest
 retains a replication protocol marker even after the last replicated bucket is
 deleted, so older peers cannot join a cluster with incompatible range history.
 
+Accepted client requests currently use the stronger fully durable ALL path for
+replicated ranges. Private prepare/commit records never enter a volatile accepted
+overlay. Single-copy accepted writes keep physical quota accounting up to date
+before their checkpoint. Durability capability 8192 is separate from recovery
+fence clearance (1024), physical quotas (2048) and replication (4096); the C and
+Go clients share that assignment. Exclusive bucket-lease acquisition waits for
+pending replica transactions before granting a new owner access.
+
 RAM replica bootstrap/restore and all-copy runtime loss still require their
 own boot-bound recovery implementation. Multi-copy RAM writes return 501.
 Automatic relocation of existing multi-copy groups, replica-set replacement

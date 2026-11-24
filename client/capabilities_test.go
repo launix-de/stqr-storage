@@ -7,7 +7,7 @@ func TestNegotiatedCapabilitiesHaveIndependentBits(t *testing.T) {
 	capabilities := []uint64{CapabilityPeerTransport, CapabilityNodeAdmin,
 		CapabilityPendingNode, CapabilityClusterControl, CapabilityRangeHandoff,
 		CapabilityRetiringNode, CapabilityExclusion, CapabilityControlRecovery,
-		CapabilityVolumeRecovery, CapabilityObjectSubscriptions, CapabilityRecoveryFenceClearance, CapabilityPhysicalQuotas}
+		CapabilityVolumeRecovery, CapabilityObjectSubscriptions, CapabilityRecoveryFenceClearance, CapabilityPhysicalQuotas, CapabilityReplication, CapabilityDurability}
 	var seen uint64
 	for _, bit := range capabilities {
 		if bit == 0 || bit&(bit-1) != 0 || bit&seen != 0 {

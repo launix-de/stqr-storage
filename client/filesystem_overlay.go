@@ -257,6 +257,15 @@ func (o *OverlayFilesystem) entries(ctx context.Context, s *overlayState, id Obj
 			return nil, err
 		}
 		for _, entry := range entries {
+			// An inherited alias must not resolve to an upper inode published
+			// for another name: that would bypass path-based write policies.
+			shadowed := false
+			if dir != nil {
+				_, shadowed = dir.entries[entry.Name]
+			}
+			if !shadowed && overlayUpperReference(s, entry.ID) {
+				return nil, syscall.EOPNOTSUPP
+			}
 			merged[entry.Name] = entry.ID
 		}
 	}
@@ -297,6 +306,10 @@ func (o *OverlayFilesystem) child(ctx context.Context, s *overlayState, parent O
 		lower = dir.lower
 	}
 	info, err := o.lower.Lookup(ctx, lower, name)
+	// Match readDir's inherited-alias check on the direct lookup fast path.
+	if err == nil && overlayUpperReference(s, info.ID) {
+		return ObjectID{}, syscall.EOPNOTSUPP
+	}
 	return info.ID, err
 }
 func (o *OverlayFilesystem) directory(ctx context.Context, s *overlayState, id ObjectID) (*overlayDirectory, error) {
@@ -507,8 +520,17 @@ func (o *OverlayFilesystem) ReadAt(ctx context.Context, id ObjectID, dst []byte,
 	return o.upper.readBlob(ctx, n.blob, dst, uint64(offset))
 }
 func (o *OverlayFilesystem) Sync(ctx context.Context, id ObjectID) error {
-	_, err := o.Stat(ctx, id)
-	return err
+	if _, err := o.Stat(ctx, id); err != nil {
+		return err
+	}
+	for _, f := range []*Filesystem{o.lower, o.upper} {
+		if s, ok := f.store.(interface{ Sync(context.Context) error }); ok {
+			if err := s.Sync(ctx); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 func (o *OverlayFilesystem) copyUp(ctx context.Context, id ObjectID) error {
@@ -527,6 +549,9 @@ func (o *OverlayFilesystem) copyUp(ctx context.Context, id ObjectID) error {
 	if visible.Directory {
 		return syscall.EISDIR
 	}
+	if visible.Kind != FSRegular || visible.Nlink > 1 {
+		return syscall.EOPNOTSUPP
+	}
 	parentPath, name := "", p
 	if i := strings.LastIndex(p, "/"); i >= 0 {
 		parentPath, name = p[:i], p[i+1:]
@@ -539,6 +564,11 @@ func (o *OverlayFilesystem) copyUp(ctx context.Context, id ObjectID) error {
 		}
 		if n.kind != fsFile {
 			return syscall.EISDIR
+		}
+		if syncer, ok := o.lower.store.(interface{ Sync(context.Context) error }); ok {
+			if err := syncer.Sync(ctx); err != nil {
+				return err
+			}
 		}
 		n.blob = fsBlob{length: n.blob.length, source: id, sourceVersion: base.Version}
 		n.writePath = p

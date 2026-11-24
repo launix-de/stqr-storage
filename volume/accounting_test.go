@@ -92,6 +92,48 @@ func TestPhysicalAccountingReconstructionAndAtomicAdmission(t *testing.T) {
 		t.Fatal("reopen changed physical accounting", expected, reopened, err)
 	}
 }
+
+func TestAcceptedPhysicalAdmissionAndReconstruction(t *testing.T) {
+	v, disk := memoryVolume(t, 16<<20)
+	admission := func(change StorageChange) (uint64, error) {
+		for _, usage := range change.After {
+			if usage.Physical > 64<<10 {
+				return 0, ErrFull
+			}
+		}
+		return 0, nil
+	}
+	if err := v.SetAdmission(admission); err != nil {
+		t.Fatal(err)
+	}
+	h, _ := v.Open(true)
+	k := testKey(1)
+	if _, err := h.Put(k, bytes.Repeat([]byte{1}, 8<<10), Options{RequestID: testID(1), Accepted: true}); err != nil {
+		t.Fatal(err)
+	}
+	before, err := h.StorageUsage()
+	if err != nil || len(before) != 1 || before[0].Physical <= 8<<10 {
+		t.Fatalf("accepted accounting %+v %v", before, err)
+	}
+	if _, err := h.Put(testKey(2), bytes.Repeat([]byte{2}, 80<<10), Options{RequestID: testID(2), Accepted: true}); !errors.Is(err, ErrFull) {
+		t.Fatal("accepted write bypassed physical quota", err)
+	}
+	after, err := h.StorageUsage()
+	h.Close()
+	if err != nil || !reflect.DeepEqual(before, after) {
+		t.Fatalf("rejected accepted write changed accounting: %+v -> %+v %v", before, after, err)
+	}
+	v = reopen(t, v, disk)
+	if err := v.SetAdmission(admission); err != nil {
+		t.Fatal(err)
+	}
+	h, _ = v.Open(false)
+	rebuilt, err := h.StorageUsage()
+	h.Close()
+	if err != nil || !reflect.DeepEqual(after, rebuilt) {
+		t.Fatalf("accepted reconstruction %+v != %+v %v", rebuilt, after, err)
+	}
+}
 func TestPhysicalAccountingTinySparseCompressedAndIndexSplits(t *testing.T) {
 	v, err := New("accounting", 16<<20, RAM)
 	if err != nil {

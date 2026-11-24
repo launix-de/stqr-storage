@@ -23,6 +23,10 @@ import (
 // cluster statistics. IDs are native 256-bit object addresses, never rehashed.
 // It is safe to call methods concurrently; Close is idempotent.
 type Client struct {
+	durabilityError error
+
+	durability map[ID]pendingDurability
+
 	subMu                        sync.Mutex
 	subscriptions                map[ID]weak.Pointer[Subscription]
 	subscriptionSources          map[ID]*objectTransport
@@ -31,6 +35,8 @@ type Client struct {
 	runtime                      ID
 	mu                           sync.Mutex
 	transport                    *objectTransport
+	maintenanceToken             ID
+	distributedMaintenance       bool
 	maintenance                  *objectTransport // pinned session; never reconnect during fsck
 	dialGate                     chan struct{}
 	closed                       bool
@@ -86,6 +92,13 @@ func (c *Client) connectEndpoint(ctx context.Context, endpoint string) (*objectT
 	ctx = merged
 	headers := http.Header{}
 	headers.Set(BucketHeader, c.bucket.String())
+	c.mu.Lock()
+	token := c.maintenanceToken
+	distributed := c.distributedMaintenance
+	c.mu.Unlock()
+	if distributed {
+		headers.Set("X-STQR-Maintenance", token.String())
+	}
 	headers.Set("Authorization", "Basic "+base64.StdEncoding.EncodeToString([]byte(c.username+":"+c.password)))
 	dialer := websocket.Dialer{Subprotocols: []string{"stqr.v1"}, EnableCompression: false, HandshakeTimeout: 0}
 	var stopSocket func() bool
@@ -119,13 +132,15 @@ func (c *Client) connectEndpoint(ctx context.Context, endpoint string) (*objectT
 	hello := Encoder{}
 	hello.U16(1)
 	hello.U16(1)
-	hello.U64(0)
+	hello.U64(CapabilityDurability)
 	hello.Text("stqr-go")
 	r, e := t.roundTrip(ctx, Message{Kind: Request, Opcode: Hello, ID: NewRequestID(), Body: hello.B}, false, nil)
 	if e == nil {
 		d := Decoder{B: r.result}
 		version := d.U16()
 		capabilities := d.U64()
+		t.capabilities = capabilities
+		t.endpoint = endpoint
 		t.node = d.ID()
 		cluster := d.ID()
 		membership := d.U64()
@@ -170,6 +185,19 @@ func (c *Client) Close() error {
 		return nil
 	}
 	c.closeOnce.Do(func() {
+		c.mu.Lock()
+		owner := c.maintenance
+		distributed := c.distributedMaintenance
+		c.closed = true
+		c.mu.Unlock()
+		if owner != nil && distributed && transportAlive(owner) {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			e := Encoder{}
+			c.objectRef(&e, ObjectID{})
+			r, _ := owner.roundTrip(ctx, Message{Kind: Request, Opcode: BucketMaintenanceEnd, ID: NewRequestID(), Body: e.B}, false, nil)
+			r.close()
+			cancel()
+		}
 		if c.cancel != nil {
 			c.cancel()
 		}
@@ -221,6 +249,12 @@ func (c *Client) activeTransport() (*objectTransport, error) {
 func (c *Client) connection(ctx context.Context) (*objectTransport, error) {
 	if t, e := c.activeTransport(); t != nil || e != nil {
 		return t, e
+	}
+	c.mu.Lock()
+	pinned := c.maintenance
+	c.mu.Unlock()
+	if pinned != nil {
+		return nil, ErrClosed
 	}
 	// A caller must be able to cancel while another caller is reconnecting. Never
 	// hold the state mutex across dial/HELLO; the gate is context-aware.
@@ -287,14 +321,34 @@ func (c *Client) do(ctx context.Context, opcode uint16, body []byte, id RequestI
 	m := Message{Kind: Request, Opcode: opcode, ID: id, Body: body}
 	c.mu.Lock()
 	maintenance := c.maintenance
+	distributed := c.distributedMaintenance
 	c.mu.Unlock()
-	if maintenance != nil {
+	if maintenance != nil && distributed && !transportAlive(maintenance) {
+		return wireReply{}, ErrClosed
+	}
+	if maintenance != nil && !distributed {
 		// A reconnect loses exclusive ownership. Never resume a sweep against a
 		// potentially changed graph; the operator must start a fresh fsck.
-		return maintenance.roundTrip(ctx, m, mutation, upload)
+		outgoing := m
+		if mutation && upload == nil && ctx.Value(acceptedContextKey{}) == true && maintenance.capabilities&CapabilityDurability != 0 {
+			outgoing = acceptedMessage(m)
+		}
+		r, err := maintenance.roundTrip(ctx, outgoing, mutation, upload)
+		if err == nil {
+			if mark := r.headers[DurabilityHeader]; len(mark) > 0 {
+				if err = c.observeDurability(maintenance, mark); err != nil {
+					r.close()
+					return wireReply{}, err
+				}
+			}
+		}
+		return r, err
 	}
 	backoff := 100 * time.Millisecond
 	for {
+		if maintenance != nil && distributed && !transportAlive(maintenance) {
+			return wireReply{}, ErrClosed
+		}
 		var t *objectTransport
 		var e error
 		var routeNode ID
@@ -315,8 +369,21 @@ func (c *Client) do(ctx context.Context, opcode uint16, body []byte, id RequestI
 				copy(subscription[:], m.Body[80:96])
 				c.bindSubscriptionTransport(subscription, t)
 			}
-			r, er := t.roundTrip(ctx, m, mutation, upload)
+			outgoing := m
+			if mutation && upload == nil && ctx.Value(acceptedContextKey{}) == true && t.capabilities&CapabilityDurability != 0 {
+				if err := c.syncExcept(ctx, t); err != nil {
+					return wireReply{}, err
+				}
+				outgoing = acceptedMessage(m)
+			}
+			r, er := t.roundTrip(ctx, outgoing, mutation, upload)
 			if er == nil {
+				if b := r.headers[DurabilityHeader]; len(b) > 0 {
+					if err := c.observeDurability(t, b); err != nil {
+						r.close()
+						return wireReply{}, err
+					}
+				}
 				return r, nil
 			}
 			e = er
@@ -451,4 +518,13 @@ func (c *Client) acceptObjectInfo(info ObjectInfo) error {
 		c.runtime = info.RuntimeID
 	}
 	return nil
+}
+
+func transportAlive(t *objectTransport) bool {
+	select {
+	case <-t.done:
+		return false
+	default:
+		return true
+	}
 }

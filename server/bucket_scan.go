@@ -16,6 +16,12 @@ func (b *Bucket) underMaintenance() bool {
 	return b.maintenance != nil
 }
 
+func (b *Bucket) blocksPlacementChange() bool {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	return b.maintenance != nil && (b.lease == nil || b.lease.Released || !b.lease.Block || !b.lease.AllowHandoff)
+}
+
 func (ws *wsSession) releaseMaintenance() {
 	if ws.authorization == nil || ws.authorization.bucket == nil {
 		return
@@ -26,6 +32,9 @@ func (ws *wsSession) releaseMaintenance() {
 	b := ws.authorization.bucket
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	if b.lease != nil && !b.lease.Released {
+		return
+	}
 	if b.maintenance == ws.authorization {
 		b.maintenance = nil
 	}
@@ -35,9 +44,53 @@ func (s *Server) executeMaintenance(ctx context.Context, op *objectMutation, d *
 	if ws == nil || ws.authorization == nil {
 		return nil, 0, fail(400, "maintenance requires a bucket socket")
 	}
-	s.opMu.Lock()
-	defer s.opMu.Unlock()
 	b := op.bucket
+	if op.message.Opcode == client.BucketMaintenanceEnd {
+		if d.Done() != nil || !ws.authorization.leaseOwner.Load() || !b.leaseAllows(ws.authorization) {
+			return nil, 0, ErrBucketForbidden
+		}
+		ids, _, err := s.leaseMembers()
+		if err != nil {
+			return nil, 0, err
+		}
+		l := ws.authorization.lease.Load()
+		if _, err = s.callLease(ctx, ids[0], 2, *l); err != nil {
+			return nil, 0, err
+		}
+		return nil, 200, nil
+	}
+
+	if view := s.currentSystem.Load(); view != nil && s.controller != nil && (op.message.Opcode == client.BucketMaintenance || op.message.Opcode == client.BucketBlockMaintenance) {
+		block := op.message.Opcode == client.BucketBlockMaintenance
+		if s.control != nil {
+			s.control.ledger.mu.Lock()
+			busy := s.control.ledger.slot != nil
+			s.control.ledger.mu.Unlock()
+			if busy {
+				return nil, 0, fail(503, "cluster control transition in progress")
+			}
+		}
+		readonly := false
+		if block {
+			readonly = d.Bool()
+		}
+		if d.Done() != nil {
+			return nil, 0, client.ErrProtocol
+		}
+		if err := s.beginClusterLease(ctx, b, ws, p, op.message.ID, block, readonly); err != nil {
+			return nil, 0, err
+		}
+		e := client.Encoder{B: []byte{1}}
+		e.ID(ws.authorization.lease.Load().Token)
+		return e.B, 200, nil
+	}
+	s.opMu.Lock()
+	locked := true
+	defer func() {
+		if locked {
+			s.opMu.Unlock()
+		}
+	}()
 	if err := ctx.Err(); err != nil {
 		return nil, 0, err
 	}
@@ -48,14 +101,34 @@ func (s *Server) executeMaintenance(ctx context.Context, op *objectMutation, d *
 	if description.State != BucketActive || description.DesiredPolicy != nil {
 		return nil, 0, fail(409, "bucket lifecycle transition in progress")
 	}
-	if op.message.Opcode == client.BucketMaintenance {
+	if op.message.Opcode == client.BucketMaintenance || op.message.Opcode == client.BucketBlockMaintenance {
+		block := op.message.Opcode == client.BucketBlockMaintenance
+		if s.control != nil {
+			s.control.ledger.mu.Lock()
+			busy := s.control.ledger.slot != nil
+			s.control.ledger.mu.Unlock()
+			if busy {
+				return nil, 0, fail(503, "cluster control transition in progress")
+			}
+		}
+		readonly := false
+		if block {
+			readonly = d.Bool()
+		}
 		if view := s.currentSystem.Load(); view != nil && len(view.manifest.Membership.Members) > 1 {
 			return nil, 0, fail(501, "cluster-wide exclusive maintenance is not yet available")
 		}
 		if d.Done() != nil {
 			return nil, 0, fail(400, "invalid maintenance request")
 		}
-		if _, err = b.authorize(p, BucketDelete); err != nil {
+		permission := BucketDelete
+		if block {
+			permission = BucketRead
+			if !readonly {
+				permission = BucketWrite
+			}
+		}
+		if _, err = b.authorize(p, permission); err != nil {
 			return nil, 0, err
 		}
 		s.wsMu.Lock()
@@ -72,13 +145,15 @@ func (s *Server) executeMaintenance(ctx context.Context, op *objectMutation, d *
 		}
 		b.mu.Lock()
 		b.maintenance = ws.authorization
+		ws.authorization.blockDevice.Store(block)
+		ws.authorization.blockReadOnly.Store(block && readonly)
 		b.mu.Unlock()
 		return nil, 200, nil
 	}
 	b.mu.RLock()
 	owner := b.maintenance
 	b.mu.RUnlock()
-	if owner != ws.authorization {
+	if owner != ws.authorization && !b.leaseAllows(ws.authorization) {
 		return nil, 0, fail(409, "exclusive maintenance must be acquired before scan")
 	}
 	var after *volume.ObjectID
@@ -91,7 +166,9 @@ func (s *Server) executeMaintenance(ctx context.Context, op *objectMutation, d *
 	if d.Done() != nil || limit == 0 || limit > 1000 {
 		return nil, 0, fail(400, "invalid scan cursor/limit")
 	}
-	records, next, more, err := b.scan(ctx, description, after, int(limit))
+	s.opMu.Unlock()
+	locked = false
+	records, next, more, err := b.scanCluster(ctx, description, p, after, int(limit))
 	if err != nil {
 		return nil, 0, err
 	}

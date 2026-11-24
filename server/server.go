@@ -27,6 +27,12 @@ type managedVolume struct {
 // Server currently owns one node. opMu serializes local administrative commits;
 // it is not a distributed lock or a substitute for placement authority.
 type Server struct {
+	leaseGate       chan struct{}
+	copyCoordinator sync.Mutex
+	leaseMu         sync.Mutex
+	activeLeases    map[volume.ID]*Bucket
+	durability      durabilityState
+
 	objectSubscriptions    objectSubscriptionRegistry
 	recoveryVolumes        map[volume.ID]*stagedRecoveryVolume
 	authority              *volumeAuthorityState
@@ -321,6 +327,11 @@ func Open(opts Options) (s *Server, err error) {
 			return nil, err
 		}
 	}
+	if e = s.loadBucketLeases(); e != nil {
+		return s, e
+	}
+	s.startLeaseRecovery()
+	s.startAcceptedCheckpoints()
 	s.startS3Maintenance()
 	s.workers.Add(1)
 	go s.statsLoop()

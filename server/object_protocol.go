@@ -70,6 +70,7 @@ type objectMutation struct {
 	digest         [32]byte
 	inline         []byte
 	stream         bool
+	accepted       bool
 }
 
 func (s *Server) parseObject(m client.Message, ws *wsSession, p principal) (*objectMutation, *client.Decoder, error) {
@@ -100,6 +101,7 @@ func (s *Server) parseObject(m client.Message, ws *wsSession, p principal) (*obj
 		}
 	}
 	description := b.storageDescription()
+	bucketScoped := m.Opcode == client.BucketMaintenance || m.Opcode == client.BucketBlockMaintenance || m.Opcode == client.BucketMaintenanceEnd || m.Opcode == client.BucketScan || m.Opcode == client.BucketObjectList
 	// No caller may enter the reserved metadata namespace through object RPCs.
 	if bucketID == systemBucket {
 		return nil, d, ErrBucketForbidden
@@ -117,14 +119,14 @@ func (s *Server) parseObject(m client.Message, ws *wsSession, p principal) (*obj
 		if _, err := b.authorize(p, permission); err != nil {
 			return nil, d, err
 		}
-		if err := s.checkObjectOwner(bucketID, oid, permission == BucketRead); err != nil {
+		if err := s.checkObjectOwner(bucketID, oid, permission == BucketRead); err != nil && !bucketScoped {
 			return nil, d, err
 		}
 		patch, _ := s.routingPatch(bucketID, oid)
-		if epoch != 0 && epoch != patch.Entries[0].OwnerEpoch {
+		if !bucketScoped && epoch != 0 && epoch != patch.Entries[0].OwnerEpoch {
 			return nil, d, &objectRedirect{patch: patch}
 		}
-	} else if revision != 0 {
+	} else if revision != 0 && !bucketScoped {
 		s.mu.RLock()
 		generation := s.cfg.Generation
 		s.mu.RUnlock()
@@ -132,8 +134,11 @@ func (s *Server) parseObject(m client.Message, ws *wsSession, p principal) (*obj
 			return nil, d, fail(503, "stale placement map")
 		}
 	}
-	if s.controller == nil && epoch > 1 {
+	if !bucketScoped && s.controller == nil && epoch > 1 {
 		return nil, d, fail(503, "unknown ownership epoch")
+	}
+	if bucketScoped {
+		return &objectMutation{message: m, bucket: b, object: oid}, d, nil
 	}
 	if description.Policy.StorageStrategy == "ram" {
 		currentRuntime := s.boot
@@ -150,10 +155,23 @@ func (s *Server) parseObject(m client.Message, ws *wsSession, p principal) (*obj
 	return &objectMutation{message: m, bucket: b, object: oid}, d, nil
 }
 func (s *Server) executeObjects(m client.Message, ws *wsSession, p principal) ([]byte, int, error) {
+	accepted := m.Opcode == client.ObjectAccepted
+	if accepted {
+		if len(m.Body) < 82 {
+			return nil, 0, fail(400, "invalid accepted mutation")
+		}
+		inner := client.Decoder{B: m.Body[80:82]}
+		m.Opcode = inner.U16()
+		if m.Opcode < 0x102 || m.Opcode > 0x108 || m.Opcode == 0x107 {
+			return nil, 0, fail(400, "accepted wrapper requires mutation")
+		}
+		m.Body = append(append([]byte{}, m.Body[:80]...), m.Body[82:]...)
+	}
 	op, d, err := s.parseObject(m, ws, p)
 	if err != nil {
 		return nil, 0, err
 	}
+	op.accepted = accepted
 	ctx := s.ctx
 	if ws != nil {
 		ctx = ws.objectContext(m.ID)
@@ -172,7 +190,7 @@ func (s *Server) executeObjects(m client.Message, ws *wsSession, p principal) ([
 	switch m.Opcode {
 	case client.BucketObjectList:
 		return s.executeObjectList(ctx, op, d, p, runtime)
-	case client.BucketMaintenance, client.BucketScan:
+	case client.BucketMaintenance, client.BucketBlockMaintenance, client.BucketMaintenanceEnd, client.BucketScan:
 		return s.executeMaintenance(ctx, op, d, ws, p, runtime)
 	case 0x0100, 0x0101:
 		length := uint64(math.MaxUint64)
@@ -255,6 +273,9 @@ func (s *Server) executeObjects(m client.Message, ws *wsSession, p principal) ([
 			return nil, 0, fail(400, "invalid mutation transfer")
 		}
 		if op.stream {
+			if accepted {
+				return nil, 0, fail(400, "accepted wrapper requires inline payload")
+			}
 			if len(op.inline) != 0 || ws == nil {
 				return nil, 0, fail(400, "streaming upload requires WebSocket")
 			}
@@ -298,6 +319,7 @@ func encodeObjectTransfer(e *client.Encoder, mode uint8, length uint64, digest [
 	e.Blob(data)
 }
 func (op *objectMutation) commit(ctx context.Context, p principal, src io.Reader, runtime client.ID) ([]byte, int, error) {
+	op.options.Accepted = op.accepted
 	ctx = bindObjectRequest(ctx, op.message)
 	var result volume.Result
 	var err error

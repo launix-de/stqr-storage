@@ -313,8 +313,11 @@ func TestDaemonReplicationQuotaCountsLogicalOnceAndPhysicalPerCopy(t *testing.T)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, err = c.Put(ctx, client.ObjectID{1}, bytes.Repeat([]byte{1}, size), client.PutOptions{}); err != nil {
+		if _, err = c.Put(ctx, client.ObjectID{1}, bytes.Repeat([]byte{1}, size), client.PutOptions{Accepted: true}); err != nil {
 			t.Fatal(name, err)
+		}
+		if err = c.Sync(ctx); err != nil {
+			t.Fatal(name, "replica accepted barrier", err)
 		}
 		var logical, allocated uint64
 		for _, node := range []*Server{source.node, target.node} {
@@ -332,6 +335,11 @@ func TestDaemonReplicationQuotaCountsLogicalOnceAndPhysicalPerCopy(t *testing.T)
 		}
 		if logical != uint64(size) || allocated < uint64(size*2) {
 			t.Fatalf("%s logical=%d physical=%d", name, logical, allocated)
+		}
+		bucket, _ := source.node.Bucket(volume.ID(id))
+		aggregate, aggregateErr := bucket.clusterUsageAs(ctx, userPrincipal(t, source.node), "physical")
+		if aggregateErr != nil || aggregate != allocated {
+			t.Fatalf("replica physical aggregation %d != %d: %v", aggregate, allocated, aggregateErr)
 		}
 		if _, err = c.Put(ctx, client.ObjectID{1}, bytes.Repeat([]byte{2}, int(limit+1)), client.PutOptions{}); !errors.Is(err, client.ErrFull) {
 			t.Fatalf("%s hard limit: %v", name, err)

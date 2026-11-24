@@ -31,6 +31,8 @@ const (
 	BucketMaintenance       uint16 = 0x0115
 	BucketScan              uint16 = 0x0116
 	BucketObjectList        uint16 = 0x0117
+	BucketBlockMaintenance  uint16 = 0x011c
+	BucketMaintenanceEnd    uint16 = 0x011d
 	UserListPage            uint16 = 0x2038
 	BucketListPage          uint16 = 0x2039
 	VolumeAddWithGroups     uint16 = 0x2036
@@ -47,6 +49,9 @@ const (
 	BucketRevoke            uint16 = 0x200a
 	BucketList              uint16 = 0x2022
 	BucketQuotaCapacity     uint16 = 0x2023
+	BucketClear             uint16 = 0x2028
+	BucketClone             uint16 = 0x2029
+	BucketMaintenanceStatus uint16 = 0x202a
 	PlacementGroupList      uint16 = 0x2030
 	PlacementGroupSet       uint16 = 0x2031
 	PlacementGroupDelete    uint16 = 0x2032

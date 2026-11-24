@@ -21,7 +21,10 @@ func (b *Bucket) authorize(p principal, permission BucketPermissions) (BucketDes
 	b.mu.RLock()
 	maintenance := b.maintenance
 	b.mu.RUnlock()
-	if maintenance != nil && (p.connection != maintenance || permission != BucketRead && permission != BucketDelete && permission != BucketWrite) {
+	if p.connection != nil && p.connection.lease.Load() != nil && !b.leaseAllows(p.connection) {
+		return BucketDescription{}, ErrBucketForbidden
+	}
+	if maintenance != nil && (p.connection != maintenance && !b.leaseAllows(p.connection) || permission != BucketRead && permission != BucketDelete && permission != BucketWrite) {
 		return BucketDescription{}, fail(409, "bucket is under exclusive maintenance")
 	}
 	d := b.storageDescription()
@@ -360,7 +363,18 @@ func (b *Bucket) mutate(ctx context.Context, p principal, id volume.ObjectID, op
 			s.opMu.Unlock()
 		}
 	}()
-	if b.underMaintenance() && opcode != 0x0108 && opcode != 0x0106 {
+	if b.underMaintenance() {
+		if view := s.currentSystem.Load(); view != nil && len(view.manifest.Membership.Members) > 1 && s.leaseRecord(b) == nil {
+			return volume.Result{}, fail(501, "exclusive maintenance cannot mutate after multi-node admission")
+		}
+	}
+	if l := s.leaseRecord(b); l != nil && !l.Released && l.ReadOnly {
+		return volume.Result{}, ErrBucketForbidden
+	}
+	if b.underMaintenance() && p.connection != nil && p.connection.blockReadOnly.Load() {
+		return volume.Result{}, ErrBucketForbidden
+	}
+	if b.underMaintenance() && opcode != 0x0108 && opcode != 0x0106 && (p.connection == nil || !p.connection.offlineCopy && !(p.connection.blockDevice.Load() && (opcode == 0x0102 || opcode == 0x0103))) {
 		return volume.Result{}, fail(409, "maintenance permits only recovery CAS and DELETE")
 	}
 	s.mu.RLock()
@@ -426,6 +440,9 @@ func (b *Bucket) mutate(ctx context.Context, p principal, id volume.ObjectID, op
 		if errors.Is(err, volume.ErrFull) && s.scopes != nil && s.scopes.requestSpace(b.ID(), id, addCapacity(length, 64<<10)) {
 			return volume.Result{}, fail(503, "waiting for range capacity handoff")
 		}
+		return volume.Result{}, err
+	}
+	if err := s.switchAcceptedVolume(b.ID(), v, opt.Accepted); err != nil {
 		return volume.Result{}, err
 	}
 	if old.Version == 0 && opcode != 0x0102 && opcode != 0x0106 && b.lostRange(id) {
@@ -676,6 +693,13 @@ func (b *Bucket) mutate(ctx context.Context, p principal, id volume.ObjectID, op
 		}
 	default:
 		err = volume.ErrUnsupported
+	}
+	if err == nil && opt.Accepted {
+		generation, gerr := h.Generation()
+		if gerr != nil {
+			return result, gerr
+		}
+		s.recordAccepted(b.ID(), v, generation)
 	}
 	if err == nil && !repeated && s.objectSubscriptions.watched(key) {
 		published, readErr := h.RecordInfo(key)

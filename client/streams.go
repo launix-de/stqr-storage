@@ -251,7 +251,7 @@ func (c *Client) writePayload(ctx context.Context, opcode uint16, id ObjectID, o
 	}
 	defer p.close()
 	p.encode(&e)
-	r, err := c.do(ctx, opcode, e.B, opt.RequestID, true, p.uploader())
+	r, err := c.do(withAccepted(ctx, opt.Accepted), opcode, e.B, opt.RequestID, true, p.uploader())
 	if err != nil {
 		return AppendResult{}, err
 	}

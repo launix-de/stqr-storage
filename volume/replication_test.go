@@ -81,6 +81,35 @@ func TestReplicaPrepareRecoveryVisibilityAndExactlyOnce(t *testing.T) {
 	}
 }
 
+func TestReplicaReadyIsDurableEvenWithAcceptedOption(t *testing.T) {
+	disk := newCrash(16 << 20)
+	v, err := Format(disk, FormatOptions{Class: SSD})
+	if err != nil {
+		t.Fatal(err)
+	}
+	k, id := testKey(1), testID(71)
+	if _, err = testPut(v, k, []byte("old"), Options{}); err != nil {
+		t.Fatal(err)
+	}
+	h, _ := v.Open(true)
+	_, err = h.PrepareMutation(opAppend, k, 0, 1, bytes.NewBufferString("!"), nil, Options{RequestID: id, Accepted: true}, ReplicaBinding{Epoch: 1, Sequence: 1, SetHash: [32]byte{1}})
+	h.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	recovered, err := Open(disk.crash(), OpenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustGet(t, recovered, k, []byte("old"))
+	h, _ = recovered.Open(false)
+	record, found, err := h.ReplicaStatus(id)
+	h.Close()
+	if err != nil || !found || record.State != ReplicaPrepared {
+		t.Fatalf("READY was volatile: %+v %v %v", record, found, err)
+	}
+}
+
 func TestReplicaAbortReleasesStorageAndFencesBinding(t *testing.T) {
 	v, _ := memoryVolume(t, 4<<20)
 	k, id := testKey(1), testID(7)

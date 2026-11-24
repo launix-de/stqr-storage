@@ -1,0 +1,51 @@
+=== RUN   TestCClient
+=== RUN   TestCClient/objects
+=== RUN   TestCClient/disconnect
+=== RUN   TestCClient/digest
+=== RUN   TestCClient/malformed
+=== RUN   TestCClient/wrong-id
+=== RUN   TestCClient/varint
+=== RUN   TestCClient/text
+=== RUN   TestCClient/subscription-digest
+--- PASS: TestCClient (6.17s)
+    --- PASS: TestCClient/objects (4.84s)
+    --- PASS: TestCClient/disconnect (0.10s)
+    --- PASS: TestCClient/digest (0.10s)
+    --- PASS: TestCClient/malformed (0.10s)
+    --- PASS: TestCClient/wrong-id (0.10s)
+    --- PASS: TestCClient/varint (0.10s)
+    --- PASS: TestCClient/text (0.10s)
+    --- PASS: TestCClient/subscription-digest (0.10s)
+=== RUN   TestKSTQRVirtualMachine
+    kstqr_linux_test.go:379: Standalone kernel mount, Go interoperability, filesystem operations and clean unload passed
+--- PASS: TestKSTQRVirtualMachine (38.51s)
+=== RUN   TestObjectSubscriptionMutationsAndLifetime
+--- PASS: TestObjectSubscriptionMutationsAndLifetime (1.90s)
+=== RUN   TestObjectSubscriptionStreamAndRangedUpdates
+--- PASS: TestObjectSubscriptionStreamAndRangedUpdates (2.04s)
+=== RUN   TestObjectSubscriptionGCCleanup
+--- PASS: TestObjectSubscriptionGCCleanup (1.89s)
+=== RUN   TestSubscriptionStoreBoundedAndInvalidated
+--- PASS: TestSubscriptionStoreBoundedAndInvalidated (1.91s)
+=== RUN   TestDaemonSubscriptionResyncsBeforeRangeHandoff
+--- PASS: TestDaemonSubscriptionResyncsBeforeRangeHandoff (3.01s)
+=== RUN   TestObjectSubscriptionDisconnectAndRevocation
+=== RUN   TestObjectSubscriptionDisconnectAndRevocation/disconnect
+=== RUN   TestObjectSubscriptionDisconnectAndRevocation/revoke
+--- PASS: TestObjectSubscriptionDisconnectAndRevocation (3.80s)
+    --- PASS: TestObjectSubscriptionDisconnectAndRevocation/disconnect (1.91s)
+    --- PASS: TestObjectSubscriptionDisconnectAndRevocation/revoke (1.89s)
+=== RUN   TestObjectSubscriptionSnapshotRegistrationBarrier
+--- PASS: TestObjectSubscriptionSnapshotRegistrationBarrier (1.93s)
+=== RUN   TestObjectSubscriptionJournalOverflowRequestsResync
+--- PASS: TestObjectSubscriptionJournalOverflowRequestsResync (0.00s)
+=== RUN   TestSubscriptionStoreDisconnectCleanupDoesNotReenterTransportOnce
+--- PASS: TestSubscriptionStoreDisconnectCleanupDoesNotReenterTransportOnce (1.93s)
+=== RUN   TestObjectSubscriptionCanceledCloseStillReleases
+--- PASS: TestObjectSubscriptionCanceledCloseStillReleases (1.92s)
+=== RUN   TestSubscriptionStoreCoalescesParallelColdReaders
+--- PASS: TestSubscriptionStoreCoalescesParallelColdReaders (1.96s)
+=== RUN   TestSubscriptionStorePausedOwnerDoesNotBlockIndependentRange
+--- PASS: TestSubscriptionStorePausedOwnerDoesNotBlockIndependentRange (2.99s)
+PASS
+ok  	github.com/launix-de/stqr-storage/server	70.991s
