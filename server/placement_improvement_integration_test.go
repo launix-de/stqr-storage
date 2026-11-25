@@ -4,6 +4,7 @@ package server
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"path/filepath"
 	"reflect"
 	"testing"
@@ -12,6 +13,42 @@ import (
 	"github.com/launix-de/stqr-storage/client"
 	"github.com/launix-de/stqr-storage/volume"
 )
+
+func TestPlacementImproveTelemetryBound(t *testing.T) {
+	s := &Server{}
+	r := &rangeManager{server: s, node: client.ID{1}}
+	s.scopes = r
+	bucket, disk := client.ID{2}, client.ID{3}
+	entries := make([]client.RangeEntry, 8192)
+	for i := range entries {
+		entry := &entries[i]
+		binary.BigEndian.PutUint16(entry.Start[:2], uint16(i<<3))
+		entry.PrefixBits, entry.OwnerEpoch, entry.PolicyVersion = 13, 1, 1
+		entry.Locations = []client.Location{{Node: r.node, Volume: disk}}
+		meter := &rangeMetric{}
+		meter.read.Store(1)
+		meter.active.Store(time.Now().UnixNano())
+		r.metrics.Store(rangeMetricKey{bucket, entry.Start, 13}, meter)
+	}
+	image, err := buildPlacement([]client.MapPatch{{Membership: 1, Generation: 1, Revision: 1, Bucket: bucket, ToEnd: true, Entries: entries, Addresses: []client.NodeAddress{{Node: r.node, Addresses: []string{"http://node:7419"}}}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.placement.Store(image)
+	snapshot := client.StatsSnapshot{Schema: 1, Node: r.node, BootID: client.ID{4}, Sequence: 1}
+	r.collectRangeTelemetry(&snapshot)
+	if len(snapshot.Ranges) != maxRangeTelemetry {
+		t.Fatal("unbounded telemetry", len(snapshot.Ranges))
+	}
+	if _, err := client.DecodeStats(client.EncodeStats(snapshot)); err != nil {
+		t.Fatal("invalid bounded snapshot", err)
+	}
+	count := 0
+	r.metrics.Range(func(_, _ any) bool { count++; return true })
+	if count != len(entries) {
+		t.Fatal("sampling discarded local optimization counters", count)
+	}
+}
 
 func TestPlacementImproveRangeTraffic(t *testing.T) {
 	node := startDaemonTestNode(t, filepath.Join(t.TempDir(), "node.yaml"), nil, false)

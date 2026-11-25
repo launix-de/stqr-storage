@@ -24,6 +24,11 @@ type rangeMetric struct {
 	readRate, writeRate float64
 }
 
+// Range telemetry is advisory. Keep snapshots comfortably below the existing
+// wire count/byte limits even when hundreds of thousands of ranges are active.
+// sync.Map iteration changes the sample; local optimizer counters remain whole.
+const maxRangeTelemetry = 4096
+
 func (b *Bucket) recordRangeTraffic(p principal, id volume.ObjectID, read, write uint64) {
 	if b.server == nil || b.server.scopes == nil || p.cowInternal || p.ClusterPeer || read == 0 && write == 0 {
 		return
@@ -112,6 +117,9 @@ func (r *rangeManager) collectRangeTelemetry(snap *client.StatsSnapshot) {
 		// Keep cumulative counters, but do not push permanently idle rows every
 		// three seconds. Cold ranges have no invented traffic measurements.
 		if time.Now().UnixNano()-m.active.Load() > int64(30*time.Second) {
+			return true
+		}
+		if len(snap.Ranges) >= maxRangeTelemetry {
 			return true
 		}
 		snap.Ranges = append(snap.Ranges, client.RangeStats{Bucket: key.bucket, Start: key.start, PrefixBits: key.bits, Volume: local.Volume, Role: local.Role, State: entry.State, ActualClass: local.Class, RuntimeID: entry.Runtime, OwnerEpoch: entry.OwnerEpoch, IO: client.IOStats{LogicalReadBytes: m.read.Load(), LogicalWriteBytes: m.write.Load()}})

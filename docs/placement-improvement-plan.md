@@ -81,7 +81,9 @@ fields for concrete locations; unpinned cohorts retain their range counters
 locally and their existing bucket/volume statistics on the wire. A Volume=0
 RangeStats row is never emitted because existing decoders reject it.
 Idle telemetry rows stop being pushed after 30 seconds; their cumulative
-counters remain. Removed/split ranges and retired source measurements are pruned.
+counters remain. At most 4,096 range rows are sampled per snapshot to preserve
+existing wire limits; local optimization retains all active counters.
+Removed/split ranges and retired source measurements are pruned.
 Volume background rates are derived from successive same-boot snapshots, not
 from lifetime totals or replayed snapshots. Clients still interpret FS/BD/S3
 formats; the optimizer sees opaque objects and ranges.
