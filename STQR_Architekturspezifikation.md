@@ -317,12 +317,37 @@ IDLE -> OFFER/COLLECT -> SEALED -> PLAN -> PREPARE_ALL
 - Frontends speichern Namen und fachliche Metadaten bei Bedarf selbst in normalen Objekten; das native Disk-/Wire-Format benötigt dafür keinen vollständigen Key.
 - Standardmäßig besitzt jeder Bucket seinen **eigenen logischen 256-Bit-Hashraum** (initial eine Range ab 0), damit Policies und Lastbalancing unabhängig bleiben. Leere Buckets können intern Default-Maps teilen; nach außen bleibt die Semantik bucketbezogen.
 
+### 5.1.1 Clientseitiges Bucket-Format
+
+Jeder Bucket besitzt ein persistentes, zunächst leeres Textfeld `format`.
+Das erste autorisierte Öffnen legt den vom Client angegebenen Wert atomar im
+Cluster fest; spätere Öffnungen prüfen ihn. Der Server behandelt das Format als
+opaken, case-sensitiven Text (1–255 UTF-8-Bytes ohne Steuerzeichen oder äußere
+Leerzeichen) und kennt weiterhin nur Objekte. Native Clients ohne Format werden
+mit HTTP 400, abweichende Formate mit HTTP 409 abgewiesen.
+Die mitgelieferten FS-, BD- und S3-Clients geben `fs`, `bd` beziehungsweise
+`s3` an; andere Clients dürfen eigene Strings verwenden, etwa `memcp`.
+Es gibt keine serverseitige Liste erlaubter Formate. Clone/COW übernimmt das Format;
+Leeren eines Buckets setzt es nicht zurück. Die Dashboard-Liste zeigt es je
+Bucket an, bei unbenutzten Buckets `-`.
+
+Die entfernten Disk-Verwaltungsnachrichten 0x011e, 0x011f, 0x203e und 0x203f
+und ihre Capability 65536 bleiben reserviert und werden nicht mehr angeboten.
+
+`BUCKET_FORMAT_OPEN` (0x0120) öffnet auf einem authentifizierten Admin-WebSocket
+einen Bucket mit explizitem Format (`bucket:ID,format:Text`); vor Objektzugriffen
+ist diese Deklaration erforderlich. Peer-Nachricht 0x10b0 koordiniert ausschließlich
+die autorisierte Erstbindung im globalen Metadaten-Commit. Sie ist von den
+COW-Transferbefehlen ab 0x1090 getrennt. Bei fehlenden Pflichtteilnehmern bleibt
+das Format ungesetzt und der Aufbau ist mit 503 wiederholbar.
+
 ### 5.2 Bucket-Konfiguration und zentrale PG-Storage-Policy
 
 ```yaml
 bucket:
   id: "a3446c68-7593-4fda-a684-0da84b1e3737"
   name: "application-data"
+  format: ""
   state: active
   placement_group: "b7446c68-7593-4fda-a684-0da84b1e3737"
   limits:
@@ -363,7 +388,7 @@ placement_group:
   nodes: []
 ```
 
-**Zuständigkeiten:** Die PG definiert Speicherklasse, Platzierungsmodus, Replikation/ACK bzw. später EC, Failure Domains, Kompression und Read-Cache-Einstellungen sowie die Node-/Volume-Auswahl. Beim Bucket bleiben ID, Name, optionale Kundenzuordnung, Zustand, PG-Referenz, individuelle Quotas und Zugriffsrechte. Das Cache-Budget der PG ist eine gemeinsame Obergrenze für alle zugeordneten Buckets und wird nicht mit deren Anzahl multipliziert. Es gibt zunächst weder Storage-Overrides pro Bucket/Range noch eine zusätzliche Storage-Profil-Ebene. Die Range-Map enthält die tatsächlich wirksamen Layouts, Locations und zugehörigen PG-Versionen.
+**Zuständigkeiten:** Die PG definiert Speicherklasse, Platzierungsmodus, Replikation/ACK bzw. später EC, Failure Domains, Kompression und Read-Cache-Einstellungen sowie die Node-/Volume-Auswahl. Beim Bucket bleiben ID, Name, clientseitiger Formatstring, optionale Kundenzuordnung, Zustand, PG-Referenz, individuelle Quotas und Zugriffsrechte. Das Cache-Budget der PG ist eine gemeinsame Obergrenze für alle zugeordneten Buckets und wird nicht mit deren Anzahl multipliziert. Es gibt zunächst weder Storage-Overrides pro Bucket/Range noch eine zusätzliche Storage-Profil-Ebene. Die Range-Map enthält die tatsächlich wirksamen Layouts, Locations und zugehörigen PG-Versionen.
 
 **Zentraler Hosting-Betrieb:** Hunderte oder tausende Kunden-Buckets können dieselbe PG referenzieren. Beispielsweise verwenden PHP-Dateien die PG `hosting-php` und direkt durch memcp verwendete Datenbanken `hosting-db`. Pro Kunde können zwei Buckets bestehen; alternativ liegen PHP-Dateien in einem gemeinsamen Bucket, während jede Datenbank einen eigenen Bucket erhält. Eine Änderung an `hosting-db` gilt für alle dort zugeordneten Datenbank-Buckets, ohne Einzelkonfigurationen nachzuführen. Abweichende Storage-Verträge werden durch eine andere PG ausgedrückt.
 
@@ -2237,7 +2262,7 @@ Beispiel:
 - **Nodes:** Mitgliedschaft, Join-/Leave-Status, Fencing-/Quorum-Health, Failure Domains, Version.
 - **Volumes:** Baumstruktur, Online-/Draining-/Unmounted-Zustand, Class, Mount-Pfad, Kapazität, SMART/IO-Fehler, Add/Remove.
 - **Storage-Volume vergrößern:** im bestehenden Node-/Volume-Baum, mit Node und Backend-Pfad, Einheiteneingabe, diskretem Slider, Schnellschritten, Vorher-/Nachher-Vorschau und erneut abrufbaren Kapazitätsgrenzen. Datei/RAM wachsen höchstens auf bisherige Kapazität plus verfügbaren Platz; 4-KiB-Ausrichtung wird in UI und API geprüft. Physische Storage-Devices übernehmen ausschließlich ihre volle extern vergrößerte Kapazität. Ein laufender Auftrag bindet Node, Volume, Zielgröße und Operations-ID; Bedienelemente und Schließen sind bis zur Antwort gesperrt. Eine verlorene Antwort kann mit derselben ID erneut geprüft werden. Keine Verwaltung virtueller Disks oder ihrer Frontend-Metadaten im Objektserver.
-- **Buckets:** anlegen, löschen, konfigurieren; Replikationszahl, EC-Profil, Basis-Storage-Class, Read-Replica-/RAMCACHE-Budget, Quotas, Zugriffsrechte; `CURRENT` vs. `DESIRED`/`NEXT` anzeigen.
+- **Buckets:** anlegen, löschen, konfigurieren; clientseitigen Formatstring als eigene Tabellenspalte anzeigen, bei ungesetztem Format `-`; keine Interpretation oder Verwaltung von Bucket-Inhalten; Replikationszahl, EC-Profil, Basis-Storage-Class, Read-Replica-/RAMCACHE-Budget, Quotas, Zugriffsrechte; `CURRENT` vs. `DESIRED`/`NEXT` anzeigen.
 - **Bucket-Statistiken:** logische/physische Bytes, Objektzahl, Reads, Writes, Appends, Top Hot-Ranges, Cache Hit Rate, Durable-Copies, EC-Overhead, Policy-Erfüllung.
 - **Generationen:** CURRENT/NEXT, Rebuild-Gründe, gewählter Koordinator, Plan-Kosten, bytes moved/remaining, Migrationsstatus je Range, ETA nur als geschätzte Metrik, Quorum-Fortschritt.
 - **User:** Admin/User, Bucket-Freigaben, Credential- und Token-Rotation, Audit-Log.
@@ -2818,27 +2843,3 @@ bestehende seitenweise Bucket-Bereinigung erfüllt bereits die Entkopplung vom
 Generationsabschluss; daraus folgt noch keine vollständige Erfüllung dieses Vertrags.
 
 Das Storage-Dashboard verwaltet keine virtuellen Disks und interpretiert keine FS-, BD- oder sonstigen Bucket-Inhalte. Es zeigt ausschließlich den vom Client festgelegten Formatstring an. Formatspezifische Verwaltung bleibt Aufgabe externer Clients.
-
-
-### Clientseitiges Bucket-Format
-
-Jeder Bucket besitzt ein persistentes, zunächst leeres Textfeld `format`.
-Das erste autorisierte Öffnen legt den vom Client angegebenen Wert atomar im
-Cluster fest; spätere Öffnungen prüfen ihn. Der Server behandelt das Format als
-opaken, case-sensitiven Text (1–255 UTF-8-Bytes ohne Steuerzeichen oder äußere
-Leerzeichen) und kennt weiterhin nur Objekte. Native Clients ohne Format werden
-mit HTTP 400, abweichende Formate mit HTTP 409 abgewiesen. Die mitgelieferten FS-, BD- und S3-Clients geben `fs`, `bd` beziehungsweise
-`s3` an; andere Clients dürfen eigene Strings verwenden, etwa `memcp`.
-Es gibt keine serverseitige Liste erlaubter Formate. Clone/COW übernimmt das Format;
-Leeren eines Buckets setzt es nicht zurück. Die Dashboard-Liste zeigt es je
-Bucket an, bei unbenutzten Buckets `-`.
-
-Die entfernten Disk-Verwaltungsnachrichten 0x011e, 0x011f, 0x203e und 0x203f
-und ihre Capability 65536 bleiben reserviert und werden nicht mehr angeboten.
-
-`BUCKET_FORMAT_OPEN` (0x0120) öffnet auf einem authentifizierten Admin-WebSocket
-einen Bucket mit explizitem Format (`bucket:ID,format:Text`); vor Objektzugriffen
-ist diese Deklaration erforderlich. Peer-Nachricht 0x10b0 koordiniert ausschließlich
-die autorisierte Erstbindung im globalen Metadaten-Commit. Sie ist von den
-COW-Transferbefehlen ab 0x1090 getrennt. Bei fehlenden Pflichtteilnehmern bleibt
-das Format ungesetzt und der Aufbau ist mit 503 wiederholbar.
