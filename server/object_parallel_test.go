@@ -2,6 +2,7 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"path/filepath"
 	"testing"
@@ -12,6 +13,16 @@ import (
 )
 
 func TestObjectRequestsOnOneSocketUseIndependentVolumeLocks(t *testing.T) {
+	for _, size := range []int{5, 2 << 20} {
+		name := "inline"
+		if size > 1<<20 {
+			name = "stream"
+		}
+		t.Run(name, func(t *testing.T) { testIndependentVolumeQueries(t, bytes.Repeat([]byte{'x'}, size)) })
+	}
+}
+
+func testIndependentVolumeQueries(t *testing.T, payload []byte) {
 	node := startDaemonTestNode(t, filepath.Join(t.TempDir(), "node.yaml"), nil, false)
 	s := node.node
 	leftVolume := addReplicaDataVolume(t, s, "left", "hdd", 8<<20)
@@ -55,7 +66,7 @@ func TestObjectRequestsOnOneSocketUseIndependentVolumeLocks(t *testing.T) {
 	}
 	defer hold.Close()
 	done := make(chan error, 1)
-	go func() { _, err := c.Put(ctx, left, []byte("after"), client.PutOptions{}); done <- err }()
+	go func() { _, err := c.Put(ctx, left, payload, client.PutOptions{}); done <- err }()
 	deadline := time.Now().Add(3 * time.Second)
 	for s.ioPriority.users.Load() == 0 {
 		if time.Now().After(deadline) {

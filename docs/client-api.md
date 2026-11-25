@@ -146,7 +146,9 @@ it unchanged. `StatusError` preserves server status/follow headers and maps 404,
 No blind HTTP redirect forwards credentials to another host. The Go SDK uses
 segmented routing and learns ownership/RAM runtime IDs. Reads may use a committed
 replica when the primary transport is unavailable; writes retain primary authority.
-The C and kernel clients do not yet follow multinode redirects.
+The C client follows range-owner redirects for reads and inline mutations;
+chunked mutations above 1 MiB require the correct owner. See
+[C routing limits](../client/c/README.md#cluster-routing).
 
 The server dispatches object operations to its RAM-resident `Bucket` instances,
 with current account/bucket authorization and persistent descriptions in the

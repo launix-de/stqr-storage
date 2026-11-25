@@ -107,6 +107,7 @@ func (r *rangeManager) runPGWorker(group string, worker pgRebuildWorker) {
 	s := r.server
 	var reported string
 	var reportedAt time.Time
+	var targets *placementTargetMap
 	for {
 		select {
 		case <-s.ctx.Done():
@@ -128,7 +129,17 @@ func (r *rangeManager) runPGWorker(group string, worker pgRebuildWorker) {
 			plan, ok = r.nextPressureGroup(group)
 		}
 		if !ok {
-			plan, ok = r.planNextGroup(group, descriptions)
+			if targets == nil {
+				targets = r.buildPlacementTargets(group, descriptions)
+			}
+			plan, ok = r.nextPlacementTarget(targets)
+		}
+		if !ok {
+			// RAM recovery and bounded capacity splits retain their existing
+			// specialized paths. Infeasible whole ranges can require a split.
+			maintenanceOnly := targets != nil && targets.pending == 0
+			plan, ok = r.planNextGroup(group, descriptions, maintenanceOnly)
+			targets = nil
 		}
 		var err error
 		if ok {

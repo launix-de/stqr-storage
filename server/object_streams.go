@@ -15,11 +15,26 @@ import (
 const maxObjectStagingBytes = 1 << 30
 const maxObjectStagingTransfers = 4
 
+func objectUploadHeader(m client.Message) bool {
+	if m.Opcode < 0x0102 || m.Opcode > 0x0104 {
+		return false
+	}
+	d := client.Decoder{B: m.Body}
+	d.Take(80) // bucket, object, map revision, owner epoch, runtime
+	if m.Opcode == 0x0103 {
+		d.U64()
+	}
+	decodeObjectOptions(&d, m.ID)
+	mode := d.U8()
+	return d.Err == nil && mode == 1
+}
+
 type serverObjectUpload struct {
 	op         *objectMutation
 	file       *os.File
 	hash       hash.Hash
 	next, part uint64
+	finishing  bool // uploadMu; the commit goroutine owns the file while true
 }
 
 func (u *serverObjectUpload) close() {
@@ -64,6 +79,9 @@ func (ws *wsSession) discardUpload(id client.ID) {
 	ws.uploadMu.Lock()
 	defer ws.uploadMu.Unlock()
 	if u := ws.uploads[id]; u != nil {
+		if u.finishing {
+			return
+		} // CANCEL cancels its context; owner closes it
 		ws.stagedBytes -= u.op.length
 		u.close()
 		ws.releaseObjectContext(id)
@@ -97,11 +115,12 @@ func (ws *wsSession) finishUpload(u *serverObjectUpload, result []byte, status i
 	}
 	return ws.sendMessage(client.Message{Kind: client.Response, Opcode: u.op.message.Opcode, ID: u.op.message.ID, Body: client.ResponseBody(status, result, detail)})
 }
-func (ws *wsSession) objectTransfer(m client.Message, p principal) error {
+func (ws *wsSession) objectTransfer(m client.Message, p principal, startCall func(func()) bool) error {
 	d := client.Decoder{B: m.Body}
 	id := d.ID()
 	ws.uploadMu.Lock()
 	u := ws.uploads[id]
+	finishing := u != nil && u.finishing
 	ws.uploadMu.Unlock()
 	if m.Opcode == 7 {
 		if d.Done() != nil {
@@ -110,7 +129,7 @@ func (ws *wsSession) objectTransfer(m client.Message, p principal) error {
 		ws.discardUpload(id)
 		return nil
 	}
-	if u == nil {
+	if u == nil || finishing {
 		return nil
 	} // Late chunks after cancellation cannot recreate a request.
 	var err error
@@ -147,10 +166,27 @@ func (ws *wsSession) objectTransfer(m client.Message, p principal) error {
 						}
 					}
 				}
-				result, status, commitErr := u.op.commit(ws.objectContext(id), p, u.file, runtime)
-				sendErr := ws.finishUpload(u, result, status, commitErr)
-				ws.discardUpload(id)
-				return sendErr
+				ws.uploadMu.Lock()
+				u.finishing = true
+				ws.uploadMu.Unlock()
+				if startCall(func() {
+					defer func() {
+						ws.uploadMu.Lock()
+						u.finishing = false
+						ws.uploadMu.Unlock()
+						ws.discardUpload(id)
+					}()
+					result, status, commitErr := u.op.commit(ws.objectContext(id), p, u.file, runtime)
+					if ws.finishUpload(u, result, status, commitErr) != nil {
+						ws.close()
+					}
+				}) {
+					return nil
+				}
+				ws.uploadMu.Lock()
+				u.finishing = false
+				ws.uploadMu.Unlock()
+				err = fail(503, "client request concurrency budget exhausted")
 			}
 		}
 	}

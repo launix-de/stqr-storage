@@ -25,6 +25,7 @@ type placementResource struct {
 type placementOption struct {
 	Range, Volume  int
 	Allocate, Move uint64 // staying costs zero payload movement
+	Quota          uint64 // final additional bucket charge; replacement staging is not growth
 }
 type placementSolution struct {
 	Assignments                [][]int // option indices, one distinct node per required copy
@@ -79,7 +80,7 @@ func solvePlacement(demands []placementDemand, resources []placementResource, op
 		}
 		d := demands[o.Range]
 		v := resources[o.Volume]
-		if o.Allocate > addCapacity(v.Free, v.Reserved[d.Bucket]) || o.Allocate > budgetOf(d.Bucket) {
+		if o.Allocate > addCapacity(v.Free, v.Reserved[d.Bucket]) || o.Quota > budgetOf(d.Bucket) {
 			continue
 		}
 		alive[i] = true
@@ -106,7 +107,7 @@ func solvePlacement(demands []placementDemand, resources []placementResource, op
 		sort.Slice(ids, func(i, j int) bool { return options[ids[i]].Allocate < options[ids[j]].Allocate })
 	}
 	for bucket, ids := range quotaOptions {
-		sortOptions(ids)
+		sort.Slice(ids, func(i, j int) bool { return options[ids[i]].Quota < options[ids[j]].Quota })
 		quotaCursor[bucket] = len(ids) - 1
 	}
 	ranges := newPlacementQueue(len(demands), func(a, b int) bool {
@@ -176,11 +177,11 @@ func solvePlacement(demands []placementDemand, resources []placementResource, op
 			v.queue.fix(g)
 		}
 		if remaining, limited := quota[bucket]; limited {
-			remaining -= o.Allocate
+			remaining -= o.Quota
 			quota[bucket] = remaining
 			ids := quotaOptions[bucket]
 			cursor := quotaCursor[bucket]
-			for cursor >= 0 && options[ids[cursor]].Allocate > remaining {
+			for cursor >= 0 && options[ids[cursor]].Quota > remaining {
 				invalidate(ids[cursor])
 				cursor--
 			}
@@ -202,8 +203,8 @@ func solvePlacement(demands []placementDemand, resources []placementResource, op
 				choices = append(choices, edge)
 				o := options[edge]
 				node := resources[o.Volume].Node
-				if n, ok := minimum[node]; !ok || o.Allocate < n {
-					minimum[node] = o.Allocate
+				if n, ok := minimum[node]; !ok || o.Quota < n {
+					minimum[node] = o.Quota
 				}
 			}
 		}
@@ -268,19 +269,19 @@ func solvePlacement(demands []placementDemand, resources []placementResource, op
 		for _, edge := range choices {
 			o := options[edge]
 			node := resources[o.Volume].Node
-			if used[node] || o.Allocate > remaining {
+			if used[node] || o.Quota > remaining {
 				continue
 			}
 			rank := ranks[node]
 			f.change(rank, -1, minimum[node])
 			needed, ok := f.cheapest(demand.Copies - len(selected) - 1)
-			if !ok || needed > remaining-o.Allocate {
+			if !ok || needed > remaining-o.Quota {
 				f.change(rank, 1, minimum[node])
 				continue
 			}
 			selected = append(selected, edge)
 			used[node] = true
-			remaining -= o.Allocate
+			remaining -= o.Quota
 			if len(selected) == demand.Copies {
 				break
 			}

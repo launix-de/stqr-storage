@@ -87,7 +87,7 @@ func (r *rangeManager) destinations(d BucketDescription, fresh ...bool) ([]range
 	return out, capacity
 }
 
-func (r *rangeManager) planNextGroup(group string, descriptions []BucketDescription) (rangePlan, bool) {
+func (r *rangeManager) planNextGroup(group string, descriptions []BucketDescription, maintenanceOnly ...bool) (rangePlan, bool) {
 	s := r.server
 	image := s.placement.Load()
 	view := s.currentSystem.Load()
@@ -131,14 +131,16 @@ func (r *rangeManager) planNextGroup(group string, descriptions []BucketDescript
 		if d.ID == systemBucket.String() || d.DeletionComplete || d.State == BucketDeleting {
 			continue
 		}
-		if plan, ok := r.planReplicaRelocation(d); ok {
-			return plan, true
-		}
-		if plan, ok := r.planReplicaAdd(d); ok {
-			return plan, true
-		}
-		if plan, ok := r.planReplicaRemove(d); ok {
-			return plan, true
+		if len(maintenanceOnly) == 0 || !maintenanceOnly[0] {
+			if plan, ok := r.planReplicaRelocation(d); ok {
+				return plan, true
+			}
+			if plan, ok := r.planReplicaAdd(d); ok {
+				return plan, true
+			}
+			if plan, ok := r.planReplicaRemove(d); ok {
+				return plan, true
+			}
 		}
 		if d.Policy.StorageStrategy == "ram" {
 			if plan, ok := r.planRuntimeReset(d); ok {
@@ -146,6 +148,9 @@ func (r *rangeManager) planNextGroup(group string, descriptions []BucketDescript
 			}
 		}
 		if d.DesiredPolicy != nil {
+			if len(maintenanceOnly) > 0 && maintenanceOnly[0] {
+				continue
+			}
 			if group != "" && group != "*" {
 				if plan, ok := r.planPGReplicaCodec(d); ok {
 					return plan, true

@@ -90,9 +90,13 @@ func TestDaemonReplicaLossRebuildsRequiredCopies(t *testing.T) {
 				t.Fatal("acknowledged write before required replicas were restored", err)
 			}
 			awaitReplicaDestinations(t, primary, 3)
-			p, ok := primary.scopes.planReplicaAdd(live.Describe())
+			targetMap := primary.scopes.buildPlacementTargets(group.String(), primary.bucketSnapshots())
+			p, ok := primary.scopes.nextPlacementTarget(targetMap)
 			if !ok {
 				t.Fatal("missing replica was not scheduled")
+			}
+			if !p.ReplicaAdd {
+				t.Fatal("replacement did not use replica addition", p)
 			}
 			if err := primary.scopes.move(ctx, p); err != nil {
 				t.Fatal("copy replacement", err)
@@ -136,7 +140,8 @@ func TestDaemonReplicaPrimariesRotateWithoutPayloadCopies(t *testing.T) {
 	for step := 0; step < 9; step++ {
 		moved := false
 		for _, node := range nodes {
-			p, ok := node.node.scopes.planPrimaryBalance(group.String(), node.node.bucketSnapshots())
+			targetMap := node.node.scopes.buildPlacementTargets(group.String(), node.node.bucketSnapshots())
+			p, ok := node.node.scopes.nextPlacementTarget(targetMap)
 			if !ok {
 				continue
 			}

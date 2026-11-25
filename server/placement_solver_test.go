@@ -42,7 +42,7 @@ func TestPlacementSolverScarceFirstAndStays(t *testing.T) {
 	bucket := client.ID{1}
 	resources := []placementResource{{Node: client.ID{1}, Free: 10, Capacity: 10}, {Node: client.ID{2}, Free: 10, Capacity: 10}}
 	demands := []placementDemand{{Bucket: bucket, Copies: 1, Bytes: 10}, {Bucket: bucket, Copies: 1, Bytes: 10}}
-	options := []placementOption{{Range: 0, Volume: 0, Allocate: 10, Move: 10}, {Range: 0, Volume: 1, Allocate: 10, Move: 10}, {Range: 1, Volume: 0, Allocate: 10, Move: 10}}
+	options := []placementOption{{Range: 0, Volume: 0, Allocate: 10, Quota: 10, Move: 10}, {Range: 0, Volume: 1, Allocate: 10, Quota: 10, Move: 10}, {Range: 1, Volume: 0, Allocate: 10, Quota: 10, Move: 10}}
 	got := solvePlacement(demands, resources, options, nil)
 	if len(got.Pending) != 0 || got.Order[0] != 1 || options[got.Assignments[0][0]].Volume != 1 {
 		t.Fatalf("scarce SSD/mask choice was consumed: %+v", got)
@@ -58,7 +58,7 @@ func TestPlacementSolverProtectedBackingAndQuota(t *testing.T) {
 	a, b := client.ID{1}, client.ID{2}
 	resources := []placementResource{{Node: client.ID{1}, Capacity: 100, Free: 0, Reserved: map[client.ID]uint64{a: 10}}, {Node: client.ID{2}, Capacity: 100, Free: 10}}
 	demands := []placementDemand{{Bucket: b, Copies: 1, Bytes: 10}, {Bucket: a, Copies: 1, Bytes: 10}}
-	options := []placementOption{{Range: 0, Volume: 0, Allocate: 10, Move: 10}, {Range: 0, Volume: 1, Allocate: 10, Move: 10}, {Range: 1, Volume: 0, Allocate: 10, Move: 10}, {Range: 1, Volume: 1, Allocate: 10, Move: 10}}
+	options := []placementOption{{Range: 0, Volume: 0, Allocate: 10, Quota: 10, Move: 10}, {Range: 0, Volume: 1, Allocate: 10, Quota: 10, Move: 10}, {Range: 1, Volume: 0, Allocate: 10, Quota: 10, Move: 10}, {Range: 1, Volume: 1, Allocate: 10, Quota: 10, Move: 10}}
 	got := solvePlacement(demands, resources, options, map[client.ID]uint64{a: 10, b: 10})
 	if len(got.Pending) != 0 || options[got.Assignments[0][0]].Volume != 1 || options[got.Assignments[1][0]].Volume != 0 {
 		t.Fatalf("borrowed another bucket's guarantee: %+v", got)
@@ -72,7 +72,7 @@ func TestPlacementSolverProtectedBackingAndQuota(t *testing.T) {
 func TestPlacementSolverReplicasAndBudgetLookahead(t *testing.T) {
 	bucket := client.ID{1}
 	resources := []placementResource{{Node: client.ID{1}, Free: 100, Capacity: 100}, {Node: client.ID{1}, Free: 100, Capacity: 100}, {Node: client.ID{2}, Free: 100, Capacity: 100}, {Node: client.ID{3}, Free: 100, Capacity: 100}}
-	options := []placementOption{{Range: 0, Volume: 0, Allocate: 10, Move: 0}, {Range: 0, Volume: 1, Allocate: 8, Move: 8}, {Range: 0, Volume: 2, Allocate: 8, Move: 8}, {Range: 0, Volume: 3, Allocate: 8, Move: 8}}
+	options := []placementOption{{Range: 0, Volume: 0, Allocate: 10, Quota: 10, Move: 0}, {Range: 0, Volume: 1, Allocate: 8, Quota: 8, Move: 8}, {Range: 0, Volume: 2, Allocate: 8, Quota: 8, Move: 8}, {Range: 0, Volume: 3, Allocate: 8, Quota: 8, Move: 8}}
 	got := solvePlacement([]placementDemand{{Bucket: bucket, Copies: 2}}, resources, options, map[client.ID]uint64{bucket: 16})
 	if len(got.Pending) != 0 {
 		t.Fatalf("greedy choice stranded the remaining replica: %+v", got)
@@ -84,6 +84,22 @@ func TestPlacementSolverReplicasAndBudgetLookahead(t *testing.T) {
 			t.Fatal("replica constraints", got)
 		}
 		used[resources[o.Volume].Node] = true
+	}
+}
+
+func TestPlacementSolverReplacementDoesNotSpendBucketQuotaTwice(t *testing.T) {
+	bucket := client.ID{1}
+	demands := []placementDemand{{Bucket: bucket, Copies: 1}}
+	resources := []placementResource{{Node: client.ID{2}, Capacity: 100, Free: 100}}
+	options := []placementOption{{Range: 0, Volume: 0, Allocate: 80, Move: 80, Quota: 0}}
+	got := solvePlacement(demands, resources, options, map[client.ID]uint64{bucket: 0})
+	if len(got.Pending) != 0 || len(got.Assignments[0]) != 1 {
+		t.Fatal("replacement charged transient copy as bucket growth", got)
+	}
+	options[0].Quota = 80
+	got = solvePlacement(demands, resources, options, map[client.ID]uint64{bucket: 0})
+	if len(got.Pending) != 1 {
+		t.Fatal("new replica escaped physical bucket quota", got)
 	}
 }
 
@@ -100,7 +116,7 @@ func TestPlacementSolverRandomResourceInvariants(t *testing.T) {
 			demands = append(demands, placementDemand{Bucket: client.ID{byte(i%3 + 1)}, Copies: 1 + rng.Intn(3), Bytes: uint64(1 + rng.Intn(12))})
 			for v := range resources {
 				if rng.Intn(3) != 0 {
-					options = append(options, placementOption{Range: i, Volume: v, Allocate: demands[i].Bytes, Move: demands[i].Bytes})
+					options = append(options, placementOption{Range: i, Volume: v, Allocate: demands[i].Bytes, Quota: demands[i].Bytes, Move: demands[i].Bytes})
 				}
 			}
 		}
@@ -149,7 +165,7 @@ func placementScalingInput(n int) ([]placementDemand, []placementResource, []pla
 	for i := range demands {
 		demands[i] = placementDemand{Bucket: client.ID{1}, Copies: 1, Bytes: 1}
 		for v := range resources {
-			options = append(options, placementOption{Range: i, Volume: v, Allocate: 1, Move: 1})
+			options = append(options, placementOption{Range: i, Volume: v, Allocate: 1, Quota: 1, Move: 1})
 		}
 	}
 	return demands, resources, options

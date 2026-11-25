@@ -288,6 +288,16 @@ func (ws *wsSession) requestLoop() {
 	slots := make(chan struct{}, receiveQueueCapacity)
 	var calls sync.WaitGroup
 	defer func() { ws.close(); calls.Wait() }()
+	startCall := func(run func()) bool {
+		select {
+		case slots <- struct{}{}:
+			calls.Add(1)
+			go func() { defer calls.Done(); defer func() { <-slots }(); run() }()
+			return true
+		default:
+			return false
+		}
+	}
 	for {
 		select {
 		case <-ws.done:
@@ -298,7 +308,7 @@ func (ws *wsSession) requestLoop() {
 				return
 			}
 			if m.Opcode == 5 || m.Opcode == 6 || m.Opcode == 7 {
-				if err := ws.objectTransfer(m, p); err != nil {
+				if err := ws.objectTransfer(m, p, startCall); err != nil {
 					return
 				}
 				continue
@@ -314,12 +324,14 @@ func (ws *wsSession) requestLoop() {
 			}
 			run := func() { ws.executeRequest(m, p) }
 			parallel := m.Kind == client.Request && (m.Opcode >= 0x0100 && m.Opcode <= 0x0108 || m.Opcode == client.ObjectAccepted || m.Opcode == client.ObjectSubscribe || m.Opcode == client.BucketStatFS || m.Opcode == client.BucketSync || m.Opcode == client.BucketObjectList)
+			// Upload headers and their following chunks may arrive back-to-back.
+			// Establish staging before consuming the next frame, even when the
+			// sender does not wait for a response to its upload header.
+			if objectUploadHeader(m) {
+				parallel = false
+			}
 			if parallel {
-				select {
-				case slots <- struct{}{}:
-					calls.Add(1)
-					go func() { defer calls.Done(); defer func() { <-slots }(); run() }()
-				default:
+				if !startCall(run) {
 					ws.releaseObjectContext(m.ID)
 					if err := ws.sendMessage(client.Message{Kind: client.Response, Opcode: m.Opcode, ID: m.ID, Body: client.ResponseBody(503, nil, "client request concurrency budget exhausted")}); err != nil {
 						return

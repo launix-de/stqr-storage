@@ -381,6 +381,40 @@ placement_group:
 - Änderungen an Klasse, Redundanz oder Maske prüfen die physischen Garantiereserven aller betroffenen Buckets sowie den Übergangsbedarf. Bestehende individuelle Quotas werden nicht automatisch erhöht oder abgesenkt; eine nicht erfüllbare Zielversion darf nicht als erfüllt veröffentlicht werden (§5.5).
 - Verfügbarkeits- und Abrechnungszusagen müssen zwischen `requested`, `migrating`, `fulfilled`, `degraded` unterscheiden.
 
+#### 5.3.1 Zweiphasiger Aufbau der Ziel-Map
+
+Der Planner erzeugt zuerst in einem linearen Durchlauf die erforderlichen
+Range-Grenzen und Layout-Anforderungen, einschließlich der benötigten Kopien.
+Dieser Schritt weist noch keine Ziel-Node und kein Ziel-Volume zu. Rein logische
+Splits/Merges bleiben von der anschließenden physischen Platzierung getrennt.
+Offline-Bereiche bleiben gemäß §4.3 vollständig unverändert.
+
+Anschließend löst ein gemeinsamer Greedy-Solver die Placement-Entscheidungen:
+Die Range mit den knappsten verbleibenden Möglichkeiten wird zuerst festgelegt.
+PG-Node-/Volume-Masken, Speicherklasse, Replica-/Failure-Domain-Anforderungen,
+physischer Platz einschließlich Übergangsbedarf, individuelle Bucket-Quotas und
+geschützte Garantien sind harte Constraints. Gültige vorhandene Kopien werden
+bevorzugt; eine neue Generation allein rechtfertigt keine Payload-Verschiebung.
+Nach jeder Entscheidung werden nur die davon betroffenen Prioritäten und
+Kapazitätsgrenzen aktualisiert. Ein wiederholtes vollständiges Bewerten aller
+Ranges nach jedem Move und damit quadratisches Verhalten ist unzulässig.
+
+Indexierte binäre Heaps verwenden zusammenhängende Arrays mit höchstens zwei
+Integer-Einträgen je Queue-Element und logarithmischer Schlüsseländerung.
+Kapazitäts-/Quota-Schwellen benachrichtigen nur betroffene Kandidaten. Bei R
+Ranges, V Ressourcen und E expliziten zulässigen Range-/Volume-Optionen ist für
+diesen Solver O(R+E+V) Speicher und O((R+E) log(R+E)) Scheduling anzustreben;
+die Ermittlung der Nutzdaten-/Metadatenkosten wird gesondert ausgewiesen.
+
+Primary-/Replica-Rollen werden kapazitätsgewichtet über die Ranges verteilt.
+Bei drei gleich großen Nodes und drei Kopien rotiert die Primary-Rolle über
+die Nodes; vorhandene korrekte Replica-Payloads bleiben dabei an ihrem Ort.
+Fehlende Kopien oder ein HDD→SSD-Wechsel werden durch denselben Ziel-Map-Diff
+umgesetzt. Eine Ersatzkopie wird gesichert, bevor die alte Kopie entfernt wird.
+Temporärer physischer Kopierbedarf und zusätzliches endgültiges Bucket-Accounting
+sind getrennte Größen: Ein gleich großer Ersatz darf die Bucket-Quota nicht
+doppelt verbrauchen, benötigt aber realen Platz auf dem Ziel-Volume.
+
 ### 5.4 Sicherheits- und Quota-Regeln
 
 - Server prüft **jede** Request-Autorisierung unabhängig vom Client-SDK.
@@ -2677,7 +2711,11 @@ Allgemeine exklusive Objekt-Leases sind unabhängig vom Nutzdatenformat. Für TR
 wählt allein der NBD-Client DELETE oder bei WRITE-only das Leeren des Stripe-Payloads.
 
 Priorität 1 gilt direkt bedienbaren Benutzer-Reads/Writes einschließlich ihrer
-benötigten Replica-I/Os. Auf eine fehlende Node oder eine Migration wartende Requests
+benötigten Replica-I/Os und synchronem Copy-before-write verbundener COW-Buckets.
+Der WebSocket empfängt unabhängig von der Ausführung; Objektrequests werden in
+parallelen, ressourcenbegrenzten Goroutinen ausgeführt. Die Objekt-/Volume-Locks
+sichern ihre Atomizität. Upload-Header und Datenframes behalten ihre Reihenfolge.
+Auf eine fehlende Node oder eine Migration wartende Requests
 zählen nicht als ausführbares lokales I/O und dürfen ihre eigene Abhängigkeit nicht
 blockieren. Priorität 2 gilt Pflichtmigrationen der aktuellen Rebuild-Map.
 Priorität 3 gilt fortsetzbarer Hintergrundarbeit wie Node-/Volume-Drain,
@@ -2686,6 +2724,22 @@ physischer Bucket-Bereinigung und anderen Langläufern. Bereits verbindlich
 Auftrag sicher beendet; eine Pause darf keine Schreibautorität verlieren. Ein atomarer Speicherschritt
 wird fertiggestellt; vor dem nächsten begrenzten Schritt wird die Priorität erneut
 geprüft. Auf entfernte Peers wartende RPCs halten keine lokale I/O-Priorität fest.
+Die Maintenance-Goroutine gibt nach begrenzten Aktionen kooperativ mit
+`runtime.Gosched()` ab und bremst bei laufendem Client-I/O, ohne unter Dauerlast
+endlos zu verhungern. Ist die Pflicht-Diff-Queue leer und vollständig bestätigt,
+kann die Node ihre Bereitschaft zum Generationsabschluss melden.
+
+Ein Client, der beispielsweise wegen eines vollen Ziel-Volumes blockiert,
+darf eine bereits in CURRENT/NEXT vorgesehene, seine Abhängigkeit lösende
+Migration vorziehen (Work Stealing/Priority Inheritance). Er erfindet dabei
+keine andere Platzierung. Vor dem Helfen gibt er seine Objekt-/Range-/Volume-Locks
+frei und zählt nicht mehr als ausführbares lokales Client-I/O. Läuft derselbe
+Move schon, teilen Worker und Helfer dessen Ausführung; der Helfer hebt dessen
+Priorität an. Nach Erwerb der Ausführungssperre und innerhalb der Storage-Locks
+wird erneut geprüft, ob die Änderung bereits erledigt wurde. Daten werden weder
+doppelt kopiert noch zweimal freigegeben; die vorhandenen dauerhaften
+Handoff-Belege bleiben die Autorität.
+
 Die bestätigte Löschvormerkung macht den Bucket sofort unerreichbar und wird in
 nachfolgende Generationen übernommen. Physische Bereinigung ist kein Abschlusskriterium
 der ankündigenden Generation. Jede Node arbeitet in kleinen Idle-Portionen weiter,
