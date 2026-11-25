@@ -20,7 +20,7 @@ struct stqr_client {
     char *authorization;
     size_t authorization_len;
     unsigned port, timeout;
-    stqr_id bucket, runtime;
+    stqr_id bucket, runtime, lease;
     int status;
     stqr_u64 capabilities;
     stqr_update_handler update;
@@ -35,6 +35,8 @@ struct stqr_client {
     struct sq_channel *channels, *active;
     struct sq_binding *bindings;
     unsigned channel_count;
+    struct sq_channel *lease_owner;
+    int lease_taken;
     stqr_u64 channel_clock;
 };
 struct buf { stqr_u8 *p; size_t n, cap, pos; int err; };
@@ -266,7 +268,7 @@ static int select_endpoint(stqr_client *c,const char *endpoint) {
         if (c->channel_count>=SQ_CHANNEL_LIMIT) {
             struct sq_channel *candidate;
             for (candidate=c->channels;candidate;candidate=candidate->next)
-                if (candidate!=original && (!s || candidate->used<s->used)) s=candidate;
+                if (candidate!=original && candidate!=c->lease_owner && (!s || candidate->used<s->used)) s=candidate;
             if (!s) { err=-ENOSPC; goto out; }
             load_channel(c,s); err=sync_active(c);
             if (err) { save_channel(c); load_channel(c,original); goto out; }
@@ -296,7 +298,7 @@ static void disconnect_channels(stqr_client *c) {
     if (notify && c->update) c->update(c->update_arg,NULL);
 }
 static int handshake(stqr_client *c) {
-    char key[25], expected[29], combined[61], bucket[33];
+    char key[25], expected[29], combined[61], bucket[33], lease[80] = {0}, token[33];
     char *request = NULL, *headers = NULL, *line, *next;
     stqr_u8 random[16], digest[20];
     size_t n = 0, capacity;
@@ -306,12 +308,16 @@ static int handshake(stqr_client *c) {
     snprintf(combined, sizeof(combined), "%s258EAFA5-E914-47DA-95CA-C5AB0DC85B11", key);
     if ((err = sq_hash(160, combined, strlen(combined), digest))) return err;
     base64(digest, 20, expected); hex(c->bucket.bytes, 16, bucket);
+    if (!zero(c->lease.bytes, 16)) {
+        hex(c->lease.bytes, 16, token);
+        snprintf(lease, sizeof(lease), "X-STQR-Maintenance: %s\r\n", token);
+    }
     capacity = c->authorization_len + 1024;
     request = sq_alloc(capacity); headers = sq_alloc(16385);
     if (!request || !headers) { err = -ENOMEM; goto out; }
     n = (size_t)snprintf(request, capacity,
-        "GET /api/ws HTTP/1.1\r\nHost: %s\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: %s\r\nSec-WebSocket-Protocol: stqr.v2\r\nAuthorization: Basic %s\r\nX-STQR-Bucket: %s\r\n\r\n",
-        c->authority, key, c->authorization, bucket);
+        "GET /api/ws HTTP/1.1\r\nHost: %s\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: %s\r\nSec-WebSocket-Protocol: stqr.v2\r\nAuthorization: Basic %s\r\nX-STQR-Bucket: %s\r\n%s\r\n",
+        c->authority, key, c->authorization, bucket, lease);
     if (n >= capacity) { err = -E2BIG; goto out; }
     if ((err = sq_send(c->socket, request, n))) goto out;
     for (n = 0; n < 16384; n++) {
@@ -692,6 +698,7 @@ static int request(stqr_client *c, unsigned op, struct buf *body, stqr_id id, in
     return request_payload(c,op,body,id,mutation,result,s,NULL,0,NULL);
 }
 static int reconnect_active(stqr_client *c) {
+    if (c && c->lease_taken && c->active == c->lease_owner) return -ESTALE;
     struct buf body = {0}, result = {0}; stqr_id id = {{0}}; int err;
     if (!c) return -EINVAL;
     broken(c); c->status = 0;
@@ -710,6 +717,7 @@ static int reconnect_active(stqr_client *c) {
     return err;
 }
 int stqr_reconnect(stqr_client *c) {
+    if (c && c->lease_taken) return -ESTALE;
     if (!c) return -EINVAL;
     disconnect_channels(c);
     return reconnect_active(c);
@@ -741,6 +749,24 @@ void stqr_close(stqr_client *c) {
 }
 static void reference(stqr_client *c, struct buf *b, stqr_object_id id) {
     put(b, c->bucket.bytes, 16); put(b, id.bytes, 32); number(b, 0, 8); number(b, 0, 8); put(b, c->runtime.bytes, 16);
+}
+int stqr_object_lease(stqr_client *c, int readonly) {
+    struct buf b = {0}, r = {0}; stqr_id id; int err;
+    if (!c || !c->socket) return -ENOTCONN;
+    if (c->lease_taken || c->channel_count > 1) return -EBUSY;
+    err = ensure_channel(c); if (err) return err;
+    err = stqr_request_id(&id); if (err) return err;
+    reference(c, &b, (stqr_object_id){{0}}); number(&b, !!readonly, 1);
+    err = request(c, 0x11c, &b, id, 0, &r, NULL);
+    if (!err && r.n) {
+        const stqr_u8 *token;
+        if (readnum(&r, 1) != 1) r.err = -EPROTO;
+        token = take(&r, 16); if (token) memcpy(c->lease.bytes, token, 16);
+        err = done(&r);
+        if (!err && zero(c->lease.bytes, 16)) err = -EPROTO;
+    }
+    if (!err) { c->lease_taken = 1; c->lease_owner = c->active; }
+    drop(&b); drop(&r); return err;
 }
 static int options(struct buf *b, const stqr_options *o) {
     if (!o || zero(o->request_id.bytes, 16)) return -EINVAL;

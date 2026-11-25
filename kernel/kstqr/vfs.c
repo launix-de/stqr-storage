@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #include "kstqr.h"
+#include "block.h"
 #include "port.h"
 #include <linux/backing-dev.h>
 #include <linux/file.h>
@@ -24,10 +25,10 @@
 struct ks_context {
 	char *url, *username, *password;
 	stqr_id bucket, lower;
-	char *whitelist;
+	char *whitelist, *device;
 	struct file *boot_lifetime;
 	unsigned timeout, cache_bytes;
-	bool create, readonly;
+	bool create, readonly, bd;
 };
 static const struct inode_operations ks_dir_ops, ks_file_ops, ks_symlink_ops;
 static const struct xattr_handler *const ks_xattrs[];
@@ -1356,6 +1357,18 @@ static int ks_fill_super(struct super_block *sb, struct fs_context *fc)
 		return -EINVAL;
 	if (current->nsproxy->net_ns != &init_net)
 		return -EOPNOTSUPP;
+	if (c->bd) {
+		if (c->create || c->whitelist || c->boot_lifetime ||
+		    memcmp(c->lower.bytes, (u8[16]){0}, 16))
+			return -EINVAL;
+		err = ks_bd_fill_super(sb, c->url, c->username, c->password, c->bucket, c->timeout,
+				       c->readonly || !!(fc->sb_flags & SB_RDONLY), c->device);
+		if (err && sb->s_fs_info && !sb->s_root)
+			sb->s_op->put_super(sb);
+		return err;
+	}
+	if (c->device)
+		return -EINVAL;
 	err = super_setup_bdi(sb);
 	if (err)
 		return err;
@@ -1488,7 +1501,9 @@ enum {
 	Opt_cache,
 	Opt_lower,
 	Opt_whitelist,
-	Opt_boot_lifetime
+	Opt_boot_lifetime,
+	Opt_bd,
+	Opt_device
 };
 static const struct fs_parameter_spec ks_parameters[] = {
     fsparam_string("url", Opt_url),
@@ -1499,6 +1514,8 @@ static const struct fs_parameter_spec ks_parameters[] = {
     fsparam_string("readonly_bucket", Opt_lower),
     fsparam_string("whitelist", Opt_whitelist),
     fsparam_fd("boot_lifetime", Opt_boot_lifetime),
+    fsparam_flag("bd", Opt_bd),
+    fsparam_string("device", Opt_device),
     fsparam_flag("init", Opt_init),
     fsparam_flag("readonly", Opt_readonly),
     {}};
@@ -1604,6 +1621,14 @@ static int ks_parse(struct fs_context *fc, struct fs_parameter *param)
 			return -EINVAL;
 		c->cache_bytes = result.uint_32;
 		break;
+	case Opt_bd:
+		c->bd = true;
+		break;
+	case Opt_device:
+		kfree(c->device);
+		c->device = param->string;
+		param->string = NULL;
+		break;
 	case Opt_init:
 		c->create = true;
 		break;
@@ -1620,6 +1645,7 @@ static void ks_free_context(struct fs_context *fc)
 	if (c) {
 		kfree(c->url);
 		kfree(c->whitelist);
+		kfree(c->device);
 		if (c->boot_lifetime)
 			fput(c->boot_lifetime);
 		kfree_sensitive(c->username);
@@ -1640,26 +1666,41 @@ static int ks_init_context(struct fs_context *fc)
 	fc->ops = &ks_context_ops;
 	return 0;
 }
+static void ks_kill_sb(struct super_block *sb)
+{
+	if (sb->s_magic == 0x53544244)
+		ks_bd_kill_sb(sb);
+	else
+		kill_anon_super(sb);
+}
 static struct file_system_type ks_type = {
     .owner = THIS_MODULE,
     .name = "kstqr",
     .init_fs_context = ks_init_context,
     .parameters = ks_parameters,
-    .kill_sb = kill_anon_super,
+    .kill_sb = ks_kill_sb,
 };
 static int __init ks_init(void)
 {
 	int err = ks_transport_start();
 	if (err)
 		return err;
-	err = register_filesystem(&ks_type);
-	if (err)
+	err = ks_bd_init();
+	if (err) {
 		ks_transport_stop();
+		return err;
+	}
+	err = register_filesystem(&ks_type);
+	if (err) {
+		ks_bd_exit();
+		ks_transport_stop();
+	}
 	return err;
 }
 static void __exit ks_exit(void)
 {
 	unregister_filesystem(&ks_type);
+	ks_bd_exit();
 	rcu_barrier();
 	ks_transport_stop();
 }

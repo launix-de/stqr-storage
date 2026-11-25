@@ -314,6 +314,7 @@ func TestCClient(t *testing.T) {
 			t.Fatal(err)
 		}
 		run(t, source.node.cfg.Node.Advertise, admin.Username, admin.Password, client.ID(bucket.ID()).String(), "routing")
+		run(t, source.node.cfg.Node.Advertise, admin.Username, admin.Password, client.ID(bucket.ID()).String(), "routing-lease")
 	})
 	for _, mode := range []string{"disconnect", "disconnect-stream", "digest", "malformed", "wrong-id", "varint", "text", "subscription-digest"} {
 		t.Run(mode, func(t *testing.T) {
