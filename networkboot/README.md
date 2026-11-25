@@ -458,6 +458,11 @@ PXE -> iPXE -> HTTP kernel + initramfs (includes matching kstqr.ko)
 login -> PAM -> persistent username_home bucket at /home/username
 ```
 
+The initramfs copies its matching module into the private upper for later module
+reloads. The shared lower stays unchanged. Since this PXE session supplies its
+own network configuration and identity, cloud metadata initialization and local
+GRUB boot-success bookkeeping are disabled in that private upper.
+
 The kernel uses our native Go/FUSE-compatible STOR/STOM overlay format:
 deletion markers live in directory records, metadata overrides preserve the
 original content, and range writes retain references to unchanged lower data.

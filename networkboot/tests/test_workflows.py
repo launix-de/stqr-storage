@@ -83,6 +83,48 @@ class Workflows(unittest.TestCase):
             (work / '.stqr-preparation.json').unlink()
             self.assertIsNone(common.prepared_release('stqr.yaml', 'ubuntu'))
             self.assertTrue((work / 'rootfs.tar').exists())
+    def test_aborted_artifact_download_does_not_report_server_failure(self):
+        import http.server
+        import socket
+        import struct
+        import threading
+        import urllib.request
+        serve = load('serve')
+        failures = []
+        class Server(http.server.HTTPServer):
+            def handle_error(self, request, address):
+                failures.append(sys.exc_info()[1])
+        class Handler(serve.BootHTTPHandler):
+            def log_message(self, *args):
+                pass
+            def do_GET(self):
+                if self.path == '/abort':
+                    self.send_response(200)
+                    self.send_header('Content-Length', str(8 << 20))
+                    self.end_headers()
+                    for _ in range(2048):
+                        self.wfile.write(b'x' * 4096)
+                else:
+                    self.send_response(200)
+                    self.send_header('Content-Length', '2')
+                    self.end_headers()
+                    self.wfile.write(b'ok')
+        server = Server(('127.0.0.1', 0), Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            with socket.create_connection(server.server_address, timeout=3) as wire:
+                wire.sendall(b'GET /abort HTTP/1.0\r\nHost: localhost\r\n\r\n')
+                self.assertTrue(wire.recv(1024))
+                wire.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack('ii', 1, 0))
+            with urllib.request.urlopen('http://127.0.0.1:%d/healthy' % server.server_port, timeout=3) as reply:
+                self.assertEqual(reply.read(), b'ok')
+            self.assertEqual(failures, [])
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join()
+
     def test_proxy_dhcp_does_not_replace_dns_or_address_server(self):
         serve = load('serve')
         config = serve.dnsmasq_config('192.0.2.10', 'eth0', '192.0.2.0/24', '/tmp/tftp', 8088)

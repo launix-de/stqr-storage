@@ -19,6 +19,21 @@ mountroot() {
     modprobe kstqr || panic "STQR kernel module unavailable"
     mkdir -p "$rootmnt"
     /bin/stqr-boot-root "$stqr_server" "$stqr_port" "$stqr_session" "$rootmnt" || panic "STQR native root mount failed"
+    # Keep future module reloads consistent without changing the shared lower.
+    stqr_module=/lib/modules/$(uname -r)/extra/kstqr.ko
+    mkdir -p "$rootmnt/lib/modules/$(uname -r)/extra"
+    cp "$stqr_module" "$rootmnt$stqr_module" || panic "STQR root module update failed"
+    # PXE supplies networking and identity; cloud metadata and local GRUB
+    # bookkeeping do not apply to this private network-root boot session.
+    if [ -d "$rootmnt/etc/cloud" ]; then
+        : > "$rootmnt/etc/cloud/cloud-init.disabled"
+    fi
+    mkdir -p "$rootmnt/etc/systemd/system"
+    for stqr_unit in grub2-common.service grub-initrd-fallback.service; do
+        if [ -e "$rootmnt/usr/lib/systemd/system/$stqr_unit" ] || [ -e "$rootmnt/lib/systemd/system/$stqr_unit" ]; then
+            ln -sf /dev/null "$rootmnt/etc/systemd/system/$stqr_unit"
+        fi
+    done
     # Each boot gets its own identity and host keys; the readonly base is shared.
     : > "$rootmnt/etc/machine-id"
     rm -f "$rootmnt/var/lib/dbus/machine-id" "$rootmnt/var/lib/systemd/random-seed"

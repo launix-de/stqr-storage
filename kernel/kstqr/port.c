@@ -9,9 +9,12 @@
 #include <linux/net.h>
 #include <linux/random.h>
 #include <linux/sched/signal.h>
+#include <linux/sched/mm.h>
 #include <linux/slab.h>
 #include <linux/vmalloc.h>
 #include <linux/wait.h>
+#include <linux/workqueue.h>
+#include <linux/completion.h>
 #include <net/net_namespace.h>
 #include <net/sock.h>
 struct stqr_socket {
@@ -50,7 +53,8 @@ int sq_hash(unsigned bits, const void *p, size_t n, stqr_u8 *out)
 	crypto_free_shash(tfm);
 	return err;
 }
-int sq_connect(struct stqr_socket **out, const char *host, unsigned port, unsigned ms)
+static int sq_connect_direct(struct stqr_socket **out, const char *host, unsigned port,
+			     unsigned ms)
 {
 	struct sockaddr_storage address = {0};
 	struct sockaddr_in *v4 = (struct sockaddr_in *)&address;
@@ -92,6 +96,47 @@ int sq_connect(struct stqr_socket **out, const char *host, unsigned port, unsign
 	}
 	*out = s;
 	return 0;
+}
+/* A mount is a storage connection, independent of the task doing I/O.
+ * sock_create_kern(init_net) alone does not provide that isolation: sockets
+ * still inherit the allocating task's cgroup. In particular, systemd services
+ * with IPAddressDeny=any would poison shared RPC slots on a redirect/reconnect,
+ * blocking unrelated tasks too. Allocate AND connect in a kernel worker, with
+ * neither the caller's cgroup nor its network namespace or security context.
+ * Service sandboxing remains effective for the service's own sockets.
+ */
+struct sq_connect_work {
+	struct work_struct work;
+	struct completion done;
+	struct stqr_socket **out;
+	const char *host;
+	unsigned port, ms;
+	int result;
+};
+static void sq_connect_worker(struct work_struct *work)
+{
+	struct sq_connect_work *job = container_of(work, struct sq_connect_work, work);
+	unsigned nofs = memalloc_nofs_save();
+
+	/* Do not re-enter filesystem reclaim while the caller holds RPC locks. */
+	job->result = sq_connect_direct(job->out, job->host, job->port, job->ms);
+	memalloc_nofs_restore(nofs);
+	complete(&job->done);
+}
+int sq_connect(struct stqr_socket **out, const char *host, unsigned port, unsigned ms)
+{
+	struct sq_connect_work job = {.out = out, .host = host, .port = port, .ms = ms};
+
+	INIT_WORK(&job.work, sq_connect_worker);
+	init_completion(&job.done);
+	queue_work(system_unbound_wq, &job.work);
+	/* The worker owns pointers into this frame. Even on a fatal signal we must
+	 * wait for its bounded connect to finish before returning/unloading code.
+	 * flush_work also waits past complete(), until the callback has returned.
+	 */
+	wait_for_completion(&job.done);
+	flush_work(&job.work);
+	return job.result;
 }
 int sq_send(struct stqr_socket *s, const void *p, size_t n)
 {
