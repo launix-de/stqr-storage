@@ -605,8 +605,13 @@ waiting write's larger requirement); one indivisible object can exceed that
 budget but must still fit the target. This bounds copying before a waiting write
 can resume without repeatedly moving empty hash leaves.
 
+Rejected preconditions and capacity checks retain the cached logical usage count:
+no object length changed. Ambiguous backend/recovery errors still invalidate it.
+This avoids full-index scans on content-deduplication probes and capacity retries;
+normal successful mutations still update the count and enforce the hard quota.
+
 Finite logical quotas now use durable per-node growth credits. Grant requests
-obtain reusable budgets up to 4 MiB where the donor has unused credits, scaled
+obtain reusable budgets up to 64 MiB where the donor has unused credits, scaled
 down for small quotas shared across members;
 the donor caps every grant at that unused allowance. This amortizes durable
 credit exchanges without increasing the bucket's hard quota. Credit transfers
@@ -1009,6 +1014,8 @@ unpinned local cohorts keep selecting the original writer until explicit target
 placement commits. Bulk snapshot completion preflights the physical budget before
 source fencing; an impossible 507 cancels the unfenced handoff. The final READY
 and COMMIT checks still enforce the exact resulting quota after codec/layout changes.
+
+For a new empty single-copy disk bucket, a finite absolute quota also serves as a soft initial placement hint. If its default owner cannot fit that size and another eligible volume can, initial placement chooses the fitting volume. This creates no reservation, never moves an existing map, and does not prevent extension when no single volume fits. Repeated capacity waits reuse queued or active handoffs rather than repeatedly scanning the bucket index.
 
 ## Join a cluster from the dashboard
 

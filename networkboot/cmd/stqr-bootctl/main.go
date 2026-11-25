@@ -123,6 +123,9 @@ func create(ctx context.Context, c config, name string) (client.ID, error) {
 	return createID(ctx, c, name, id)
 }
 func createID(ctx context.Context, c config, name string, id client.ID) (client.ID, error) {
+	return createIDWithQuota(ctx, c, name, id, 0)
+}
+func createIDWithQuota(ctx context.Context, c config, name string, id client.ID, quota uint64) (client.ID, error) {
 	e := client.Encoder{}
 	e.ID(id)
 	e.U64(1)
@@ -140,8 +143,8 @@ func createID(ctx context.Context, c config, name string, id client.ID) (client.
 	e.U64(0)
 	e.U8(0)
 	e.U64(0)
-	e.Bool(true)
-	e.U64(0)
+	e.Bool(quota == 0)
+	e.U64(quota)
 	e.U32(150000)
 	_, err := control(ctx, c, client.BucketCreate, e.B)
 	return id, err

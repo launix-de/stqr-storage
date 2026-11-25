@@ -227,12 +227,19 @@ func TestDaemonQuotaMovesLiveBytesAndChangesLimits(t *testing.T) {
 }
 
 func TestDaemonQuotaNewOwnerReceivesReusableBlockBudget(t *testing.T) {
+	testReusableQuotaBudget(t, 16<<20, 1<<20)
+}
+func TestDaemonLargeQuotaOwnerReceivesReusableBurstBudget(t *testing.T) {
+	testReusableQuotaBudget(t, 4<<30, 64<<20)
+}
+func testReusableQuotaBudget(t *testing.T, limit, minimum uint64) {
+	t.Helper()
 	source, target := startAutomaticDaemonPair(t, false)
 	addTestVolume(t, source.node, "credit-source", "hdd", 16<<20)
 	v := addTestVolume(t, target.node, "credit-target", "hdd", 16<<20)
 	draft := newTestBucket(t, "reusable-block-credits")
 	draft.description.Policy.Limits.Unlimited = false
-	draft.description.Policy.Limits.Absolute = 16 << 20
+	draft.description.Policy.Limits.Absolute = limit
 	if _, status, _ := adminBucketMessage(t, source.node, client.BucketCreate, bucketPolicyBody(t, draft)); status != 201 {
 		t.Fatal(status)
 	}
@@ -288,7 +295,7 @@ func TestDaemonQuotaNewOwnerReceivesReusableBlockBudget(t *testing.T) {
 	target.node.opMu.Lock()
 	allowance, err := target.node.quotaAllowance(client.ID(draft.ID()))
 	target.node.opMu.Unlock()
-	if err != nil || allowance < 1<<20 || allowance > draft.description.Policy.Limits.Absolute {
+	if err != nil || allowance < minimum || allowance > draft.description.Policy.Limits.Absolute {
 		t.Fatal("new owner lacks reusable block credits", allowance, err)
 	}
 	source.node.opMu.Lock()

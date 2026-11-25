@@ -98,8 +98,9 @@ redirect/reconnect. The service's own sockets remain filtered. Object operations
 follow validated range-owner redirects;
 cluster nodes must advertise numeric addresses usable by the kernel. Before a
 serial RPC connection changes owner, it synchronizes accepted writes to its old
-node. Each RPC slot and the subscription connection has its own durability
-barrier. Other network namespaces and automatic address failover are not
+node. Each RPC slot and the subscription client retains endpoint sessions, with
+a durability barrier covering every retained session. Subscription polling reads
+all owners; visiting a different owner does not invalidate existing inode proofs. Other network namespaces and automatic address failover are not
 implemented. Transport is plain HTTP/WebSocket, matching the current
 server; use it on loopback or an appropriately protected network.
 
@@ -339,3 +340,5 @@ Both normal inode and STOR namespace readers resolve interrupted intents;
 read-only mounts apply committed edits virtually. Ordinary older inode layouts
 remain readable. Old lower-inode references require verified conversion or a
 recreated upper before kernel use. See [the shared contract](filesystem-posix.md).
+
+Kernel transport transfers run in NOFS workers, independent of the task issuing filesystem I/O. Nonfatal process signals (including SIGCHLD and restartable timers) do not break partial shared RPC frames or invalidate other tasks' sessions. Socket timeouts still bound stalled transfers; fatal cancellation is observed between dispatches, and dispatched buffers remain owned until the worker has returned. The VM regression suite exercises repeated reads, writes and fsync under a 500-microsecond restartable timer.

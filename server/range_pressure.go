@@ -14,6 +14,7 @@ type rangePressure struct {
 	needed    uint64
 	failed    volume.ID
 	requested time.Time
+	checked   time.Time
 }
 
 // Volatile scheduling hints are bounded; neither an admission promise nor an
@@ -33,14 +34,28 @@ func (r *rangeManager) requestSpace(bucket volume.ID, object volume.ObjectID, ne
 		hint.failed = failed[0]
 	}
 	r.mu.Lock()
+	// A foreground retry must not repeatedly scan the bucket while the same
+	// durable handoff is already progressing. This is only a wait hint; it
+	// neither grants capacity nor acknowledges the original mutation.
+	for _, tx := range r.txns {
+		if tx.plan.Source == r.node && tx.plan.Before.Bucket == client.ID(bucket) && r.active(tx) && tx.plan.contains(object) {
+			r.mu.Unlock()
+			return true
+		}
+	}
 	for _, prior := range r.pressures {
 		if prior.bucket == bucket && prior.object == object {
+			if hint.failed == prior.failed && needed <= prior.needed && time.Since(prior.checked) < 750*time.Millisecond {
+				r.mu.Unlock()
+				return true
+			}
 			hint.requested = prior.requested
 			hint.needed = max(needed, prior.needed)
 			break
 		}
 	}
 	r.mu.Unlock()
+	hint.checked = time.Now()
 	_, ready := r.pressurePlan(hint)
 	if !ready && !r.awaitPressureStats(hint) {
 		r.mu.Lock()

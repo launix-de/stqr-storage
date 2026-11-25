@@ -73,13 +73,13 @@ int save_settings(const char *url, const char *user, const char *password,
   Large objects can be accessed using ranged reads/writes; this is not an object
   size restriction. Callback-based, unbounded streaming is not yet exposed.
 - URLs accept `http://host[:port]` or `ws://host[:port]/api/ws`, including bracketed
-  IPv6. DNS resolution is provided by the POSIX adapter. No redirects, TLS,
+  IPv6. DNS resolution is provided by the POSIX adapter. No TLS,
   compression extensions or implicit credential forwarding are performed.
 - The timeout bounds socket connection and individual blocking socket I/O;
   DNS resolution uses the system resolver. There is no asynchronous cancellation
   or background heartbeat/reconnect thread.
 - Runtime IDs are retained across reconnect; an observed RAM-runtime change is
-  reported as `-ESTALE`. Multinode routing/redirect following is not implemented.
+  reported as `-ESTALE`. Inline operations follow validated owner redirects as described below.
 
 ## Kernel reuse
 
@@ -134,14 +134,22 @@ bucket. Receipt observation also covers reads and subscription notices. Marks
 survive reconnect; an unconfirmed lost incarnation yields `-ESTALE`. Close alone
 is not a sync. See [the complete contract](../../docs/durability.md).
 
+Sync covers all retained sessions. A public pending mark first confirms inactive
+sessions and then describes the remaining active-node prefix. Sync-through and
+durable notifications are routed to the known origin of the mark.
+
 ## Cluster routing
 
 Reads and inline mutations (up to 1 MiB per payload, including native filesystem
 segments) follow authoritative range-owner redirects. The client validates the
 bucket/range and primary node in the returned map patch, flushes accepted writes
-before switching its serial connection, reauthenticates and retries with the same
-request ID. Reconnecting invalidates outstanding subscription coverage. There is
-no per-node connection pool or automatic alternate-address failover. Chunked
+before switching owners and retries with the same request ID. Up to 32
+authenticated endpoint sessions are retained per logical bucket connection;
+switching owners preserves existing subscriptions. Poll visits every live session,
+and unsubscribe uses the session which owns that subscription. A transport loss,
+explicit reconnect or bounded-pool eviction invalidates subscription coverage;
+ordinary routing does not. Eviction confirms outstanding writes before closing a
+session. There is no automatic alternate-address failover. Chunked
 mutations larger than 1 MiB still require connecting to their correct owner; use
 bounded ranged writes for the native filesystem path.
 

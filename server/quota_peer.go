@@ -284,7 +284,7 @@ func (s *Server) fulfillQuotaDemand(h quotaDemand) {
 		// request at its unused allowance, preserving the global hard quota.
 		// Small quotas shared by replica owners need smaller reusable shares:
 		// do not drain the donor's entire remaining budget after one write.
-		reusable := min(uint64(4<<20), max(uint64(64<<10), a.Limit/uint64(4*len(view.manifest.Membership.Members))))
+		reusable := min(uint64(64<<20), max(uint64(64<<10), a.Limit/uint64(4*len(view.manifest.Membership.Members))))
 		asked := max(needed, reusable)
 		e.U64(asked)
 		ctx, cancel := context.WithTimeout(s.ctx, 3*time.Second)
