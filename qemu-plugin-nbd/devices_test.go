@@ -12,8 +12,7 @@ import (
 )
 
 type testObject struct {
-	data    []byte
-	version uint64
+	data []byte
 }
 
 func TestTrimDeletesWholeStripesAndZeroesEdges(t *testing.T) {
@@ -105,7 +104,7 @@ func (s *testStore) Put(_ context.Context, id client.ObjectID, data []byte, _ cl
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.put++
-	o := testObject{bytes.Clone(data), s.objects[id].version + 1}
+	o := testObject{bytes.Clone(data)}
 	s.objects[id] = o
 	return client.ObjectInfo{Length: uint64(len(o.data))}, nil
 }
@@ -119,24 +118,37 @@ func (s *testStore) PutRange(_ context.Context, id client.ObjectID, off uint64, 
 		o.data = append(o.data, make([]byte, end-uint64(len(o.data)))...)
 	}
 	copy(o.data[off:], data)
-	o.version++
 	s.objects[id] = o
 	return client.ObjectInfo{Length: uint64(len(o.data))}, nil
 }
-func (s *testStore) CAS(ctx context.Context, id client.ObjectID, _ uint64, expected, data []byte, opt client.CASOptions) (client.ObjectInfo, error) {
+func (s *testStore) CAS(ctx context.Context, id client.ObjectID, offset uint64, expected, data []byte, opt client.CASOptions) (client.ObjectInfo, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	o, exists := s.objects[id]
-	if opt.Absent && exists {
-		return client.ObjectInfo{}, client.ErrPrecondition
+	if opt.Absent {
+		if exists {
+			return client.ObjectInfo{}, client.ErrPrecondition
+		}
+	} else if opt.Scope == client.CASObject {
+		if !exists || offset != 0 || !bytes.Equal(o.data, expected) {
+			return client.ObjectInfo{}, client.ErrPrecondition
+		}
+	} else {
+		if !exists || offset > uint64(len(o.data)) || uint64(len(expected)) > uint64(len(o.data))-offset || !bytes.Equal(o.data[offset:offset+uint64(len(expected))], expected) {
+			return client.ObjectInfo{}, client.ErrPrecondition
+		}
+		if len(expected) != len(data) {
+			return client.ObjectInfo{}, client.ErrRange
+		}
+		copy(o.data[offset:], data)
+		s.objects[id] = o
+		return client.ObjectInfo{Length: uint64(len(o.data))}, nil
 	}
-	if !opt.Absent && (!exists || !bytes.Equal(o.data, expected)) {
-		return client.ObjectInfo{}, client.ErrPrecondition
-	}
-	o = testObject{bytes.Clone(data), o.version + 1}
+	o = testObject{bytes.Clone(data)}
 	s.objects[id] = o
 	return client.ObjectInfo{Length: uint64(len(o.data))}, nil
 }
+
 func (s *testStore) Stat(ctx context.Context, id client.ObjectID) (client.ObjectInfo, error) {
 	_, i, e := s.Get(ctx, id)
 	return i, e
@@ -273,5 +285,38 @@ func TestCollectWithoutSegmentLists(t *testing.T) {
 	s.Put(ctx, client.FilesystemRootID(), []byte("legacy"), client.PutOptions{})
 	if _, e = c.Collect(ctx, nil); e != ErrLegacyFormat {
 		t.Fatal("legacy filesystem protection", e)
+	}
+}
+
+type writeOnlyStore struct{ *testStore }
+
+func (s writeOnlyStore) Delete(context.Context, client.ObjectID, client.DeleteOptions) error {
+	return client.ErrUnauthorized
+}
+func TestWriteOnlyTrimReleasesPayloadWithoutServerDeviceRules(t *testing.T) {
+	ctx := context.Background()
+	store := writeOnlyStore{newTestStore()}
+	c := NewCatalog(store)
+	disk, err := c.Create(ctx, Metadata{Name: "write-only", Size: StripeSize})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = c.WriteAt(ctx, disk, bytes.Repeat([]byte("p"), int(StripeSize)), 0); err != nil {
+		t.Fatal(err)
+	}
+	if err = c.Trim(ctx, disk, 0, StripeSize); err != nil {
+		t.Fatal(err)
+	}
+	info, err := store.Stat(ctx, StripeID(disk.ID, 0))
+	if err != nil || info.Length != 0 {
+		t.Fatal("payload not released", info, err)
+	}
+	writes := store.put
+	if err = c.Trim(ctx, disk, 0, StripeSize); err != nil || store.put != writes {
+		t.Fatal("repeated discard rewrote empty stripe", err)
+	}
+	zeros := make([]byte, 4096)
+	if err = c.ReadAt(ctx, disk, zeros, 512); err != nil || !bytes.Equal(zeros, make([]byte, len(zeros))) {
+		t.Fatal("trimmed range not zero", err)
 	}
 }

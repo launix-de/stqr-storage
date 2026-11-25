@@ -5,6 +5,7 @@ import (
 	"context"
 	"github.com/launix-de/stqr-storage/client"
 	"github.com/launix-de/stqr-storage/volume"
+	"sort"
 	"time"
 )
 
@@ -29,6 +30,22 @@ func (c *clusterController) finishBucketDeletions(ctx context.Context) {
 		if err != nil {
 			return
 		}
+		// Probe local background completion before reserving a global round.
+		// The committed DELETING description survives subsequent generations.
+		ready := true
+		for _, node := range members {
+			e := client.Encoder{}
+			e.Blob(nil)
+			e.ID(client.ID(bucket))
+			e.U64(description.Revision)
+			if _, err := (peerControlParticipants{runtime: s.control}).call(ctx, node, peerBucketPurge, e.B); err != nil {
+				ready = false
+				break
+			}
+		}
+		if !ready {
+			continue
+		}
 		_, _, _ = c.change(ctx, nil, func() (*adminDraft, error) {
 			current, err := s.Bucket(bucket)
 			if err != nil {
@@ -38,23 +55,7 @@ func (c *clusterController) finishBucketDeletions(ctx context.Context) {
 			if expected.State != BucketDeleting || expected.DeletionComplete {
 				return nil, errControlConflict
 			}
-			request := c.coordinator.requestSnapshot()
-			if request == nil {
-				return nil, errControlConflict
-			}
-			claim, err := marshalControlClaim(request.Claim)
-			if err != nil {
-				return nil, err
-			}
-			for _, node := range request.Claim.Required {
-				e := client.Encoder{}
-				e.Blob(claim)
-				e.ID(client.ID(bucket))
-				e.U64(expected.Revision)
-				if _, err := (peerControlParticipants{runtime: s.control}).call(ctx, node, peerBucketPurge, e.B); err != nil {
-					return nil, err
-				}
-			}
+
 			s.opMu.Lock()
 			preview, err := s.newAdminPreview()
 			s.opMu.Unlock()
@@ -96,142 +97,220 @@ func (c *clusterController) finishBucketDeletions(ctx context.Context) {
 	}
 }
 
-// The global DELETE intent is already committed on every member. The follow-up
-// slot prevents conflicting catalog changes; irreversible data cleanup is safe
-// to repeat after abort/restart. Each page releases opMu for unrelated buckets.
+// A committed DELETING catalog entry is the durable cleanup intent. Peer
+// requests only observe completion, never perform bulk work inside ALL/control.
+// Empty claim is the new status-only form; old claim-bearing requests are also
+// status-only, so mixed-version callers cannot pin cleanup inside a generation.
 func (s *Server) purgeDeletedBucket(body []byte, actor client.ID) ([]byte, error) {
 	d := client.Decoder{B: body}
-	claim, err := decodeControlClaim(d.Blob())
+	raw := d.Blob()
 	bucket, revision := volume.ID(d.ID()), d.U64()
-	if err != nil || d.Done() != nil || claim.Round.Initiator != actor || bucket == systemBucket || s.control == nil {
-		return nil, fail(403, "invalid bucket cleanup authority")
+	if d.Done() != nil || bucket == systemBucket || s.control == nil {
+		return nil, fail(403, "invalid bucket cleanup status")
 	}
-	s.opMu.Lock()
-	l := s.control.ledger
-	l.mu.Lock()
-	valid := l.slot != nil && equalControlClaim(l.slot.Claim, claim)
-	l.mu.Unlock()
-	b, err := s.Bucket(bucket)
-	if !valid || err != nil {
-		s.opMu.Unlock()
-		return nil, errControlConflict
+	view := s.currentSystem.Load()
+	if view == nil || !hasControlNode(membershipIDs(view.manifest.Membership), actor) {
+		return nil, fail(403, "cleanup status requires a cluster member")
 	}
-	description := b.Describe()
-	if description.State != BucketDeleting || description.Revision != revision || len(description.ClonePeers) > 0 {
-		s.opMu.Unlock()
-		return nil, errControlConflict
-	}
-	s.mu.RLock()
-	var stores []*managedVolume
-	for _, v := range s.volumes {
-		if !v.config.System {
-			stores = append(stores, v)
+	if len(raw) > 0 {
+		claim, err := decodeControlClaim(raw)
+		if err != nil || claim.Round.Initiator != actor {
+			return nil, fail(403, "invalid legacy cleanup claim")
 		}
 	}
-	s.mu.RUnlock()
-	s.opMu.Unlock()
-	for _, managed := range stores {
-		var after *volume.ObjectID
+	b, err := s.Bucket(bucket)
+	if err != nil {
+		return nil, err
+	}
+	desc := b.Describe()
+	if desc.State != BucketDeleting || desc.Revision != revision || len(desc.ClonePeers) > 0 {
+		return nil, errControlConflict
+	}
+	s.cleanupMu.Lock()
+	job := s.cleanupJobs[bucket]
+	done := job != nil && job.done
+	s.cleanupMu.Unlock()
+	if !done {
+		return nil, fail(503, "bucket cleanup continues in idle cycles")
+	}
+	return nil, nil
+}
+
+type cleanupVolumeProgress struct {
+	id           volume.ID
+	objectsDone  bool
+	objectAfter  *volume.ObjectID
+	requestAfter *volume.ID
+}
+type bucketCleanupJob struct {
+	volumes []cleanupVolumeProgress
+	next    int
+	done    bool
+}
+
+func (s *Server) startBucketReclaimer() {
+	if s.metadataPreview || s.controller == nil {
+		return
+	}
+	s.workers.Add(1)
+	go func() {
+		defer s.workers.Done()
+		delay := 5 * time.Millisecond
 		for {
-			if err := s.ctx.Err(); err != nil {
-				return nil, err
+			select {
+			case <-s.ctx.Done():
+				return
+			case <-time.After(delay):
 			}
-			done, err := func() (bool, error) {
-				s.opMu.Lock()
-				defer s.opMu.Unlock()
-				s.mu.RLock()
-				attached := s.volumes[managed.config.ID] == managed
-				s.mu.RUnlock()
-				if !attached {
-					return true, nil
+			begin := time.Now()
+			worked := s.reclaimBucketStep()
+			delay = 5 * time.Millisecond
+			if !worked {
+				delay = 250 * time.Millisecond
+			}
+			// A busy foreground stream is never held behind an entire bucket purge.
+			if s.ioPriority.users.Load() > 0 {
+				delay = max(delay, 9*time.Since(begin))
+			}
+		}
+	}()
+}
+
+// One bounded page per call. TryLock/TryOpen never queue idle work ahead of
+// users or a rebuilding range. Cursors are RAM hints; the catalog intent is
+// persistent and a restart safely reconstructs cleanup from the indexes.
+func (s *Server) reclaimBucketStep() bool {
+	if !s.cleanupIdle() {
+		return false
+	}
+	view := s.currentSystem.Load()
+	if view == nil {
+		return false
+	}
+	s.cleanupMu.Lock()
+	defer s.cleanupMu.Unlock()
+	if s.cleanupJobs == nil {
+		s.cleanupJobs = make(map[volume.ID]*bucketCleanupJob)
+	}
+	if s.cleanupView != view {
+		pending := make(map[volume.ID]bool)
+		s.cleanupOrder = nil
+		for _, desc := range view.descriptions {
+			if desc.State != BucketDeleting || desc.DeletionComplete || len(desc.ClonePeers) > 0 {
+				continue
+			}
+			id := newVolumeID(desc.ID)
+			pending[id] = true
+			s.cleanupOrder = append(s.cleanupOrder, id)
+			if s.cleanupJobs[id] != nil {
+				continue
+			}
+			job := &bucketCleanupJob{}
+			s.mu.RLock()
+			for _, v := range s.volumes {
+				if !v.config.System {
+					job.volumes = append(job.volumes, cleanupVolumeProgress{id: v.store.Identity().VolumeID})
 				}
-				h, err := managed.store.Open(true)
-				if err != nil {
-					return false, err
+			}
+			s.mu.RUnlock()
+			sort.Slice(job.volumes, func(i, j int) bool { return job.volumes[i].id.String() < job.volumes[j].id.String() })
+			s.cleanupJobs[id] = job
+		}
+		for id := range s.cleanupJobs {
+			if !pending[id] {
+				delete(s.cleanupJobs, id)
+			}
+		}
+		s.cleanupView = view
+	}
+	for i := 0; i < len(s.cleanupOrder); i++ {
+		s.cleanupCursor = (s.cleanupCursor + 1) % len(s.cleanupOrder)
+		id := s.cleanupOrder[s.cleanupCursor]
+		job := s.cleanupJobs[id]
+		if job.done {
+			continue
+		}
+		if job.next == len(job.volumes) {
+			job.done = true
+			s.notifyStats()
+			continue
+		}
+		if !s.cleanupIdle() || !s.opMu.TryLock() {
+			return false
+		}
+		worked := func() bool {
+			defer s.opMu.Unlock()
+			if !s.cleanupIdle() {
+				return false
+			}
+			progress := &job.volumes[job.next]
+			s.mu.RLock()
+			managed := s.volumes[progress.id.String()]
+			s.mu.RUnlock()
+			if managed == nil {
+				job.next++
+				return true
+			}
+			h, acquired, err := managed.store.TryOpen(true)
+			if !acquired || err != nil {
+				return false
+			}
+			defer h.Close()
+			usage, err := h.StorageUsage()
+			if err != nil {
+				return false
+			}
+			found := false
+			for _, u := range usage {
+				if u.Bucket == id && u.Physical > 0 {
+					found = true
+					break
 				}
-				defer h.Close()
-				records, err := h.ScanBucketObjects(bucket, after, 32)
+			}
+			// Maintained accounting includes tombstones, receipts and import shadows.
+			// An absent bucket cannot require a sweep through unrelated retry records.
+			if !found {
+				job.next++
+				return true
+			}
+			if !progress.objectsDone {
+				records, err := h.ScanBucketObjects(id, progress.objectAfter, 8)
 				if err != nil {
-					return false, err
+					return false
 				}
 				if len(records) == 0 {
-					return true, nil
+					progress.objectsDone = true
+					return true
 				}
-				if err := h.PurgeBatch(records); err != nil {
-					return false, err
+				if err = h.PurgeBatch(records); err != nil {
+					return false
 				}
 				next := records[len(records)-1].Key.Object
-				after = &next
-				return false, nil
-			}()
+				progress.objectAfter = &next
+				return true
+			}
+			records, err := h.ScanRequestRecords(progress.requestAfter, 128)
 			if err != nil {
-				return nil, err
+				return false
 			}
-			if done {
-				break
+			if len(records) == 0 {
+				job.next++
+				return true
 			}
-			// Yield outside opMu/the volume lock. Cleanup must not monopolize a
-			// busy device, even when the next index page is already cached.
-			select {
-			case <-s.ctx.Done():
-				return nil, s.ctx.Err()
-			case <-time.After(2 * time.Millisecond):
-			}
-		}
-		var cursor *volume.ID
-		for {
-			if err := s.ctx.Err(); err != nil {
-				return nil, err
-			}
-			done, err := func() (bool, error) {
-				s.opMu.Lock()
-				defer s.opMu.Unlock()
-				s.mu.RLock()
-				attached := s.volumes[managed.config.ID] == managed
-				s.mu.RUnlock()
-				if !attached {
-					return true, nil
+			var remove []volume.ID
+			for _, record := range records {
+				if record.Key.Bucket == id {
+					remove = append(remove, record.ID)
 				}
-				h, err := managed.store.Open(true)
-				if err != nil {
-					return false, err
-				}
-				defer h.Close()
-				records, err := h.ScanRequestRecords(cursor, 64)
-				if err != nil {
-					return false, err
-				}
-				if len(records) == 0 {
-					return true, nil
-				}
-				var forgotten []volume.ID
-				for _, record := range records {
-					if record.Key.Bucket == bucket {
-						forgotten = append(forgotten, record.ID)
-					}
-				}
-				if err := h.ForgetRequests(forgotten); err != nil {
-					return false, err
-				}
-				next := records[len(records)-1].ID
-				cursor = &next
-				return false, nil
-			}()
-			if err != nil {
-				return nil, err
 			}
-			if done {
-				break
+			if err = h.ForgetRequests(remove); err != nil {
+				return false
 			}
-			// Yield outside opMu/the volume lock. Cleanup must not monopolize a
-			// busy device, even when the next index page is already cached.
-			select {
-			case <-s.ctx.Done():
-				return nil, s.ctx.Err()
-			case <-time.After(2 * time.Millisecond):
-			}
-		}
+			next := records[len(records)-1].ID
+			progress.requestAfter = &next
+			return true
+		}()
+		return worked
 	}
-	s.notifyStats()
-	return nil, nil
+	return false
 }

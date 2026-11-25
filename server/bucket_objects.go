@@ -311,6 +311,8 @@ func (b *Bucket) getRange(ctx context.Context, p principal, id volume.ObjectID, 
 		}
 		return nil, volume.Info{}, b.absenceError(id, prior, err)
 	}
+	b.server.ioPriority.users.Add(1)
+	defer b.server.ioPriority.users.Add(-1)
 	h, err := v.Open(false)
 	if err != nil {
 		return nil, volume.Info{}, err
@@ -351,6 +353,8 @@ func (b *Bucket) copyToCheckedUnmetered(ctx context.Context, p principal, id vol
 		}
 		return volume.Info{}, 0, b.absenceError(id, prior, err)
 	}
+	b.server.ioPriority.users.Add(1)
+	defer b.server.ioPriority.users.Add(-1)
 	h, err := v.Open(false)
 	if err != nil {
 		return volume.Info{}, 0, err
@@ -440,7 +444,7 @@ func (b *Bucket) mutateUnmetered(ctx context.Context, p principal, id volume.Obj
 			permission = BucketAppend
 		}
 		if opcode == 0x0106 {
-			permission = blockDeletePermission(p)
+			permission = BucketDelete
 		}
 		if _, err := b.authorize(p, permission); err != nil {
 			return volume.Result{}, err
@@ -454,11 +458,11 @@ func (b *Bucket) mutateUnmetered(ctx context.Context, p principal, id volume.Obj
 		release := s.replicas.lock(volume.Key{Bucket: b.ID(), Object: id})
 		defer release()
 	}
-	s.opMu.Lock()
+	s.lockUserObjectIO()
 	opLocked := true
 	defer func() {
 		if opLocked {
-			s.opMu.Unlock()
+			s.unlockUserObjectIO()
 		}
 	}()
 	if b.underMaintenance() {
@@ -469,11 +473,11 @@ func (b *Bucket) mutateUnmetered(ctx context.Context, p principal, id volume.Obj
 	if l := s.leaseRecord(b); l != nil && !l.Released && l.ReadOnly && !b.cowMaintenanceAllowed(ctx, p) {
 		return volume.Result{}, ErrBucketForbidden
 	}
-	if b.underMaintenance() && p.connection != nil && p.connection.blockReadOnly.Load() {
+	if b.underMaintenance() && p.connection != nil && p.connection.leaseReadOnly.Load() {
 		return volume.Result{}, ErrBucketForbidden
 	}
-	if b.underMaintenance() && !b.cowMaintenanceAllowed(ctx, p) && opcode != 0x0108 && opcode != 0x0106 && (p.connection == nil || !p.connection.offlineCopy && !(p.connection.blockDevice.Load() && (opcode == 0x0102 || opcode == 0x0103))) {
-		return volume.Result{}, fail(409, "maintenance permits only recovery CAS and DELETE")
+	if b.underMaintenance() && !b.cowMaintenanceAllowed(ctx, p) && opcode != 0x0108 && opcode != 0x0106 && (p.connection == nil || !p.connection.offlineCopy && !p.connection.objectLease.Load()) {
+		return volume.Result{}, fail(409, "restricted maintenance permits only CAS and DELETE")
 	}
 	s.mu.RLock()
 	closed := s.closed
@@ -489,7 +493,7 @@ func (b *Bucket) mutateUnmetered(ctx context.Context, p principal, id volume.Obj
 		permission = BucketAppend
 	}
 	if opcode == 0x0106 {
-		permission = blockDeletePermission(p)
+		permission = BucketDelete
 	}
 	d, err := b.authorize(p, permission)
 	if err != nil {
@@ -749,7 +753,7 @@ func (b *Bucket) mutateUnmetered(ctx context.Context, p principal, id volume.Obj
 			mutationRelease()
 			mutationRelease = nil
 		}
-		s.opMu.Unlock()
+		s.unlockUserObjectIO()
 		opLocked = false
 		if record.State == volume.ReplicaPrepared {
 			if e = s.replicas.preparePeers(ctx, replicatedEntry, header, src.(io.ReadSeeker)); e != nil {
@@ -758,13 +762,13 @@ func (b *Bucket) mutateUnmetered(ctx context.Context, p principal, id volume.Obj
 				}
 				return result, fail(503, "waiting for required replicas: "+e.Error())
 			}
-			s.opMu.Lock()
+			s.lockUserObjectIO()
 			h, e = v.Open(true)
 			if e == nil {
 				e = h.DecideReplica(opt.RequestID, record.Binding)
 				h.Close()
 			}
-			s.opMu.Unlock()
+			s.unlockUserObjectIO()
 			if e != nil {
 				return result, e
 			}
@@ -772,7 +776,7 @@ func (b *Bucket) mutateUnmetered(ctx context.Context, p principal, id volume.Obj
 		if e = s.replicas.commitPeers(ctx, replicatedEntry, header); e != nil {
 			return result, fail(503, "commit is waiting for required replicas: "+e.Error())
 		}
-		s.opMu.Lock()
+		s.lockUserObjectIO()
 		opLocked = true
 		h, e = v.Open(true)
 		if e != nil {
@@ -896,16 +900,6 @@ func (b *Bucket) mutateUnmetered(ctx context.Context, p principal, id volume.Obj
 	return result, err
 }
 
-// Discarding stripes is a write operation on an exclusively held native block
-// device. Ordinary object clients and private clear/clone frontends retain the
-// separate DELETE grant; authorize still validates the active lease token.
-func blockDeletePermission(p principal) BucketPermissions {
-	a := p.connection
-	if a != nil && a.frontendPermission == 0 && a.blockDevice.Load() && !a.blockReadOnly.Load() {
-		return BucketWrite
-	}
-	return BucketDelete
-}
 func (b *Bucket) Put(ctx context.Context, p principal, id volume.ObjectID, data []byte, opt volume.Options) (volume.Info, error) {
 	return b.PutReader(ctx, p, id, bytes.NewReader(data), uint64(len(data)), opt)
 }

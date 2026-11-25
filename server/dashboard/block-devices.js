@@ -25,7 +25,7 @@ export function setupBlockDevices({connection,escape,toast}){
  let bucket,devices=[],meta={},epoch=0,searchTimer,selected,steps=[],pending=false,retry;
  function render(){
   el('[data-count]').textContent=String(devices.length);
-  el('[data-exporter]').textContent=meta.live?`Exporter verbunden · ${meta.readonly?'Nur lesen':'Schreibzugriff'} · Node ${meta.owner.slice(0,8)}`:'Kein Exporter verbunden · Verwaltung über eine exklusive Cluster-Lease';
+  el('[data-exporter]').textContent=meta.live?`Exporter verbunden · ${meta.readonly?'Nur lesen':'Schreibzugriff'} · Node ${meta.owner.slice(0,8)}`:'Kein Exporter verbunden · Verwaltung über native Objektoperationen';
   el('[data-disks]').innerHTML=devices.map(d=>`<tr data-device="${d.id}"><td><div class="volume-name">${escape(d.name)}</div><div class="volume-path">${escape(d.id)}</div></td><td><strong title="${d.size} Bytes">${escape(sizeLabel(d.size))}</strong><div class="bucket-sub">Sparse · ${d.size.toLocaleString('de-DE')} Bytes</div></td><td>${escape(d.manufacturer)} · ${escape(d.model)}<div class="volume-path">${escape(d.serial)}</div></td><td><button type="button" class="row-action" data-grow="${d.id}" ${meta.readonly||d.size===MAX_SIZE?'disabled':''}>Vergrößern</button></td></tr>`).join('')||`<tr><td colspan="4" class="empty">${el('[data-search]').value?'Keine passenden Disks.':'In diesem Bucket sind keine virtuellen Disks angelegt.'}</td></tr>`;
   for(const button of el('[data-disks]').querySelectorAll('[data-grow]'))button.onclick=()=>openGrow(devices.find(d=>d.id===button.dataset.grow));
  }

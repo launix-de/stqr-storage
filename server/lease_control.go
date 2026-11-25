@@ -7,17 +7,16 @@ import (
 	"time"
 
 	"github.com/launix-de/stqr-storage/client"
-	nbd "github.com/launix-de/stqr-storage/qemu-plugin-nbd"
 	"github.com/launix-de/stqr-storage/volume"
 )
 
-func (s *Server) registerBlockControl(m client.Message, ws *wsSession) ([]byte, int) {
+func (s *Server) registerLeaseControl(m client.Message, ws *wsSession) ([]byte, int) {
 	reject := func(code int, detail string) ([]byte, int) { return client.ResponseBody(code, nil, detail), code }
 	if m.Kind != client.Request {
-		return reject(400, "block control registration requires a request")
+		return reject(400, "lease control registration requires a request")
 	}
-	if ws == nil || ws.authorization == nil || ws.authorization.bucket == nil || !ws.authorization.blockDevice.Load() {
-		return reject(403, "block lease owner required")
+	if ws == nil || ws.authorization == nil || ws.authorization.bucket == nil || !ws.authorization.objectLease.Load() {
+		return reject(403, "object lease owner required")
 	}
 	a := ws.authorization
 	b := a.bucket
@@ -26,16 +25,16 @@ func (s *Server) registerBlockControl(m client.Message, ws *wsSession) ([]byte, 
 	b.mu.RUnlock()
 	d := client.Decoder{B: m.Body}
 	if d.U16() != 1 || d.Done() != nil {
-		return reject(400, "invalid block control registration")
+		return reject(400, "invalid lease control registration")
 	}
 	if !owner {
-		return reject(403, "original block lease socket required")
+		return reject(403, "original object lease socket required")
 	}
 	ws.blockControl.Store(true)
 	return client.ResponseBody(200, nil, ""), 200
 }
 
-func blockAdminBody(bucket volume.ID, owner client.ID, request []byte) []byte {
+func leaseControlBody(bucket volume.ID, owner client.ID, request []byte) []byte {
 	e := client.Encoder{}
 	e.U16(1)
 	e.ID(client.ID(bucket))
@@ -44,7 +43,7 @@ func blockAdminBody(bucket volume.ID, owner client.ID, request []byte) []byte {
 	return e.B
 }
 
-func (s *Server) blockDeviceAdmin(m client.Message, ws *wsSession, p principal) ([]byte, int) {
+func (s *Server) leaseControlAdmin(m client.Message, ws *wsSession, p principal) ([]byte, int) {
 	failure := func(err error) ([]byte, int) {
 		status := objectStatus(err)
 		var native *client.StatusError
@@ -68,13 +67,12 @@ func (s *Server) blockDeviceAdmin(m client.Message, ws *wsSession, p principal) 
 		return failure(err)
 	}
 	if m.Kind != client.Request {
-		return failure(fail(400, "block administration requires a request"))
+		return failure(fail(400, "lease control requires a request"))
 	}
 	d := client.Decoder{B: m.Body}
 	version, id, expectedOwner, request := d.U16(), volume.ID(d.ID()), d.ID(), d.Blob()
-	r, err := nbd.DecodeManagementRequest(request)
-	if version != 1 || d.Done() != nil || err != nil || id == systemBucket || (m.Opcode == client.BlockDeviceList) != (r.Action == 1) {
-		return failure(fail(400, "invalid block device administration request"))
+	if version != 1 || d.Done() != nil || len(request) > 2048 || id == systemBucket {
+		return failure(fail(400, "invalid lease control request"))
 	}
 	if s.clusterPaused() || s.forceFrozen() || s.joinPending() {
 		return failure(fail(503, "cluster control transition in progress"))
@@ -97,21 +95,21 @@ func (s *Server) blockDeviceAdmin(m client.Message, ws *wsSession, p principal) 
 	owner := client.ID(local)
 	l := s.leaseRecord(b)
 	live := l != nil && !l.Released
-	if live && !l.Block {
-		return failure(fail(409, "bucket is under filesystem maintenance"))
+	if live && !l.ObjectIO {
+		return failure(fail(409, "bucket is under exclusive maintenance"))
 	}
 	readonly := live && l.ReadOnly
 	if live {
 		owner = l.Owner
 	}
 	if expectedOwner != (client.ID{}) && expectedOwner != owner {
-		return failure(fail(409, "block lease owner changed; refresh the device list"))
+		return failure(fail(409, "object lease owner changed; refresh the device list"))
 	}
 	if live && owner != client.ID(local) {
 		if expectedOwner != (client.ID{}) {
-			return failure(fail(409, "block lease owner changed; refresh the device list"))
+			return failure(fail(409, "object lease owner changed; refresh the device list"))
 		}
-		body, err := (client.NodeAdmin{Target: owner, Opcode: m.Opcode, Body: blockAdminBody(id, owner, request)}).MarshalBinary()
+		body, err := (client.NodeAdmin{Target: owner, Opcode: m.Opcode, Body: leaseControlBody(id, owner, request)}).MarshalBinary()
 		if err != nil {
 			return failure(err)
 		}
@@ -136,7 +134,7 @@ func (s *Server) blockDeviceAdmin(m client.Message, ws *wsSession, p principal) 
 			if !active {
 				continue
 			}
-			live, readonly = true, a.blockReadOnly.Load()
+			live, readonly = true, a.leaseReadOnly.Load()
 		}
 		target = session
 		break
@@ -144,46 +142,22 @@ func (s *Server) blockDeviceAdmin(m client.Message, ws *wsSession, p principal) 
 	s.wsMu.Unlock()
 	var result []byte
 	if target != nil {
-		if readonly && r.Action == 2 {
-			return failure(fail(403, "readonly exporter cannot resize devices"))
+		if readonly && m.Opcode == client.LeaseControlWrite {
+			return failure(fail(403, "readonly lease owner cannot accept control writes"))
 		}
-		result, err = target.requestDuplex(ctx, client.BucketBlockControl, request)
+		result, err = target.requestDuplex(ctx, client.BucketLeaseControl, request)
 	} else if live || b.underMaintenance() {
-		return failure(fail(409, "the block lease owner is unavailable or does not support dashboard management; reconnect it with an updated exporter"))
+		return failure(fail(409, "the object lease owner is unavailable or does not support dashboard management; reconnect it with an updated exporter"))
 	} else {
-		// No exporter is present. Acquire the same cluster-wide lease used by
-		// the CLI; never read or mutate around another client's exclusive lease.
-		actor := p
-		actor.frontendPermission = BucketWrite
-		if r.Action == 1 {
-			actor.frontendPermission = BucketRead
-		}
-		c, e := s.openFrontend(ctx, id, actor)
-		if e != nil {
-			return failure(e)
-		}
-		defer c.Close()
-		if e = c.BeginBlockMaintenance(ctx, r.Action == 1); e != nil {
-			return failure(e)
-		}
-		catalog := nbd.NewCatalog(c)
-		if e = catalog.CheckFormat(ctx); e != nil {
-			if errors.Is(e, nbd.ErrLegacyFormat) {
-				return failure(fail(409, "this bucket contains a filesystem rather than named block devices"))
-			}
-			return failure(e)
-		}
-		result, err = catalog.Manage(ctx, request, false)
+		// No registered client owns the bucket. Report this to the browser;
+		// only the client knows how to interpret its object payloads.
+		result = nil
 	}
 	if err != nil {
 		return failure(err)
 	}
-	items, _, err := nbd.DecodeManagementResult(result)
-	if err != nil {
-		return failure(err)
-	}
-	if r.Action == 1 && len(items) > int(r.Limit) || r.Action == 2 && (len(items) != 1 || items[0].ID != r.Device || items[0].Size != r.Size) {
-		return failure(fail(502, "invalid exporter response"))
+	if len(result) > 1<<20 {
+		return failure(fail(502, "lease owner response exceeds the control budget"))
 	}
 	e := client.Encoder{}
 	e.Bool(live)

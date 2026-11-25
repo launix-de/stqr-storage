@@ -48,6 +48,24 @@ func (v *Volume) Open(write bool) (*Handle, error) {
 	} else {
 		v.mu.RLock()
 	}
+	return v.openHandleLocked(write)
+}
+
+// TryOpen is for idle maintenance: busy volumes are skipped instead of queuing
+// a background writer ahead of foreground requests. acquired=false is not an error.
+func (v *Volume) TryOpen(write bool) (h *Handle, acquired bool, err error) {
+	if write {
+		acquired = v.mu.TryLock()
+	} else {
+		acquired = v.mu.TryRLock()
+	}
+	if !acquired {
+		return nil, false, nil
+	}
+	h, err = v.openHandleLocked(write)
+	return h, true, err
+}
+func (v *Volume) openHandleLocked(write bool) (*Handle, error) {
 	l := &handleLease{v: v, write: write}
 	if e := v.check(write); e != nil {
 		l.release()

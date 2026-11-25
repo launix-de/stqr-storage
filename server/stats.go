@@ -56,7 +56,7 @@ func (s *Server) CollectStats(filter client.StatsFilter) client.StatsSnapshot {
 				snap.ReasonBits |= 1 << 6
 			}
 			if description.State == BucketDeleting && !description.DeletionComplete {
-				snap.NeedRebuild = true
+				// Background reclamation is carried by the catalog, not a generation barrier.
 				snap.ReasonBits |= 1 << 8
 			}
 		}

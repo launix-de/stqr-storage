@@ -62,7 +62,7 @@ func TestBlockDeviceDashboardRoutesToLiveExporter(t *testing.T) {
 	}
 	call := func(op uint16, r nbd.ManagementRequest) ([]byte, int) {
 		t.Helper()
-		return target.node.dispatchAs(client.Message{Kind: client.Request, Opcode: op, ID: client.NewRequestID(), Body: blockAdminBody(b.ID(), client.ID{}, r.MarshalBinary())}, nil, userPrincipal(t, source.node))
+		return target.node.dispatchAs(client.Message{Kind: client.Request, Opcode: op, ID: client.NewRequestID(), Body: leaseControlBody(b.ID(), client.ID{}, r.MarshalBinary())}, nil, userPrincipal(t, source.node))
 	}
 	body, status := call(client.BlockDeviceList, nbd.ManagementRequest{Action: 1, Limit: 50})
 	if status != 200 {
@@ -100,6 +100,29 @@ func TestBlockDeviceDashboardRoutesToLiveExporter(t *testing.T) {
 	if err = c.WriteAt(ctx, items[0], payload, 7680); err != nil {
 		t.Fatal(err)
 	}
+	// The relay must be independent of any disk request/result codec.
+	opaque := []byte{0xff, 0x00, 0x7f, 0x80}
+	if err = c.Client.RegisterObjectControl(ctx, func(_ context.Context, request []byte) ([]byte, error) {
+		if !bytes.Equal(request, opaque) {
+			t.Error("control bytes changed")
+		}
+		return opaque, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	body, status = target.node.dispatchAs(client.Message{Kind: client.Request, Opcode: client.LeaseControlRead, ID: client.NewRequestID(), Body: leaseControlBody(b.ID(), client.ID{}, opaque)}, nil, userPrincipal(t, source.node))
+	if status != 200 {
+		t.Fatalf("opaque control %d: %x", status, body)
+	}
+	d := client.Decoder{B: body}
+	d.V()
+	d.Blob()
+	d.Bool()
+	d.Bool()
+	d.ID()
+	if !bytes.Equal(d.Blob(), opaque) || d.Done() != nil {
+		t.Fatal("relay interpreted opaque client result")
+	}
 }
 
 func TestBlockDeviceDashboardStoppedReadonlyAndLegacyOwners(t *testing.T) {
@@ -123,18 +146,47 @@ func TestBlockDeviceDashboardStoppedReadonlyAndLegacyOwners(t *testing.T) {
 	}
 	waitFsckReleased(t, b)
 	call := func(op uint16, r nbd.ManagementRequest) ([]byte, int) {
-		return s.dispatchAs(client.Message{Kind: client.Request, Opcode: op, ID: client.NewRequestID(), Body: blockAdminBody(b.ID(), client.ID{}, r.MarshalBinary())}, nil, userPrincipal(t, s))
+		return s.dispatchAs(client.Message{Kind: client.Request, Opcode: op, ID: client.NewRequestID(), Body: leaseControlBody(b.ID(), client.ID{}, r.MarshalBinary())}, nil, userPrincipal(t, s))
 	}
 	body, status := call(client.BlockDeviceList, nbd.ManagementRequest{Action: 1, Limit: 50})
 	if status != 200 {
 		t.Fatalf("stopped list %d: %x", status, body)
 	}
-	_, _, live, _ := decodeBlockAdminPage(t, body)
-	if live {
-		t.Fatal("stopped exporter reported live")
+	// Offline payload interpretation belongs to the browser. The server only
+	// announces the absence of a registered lease owner; it never scans or
+	// mutates descriptors on the dashboard's behalf.
+	d := client.Decoder{B: body}
+	d.V()
+	d.Blob()
+	if d.Bool() || d.Bool() {
+		t.Fatal("offline bucket reported live or readonly")
+	}
+	d.ID()
+	if len(d.Blob()) != 0 || d.Done() != nil {
+		t.Fatal("server synthesized a client-format result")
 	}
 	if body, status = call(client.BlockDeviceResize, nbd.ManagementRequest{Action: 2, Name: m.Name, Device: m.ID, Expected: m.Size, Size: 8192}); status != 200 {
-		t.Fatalf("stopped resize %d: %x", status, body)
+		t.Fatalf("offline discovery %d: %x", status, body)
+	}
+	// A dashboard capability may delegate ordinary native object commands,
+	// including via another cluster member, without becoming a bucket grant.
+	ref := client.Encoder{}
+	ref.ID(client.ID(b.ID()))
+	rootID := client.FilesystemRootID()
+	ref.B = append(ref.B, rootID[:]...)
+	ref.U64(0)
+	ref.U64(0)
+	ref.ID(client.ID{})
+	pAdmin := userPrincipal(t, s)
+	pAdmin.connection = &connectionAuthorization{admin: true}
+	pAdmin.User.PasswordHash = "" // actual dashboard socket behavior
+	localID, _ := parseID(s.cfg.Node.ID)
+	proxy, e := (client.NodeAdmin{Target: client.ID(localID), Opcode: 0x107, Body: ref.B}).MarshalBinary()
+	if e != nil {
+		t.Fatal(e)
+	}
+	if result, code := s.dispatchAs(client.Message{Kind: client.Request, Opcode: client.NodeAdminRequest, ID: client.NewRequestID(), Body: proxy}, nil, pAdmin); code != 404 && code != 301 {
+		t.Fatalf("native delegation %d: %x", code, result)
 	}
 	readonly, err := nbd.Open(ctx, s.cfg.Node.Advertise, a.Username, a.Password, client.ID(b.ID()), true)
 	if err != nil {
@@ -164,7 +216,7 @@ func TestBlockDeviceDashboardStoppedReadonlyAndLegacyOwners(t *testing.T) {
 	if _, status = call(client.BlockDeviceList, nbd.ManagementRequest{Action: 1, Limit: 50}); status != 409 {
 		t.Fatal("unregistered lease bypassed", status)
 	}
-	message := client.Message{Kind: client.Request, Opcode: client.BlockDeviceList, Body: blockAdminBody(b.ID(), client.ID{}, nbd.ManagementRequest{Action: 1, Limit: 50}.MarshalBinary())}
+	message := client.Message{Kind: client.Request, Opcode: client.BlockDeviceList, Body: leaseControlBody(b.ID(), client.ID{}, nbd.ManagementRequest{Action: 1, Limit: 50}.MarshalBinary())}
 	p := userPrincipal(t, s)
 	p.User.Role = "USER"
 	if _, status = s.dispatchAs(message, nil, p); status != 403 {

@@ -18,8 +18,9 @@ func TestDashboardBlockDevicesBrowser(t *testing.T) {
 	if os.Getenv("STQR_TEST_BROWSER_MODULE") == "" {
 		t.Skip("set STQR_TEST_BROWSER_MODULE for Playwright")
 	}
-	for _, readonly := range []bool{false, true} {
-		t.Run(map[bool]string{false: "writable", true: "readonly"}[readonly], func(t *testing.T) {
+	for _, mode := range []string{"writable", "readonly", "offline"} {
+		readonly, offline := mode == "readonly", mode == "offline"
+		t.Run(mode, func(t *testing.T) {
 			source, target := startAutomaticDaemonPair(t, false)
 			addTestVolume(t, source.node, "browser-blocks", "hdd", 32<<20)
 			b, _ := createProtocolBucket(t, source.node, "browser-disks")
@@ -46,7 +47,11 @@ func TestDashboardBlockDevicesBrowser(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			input, _ := json.Marshal(map[string]any{"url": target.node.cfg.Node.Advertise, "username": a.Username, "password": a.Password, "readonly": readonly})
+			if offline {
+				c.Close()
+				waitFsckReleased(t, b)
+			}
+			input, _ := json.Marshal(map[string]any{"url": target.node.cfg.Node.Advertise, "username": a.Username, "password": a.Password, "readonly": readonly, "offline": offline})
 			cmd := exec.CommandContext(ctx, "node", "dashboard_block_devices_browser.mjs")
 			cmd.Stdin = bytes.NewReader(input)
 			output, err := cmd.CombinedOutput()
@@ -54,6 +59,12 @@ func TestDashboardBlockDevicesBrowser(t *testing.T) {
 				t.Fatalf("block UI: %v\n%s", err, output)
 			}
 			t.Log(string(output))
+			if offline {
+				c, err = nbd.Open(ctx, source.node.cfg.Node.Advertise, a.Username, a.Password, client.ID(b.ID()), true)
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
 			actual, err := c.Lookup(ctx, m.Name)
 			if err != nil {
 				t.Fatal(err)

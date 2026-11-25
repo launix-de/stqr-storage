@@ -12,6 +12,11 @@ import (
 )
 
 func (r *rangeManager) move(ctx context.Context, p rangePlan) (retErr error) {
+	if err := r.server.waitForUserIO(ctx); err != nil {
+		return err
+	}
+	r.server.ioPriority.rebuilds.Add(1)
+	defer r.server.ioPriority.rebuilds.Add(-1)
 	stage := "source reservation"
 	defer func() {
 		if retErr != nil {

@@ -564,6 +564,9 @@ func (r *rangeManager) sendSnapshot(ctx context.Context, p rangePlan, final bool
 				break
 			}
 			for _, record := range records {
+				if err := r.server.waitForUserIO(ctx); err != nil {
+					return [32]byte{}, client.Proof{}, err
+				}
 				if !p.contains(record.Key.Object) {
 					continue
 				}
@@ -604,21 +607,34 @@ func (r *rangeManager) sendSnapshot(ctx context.Context, p rangePlan, final bool
 		}
 		err = func() error {
 			defer func() { file.Close(); os.Remove(file.Name()) }()
-			h, err := v.Open(false)
-			if err != nil {
-				return err
-			}
-			err = h.ScanRequests(func(record volume.RequestRecord) error {
-				if record.Key.Bucket != volume.ID(p.Before.Bucket) || !p.contains(record.Key.Object) {
-					return nil
+			var cursor *volume.ID
+			for {
+				if err := r.server.waitForUserIO(ctx); err != nil {
+					return err
 				}
-				_, err := file.Write(encodeRangeReceipt(record))
-				return err
-			})
-			h.Close()
-			if err != nil {
-				return err
+				h, err := v.Open(false)
+				if err != nil {
+					return err
+				}
+				records, err := h.ScanRequestRecords(cursor, 128)
+				h.Close()
+				if err != nil {
+					return err
+				}
+				if len(records) == 0 {
+					break
+				}
+				for _, record := range records {
+					if record.Key.Bucket == volume.ID(p.Before.Bucket) && p.contains(record.Key.Object) {
+						if _, err := file.Write(encodeRangeReceipt(record)); err != nil {
+							return err
+						}
+					}
+				}
+				next := records[len(records)-1].ID
+				cursor = &next
 			}
+
 			if _, err := file.Seek(0, io.SeekStart); err != nil {
 				return err
 			}

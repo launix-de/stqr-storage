@@ -11,6 +11,12 @@ try{
  await page.locator('[data-view="buckets"]').click();
  await page.waitForFunction(id=>{const cell=document.querySelector(`[data-bucket-throughput="${id}"]`);return cell&&!cell.textContent.includes('—')&&!cell.textContent.includes(' 0 B/s')},config.bucket);
  await page.screenshot({path:'/tmp/stqr-throughput-buckets.png'});
+ const lateID=await page.evaluate(async source=>{
+  const session=await(await fetch('/api/session')).json();const {NodeConnection,newID}=await import('/assets/protocol.js');
+  return new Promise((resolve,reject)=>{const c=new NodeConnection(session.csrf_token,()=>{},()=>{});c.onOpen=async()=>{try{const original=(await c.listBuckets()).buckets.find(b=>b.id===source);const id=newID();await c.createBucket({...original,id,name:'late-created-bucket',grants:[]});resolve(id)}catch(e){reject(e)}finally{c.stop()}}});
+ },config.bucket);
+ await page.locator(`[data-bucket="${lateID}"]`).waitFor({timeout:12000});
+
  await page.locator('[data-view="users"]').click();
  await page.waitForFunction(()=>document.querySelectorAll('#user-rows [data-user]').length===4);
  await page.waitForFunction(()=>{const rows=[...document.querySelectorAll('#user-rows [data-user-throughput]')];return rows.length===4&&rows.every(r=>!r.textContent.includes('—'))});

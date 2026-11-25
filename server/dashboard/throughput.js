@@ -38,3 +38,19 @@ export function bucketTotals(entries,now=Date.now()){
  for(const id of ids){const rates=bucketRates(entries,id,now);for(let i=0;i<2;i++){if(total[i]!=null)total[i]=rates[i]==null?null:total[i]+rates[i]}}
  return total;
 }
+
+// Bursty event snapshots are not independent throughput windows. Keep a bounded
+// three-second baseline rather than dividing every tiny no-payload update.
+export function recordRateSnapshot(entry,snapshot,now=Date.now()){
+ if(entry.snapshot?.boot!==snapshot.boot)entry.rateSamples=[];
+ const samples=entry.rateSamples??=[];
+ const last=samples.at(-1);
+ if(!last||snapshot.captured-last.captured>=250000000n)samples.push(snapshot);
+ const cutoff=snapshot.captured-3000000000n;
+ while(samples.length>1&&samples[1].captured<=cutoff)samples.shift();
+ while(samples.length>32)samples.shift();
+ const baseline=samples[0];
+ entry.previous=baseline&&snapshot.captured-baseline.captured>=1000000000n?baseline:null;
+ entry.snapshot=snapshot;entry.received=now;entry.placeholder=false;
+ return entry;
+}

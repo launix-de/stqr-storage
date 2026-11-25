@@ -1049,3 +1049,39 @@ these responses. Deleted-account counters are pruned when listing users.
 `dashboard/numbers.js` formats displayed quantities centrally with at most one
 fractional digit and German separators. Exact editable byte sizes retain the
 round-tripping `formatSize` encoding so displaying a size never changes a quota.
+
+### Opaque client formats and exclusive object access
+
+The three filesystem frontends (FUSE, kstqr and WinFsp) interpret their filesystem
+format on the client. QEMU/NBD interprets its device metadata and 1-MiB stripe
+layout on the client. Their data operations use the same native object methods;
+the daemon does not recognize filesystem or virtual-disk payload headers. The
+integrated S3 frontend also uses those object methods.
+
+`BUCKET_OBJECT_LEASE` (0x011c) is a generic exclusive object connection, including
+read-only mode and routed auxiliary connections. `BeginBlockMaintenance` remains
+a source-compatible Go alias for `BeginObjectLease`. Existing persisted leases
+retain the historical `Block` JSON key; it denotes this generic I/O mode. There
+is no persisted format change or object-content version number.
+
+An exclusive lease does not expand operation grants. DELETE always requires its
+DELETE grant. A WRITE-only NBD client handles full-stripe trim by PUTting an empty
+payload; the small object header remains, while payload space is released. The
+client also synthesizes zeros when reading sparse tails outside an object's
+payload. The storage server supplies neither disk geometry nor sparse-disk
+semantics. Restricted inventory/repair leases retain their native operation
+restrictions; filesystem reachability checking remains client code.
+
+Bucket deletion is announced by a committed DELETING catalog entry. The catalog
+carries that pending operation across later generations. It neither retains the
+announcing generation's control slot nor waits for physical deletion to finalize
+that generation. Each node reclaims bounded pages in idle cycles, skips occupied
+locks, and yields to user I/O and active rebuild work. Completion is observed
+before starting the later, short catalog-cleanup decision.
+
+Dashboard disk administration follows the same client boundary. The server
+relays bounded, opaque requests to registered object-lease owners; an absent
+owner is reported without opening a disk catalog. The browser handles offline
+descriptors using delegated native GET/STAT/inventory/ranged-CAS operations.
+Delegation requires an administrator and retains ordinary bucket authorization,
+lease exclusion, owner routing and traffic accounting.

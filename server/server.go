@@ -74,6 +74,12 @@ type Server struct {
 	latest                 atomic.Pointer[client.StatsSnapshot]
 	retiredIO              client.IOStats
 	userIO                 sync.Map
+	ioPriority             ioPriorities
+	cleanupMu              sync.Mutex
+	cleanupJobs            map[volume.ID]*bucketCleanupJob
+	cleanupView            *systemView
+	cleanupOrder           []volume.ID
+	cleanupCursor          int
 	peerStatsMu            sync.RWMutex
 	peerStats              map[client.ID]*peerObservation
 	peerManagers           map[string]bool
@@ -347,6 +353,7 @@ func Open(opts Options) (s *Server, err error) {
 	}
 	s.startLeaseRecovery()
 	s.startAcceptedCheckpoints()
+	s.startBucketReclaimer()
 	s.startS3Maintenance()
 	s.workers.Add(1)
 	go s.statsLoop()

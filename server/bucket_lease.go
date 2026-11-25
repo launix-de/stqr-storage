@@ -22,12 +22,13 @@ const bucketLeaseHeader = "X-STQR-Maintenance"
 // Leases do not expire on a timer or peer disconnect. Only the owner releases
 // them; a restarted owner can release its preceding incarnation's orphan lease.
 type bucketLease struct {
-	Bucket                    volume.ID
-	Epoch, Sequence           uint64
-	Request                   client.ID
-	Token, Owner, Boot        client.ID
-	User, Username            string
-	Block, ReadOnly, Released bool
+	Bucket             volume.ID
+	Epoch, Sequence    uint64
+	Request            client.ID
+	Token, Owner, Boot client.ID
+	User, Username     string
+	ObjectIO           bool `json:"Block"` // legacy persisted/wire field name; generic object I/O lease
+	ReadOnly, Released bool
 	// Opt-in so leases persisted by older nodes retain their placement fence.
 	AllowHandoff bool
 }
@@ -72,8 +73,8 @@ func (s *Server) storeLease(b *Bucket, l bucketLease) error {
 	} else {
 		a := &connectionAuthorization{accountID: l.User, bucket: b, bucketID: l.Bucket, permissions: BucketAllPermissions}
 		a.lease.Store(&l)
-		a.blockDevice.Store(l.Block)
-		a.blockReadOnly.Store(l.ReadOnly)
+		a.objectLease.Store(l.ObjectIO)
+		a.leaseReadOnly.Store(l.ReadOnly)
 		b.maintenance = a
 	}
 	b.mu.Unlock()
@@ -130,8 +131,8 @@ func (s *Server) loadBucketLeases() error {
 		if !l.Released {
 			a := &connectionAuthorization{accountID: l.User, bucket: b, bucketID: id, permissions: BucketAllPermissions}
 			a.lease.Store(&l)
-			a.blockDevice.Store(l.Block)
-			a.blockReadOnly.Store(l.ReadOnly)
+			a.objectLease.Store(l.ObjectIO)
+			a.leaseReadOnly.Store(l.ReadOnly)
 			b.maintenance = a
 		}
 		b.mu.Unlock()
@@ -337,7 +338,7 @@ func (s *Server) reserveLeaseLocked(b *Bucket, l bucketLease) error {
 		return e
 	}
 	required := BucketRead | BucketDelete
-	if l.Block {
+	if l.ObjectIO {
 		required = BucketRead
 		if !l.ReadOnly {
 			required |= BucketWrite
@@ -432,16 +433,15 @@ func (s *Server) retirePreviousEpochLeases(epoch uint64) error {
 	return nil
 }
 
-func (s *Server) beginClusterLease(ctx context.Context, b *Bucket, ws *wsSession, p principal, id client.ID, block, readonly bool) error {
+func (s *Server) beginClusterLease(ctx context.Context, b *Bucket, ws *wsSession, p principal, id client.ID, objectIO, readonly bool) error {
 	ids, epoch, e := s.leaseMembers()
 	if e != nil {
 		return e
 	}
-	l := bucketLease{Bucket: b.ID(), Epoch: epoch, Token: id, Request: id, Owner: s.control.ledger.node, Boot: s.boot, User: p.User.ID, Username: p.User.Name, Block: block, ReadOnly: readonly}
-	// Private frontends use block leases for bounded clear/clone inventories.
-	// Their namespace must stay pinned; ordinary block exports only exclude
-	// competing clients and can use the normal durable migration protocol.
-	l.AllowHandoff = block && p.frontendPermission == 0 && ws.authorization.frontendPermission == 0
+	l := bucketLease{Bucket: b.ID(), Epoch: epoch, Token: id, Request: id, Owner: s.control.ledger.node, Boot: s.boot, User: p.User.ID, Username: p.User.Name, ObjectIO: objectIO, ReadOnly: readonly}
+	// Private clear/clone inventories pin their namespace. General object
+	// leases exclude competing clients while allowing durable placement handoffs.
+	l.AllowHandoff = objectIO && p.frontendPermission == 0 && ws.authorization.frontendPermission == 0
 	ws.authorization.leaseOwner.Store(true)
 	ws.authorization.lease.Store(&l)
 	granted, e := s.callLease(ctx, ids[0], 0, l)
@@ -451,8 +451,8 @@ func (s *Server) beginClusterLease(ctx context.Context, b *Bucket, ws *wsSession
 		return e
 	}
 	ws.authorization.lease.Store(&granted)
-	ws.authorization.blockDevice.Store(block)
-	ws.authorization.blockReadOnly.Store(readonly)
+	ws.authorization.objectLease.Store(objectIO)
+	ws.authorization.leaseReadOnly.Store(readonly)
 	return nil
 }
 

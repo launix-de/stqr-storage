@@ -7,10 +7,10 @@ import (
 	"time"
 )
 
-// RegisterBlockControl enables bounded reverse management requests on the
+// RegisterObjectControl enables bounded reverse management requests on the
 // original lease socket. The handler must not close its Client. Legacy nodes
 // remain usable but cannot expose their exporter through the dashboard.
-func (c *Client) RegisterBlockControl(ctx context.Context, handler func(context.Context, []byte) ([]byte, error)) error {
+func (c *Client) RegisterObjectControl(ctx context.Context, handler func(context.Context, []byte) ([]byte, error)) error {
 	c.mu.Lock()
 	t := c.maintenance
 	if t == nil || handler == nil {
@@ -80,4 +80,10 @@ func (c *Client) receiveBlockControl(t *objectTransport, m Message) {
 		}
 		reply(ctx, status, result, detail)
 	}()
+}
+
+// RegisterBlockControl is a compatibility alias for opaque lease-owner control.
+// Deprecated: use RegisterObjectControl.
+func (c *Client) RegisterBlockControl(ctx context.Context, handler func(context.Context, []byte) ([]byte, error)) error {
+	return c.RegisterObjectControl(ctx, handler)
 }

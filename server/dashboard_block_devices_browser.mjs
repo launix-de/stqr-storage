@@ -10,8 +10,8 @@ try{
  await page.locator('#bucket-rows tr').filter({hasText:'browser-disks'}).locator('[data-bucket-action="disks"]').click();
  const list=page.locator('#block-devices-dialog'),grow=page.locator('#block-device-grow-dialog');
  const system=list.locator('[data-device]').filter({hasText:'system'});
- await system.waitFor();await list.getByText('data <archive>',{exact:true}).waitFor();
- if(!await list.locator('[data-exporter]').textContent().then(s=>s.includes('Exporter verbunden')))throw Error('Live exporter not shown');
+ await system.waitFor().catch(async e=>{throw Error(`${e.message}\nDashboard: ${await list.locator('[data-error]').textContent()} / ${errors.join('; ')}`)});await list.getByText('data <archive>',{exact:true}).waitFor();
+ if(!await list.locator('[data-exporter]').textContent().then(s=>s.includes(config.offline?'Kein Exporter':'Exporter verbunden')))throw Error('Exporter state incorrect');
  if(config.readonly){
   if(!await system.locator('[data-grow]').isDisabled())throw Error('Readonly resize enabled');
   if(!await list.locator('[data-exporter]').textContent().then(s=>s.includes('Nur lesen')))throw Error('Readonly state missing');
