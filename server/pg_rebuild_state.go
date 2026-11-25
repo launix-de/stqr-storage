@@ -517,6 +517,10 @@ func (r *rangeManager) beginPG(ctx context.Context, p rangePlan) error {
 		r.mu.Lock()
 		_, completed := r.pgRounds[p.id()]
 		state := r.pgStates[group]
+		if state != nil && state.Active != nil && state.Active.Round.ID != p.id() {
+			r.mu.Unlock()
+			return fail(503, "an accepted PG round must finish before proposing another")
+		}
 		active := state != nil && state.Active != nil && state.Active.Round.ID == p.id()
 		if !completed && !active {
 			if old, ok := r.pgOffers[group]; ok {
