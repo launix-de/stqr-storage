@@ -4,3 +4,5 @@
 #include "objects.c"
 
 #include "overlay.c"
+
+#include "block_protocol.c"

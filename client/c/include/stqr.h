@@ -54,6 +54,10 @@ int stqr_dial(stqr_client **out, const char *url, const char *username,
 void stqr_close(stqr_client *client);
 int stqr_reconnect(stqr_client *client);
 int stqr_status(const stqr_client *client);
+/* Exclusive opaque-object bucket lease. Call on a fresh dedicated client before
+ * accessing other owners. Retained owner sessions carry the lease token; close
+ * releases it. Reconnect cannot safely reacquire it and returns -ESTALE. */
+int stqr_object_lease(stqr_client *, int readonly);
 /* A failed, possibly sent mutation returns -EINPROGRESS. Reconnect and retry
  * with identical arguments and the same caller-owned request_id. No blind retry.
  */
