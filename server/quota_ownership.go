@@ -2,14 +2,64 @@
 package server
 
 import (
+	"reflect"
+
 	"github.com/launix-de/stqr-storage/client"
 	"github.com/launix-de/stqr-storage/volume"
 )
 
 type quotaOwnershipStamp struct {
-	placement *placementImage
-	view      *systemView
-	legacy    uint64
+	placement  *placementImage
+	view       *systemView
+	legacy     uint64
+	general    bool
+	standalone bool
+}
+
+// System image and placement pointers change for account edits, receipts and
+// map envelope revisions too. They are not ownership changes. Compare only the
+// immutable inputs actually used by the predicate; the volume can retain its
+// totals when changed buckets have no records on that volume.
+func (stamp quotaOwnershipStamp) ChangedOwnershipBuckets(previous any) ([]volume.ID, bool) {
+	before, ok := previous.(quotaOwnershipStamp)
+	if !ok || stamp.general != before.general || stamp.standalone != before.standalone {
+		return nil, false
+	}
+	if stamp.standalone {
+		return nil, true
+	}
+	var previousOrigins, nextOrigins []volumeRecoveryOrigin
+	if before.view != nil {
+		previousOrigins = before.view.manifest.VolumeRecoveries
+	}
+	if stamp.view != nil {
+		nextOrigins = stamp.view.manifest.VolumeRecoveries
+	}
+	if !reflect.DeepEqual(previousOrigins, nextOrigins) {
+		return nil, false
+	}
+	buckets := make(map[client.ID]bool)
+	for _, image := range []*placementImage{before.placement, stamp.placement} {
+		if image != nil {
+			for id := range image.bounds {
+				buckets[id] = true
+			}
+		}
+	}
+	var changed []volume.ID
+	for id := range buckets {
+		var oldEntries, newEntries []client.RangeEntry
+		if before.placement != nil {
+			oldEntries = before.placement.bucketEntries(id)
+		}
+		if stamp.placement != nil {
+			newEntries = stamp.placement.bucketEntries(id)
+		}
+		if !reflect.DeepEqual(oldEntries, newEntries) {
+			changed = append(changed, volume.ID(id))
+		}
+	}
+	return changed, true
 }
 
 func (s *Server) refreshQuotaOwnership(v *volume.Volume) error {
@@ -21,7 +71,7 @@ func (s *Server) refreshQuotaOwnership(v *volume.Volume) error {
 	managed := s.volumes[id.String()]
 	general := managed != nil && !managed.config.RecoveryOnly
 	s.mu.RUnlock()
-	stamp := quotaOwnershipStamp{placement: image, view: view}
+	stamp := quotaOwnershipStamp{placement: image, view: view, general: general, standalone: s.controller == nil}
 	if s.controller == nil {
 		s.mu.RLock()
 		stamp.legacy = s.cfg.Generation

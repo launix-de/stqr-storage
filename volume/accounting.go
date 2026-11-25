@@ -330,6 +330,15 @@ func (h *Handle) StorageUsageWhere(include func(Key) bool, authoritative ...bool
 	})
 }
 
+// OwnershipDelta optionally describes an immutable filter stamp. The method is
+// called under the volume lock and must not acquire server or volume locks.
+// When known is true, the predicate is unchanged outside the returned buckets.
+// Over-reporting is safe; omitting a changed bucket violates the contract.
+// Returning known=false requests a complete ownership recount.
+type OwnershipDelta interface {
+	ChangedOwnershipBuckets(previous any) (buckets []ID, known bool)
+}
+
 // SetOwnershipFilter selects records that are authoritative at this owner. An
 // uncommitted incoming copy or retired source copy is operating space, not an
 // additional required replica charged against a bucket's absolute quota.
@@ -345,6 +354,24 @@ func (v *Volume) SetOwnershipFilter(stamp any, include func(Key, bool) bool) err
 	}
 	if err := v.initAccounting(); err != nil {
 		return err
+	}
+	if v.owned != nil {
+		if delta, ok := stamp.(OwnershipDelta); ok {
+			changed, known := delta.ChangedOwnershipBuckets(v.ownerStamp)
+			unchanged := known
+			for _, bucket := range changed {
+				if v.accounting[bucket].records != 0 {
+					unchanged = false
+					break
+				}
+			}
+			if unchanged {
+				// Empty newly placed buckets cannot change existing totals, but
+				// future writes must use the newly published predicate.
+				v.ownerFilter, v.ownerStamp = include, stamp
+				return nil
+			}
+		}
 	}
 	selected := make(map[ID]bucketAllocation)
 	err := v.walkIndex(func(x indexEntry) error {
