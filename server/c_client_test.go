@@ -79,7 +79,7 @@ func TestCClient(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		c, err := client.Dial(context.Background(), host.URL, admin.Username, admin.Password, client.ID(b.ID()))
+		c, err := client.Dial(context.Background(), host.URL, admin.Username, admin.Password, client.ID(b.ID()), "fs")
 		if err != nil {
 			t.Fatal(err)
 		}

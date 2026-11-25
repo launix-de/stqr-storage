@@ -685,7 +685,7 @@ func TestDaemonSubscriptionRegistersOnlyAtWriteOwner(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	admin := source.node.cfg.Auth.BootstrapAdmin
-	reader, err := client.Dial(ctx, replica.cfg.Node.Advertise, admin.Username, admin.Password, client.BucketID(b.ID()))
+	reader, err := client.Dial(ctx, replica.cfg.Node.Advertise, admin.Username, admin.Password, client.BucketID(b.ID()), "fs")
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -22,7 +22,7 @@ func TestTicket32FilesystemPhysicalReclamation(t *testing.T) {
 	defer cancel()
 	admin := s.cfg.Auth.BootstrapAdmin
 	dial := func() *client.Client {
-		c, err := client.Dial(ctx, host.URL, admin.Username, admin.Password, client.BucketID(b.ID()))
+		c, err := client.Dial(ctx, host.URL, admin.Username, admin.Password, client.BucketID(b.ID()), "fs")
 		if err != nil {
 			t.Fatal(err)
 		}
