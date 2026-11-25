@@ -3,6 +3,7 @@ package server
 
 import (
 	"context"
+	"errors"
 	"sync/atomic"
 
 	"github.com/launix-de/stqr-storage/client"
@@ -126,5 +127,18 @@ func (r *rangeManager) stealSpace(ctx context.Context, bucket volume.ID, failed 
 	if !found {
 		return false, nil
 	}
-	return true, r.executeMove(ctx, plan, true)
+	err := r.executeMove(ctx, plan, true)
+	if errors.Is(err, errControlConflict) {
+		// The worker may have durably cancelled this offer while the helper
+		// waited for its execution gate. Retry the original object against
+		// current placement/capacity; the obsolete offer is not an I/O fault.
+		r.mu.Lock()
+		t := r.txns[plan.id()]
+		cancelled := t != nil && (t.aborted || t.forceRetired)
+		r.mu.Unlock()
+		if cancelled {
+			return true, fail(503, "capacity handoff was cancelled; retry current placement")
+		}
+	}
+	return true, err
 }

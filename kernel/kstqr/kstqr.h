@@ -11,6 +11,9 @@ int ks_transport_start(void);
 void ks_transport_stop(void);
 void ks_queue_fence_work(struct work_struct *);
 #define KS_RPC_SLOTS 4
+struct ks_fs;
+bool ks_transport_retryable(stqr_client *, int);
+int ks_reconnect_wait(struct ks_fs *, stqr_client *);
 struct ks_cache;
 struct ks_overlay_state;
 struct ks_rpc {

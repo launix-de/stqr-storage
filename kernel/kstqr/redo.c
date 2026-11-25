@@ -19,12 +19,14 @@ static void edits_free(struct ks_edit *w)
 static int object_stat(struct ks_fs *f, stqr_object_id id, stqr_info *info)
 {
 	struct ks_rpc *rpc = ks_rpc_lock(f, id);
-	int err = stqr_stat(rpc->client, id, info);
-	if (err == -ENOTCONN || err == -ECONNRESET || err == -EPIPE || err == -ETIMEDOUT ||
-	    (err == -EAGAIN && !stqr_status(rpc->client))) {
-		err = stqr_reconnect(rpc->client);
-		if (!err)
-			err = stqr_stat(rpc->client, id, info);
+	int err;
+	for (;;) {
+		err = stqr_stat(rpc->client, id, info);
+		if (!ks_transport_retryable(rpc->client, err))
+			break;
+		err = ks_reconnect_wait(f, rpc->client);
+		if (err)
+			break;
 	}
 	mutex_unlock(&rpc->lock);
 	return err;
@@ -216,25 +218,21 @@ static int apply_edits(struct ks_fs *f, stqr_object_id tx, const struct buf *enc
 			return err;
 		rpc = ks_rpc_lock(f, id);
 		ks_cache_forget(f, id);
-		if (remove)
-			err = stqr_delete(rpc->client, id, &opt);
-		else if (full)
-			err = stqr_put(rpc->client, id, data, n, &opt, &info);
-		else
-			err = stqr_put_range(rpc->client, id, off, data, n, &opt, &info);
-		if (err == -EINPROGRESS || err == -EACCES || err == -ENOTCONN ||
-		    err == -ECONNRESET || err == -EPIPE || err == -ETIMEDOUT) {
-			if (!stqr_reconnect(rpc->client)) {
-				if (remove)
-					err = stqr_delete(rpc->client, id, &opt);
-				else if (full)
-					err = stqr_put(rpc->client, id, data, n, &opt, &info);
-				else
-					err = stqr_put_range(rpc->client, id, off, data, n, &opt,
-							     &info);
-			}
-			if (err == -EINPROGRESS)
-				err = -EIO;
+		bool auth_retry = false;
+		for (;;) {
+			if (remove)
+				err = stqr_delete(rpc->client, id, &opt);
+			else if (full)
+				err = stqr_put(rpc->client, id, data, n, &opt, &info);
+			else
+				err = stqr_put_range(rpc->client, id, off, data, n, &opt, &info);
+			if (err == -EACCES && !auth_retry)
+				auth_retry = true;
+			else if (!ks_transport_retryable(rpc->client, err))
+				break;
+			err = ks_reconnect_wait(f, rpc->client);
+			if (err)
+				break;
 		}
 		mutex_unlock(&rpc->lock);
 		ks_cache_forget(f, id);
