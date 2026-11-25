@@ -7,6 +7,9 @@
 #include <linux/mutex.h>
 #include <linux/spinlock.h>
 #include <linux/workqueue.h>
+int ks_transport_start(void);
+void ks_transport_stop(void);
+void ks_queue_fence_work(struct work_struct *);
 #define KS_RPC_SLOTS 4
 struct ks_cache;
 struct ks_overlay_state;

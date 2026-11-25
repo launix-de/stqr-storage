@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #include "port.h"
+#include "kstqr.h"
 #include <crypto/hash.h>
 #include <linux/in.h>
 #include <linux/delay.h>
@@ -18,6 +19,36 @@
 #include <linux/completion.h>
 #include <net/net_namespace.h>
 #include <net/sock.h>
+/* Filesystem reclaim/read-ahead and writeback may synchronously wait for
+ * these jobs. Both levels need reclaim rescuers; fences use a separate queue
+ * because their workers themselves wait for transport jobs. Never flush work
+ * on system_unbound_wq from a WQ_MEM_RECLAIM caller.
+ */
+static struct workqueue_struct *sq_transport_wq, *sq_fence_wq;
+int ks_transport_start(void)
+{
+	sq_transport_wq = alloc_workqueue("kstqr-net", WQ_UNBOUND | WQ_MEM_RECLAIM, 0);
+	if (!sq_transport_wq)
+		return -ENOMEM;
+	sq_fence_wq = alloc_workqueue("kstqr-fence", WQ_UNBOUND | WQ_MEM_RECLAIM, 0);
+	if (!sq_fence_wq) {
+		destroy_workqueue(sq_transport_wq);
+		sq_transport_wq = NULL;
+		return -ENOMEM;
+	}
+	return 0;
+}
+void ks_transport_stop(void)
+{
+	/* Fence jobs must finish while their transport dependency is still live. */
+	destroy_workqueue(sq_fence_wq);
+	destroy_workqueue(sq_transport_wq);
+	sq_fence_wq = sq_transport_wq = NULL;
+}
+void ks_queue_fence_work(struct work_struct *work)
+{
+	queue_work(sq_fence_wq, work);
+}
 struct stqr_socket {
 	struct socket *sock;
 };
@@ -132,7 +163,7 @@ int sq_connect(struct stqr_socket **out, const char *host, unsigned port, unsign
 
 	INIT_WORK(&job.work, sq_connect_worker);
 	init_completion(&job.done);
-	queue_work(system_unbound_wq, &job.work);
+	queue_work(sq_transport_wq, &job.work);
 	/* The worker owns pointers into this frame. Even on a fatal signal we must
 	 * wait for its bounded connect to finish before returning/unloading code.
 	 * flush_work also waits past complete(), until the callback has returned.
@@ -205,7 +236,7 @@ static int sq_transfer(struct stqr_socket *s, void *p, size_t n, bool send)
 		return -EINTR;
 	INIT_WORK(&job.work, sq_transfer_worker);
 	init_completion(&job.done);
-	queue_work(system_unbound_wq, &job.work);
+	queue_work(sq_transport_wq, &job.work);
 	wait_for_completion(&job.done);
 	flush_work(&job.work);
 	return job.result;

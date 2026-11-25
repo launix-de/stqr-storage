@@ -499,7 +499,7 @@ test "$(cat /readonly/kernel.txt)" = 'written by kstqr'
 /mmap-test verify
 umount /readonly
 rmmod kstqr
-if dmesg | grep -E 'BUG:|WARNING: CPU:|Oops:|KASAN:'; then exit 1; fi
+if dmesg | grep -E 'BUG:|WARNING:|Oops:|KASAN:'; then exit 1; fi
 echo KSTQR_VM_PASS
 trap - EXIT
 poweroff -f
@@ -712,7 +712,7 @@ if /mount.kstqr --uri %[1]s --bucket %[7]s --readonly-bucket %[3]s --whitelist w
 test "$(cat /fresh/work/native)" = initialized
 umount /fresh
 rmmod kstqr
-if dmesg | grep -E 'BUG:|WARNING: CPU:|Oops:|KASAN:'; then exit 1; fi
+if dmesg | grep -E 'BUG:|WARNING:|Oops:|KASAN:'; then exit 1; fi
 echo KSTQR_VM_PASS
 trap - EXIT
 poweroff -f
@@ -737,7 +737,7 @@ poweroff -f
 	if err != nil {
 		t.Fatalf("cpio: %v %s", err, packErr.String())
 	}
-	args := []string{"-machine", "q35", "-m", "512M", "-smp", "2", "-display", "none", "-serial", "stdio", "-monitor", "none", "-no-reboot", "-kernel", image, "-initrd", archive, "-append", "console=ttyS0 panic=1 oops=panic rdinit=/init loglevel=6", "-nic", "user,model=virtio-net-pci"}
+	args := []string{"-machine", "q35", "-m", "512M", "-smp", "2", "-display", "none", "-serial", "stdio", "-monitor", "none", "-no-reboot", "-kernel", image, "-initrd", archive, "-append", "console=ttyS0 panic=1 oops=panic panic_on_warn=1 rdinit=/init loglevel=6", "-nic", "user,model=virtio-net-pci"}
 	if os.Getenv("STQR_KERNEL_TCG") != "1" {
 		args = append(args, "-enable-kvm", "-cpu", "host")
 	}
