@@ -62,6 +62,7 @@ func (s *Server) runKnownPeer(peer PeerConfig) {
 			if err == nil {
 				backoff = 100 * time.Millisecond
 				p.sendDirectory(s.peerDirectoryBody())
+				s.catchupRangePeer(p)
 				<-p.ctx.Done()
 			}
 			p.close()

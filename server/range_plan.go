@@ -26,6 +26,7 @@ type rangePlan struct {
 	ReplicaRemove   bool
 	ReplicaPromote  bool
 	ReplicaRelocate bool
+	CodecOnly       bool
 }
 
 func (p rangePlan) marshal() ([]byte, error) {
@@ -53,6 +54,9 @@ func (p rangePlan) marshal() ([]byte, error) {
 	}
 	if p.ReplicaRelocate {
 		schema = 6
+	}
+	if p.CodecOnly {
+		schema = 7
 	}
 	e.U16(schema)
 	e.Blob(before)
@@ -94,7 +98,7 @@ func decodeRangePlan(b []byte) (rangePlan, error) {
 	p.Moving.PrefixBits = d.U16()
 	p.Compression = volume.Compression(d.U8())
 	p.Physical = d.U64()
-	if schema >= 2 && schema <= 6 {
+	if schema >= 2 && schema <= 7 {
 		p.Attempt = d.ID()
 		if p.Attempt == (client.ID{}) {
 			return rangePlan{}, client.ErrProtocol
@@ -118,13 +122,16 @@ func decodeRangePlan(b []byte) (rangePlan, error) {
 			return rangePlan{}, client.ErrProtocol
 		}
 	}
+	if schema == 7 {
+		p.CodecOnly = true
+	}
 	if schema == 6 {
 		p.ReplicaRelocate = d.Bool()
 		if !p.ReplicaRelocate {
 			return rangePlan{}, client.ErrProtocol
 		}
 	}
-	if (schema < 1 || schema > 6) || a != nil || bErr != nil || d.Done() != nil {
+	if (schema < 1 || schema > 7) || a != nil || bErr != nil || d.Done() != nil {
 		return rangePlan{}, client.ErrProtocol
 	}
 	if err := p.validate(); err != nil {
@@ -142,6 +149,12 @@ func (p rangePlan) validate() error {
 		return client.ErrProtocol
 	}
 	old := p.Before.Entries[0]
+	if p.CodecOnly {
+		if p.ReplicaAdd || p.ReplicaRemove || p.ReplicaPromote || p.ReplicaRelocate {
+			return client.ErrProtocol
+		}
+		return p.validatePGCodec()
+	}
 	flags := 0
 	for _, flag := range []bool{p.ReplicaAdd, p.ReplicaRemove, p.ReplicaPromote, p.ReplicaRelocate} {
 		if flag {

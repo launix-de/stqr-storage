@@ -202,6 +202,20 @@ func (r *rangeManager) archive(body []byte) ([]byte, error) {
 	if d.Done() != nil {
 		return nil, client.ErrProtocol
 	}
+	return r.archivePage(offset, nil)
+}
+
+func (r *rangeManager) archivePage(offset uint64, group *client.ID) ([]byte, error) {
+	var buckets map[client.ID]bool
+	if group != nil {
+		buckets = map[client.ID]bool{}
+		for _, d := range r.server.bucketSnapshots() {
+			id, err := bucketID(d.ID)
+			if err == nil && (d.Policy.PlacementGroup == "" && *group == (client.ID{}) || d.Policy.PlacementGroup == group.String()) {
+				buckets[client.ID(id)] = true
+			}
+		}
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if offset > uint64(len(r.order)) {
@@ -212,7 +226,7 @@ func (r *rangeManager) archive(body []byte) ([]byte, error) {
 	size := 0
 	for at < uint64(len(r.order)) && len(records) < 24 {
 		t := r.txns[r.order[at]]
-		if t.decision != nil {
+		if t.decision != nil && (group == nil || buckets[t.plan.Before.Bucket]) {
 			e := client.Encoder{}
 			e.Blob(mustRangeWire(t.plan))
 			commit, err := t.decision.marshal()
@@ -238,7 +252,12 @@ func (r *rangeManager) archive(body []byte) ([]byte, error) {
 	return e.B, nil
 }
 
-func (r *rangeManager) syncArchives(ctx context.Context) error {
+func (r *rangeManager) syncArchives(ctx context.Context) error { return r.syncScopedArchives(ctx, nil) }
+func (r *rangeManager) syncGlobalArchives(ctx context.Context) error {
+	group := client.ID{}
+	return r.syncScopedArchives(ctx, &group)
+}
+func (r *rangeManager) syncScopedArchives(ctx context.Context, group *client.ID) error {
 	l := r.server.control.ledger
 	l.mu.Lock()
 	members := membershipIDs(l.current.Membership)
@@ -247,7 +266,7 @@ func (r *rangeManager) syncArchives(ctx context.Context) error {
 		if node == r.node {
 			continue
 		}
-		if err := r.syncArchiveFrom(ctx, node); err != nil {
+		if err := r.syncScopedArchiveFrom(ctx, node, group); err != nil {
 			return err
 		}
 	}
@@ -255,11 +274,20 @@ func (r *rangeManager) syncArchives(ctx context.Context) error {
 }
 
 func (r *rangeManager) syncArchiveFrom(ctx context.Context, node client.ID) error {
+	return r.syncScopedArchiveFrom(ctx, node, nil)
+}
+func (r *rangeManager) syncScopedArchiveFrom(ctx context.Context, node client.ID, group *client.ID) error {
 	var offset uint64
 	for {
 		e := client.Encoder{}
 		e.U64(offset)
-		body, err := r.call(ctx, node, peerRangeArchive, e.B)
+		var body []byte
+		var err error
+		if group == nil {
+			body, err = r.call(ctx, node, peerRangeArchive, e.B)
+		} else {
+			body, err = r.pgCall(ctx, node, peerPGRebuildRanges, pgArchiveRequest{Group: *group, After: offset})
+		}
 		if err != nil {
 			return err
 		}

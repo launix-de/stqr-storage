@@ -3,7 +3,6 @@ package server
 
 import (
 	"bytes"
-	"log"
 	"sort"
 	"time"
 
@@ -18,92 +17,28 @@ type rangeDestination struct {
 	observed       time.Time
 }
 
-func (r *rangeManager) start() {
-	s := r.server
-	s.workers.Add(1)
-	go func() {
-		defer s.workers.Done()
-		ticker := time.NewTicker(750 * time.Millisecond)
-		defer ticker.Stop()
-		var reported string
-		var reportedAt time.Time
-		for {
-			select {
-			case <-s.ctx.Done():
-				return
-			case <-ticker.C:
-			case <-r.capacityWake:
-			}
-			if s.joinPending() || s.shortStopping.Load() || s.clusterPaused() || s.forceFrozen() {
-				continue
-			}
-			_ = r.collectMemos()
-			_ = r.collectAbortedImports()
-			_ = r.finishEmptyDrains()
-			r.work.Lock()
-			var pending *rangePlan
-			r.mu.Lock()
-			for _, id := range r.order {
-				t := r.txns[id]
-				if t.plan.Source == r.node && r.active(t) {
-					copy := t.plan
-					pending = &copy
-					break
-				}
-			}
-			r.mu.Unlock()
-			var stepErr error
-			moveStarted := time.Now()
-			moved := true
-			if pending != nil {
-				stepErr = r.move(s.ctx, *pending)
-			} else if plan, ok := r.nextPressure(); ok {
-				stepErr = r.move(s.ctx, plan)
-			} else if plan, ok := r.planNext(); ok {
-				stepErr = r.move(s.ctx, plan)
-			} else {
-				moved = false
-				stepErr = r.finishNodeDrain(s.ctx)
-			}
-			r.mu.Lock()
-			if moved && stepErr == nil {
-				elapsed := time.Since(moveStarted)
-				if r.capacityMoveTime == 0 {
-					r.capacityMoveTime = elapsed
-				} else {
-					r.capacityMoveTime = (r.capacityMoveTime*3 + elapsed) / 4
-				}
-			}
-			r.lastError = stepErr
-			r.mu.Unlock()
-			r.work.Unlock()
-			if stepErr != nil {
-				message := stepErr.Error()
-				if message != reported || time.Since(reportedAt) >= 30*time.Second {
-					log.Printf("STQR range worker node=%s: %s", r.node, message)
-					reported, reportedAt = message, time.Now()
-				}
-			} else {
-				reported = ""
-			}
+func (r *rangeManager) start() { r.startPGWorkers() }
 
-		}
-	}()
-}
-
-func (r *rangeManager) destinations(d BucketDescription) ([]rangeDestination, map[client.ID]uint64) {
+func (r *rangeManager) destinations(d BucketDescription, fresh ...bool) ([]rangeDestination, map[client.ID]uint64) {
 	s := r.server
-	local := s.CollectStats(client.StatsFilter{})
-	snapshots := []client.StatsSnapshot{local}
-	seen := map[client.ID]time.Time{local.Node: time.Now()}
-	s.peerStatsMu.RLock()
-	for _, observation := range s.peerStats {
-		if observation.online && observation.snapshot != nil && observation.connection.Capabilities&client.CapabilityRangeHandoff != 0 {
-			snapshots = append(snapshots, *observation.snapshot)
-			seen[observation.snapshot.Node] = observation.lastSeen
+	var snapshots []client.StatsSnapshot
+	seen := map[client.ID]time.Time{}
+	if catalog := r.pgCatalog.Load(); catalog != nil && len(fresh) == 0 && time.Since(catalog.captured) < 1500*time.Millisecond {
+		snapshots = catalog.snapshots
+		seen = catalog.seen
+	} else {
+		local := s.CollectStats(client.StatsFilter{})
+		snapshots = []client.StatsSnapshot{local}
+		seen[local.Node] = time.Now()
+		s.peerStatsMu.RLock()
+		for _, observation := range s.peerStats {
+			if observation.online && observation.snapshot != nil && observation.connection.Capabilities&client.CapabilityRangeHandoff != 0 {
+				snapshots = append(snapshots, *observation.snapshot)
+				seen[observation.snapshot.Node] = observation.lastSeen
+			}
 		}
+		s.peerStatsMu.RUnlock()
 	}
-	s.peerStatsMu.RUnlock()
 	view := s.currentSystem.Load()
 	if view == nil {
 		return nil, nil
@@ -152,7 +87,7 @@ func (r *rangeManager) destinations(d BucketDescription) ([]rangeDestination, ma
 	return out, capacity
 }
 
-func (r *rangeManager) planNext() (rangePlan, bool) {
+func (r *rangeManager) planNextGroup(group string, descriptions []BucketDescription) (rangePlan, bool) {
 	s := r.server
 	image := s.placement.Load()
 	view := s.currentSystem.Load()
@@ -163,7 +98,7 @@ func (r *rangeManager) planNext() (rangePlan, bool) {
 	l.mu.Lock()
 	busy := l.slot != nil || l.request != nil
 	l.mu.Unlock()
-	if busy {
+	if busy && (group == "" || group == "*") {
 		return rangePlan{}, false
 	}
 	s.mu.RLock()
@@ -186,7 +121,13 @@ func (r *rangeManager) planNext() (rangePlan, bool) {
 	r.mu.Unlock()
 	var balance capacityMove
 	var balancing bool
-	for _, d := range s.bucketSnapshots() {
+	for _, d := range descriptions {
+		if group != "*" && d.Policy.PlacementGroup != group {
+			continue
+		}
+		if group != "" && s.controlBlocksPG(client.ID(newVolumeID(d.ID))) {
+			continue
+		}
 		if d.ID == systemBucket.String() || d.DeletionComplete || d.State == BucketDeleting {
 			continue
 		}
@@ -205,7 +146,12 @@ func (r *rangeManager) planNext() (rangePlan, bool) {
 			}
 		}
 		if d.DesiredPolicy != nil {
-			if !samePlacementPolicy(d.Policy, *d.DesiredPolicy) {
+			if group != "" && group != "*" {
+				if plan, ok := r.planPGReplicaCodec(d); ok {
+					return plan, true
+				}
+			}
+			if !samePlacementPolicy(d.Policy, *d.DesiredPolicy) || group != "" && group != "*" {
 				if plan, ok := r.planPolicyPlacement(d, drainingNode, draining); ok {
 					return plan, true
 				}

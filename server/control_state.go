@@ -52,6 +52,7 @@ type controlBase struct {
 }
 
 type controlClaim struct {
+	GlobalBarrier bool `json:",omitempty"`
 	FrozenBuckets []client.ID
 	Exclusion     *controlExclusion `json:",omitempty"`
 	Round         client.RoundID
@@ -187,7 +188,7 @@ func equalControlBase(a, b controlBase) bool {
 }
 
 func equalControlClaim(a, b controlClaim) bool {
-	return a.Round == b.Round && equalControlBase(a.Base, b.Base) && reflect.DeepEqual(a.Required, b.Required) && reflect.DeepEqual(a.FrozenBuckets, b.FrozenBuckets) && reflect.DeepEqual(a.Exclusion, b.Exclusion)
+	return a.GlobalBarrier == b.GlobalBarrier && a.Round == b.Round && equalControlBase(a.Base, b.Base) && reflect.DeepEqual(a.Required, b.Required) && reflect.DeepEqual(a.FrozenBuckets, b.FrozenBuckets) && reflect.DeepEqual(a.Exclusion, b.Exclusion)
 }
 
 func equalControlProposal(a, b controlProposal) bool {
@@ -235,6 +236,9 @@ func (p controlProposal) decision() (client.Decision, error) {
 	if claim.Exclusion != nil {
 		e.Text("externally fenced exclusion v1")
 		encodeControlExclusion(&e, claim.Exclusion)
+	}
+	if claim.GlobalBarrier {
+		e.Text("global membership/shutdown barrier v1")
 	}
 	return client.NewDecision(claim.Base.Membership.Epoch, claim.Base.Sequence+1, claim.Base.Head, p.Kind, e.B)
 }
@@ -500,7 +504,7 @@ func (l *controlLedger) beginRequestWithExclusion(kind uint16, required []client
 	if l.request != nil && (exclusion == nil || !l.canSuspendRequest()) || l.attempt == ^uint64(0) || l.current.Membership.Epoch == 0 || !hasControlNode(membershipIDs(l.current.Membership), l.node) {
 		return controlClaim{}, errControlConflict
 	}
-	claim := controlClaim{Round: client.RoundID{Membership: l.current.Membership.Epoch, Generation: l.current.Generation, Initiator: l.node, Attempt: l.attempt + 1}, Base: cloneControlBase(l.current), Required: append([]client.ID{}, required...), Exclusion: exclusion, FrozenBuckets: append([]client.ID(nil), frozen...)}
+	claim := controlClaim{GlobalBarrier: kind == controlMembership || kind == controlShutdown, Round: client.RoundID{Membership: l.current.Membership.Epoch, Generation: l.current.Generation, Initiator: l.node, Attempt: l.attempt + 1}, Base: cloneControlBase(l.current), Required: append([]client.ID{}, required...), Exclusion: exclusion, FrozenBuckets: append([]client.ID(nil), frozen...)}
 	if !l.checkClaim(claim) || !validControlKind(kind, claim) {
 		return controlClaim{}, errControlConflict
 	}

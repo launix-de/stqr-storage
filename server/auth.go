@@ -2,6 +2,7 @@
 package server
 
 import (
+	"context"
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/json"
@@ -153,7 +154,8 @@ type session struct {
 	Expires                time.Time
 }
 type principal struct {
-	cowInternal bool // admitted node preservation; never decoded from a client
+	requestContext context.Context
+	cowInternal    bool // admitted node preservation; never decoded from a client
 	// Internal S3 operations retain the original HTTP operation grant, including
 	// write-only/delete-only users. Native clients cannot set this field.
 	frontendPermission BucketPermissions

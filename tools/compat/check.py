@@ -24,6 +24,7 @@ FORMAT_PATHS = (
     "kernel/kstqr/*.c", "kernel/kstqr/*.h", "qemu-plugin-nbd/devices.go",
     "server/*_wire.go", "server/*_state.go", "server/*_image.go", "server/*_format.go",
     "server/*_journal.go", "server/*_snapshot.go", "server/durability.go",
+    "server/range_plan.go", "server/pg_rebuild_codec.go",
     "server/bucket_lease.go", "server/s3*.go", "server/placement.go",
     "server/quota*.go", "server/Bucket.go", "server/PlacementGroup.go",
     "server/config.go", "server/auth.go", "server/users.go", "server/s3_keys.go",

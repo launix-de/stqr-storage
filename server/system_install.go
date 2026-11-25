@@ -103,6 +103,9 @@ func (s *Server) installSystemView(view *systemView) error {
 	s.invalidateFrontendIssuers(view.manifest.Membership)
 	s.closeExcludedTransports(view.manifest.Membership)
 	if s.scopes != nil {
+		if err := s.scopes.retirePGMembership(); err != nil {
+			return err
+		}
 		s.scopes.mu.Lock()
 		err := s.scopes.rebuildLocked()
 		s.scopes.mu.Unlock()

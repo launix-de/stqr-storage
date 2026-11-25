@@ -3,9 +3,11 @@ package server
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/json"
 	"path/filepath"
 	"reflect"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -33,6 +35,14 @@ const (
 	rangeForceCancelled
 	rangeForceRetired
 	rangeForcePromoted
+	rangePGPrepared
+	rangePGStarted
+	rangePGCompleted
+	rangePGImported
+	rangePGSourceCancelled
+	rangePGOffered
+	rangePGOfferRetired
+	rangePGRetired
 )
 
 type rangeCommit struct {
@@ -42,16 +52,19 @@ type rangeCommit struct {
 	Source, Target client.Proof
 }
 type rangeEvent struct {
-	Exclusion        *controlClaim
-	Boot, SourceBoot client.ID
-	LogicalUsed      uint64
-	QuotaUsed        uint64
-	PeerBoot         client.ID
-	Object           *rangeObjectMemo
-	ID, Digest       [32]byte
-	Plan             []byte
-	Commit           *rangeCommit
-	TargetDone       client.Proof
+	RetiredMembership uint64          `json:",omitempty"`
+	PGGroup           client.ID       `json:",omitempty"`
+	PG                *pgRebuildRound `json:",omitempty"`
+	Exclusion         *controlClaim
+	Boot, SourceBoot  client.ID
+	LogicalUsed       uint64
+	QuotaUsed         uint64
+	PeerBoot          client.ID
+	Object            *rangeObjectMemo
+	ID, Digest        [32]byte
+	Plan              []byte
+	Commit            *rangeCommit
+	TargetDone        client.Proof
 }
 type rangeTxn struct {
 	sourceBoot, targetBoot                                        client.ID
@@ -77,6 +90,12 @@ type rangeTxn struct {
 	remaining                                                     uint64
 }
 type rangeManager struct {
+	pgOffers         map[client.ID]rangePlan
+	pgCatalog        atomic.Pointer[pgRebuildCatalog]
+	pgRuntime        pgRebuildRuntime
+	pgStates         map[client.ID]*pgRebuildState
+	pgRounds         map[[32]byte]pgRebuildRound
+	pgOrder          [][32]byte
 	activity         atomic.Pointer[rangeActivity]
 	lastError        error
 	pressures        []rangePressure
@@ -90,7 +109,6 @@ type rangeManager struct {
 	order            [][32]byte
 	initialized      bool
 	memoCursor       *volume.Key
-	work             sync.Mutex
 	capacityWake     chan struct{}
 }
 
@@ -114,6 +132,9 @@ func (s *Server) initRanges(dataDir string) error {
 	}
 	s.cfg.RangeVersion = 1
 	if err := saveConfig(s.configPath, s.cfg); err != nil {
+		return err
+	}
+	if err := r.retirePGMembership(); err != nil {
 		return err
 	}
 	r.mu.Lock()
@@ -155,6 +176,43 @@ func (r *rangeManager) replay(record controlRecord) error {
 	var event rangeEvent
 	if err := decodeControlRecord(record.Data, &event); err != nil {
 		return err
+	}
+	if record.Kind != rangeGenesis && !r.initialized {
+		return volume.ErrCorrupt
+	}
+	if record.Kind == rangePGRetired {
+		a := event.PG
+		if a == nil || !validPGRound(*a) || event.RetiredMembership <= a.Membership {
+			return volume.ErrCorrupt
+		}
+		state := r.pgStates[a.Group]
+		if state == nil || state.Active == nil || !samePGRound(state.Active.Round, *a) {
+			return volume.ErrCorrupt
+		}
+		state.Active = nil
+		delete(r.pgOffers, a.Group)
+		return nil
+	}
+	if record.Kind == rangePGOffered || record.Kind == rangePGOfferRetired {
+		if r.pgOffers == nil {
+			r.pgOffers = map[client.ID]rangePlan{}
+		}
+		p, err := decodeRangePlan(event.Plan)
+		if err != nil || event.PGGroup == (client.ID{}) || p.Source != r.node {
+			return volume.ErrCorrupt
+		}
+		if record.Kind == rangePGOffered {
+			if old, ok := r.pgOffers[event.PGGroup]; ok && old.id() != p.id() {
+				return volume.ErrCorrupt
+			}
+			r.pgOffers[event.PGGroup] = p
+		} else {
+			delete(r.pgOffers, event.PGGroup)
+		}
+		return nil
+	}
+	if record.Kind >= rangePGPrepared && record.Kind <= rangePGSourceCancelled {
+		return r.replayPG(record.Kind, event.PG)
 	}
 	if record.Kind == rangeGenesis {
 		if r.initialized || record.Proof.RecordSequence != 1 {
@@ -327,6 +385,9 @@ func (r *rangeManager) busyLocked() bool {
 }
 
 func (r *rangeManager) reserve(p rangePlan, sourceBoot ...client.ID) error {
+	if err := r.ensurePGPrepared(r.server.ctx, p); err != nil {
+		return err
+	}
 	wire, err := p.marshal()
 	if len(p.Before.Entries) > 0 && p.Before.Entries[0].State == 4 {
 		return fail(503, "range awaits rescued storage")
@@ -369,7 +430,7 @@ func (r *rangeManager) reserve(p rangePlan, sourceBoot ...client.ID) error {
 	busy := l.slot != nil
 	membership := l.current.Membership
 	l.mu.Unlock()
-	if busy || membership.Epoch != p.Before.Membership || !hasControlNode(membershipIDs(membership), p.Source) || !hasControlNode(membershipIDs(membership), p.Target) {
+	if (busy && r.server.controlBlocksPG(p.Before.Bucket)) || membership.Epoch != p.Before.Membership || !hasControlNode(membershipIDs(membership), p.Source) || !hasControlNode(membershipIDs(membership), p.Target) {
 		return errControlConflict
 	}
 	if p.Source != r.node && p.Target != r.node {
@@ -768,30 +829,45 @@ func (r *rangeManager) rebuildLocked() error {
 		return nil
 	}
 	patches := append([]client.MapPatch{}, view.patches...)
+	// Journal arrival order is not causal order after a partition. Index
+	// transitions by their complete BEFORE binding and replay descendants as
+	// their parents become available. Disjoint scopes commute naturally.
+	type binding struct {
+		bucket client.ID
+		digest [32]byte
+	}
+	key := func(bucket client.ID, entry client.RangeEntry) binding {
+		raw, _ := json.Marshal(entry)
+		return binding{bucket, sha256.Sum256(raw)}
+	}
+	waiting := make(map[binding]*rangeTxn)
 	for _, id := range r.order {
 		t := r.txns[id]
 		if t.decision == nil {
 			continue
 		}
-		for i, p := range patches {
-			if p.Bucket != t.plan.Before.Bucket {
-				continue
-			}
-			var next []client.RangeEntry
-			applied := false
-			for _, entry := range p.Entries {
-				old := t.plan.Before.Entries[0]
-				if entry.Start == old.Start && entry.PrefixBits == old.PrefixBits && entry.OwnerEpoch == old.OwnerEpoch && reflect.DeepEqual(entry, old) {
-					next = append(next, t.plan.After.Entries...)
-					applied = true
-				} else {
-					next = append(next, entry)
-				}
-			}
-			if applied {
-				patches[i].Entries = next
+		k := key(t.plan.Before.Bucket, t.plan.Before.Entries[0])
+		if previous := waiting[k]; previous != nil && !reflect.DeepEqual(previous.plan.After.Entries, t.plan.After.Entries) {
+			return volume.ErrCorrupt
+		}
+		waiting[k] = t
+	}
+	for i, patch := range patches {
+		queue := append([]client.RangeEntry(nil), patch.Entries...)
+		var entries []client.RangeEntry
+		for len(queue) > 0 {
+			entry := queue[0]
+			queue = queue[1:]
+			k := key(patch.Bucket, entry)
+			if t := waiting[k]; t != nil {
+				delete(waiting, k)
+				queue = append(queue, t.plan.After.Entries...)
+			} else {
+				entries = append(entries, entry)
 			}
 		}
+		sort.Slice(entries, func(a, b int) bool { return bytes.Compare(entries[a].Start[:], entries[b].Start[:]) < 0 })
+		patches[i].Entries = entries
 	}
 	image, err := buildPlacement(patches)
 	if err != nil {

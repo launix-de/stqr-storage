@@ -332,11 +332,12 @@ func (c *clusterController) changeWithExclusion(ctx context.Context, next *clien
 	for _, d := range c.server.bucketSnapshots() {
 		if !d.DeletionComplete && (!quotaPolicy(d).Limits.Unlimited || quotaPolicy(d).Limits.Guaranteed != 0) {
 			id, _ := bucketID(d.ID)
-			if (findQuota(c.server.currentSystem.Load(), client.ID(id)) == nil || quotaPolicy(d).Limits.Guaranteed != 0 || quotaPolicy(d).Limits.Accounting == "physical") && !hasControlNode(frozen, client.ID(id)) {
+			if (findQuota(c.server.currentSystem.Load(), client.ID(id)) == nil || d.Policy.PlacementGroup == "" && (quotaPolicy(d).Limits.Guaranteed != 0 || quotaPolicy(d).Limits.Accounting == "physical")) && !hasControlNode(frozen, client.ID(id)) {
 				frozen = append(frozen, client.ID(id))
 			}
 		}
 	}
+
 	required := membershipIDs(base.Membership)
 	for _, id := range membershipIDs(membership) {
 		if !hasControlNode(required, id) {
@@ -393,8 +394,8 @@ func (c *clusterController) finishReservedChange(ctx context.Context, claim cont
 			}
 		}
 	}()
-	// ALL reservations fence new scoped handoffs. Collect committed histories
-	// before capturing the checkpoint, including disjoint remote rebuilds.
+	// Ordinary global metadata only checkpoints the NULL rebuild scope.
+	// Membership/shutdown/exclusion are explicit barriers across all scopes.
 	var recovered []forceRecoveredRange
 	if exclusion != nil {
 		if err := l.startForceConstruction(claim); err != nil {
@@ -420,8 +421,29 @@ func (c *clusterController) finishReservedChange(ctx context.Context, claim cont
 					return nil, 0, err
 				}
 			}
-		} else if err := c.server.scopes.syncArchives(ctx); err != nil {
-			return nil, 0, err
+		} else {
+			var err error
+			if claim.GlobalBarrier {
+				err = c.server.scopes.syncArchives(ctx)
+			} else {
+				err = c.server.scopes.syncGlobalArchives(ctx)
+			}
+			if err != nil {
+				return nil, 0, err
+			}
+		}
+		if claim.GlobalBarrier || exclusion != nil {
+			for _, g := range c.server.placementGroups.Load().object.Groups {
+				id, e := bucketID(g.ID)
+				if e != nil || id == systemPlacementGroup {
+					continue
+				}
+				for _, node := range required {
+					if err := c.server.scopes.syncPGArchive(ctx, node, client.ID(id)); err != nil {
+						return nil, 0, err
+					}
+				}
+			}
 		}
 	}
 	var err error
@@ -534,7 +556,7 @@ func (c *clusterController) finishReservedChange(ctx context.Context, claim cont
 		}
 		planned = bundle.Root
 	}
-	allocations, err := c.captureQuotaAllocations(ctx, claim, membership, descriptions, planned)
+	allocations, err := c.captureQuotaAllocations(ctx, claim, membership, descriptions, source.placementGroups.Load(), planned)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -637,6 +659,24 @@ func (s *Server) executeGlobalAdmin(m client.Message, actor principal) ([]byte, 
 			return nil, 0, client.ErrProtocol
 		}
 		frozen = append(frozen, id)
+	}
+	if m.Opcode == placementGroupSet {
+		d := client.Decoder{B: m.Body}
+		schema, group := d.U16(), d.ID()
+		if d.Err != nil || schema != 1 && schema != 2 {
+			return nil, 0, client.ErrProtocol
+		}
+		for _, desc := range s.bucketSnapshots() {
+			if !desc.DeletionComplete && (desc.Policy.PlacementGroup == group.String() || desc.DesiredPolicy != nil && desc.DesiredPolicy.PlacementGroup == group.String()) {
+				id, err := bucketID(desc.ID)
+				if err != nil {
+					return nil, 0, err
+				}
+				if !hasControlNode(frozen, client.ID(id)) {
+					frozen = append(frozen, client.ID(id))
+				}
+			}
+		}
 	}
 	return c.change(s.ctx, nil, func() (*adminDraft, error) {
 		draft, err := s.prepareAdminDraft(m, actor)

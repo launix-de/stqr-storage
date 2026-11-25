@@ -644,6 +644,15 @@ func TestDaemonReplicaDisjointNodeMaskReplacement(t *testing.T) {
 		}
 		count++
 	}
+	// Explicit-plan fixtures must run codec work on the new primary,
+	// which can be either replacement node depending on capacity/ID ordering.
+	entry, _ := source.node.placement.Load().lookup(client.ID(b.ID()), client.ObjectID{1})
+	for _, node := range nodes {
+		if node.node.control.ledger.node == entry.Locations[0].Node {
+			awaitPGVersion(t, node.node, group, 2)
+			break
+		}
+	}
 	awaitPGVersion(t, third.node, group, 2)
 	retry, err := conn.Append(ctx, client.ObjectID{1}, []byte("base"), request)
 	if err != nil || retry != original {

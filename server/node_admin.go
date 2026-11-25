@@ -165,6 +165,9 @@ func (s *Server) verifyDelegatedAdmin(body []byte) ([]byte, error) {
 // Lease coordination must not queue behind long delegated copies, nor occupy
 // the ordinary worker needed by quota/control callbacks while participants drain.
 func isLeaseCoordinatorRequest(m client.Message) bool {
+	if m.Opcode == peerPGRebuildRequest {
+		return true
+	}
 	if m.Opcode >= peerCowCapture && m.Opcode <= peerCowSync && m.Opcode != peerCowMaterialize {
 		return true
 	}

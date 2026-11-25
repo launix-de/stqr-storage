@@ -116,6 +116,14 @@ func (p *peerConnection) dispatchRequestQueue(queue <-chan client.Message) {
 		case <-p.ctx.Done():
 			return
 		case m := <-queue:
+			if p.server.launchPGRequest(p.ctx, m, identity, func(body []byte) {
+				select {
+				case p.outgoing <- client.Message{Kind: client.Response, Opcode: m.Opcode, ID: m.ID, Body: body}:
+				case <-p.ctx.Done():
+				}
+			}) {
+				continue
+			}
 			body, _ := p.server.dispatchAs(m, nil, identity)
 			if m.Kind == client.Request {
 				select {

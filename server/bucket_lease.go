@@ -22,6 +22,9 @@ const bucketLeaseHeader = "X-STQR-Maintenance"
 // Leases do not expire on a timer or peer disconnect. Only the owner releases
 // them; a restarted owner can release its preceding incarnation's orphan lease.
 type bucketLease struct {
+	Group              client.ID   `json:",omitempty"`
+	Mask               uint64      `json:",omitempty"`
+	Members            []client.ID `json:",omitempty"`
 	Bucket             volume.ID
 	Epoch, Sequence    uint64
 	Request            client.ID
@@ -37,12 +40,19 @@ type leaseRequest struct {
 	Lease  bucketLease
 }
 
-func (s *Server) leaseMembers() ([]client.ID, uint64, error) {
+func (s *Server) leaseMembers(buckets ...*Bucket) ([]client.ID, uint64, error) {
 	v := s.currentSystem.Load()
 	if v == nil || s.control == nil {
 		return nil, 0, fail(503, "membership unavailable")
 	}
 	ids := membershipIDs(v.manifest.Membership)
+	if len(buckets) > 0 && buckets[0] != nil && buckets[0].Describe().Policy.PlacementGroup != "" {
+		var err error
+		ids, _, err = s.pgMembers(buckets[0].Describe())
+		if err != nil {
+			return nil, 0, err
+		}
+	}
 	sort.Slice(ids, func(i, j int) bool { return bytes.Compare(ids[i][:], ids[j][:]) < 0 })
 	if len(ids) == 0 {
 		return nil, 0, fail(503, "empty membership")
@@ -60,6 +70,7 @@ func (s *Server) leaseRecord(b *Bucket) *bucketLease {
 		return nil
 	}
 	copy := *b.lease
+	copy.Members = append([]client.ID(nil), copy.Members...)
 	return &copy
 }
 func (s *Server) storeLease(b *Bucket, l bucketLease) error {
@@ -156,10 +167,11 @@ func (s *Server) callLease(ctx context.Context, node client.ID, action uint8, l 
 	if e != nil {
 		return l, e
 	}
-	if e = json.Unmarshal(raw, &l); e != nil {
+	var result bucketLease
+	if e = json.Unmarshal(raw, &result); e != nil {
 		return l, fmt.Errorf("lease reply decode from %s action %d: %w (bytes %d)", node.String(), action, e, len(raw))
 	}
-	return l, nil
+	return result, nil
 }
 func (s *Server) receiveBucketLease(ctx context.Context, body []byte, actor client.ID) ([]byte, error) {
 	var req leaseRequest
@@ -167,19 +179,56 @@ func (s *Server) receiveBucketLease(ctx context.Context, body []byte, actor clie
 		return nil, fmt.Errorf("invalid lease request JSON")
 	}
 	l := req.Lease
-	ids, epoch, e := s.leaseMembers()
-	if e != nil {
-		return nil, e
-	}
-	if !hasControlNode(ids, actor) || l.Bucket == systemBucket || l.Token == (client.ID{}) || l.Epoch != epoch {
-		return nil, ErrBucketForbidden
-	}
+	// Action 4 probes the cluster lease capability before a bucket exists.
+	// It binds only membership and authenticates the peer; it acquires no lease.
 	if req.Action == 4 {
+		ids, epoch, err := s.leaseMembers()
+		if err != nil {
+			return nil, err
+		}
+		if !hasControlNode(ids, actor) || l.Token == (client.ID{}) || l.Epoch != epoch || l.Bucket != (volume.ID{}) || l.Group != (client.ID{}) || l.Mask != 0 || len(l.Members) != 0 {
+			return nil, ErrBucketForbidden
+		}
 		return json.Marshal(l)
 	}
 	b, e := s.Bucket(l.Bucket)
 	if e != nil {
 		return nil, e
+	}
+	ids, epoch, e := s.leaseMembers()
+	continuing := false
+	if l.Group != (client.ID{}) && (req.Action == 2 || req.Action == 3) && len(l.Members) > 0 {
+		prior := s.leaseRecord(b)
+		continuing = prior != nil && prior.Token == l.Token && prior.Group == l.Group && prior.Mask == l.Mask && equalIDs(prior.Members, l.Members)
+		if req.Action == 3 && prior == nil {
+			continuing = true
+		}
+		if continuing {
+			for i, node := range l.Members {
+				if !hasControlNode(ids, node) || i > 0 && bytes.Compare(l.Members[i-1][:], node[:]) >= 0 {
+					return nil, ErrBucketForbidden
+				}
+			}
+			ids = append([]client.ID(nil), l.Members...)
+		}
+	}
+	if l.Group != (client.ID{}) && !continuing {
+		ids, epoch, e = s.leaseMembers(b)
+		if e == nil {
+			members, mask, err := s.pgMembers(b.Describe())
+			if err != nil {
+				return nil, err
+			}
+			if b.Describe().Policy.PlacementGroup != l.Group.String() || mask != l.Mask || !equalIDs(members, l.Members) {
+				return nil, ErrBucketForbidden
+			}
+		}
+	}
+	if e != nil {
+		return nil, e
+	}
+	if !hasControlNode(ids, actor) || l.Bucket == systemBucket || l.Token == (client.ID{}) || l.Epoch != epoch {
+		return nil, ErrBucketForbidden
 	}
 	if req.Action == 0 || req.Action == 2 {
 		var cancel context.CancelFunc
@@ -194,6 +243,10 @@ func (s *Server) receiveBucketLease(ctx context.Context, body []byte, actor clie
 		}
 		gate := s.leaseGate
 		s.leaseMu.Unlock()
+		if l.Group != (client.ID{}) && s.scopes != nil {
+			value, _ := s.scopes.pgRuntime.leaseGates.LoadOrStore(l.Bucket, make(chan struct{}, 1))
+			gate = value.(chan struct{})
+		}
 		select {
 		case gate <- struct{}{}:
 			defer func() { <-gate }()
@@ -306,8 +359,11 @@ func (s *Server) reserveLeaseLocked(b *Bucket, l bucketLease) error {
 	}
 	s.control.ledger.mu.Lock()
 	transitioning := s.control.ledger.slot != nil
+	if l.Group != (client.ID{}) {
+		transitioning = false
+	}
 	s.control.ledger.mu.Unlock()
-	if epoch != l.Epoch || transitioning || s.bucketFrozen(l.Bucket) {
+	if epoch != l.Epoch || transitioning || s.controlBlocksPG(client.ID(l.Bucket)) || s.bucketFrozen(l.Bucket) {
 		return fail(503, "bucket control transition in progress")
 	}
 	if prior := s.leaseRecord(b); prior != nil {
@@ -434,7 +490,7 @@ func (s *Server) retirePreviousEpochLeases(epoch uint64) error {
 }
 
 func (s *Server) beginClusterLease(ctx context.Context, b *Bucket, ws *wsSession, p principal, id client.ID, objectIO, readonly bool) error {
-	ids, epoch, e := s.leaseMembers()
+	ids, epoch, e := s.leaseMembers(b)
 	if e != nil {
 		return e
 	}
@@ -442,6 +498,14 @@ func (s *Server) beginClusterLease(ctx context.Context, b *Bucket, ws *wsSession
 	// Private clear/clone inventories pin their namespace. General object
 	// leases exclude competing clients while allowing durable placement handoffs.
 	l.AllowHandoff = objectIO && p.frontendPermission == 0 && ws.authorization.frontendPermission == 0
+	if b.Describe().Policy.PlacementGroup != "" {
+		group, _ := bucketID(b.Describe().Policy.PlacementGroup)
+		_, mask, err := s.pgMembers(b.Describe())
+		if err != nil {
+			return err
+		}
+		l.Group, l.Mask, l.Members = client.ID(group), mask, append([]client.ID(nil), ids...)
+	}
 	ws.authorization.leaseOwner.Store(true)
 	ws.authorization.lease.Store(&l)
 	granted, e := s.callLease(ctx, ids[0], 0, l)
@@ -495,6 +559,9 @@ func (s *Server) startLeaseRecovery() {
 					continue
 				}
 				ids, _, e := s.leaseMembers()
+				if l.Group != (client.ID{}) {
+					ids = append([]client.ID(nil), l.Members...)
+				}
 				if e != nil {
 					continue
 				}

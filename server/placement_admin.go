@@ -19,8 +19,9 @@ const (
 
 type placementGroupListEntry struct {
 	PlacementGroup
-	BucketCount    uint64 `json:"bucket_count"`
-	PendingBuckets uint64 `json:"pending_buckets"`
+	BucketCount    uint64         `json:"bucket_count"`
+	PendingBuckets uint64         `json:"pending_buckets"`
+	Rebuild        *pgRebuildInfo `json:"rebuild,omitempty"`
 }
 
 type placementGroupReceipt struct {
@@ -91,7 +92,10 @@ func (s *Server) executePlacementAdmin(m client.Message, p principal) ([]byte, i
 				next = page[len(page)-1].ID
 				break
 			}
-			entry := placementGroupListEntry{g, counts[g.ID], pending[g.ID]}
+			entry := placementGroupListEntry{PlacementGroup: g, BucketCount: counts[g.ID], PendingBuckets: pending[g.ID]}
+			if s.scopes != nil && g.ID != systemPlacementGroup.String() {
+				entry.Rebuild = s.scopes.pgInfo(g.ID)
+			}
 			raw, err := json.Marshal(entry)
 			if err != nil {
 				return nil, 0, err
