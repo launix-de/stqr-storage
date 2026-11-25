@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io"
 	"math"
+	"time"
 
 	"github.com/launix-de/stqr-storage/client"
 	"github.com/launix-de/stqr-storage/volume"
@@ -329,14 +330,29 @@ func (b *Bucket) getRange(ctx context.Context, p principal, id volume.ObjectID, 
 	return h.GetRange(volume.Key{Bucket: b.ID(), Object: id}, offset, length)
 }
 
-// CopyTo holds one snapshot handle for the complete transfer, without buffering
-// the whole object. Mutations never expose partially applied object contents.
+// CopyTo captures a bounded local snapshot before invoking the caller writer.
+// A stalled client cannot hold a volume handle through network backpressure.
 func (b *Bucket) CopyTo(ctx context.Context, p principal, id volume.ObjectID, offset, length uint64, dst io.Writer) (volume.Info, uint64, error) {
-	return b.copyToChecked(ctx, p, id, offset, length, dst, nil)
+	file, err := s3Temp("stqr-bucket-read-*")
+	if err != nil {
+		return volume.Info{}, 0, err
+	}
+	defer file.Close()
+	info, n, err := b.copyToChecked(ctx, p, id, offset, length, &objectBudgetWriter{dst: file, remaining: maxObjectStagingBytes}, nil)
+	if err != nil {
+		return info, 0, err
+	}
+	if _, err = file.Seek(0, io.SeekStart); err != nil {
+		return info, 0, err
+	}
+	copied, err := io.CopyN(bucketContextWriter{ctx: ctx, w: dst}, file, int64(n))
+	return info, uint64(copied), err
 }
 
 // Check while holding the same native read handle that copies the data.
 func (b *Bucket) copyToCheckedUnmetered(ctx context.Context, p principal, id volume.ObjectID, offset, length uint64, dst io.Writer, condition *volume.Options) (volume.Info, uint64, error) {
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
 	if err := ctx.Err(); err != nil {
 		return volume.Info{}, 0, err
 	}
@@ -436,6 +452,10 @@ func (b *Bucket) Stat(ctx context.Context, p principal, id volume.ObjectID) (vol
 	return info, b.absenceError(id, info, err)
 }
 func (b *Bucket) mutateUnmetered(ctx context.Context, p principal, id volume.ObjectID, opcode uint16, offset, length uint64, src io.Reader, expected []byte, opt volume.Options) (volume.Result, error) {
+	// This is a cooperative local-work budget, never a timer-driven unlock in
+	// the middle of an atomic storage transaction. Caller IO was staged first.
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
 	for {
 		result, err := b.mutateAttempt(ctx, p, id, opcode, offset, length, src, expected, opt)
 		var wait *acceptedCheckpoint

@@ -2,6 +2,8 @@
 /* Included after core.c: reuse its checked canonical codec, not another ABI. */
 #include "kstqr.h"
 #include <linux/ktime.h>
+#include <linux/delay.h>
+#include <linux/sched/signal.h>
 #include <linux/completion.h>
 #include <linux/overflow.h>
 #include <linux/sort.h>
@@ -41,17 +43,60 @@ struct ks_rpc *ks_rpc_lock(struct ks_fs *f, stqr_object_id id)
 	mutex_lock(&rpc->lock);
 	return rpc;
 }
+/* Mounted storage has hard reconnect semantics: a transient node outage is
+ * not a missing file or corrupt executable page. Per-attempt socket deadlines
+ * still apply, but only explicit cancellation or a semantic server error ends
+ * the operation. Mutation callers retain their original request identity. */
+bool ks_transport_retryable(stqr_client *client, int err)
+{
+	switch (err) {
+	case -ENOTCONN:
+	case -ECONNRESET:
+	case -ECONNREFUSED:
+	case -EPIPE:
+	case -ETIMEDOUT:
+	case -EHOSTUNREACH:
+	case -ENETUNREACH:
+	case -ENETDOWN:
+	case -EINPROGRESS:
+		return true;
+	case -EAGAIN:
+		return stqr_status(client) == 0 || stqr_status(client) == 503;
+	default:
+		return false;
+	}
+}
+int ks_reconnect_wait(struct ks_fs *f, stqr_client *client)
+{
+	unsigned pause = 20;
+	for (;;) {
+		int err;
+		if (READ_ONCE(f->stopping))
+			return -ESHUTDOWN;
+		if (fatal_signal_pending(current))
+			return -EINTR;
+		err = stqr_reconnect(client);
+		if (!err || !ks_transport_retryable(client, err))
+			return err;
+		msleep(pause);
+		pause = min(pause * 2, 1000U);
+	}
+}
 static int get_object(struct ks_fs *f, stqr_object_id id, void **p, size_t *n, stqr_info *info)
 {
 	struct ks_rpc *rpc = ks_rpc_lock(f, id);
 	int err;
 	atomic64_inc(&f->rpc_gets);
-	err = stqr_get(rpc->client, id, p, n, info);
-	if (err == -ENOTCONN || err == -ECONNRESET || err == -EPIPE || err == -ETIMEDOUT ||
-	    (err == -EAGAIN && !stqr_status(rpc->client))) {
-		err = stqr_reconnect(rpc->client);
-		if (!err)
-			err = stqr_get(rpc->client, id, p, n, info);
+	for (;;) {
+		err = stqr_get(rpc->client, id, p, n, info);
+		if (!ks_transport_retryable(rpc->client, err))
+			break;
+		sq_free(*p);
+		*p = NULL;
+		*n = 0;
+		err = ks_reconnect_wait(f, rpc->client);
+		if (err)
+			break;
 	}
 	mutex_unlock(&rpc->lock);
 	return err;
@@ -73,18 +118,17 @@ static int cas_object(struct ks_fs *f, stqr_object_id id, const void *p, size_t 
 	rpc = ks_rpc_lock(f, id);
 	ks_cache_forget(f, id);
 	atomic64_inc(&f->rpc_cas);
-	err = stqr_cas(rpc->client, id, 1, 0, expected, expected_size, p, n, &o, &info);
-	if (err == -EINPROGRESS || err == -EACCES || err == -ENOTCONN ||
-	    err == -ECONNRESET || err == -EPIPE || err == -ETIMEDOUT ||
-	    (err == -EAGAIN && !stqr_status(rpc->client))) {
-		// A bucket unlock/grant change may leave this socket with its old
-		// read-only capability. A transport failure also requires reconnect.
-		// Preserve the request ID so a lost CAS reply is not applied twice.
-		if (!stqr_reconnect(rpc->client))
-			err = stqr_cas(rpc->client, id, 1, 0, expected, expected_size, p, n, &o,
-				       &info);
-		if (err == -EINPROGRESS)
-			err = -EIO;
+	bool auth_retry = false;
+	for (;;) {
+		err = stqr_cas(rpc->client, id, 1, 0, expected, expected_size, p, n, &o, &info);
+		if (err == -EACCES && !auth_retry) {
+			auth_retry = true;
+		} else if (!ks_transport_retryable(rpc->client, err))
+			break;
+		// Replaying this exact request ID resolves an uncertain CAS reply once.
+		err = ks_reconnect_wait(f, rpc->client);
+		if (err)
+			break;
 	}
 	ks_cache_forget(f, id);
 	mutex_unlock(&rpc->lock);
@@ -779,14 +823,16 @@ static int index_read(struct ks_fs *f, const struct ks_node *view, stqr_object_i
 			}
 			rpc = ks_rpc_lock(store, p->id);
 			atomic64_inc(&f->rpc_ranges);
-			err = stqr_get_range(rpc->client, p->id, p->offset + offset, n, &data,
-					     &actual, &info);
-			if (err == -ENOTCONN || err == -ECONNRESET || err == -EPIPE ||
-			    err == -ETIMEDOUT || (err == -EAGAIN && !stqr_status(rpc->client))) {
-				err = stqr_reconnect(rpc->client);
-				if (!err)
-					err = stqr_get_range(rpc->client, p->id, p->offset + offset,
-							     n, &data, &actual, &info);
+			for (;;) {
+				err = stqr_get_range(rpc->client, p->id, p->offset + offset, n,
+						     &data, &actual, &info);
+				if (!ks_transport_retryable(rpc->client, err))
+					break;
+				sq_free(data);
+				data = NULL;
+				err = ks_reconnect_wait(store, rpc->client);
+				if (err)
+					break;
 			}
 			mutex_unlock(&rpc->lock);
 			if (!err && actual != n)
@@ -2024,6 +2070,7 @@ struct ks_fence_work {
  struct work_struct work;
  struct completion done;
  stqr_fence *fence;
+ struct ks_fs *fs;
  unsigned target;
  int error;
 };
@@ -2031,7 +2078,12 @@ static void ks_fence_worker(struct work_struct *work)
 {
  struct ks_fence_work *job = container_of(work, struct ks_fence_work, work);
  unsigned saved = memalloc_nofs_save();
- job->error = stqr_fence_wait_one(job->fence, job->target);
+ for (;;) {
+  job->error = stqr_fence_wait_one(job->fence, job->target);
+  if (!ks_transport_retryable(NULL, job->error)) break;
+  if (READ_ONCE(job->fs->stopping)) { job->error = -ESHUTDOWN; break; }
+  msleep(100);
+ }
  memalloc_nofs_restore(saved);
  complete(&job->done);
 }
@@ -2057,6 +2109,7 @@ int ks_checkpoint(struct ks_fs *f)
  if (!jobs) { err = -ENOMEM; goto done; }
  for (unsigned n = 0; n < count; n++) {
   jobs[n].fence = f->fence;
+  jobs[n].fs = f;
   jobs[n].target = n;
   INIT_WORK(&jobs[n].work, ks_fence_worker);
   init_completion(&jobs[n].done);

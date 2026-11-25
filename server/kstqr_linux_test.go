@@ -777,6 +777,51 @@ trap - EXIT
 poweroff -f
 `, endpoint, upperID.String(), client.ID(b.ID()).String())
 	}
+
+	if os.Getenv("STQR_KERNEL_OUTAGE") == "1" {
+		cold, e := fs.Create(ctx, client.FilesystemRootID(), "outage-cold", 0644, 0, 0, false)
+		if e != nil {
+			t.Fatal(e)
+		}
+		if _, e = fs.WriteAt(ctx, cold.ID, bytes.Repeat([]byte("R"), 65536), 0); e != nil {
+			t.Fatal(e)
+		}
+		if _, e = fs.Create(ctx, client.FilesystemRootID(), "append-once", 0644, 0, 0, false); e != nil {
+			t.Fatal(e)
+		}
+		if e = conn.Sync(ctx); e != nil {
+			t.Fatal(e)
+		}
+		native, control, fixture := startKernelOutageFixture(t, s)
+		t.Cleanup(func() {
+			if fixture.pauses.Load() != 2 || fixture.drops.Load() != 1 {
+				t.Errorf("outage fixture did not exercise both failures: pauses=%d dropped_replies=%d", fixture.pauses.Load(), fixture.drops.Load())
+			}
+		})
+		run("cc", "-static", "-O2", "-Wall", "-Wextra", "-Werror", "-o", filepath.Join(initrdRoot, "outage-test"), filepath.Join(root, "tests/outage.c"))
+		init = fmt.Sprintf(`#!/bin/sh
+set -eu
+export PATH=/bin
+/bin/busybox --install -s /bin
+trap 'echo KSTQR_VM_FAIL; poweroff -f' EXIT
+mount -t proc proc /proc
+mount -t sysfs sys /sys
+mount -t devtmpfs dev /dev
+ip link set lo up
+ip link set eth0 up
+ip addr add 10.0.2.15/24 dev eth0
+ip route add default via 10.0.2.2
+insmod /kstqr.ko
+/mount.kstqr --uri %s --bucket %s --credentials /credentials /mnt
+/outage-test %s
+umount /mnt
+rmmod kstqr
+if dmesg | grep -E 'BUG:|WARNING:|Oops:|KASAN:'; then exit 1; fi
+echo KSTQR_VM_PASS
+trap - EXIT
+poweroff -f
+`, native, client.ID(b.ID()).String(), control)
+	}
 	if err = os.WriteFile(filepath.Join(initrdRoot, "init"), []byte(init), 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -806,6 +851,9 @@ poweroff -f
 	}
 	if os.Getenv("STQR_KERNEL_CACHE_RETENTION") == "1" && !strings.Contains(string(output), "KSTQR_CACHE_RETENTION_PASS") {
 		t.Fatalf("cache retention test did not pass: %v\n%s", err, output)
+	}
+	if os.Getenv("STQR_KERNEL_OUTAGE") == "1" && !strings.Contains(string(output), "KSTQR_OUTAGE_PASS") {
+		t.Fatalf("outage test did not pass: %v\n%s", err, output)
 	}
 	if err != nil || !strings.Contains(string(output), "KSTQR_VM_PASS") || strings.Contains(string(output), "KSTQR_VM_FAIL") {
 		t.Fatalf("kernel VM: %v\n%s", err, output)
@@ -899,6 +947,18 @@ poweroff -f
 			if _, err := conn.CheckFilesystem(ctx); err != nil {
 				t.Fatal(err)
 			}
+		}
+		return
+	}
+	if os.Getenv("STQR_KERNEL_OUTAGE") == "1" {
+		file, e := fs.Lookup(ctx, client.FilesystemRootID(), "append-once")
+		if e != nil {
+			t.Fatal(e)
+		}
+		data := make([]byte, 4)
+		n, e := fs.ReadAt(ctx, file.ID, data, 0)
+		if e != nil || n != 4 || string(data) != "once" {
+			t.Fatal("uncertain append was applied more than once", string(data), e)
 		}
 		return
 	}
