@@ -12,8 +12,22 @@ import (
 
 type fsckMemory struct {
 	*MemoryFilesystemStore
-	failAfter int
-	deletes   int
+	failAfter    int
+	deletes      int
+	deletedBytes uint64
+}
+
+// This test backend is used only where callers explicitly declare all mounts
+// offline, matching the native collector's exclusive-maintenance requirement.
+func (m *fsckMemory) ResetAbandonedObjectReferences(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.references = nil
+	m.claims = nil
+	return nil
 }
 
 func (m *fsckMemory) scanFilesystemObjects(ctx context.Context, after *ObjectID, limit uint32) ([]fsCheckObject, *ObjectID, error) {
@@ -51,12 +65,13 @@ func (m *fsckMemory) Delete(ctx context.Context, id ObjectID, opt DeleteOptions)
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	_, ok := m.objects[id]
+	object, ok := m.objects[id]
 	if !ok {
 		return ErrNotFound
 	}
 	delete(m.objects, id)
 	m.deletes++
+	m.deletedBytes += uint64(len(object.data))
 	return nil
 }
 
@@ -121,8 +136,9 @@ func TestFilesystemFsckCollectsOrphansAndPreservesSharedSparseData(t *testing.T)
 		}
 	}
 	before := len(store.objects)
+	onlineDeleted := store.deletedBytes
 	result, err := checkFilesystem(ctx, store)
-	if err != nil || result.Scanned != uint64(before) || result.Deleted < 523 || result.DeletedBytes < 1400000 {
+	if err != nil || result.Scanned != uint64(before) || result.Deleted < 521 || result.DeletedBytes+onlineDeleted < 1400000 {
 		t.Fatalf("%+v %v", result, err)
 	}
 	if result.Reachable+result.Deleted != result.Scanned || uint64(len(store.objects)) != result.Reachable {

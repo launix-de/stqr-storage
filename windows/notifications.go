@@ -55,10 +55,11 @@ func (f *Filesystem) directoryEntries(p string, id client.ObjectID) ([]Entry, er
 // RefreshDirectory starts a fresh enumeration at offset zero; subsequent pages
 // keep the same snapshot, avoiding duplicate/skipped entries during a refresh.
 func (f *Filesystem) RefreshDirectory(h uint64) error {
-	current, err := f.get(h)
+	current, release, err := f.acquire(h)
 	if err != nil {
 		return err
 	}
+	defer release()
 	if !current.options.Directory {
 		return syscall.ENOTDIR
 	}

@@ -10,6 +10,8 @@
 #include <linux/xattr.h>
 static bool valid_name(const char *);
 static int ks_overlay_node_cas(struct ks_fs *, const struct ks_snapshot *, const struct ks_node *);
+static int ks_overlay_prune_orphan(struct ks_fs *, stqr_object_id);
+static int delete_orphan_object(struct ks_fs *, stqr_object_id);
 const stqr_object_id ks_root_id = {{0x3f, 0xda, 0xbc, 0x50, 0xba, 0xc2, 0xa0, 0xe8,
 				    0x3a, 0x0a, 0x4b, 0x32, 0x46, 0xca, 0x79, 0xbe,
 				    0x13, 0x7a, 0x00, 0x19, 0x40, 0x39, 0x44, 0x2a,
@@ -82,6 +84,35 @@ int ks_reconnect_wait(struct ks_fs *f, stqr_client *client)
 		pause = min(pause * 2, 1000U);
 	}
 }
+int ks_object_reference(struct ks_fs *f, stqr_object_id id, stqr_id token, unsigned action)
+{
+	struct ks_rpc *rpc = ks_rpc_lock(f, id);
+	int (*operation)(stqr_client *, stqr_object_id, stqr_id);
+	int err;
+	switch (action) {
+	case 0: operation = stqr_object_pin; break;
+	case 1: operation = stqr_object_unpin; break;
+	case 2: operation = stqr_object_claim; break;
+	case 3: operation = stqr_object_release_claim; break;
+	case 4: operation = stqr_object_pin_dependency; break;
+	case 5: operation = stqr_object_unpin_dependency; break;
+	default: mutex_unlock(&rpc->lock); return -EINVAL;
+	}
+	bool auth_retry = false;
+	for (;;) {
+		err = operation(rpc->client, id, token);
+		if (err == -EACCES && !auth_retry)
+			auth_retry = true;
+		else if (!ks_transport_retryable(rpc->client, err))
+			break;
+		/* Tokens are durable and idempotent across every reconnect. */
+		err = ks_reconnect_wait(f, rpc->client);
+		if (err)
+			break;
+	}
+	mutex_unlock(&rpc->lock);
+	return err;
+}
 static int get_object(struct ks_fs *f, stqr_object_id id, void **p, size_t *n, stqr_info *info)
 {
 	struct ks_rpc *rpc = ks_rpc_lock(f, id);
@@ -118,17 +149,33 @@ static int cas_object(struct ks_fs *f, stqr_object_id id, const void *p, size_t 
 	rpc = ks_rpc_lock(f, id);
 	ks_cache_forget(f, id);
 	atomic64_inc(&f->rpc_cas);
-	bool auth_retry = false;
+	bool auth_retry = false, replayed = false;
 	for (;;) {
 		err = stqr_cas(rpc->client, id, 1, 0, expected, expected_size, p, n, &o, &info);
-		if (err == -EACCES && !auth_retry) {
+		if (replayed && f->references && err == -EAGAIN && stqr_status(rpc->client) == 412) {
+			void *observed = NULL;
+			size_t size = 0;
+			int check = stqr_get(rpc->client, id, &observed, &size, &info);
+			/* Modern peers need no native CAS history. Resolve an uncertain
+			 * retry only by its exact after-image, never by replaying an entire
+			 * filesystem append against a newer inode snapshot. */
+			if (!ks_transport_retryable(rpc->client, check)) {
+				err = !check && size == n && !memcmp(observed, p, n) ? 0 : -EIO;
+				sq_free(observed);
+				break;
+			}
+			sq_free(observed);
+			err = check;
+		}
+		if (err == -EACCES && !auth_retry)
 			auth_retry = true;
-		} else if (!ks_transport_retryable(rpc->client, err))
+		else if (!ks_transport_retryable(rpc->client, err))
 			break;
-		// Replaying this exact request ID resolves an uncertain CAS reply once.
+		// Retain the same request identity throughout a temporary outage.
 		err = ks_reconnect_wait(f, rpc->client);
 		if (err)
 			break;
+		replayed = true;
 	}
 	ks_cache_forget(f, id);
 	mutex_unlock(&rpc->lock);
@@ -427,7 +474,7 @@ bad:
 	return -EUCLEAN;
 }
 /* Iterative helping: no recursive descriptor chain on the kernel stack. */
-static int help_tx(struct ks_fs *f, stqr_object_id first)
+static int help_tx_legacy(struct ks_fs *f, stqr_object_id first)
 {
 	stqr_object_id *stack = sq_alloc(128 * sizeof(*stack));
 	unsigned depth = 0, rounds = 0;
@@ -575,6 +622,11 @@ static int help_tx(struct ks_fs *f, stqr_object_id first)
 	sq_free(stack);
 	return err ? err : first_result;
 }
+#include "reference_redo.c"
+static int help_tx(struct ks_fs *f, stqr_object_id first)
+{
+	return f->references ? help_tx_pinned(f, first, NULL) : help_tx_legacy(f, first);
+}
 static int ks_overlay_snapshot_cached(struct ks_fs *, stqr_object_id, struct ks_snapshot *);
 static int ks_plain_snapshot_cached(struct ks_fs *f, stqr_object_id id, struct ks_snapshot *s)
 {
@@ -634,7 +686,7 @@ int ks_plain_snapshot(struct ks_fs *f, stqr_object_id id, struct ks_snapshot *s)
 			u8 guard_digest[32];
 			bool legacy = false;
 			err = intent_get(f, txid, &raw, &journal, &info);
-			if (!err && raw.n == 7 && !memcmp(raw.p, "STFD\1\0", 6)) {
+			if (err == -ENOENT || (!err && raw.n == 7 && !memcmp(raw.p, "STFD\1\0", 6))) {
 				drop(&raw);
 				drop(&journal);
 				sq_free(s->raw);
@@ -1066,7 +1118,7 @@ static int node_cas(struct ks_fs *f, struct ks_snapshot *old, struct ks_node *ne
 
 	struct buf b = {0};
 	int err;
-	if (next->edits) {
+	if (next->edits || f->references) {
 		struct member m = {0};
 		err = member_set(&m, old, next);
 		if (!err)
@@ -1082,6 +1134,8 @@ static int node_cas(struct ks_fs *f, struct ks_snapshot *old, struct ks_node *ne
 	return err;
 }
 #include "mutable.c"
+#include "orphans.c"
+#include "anchors.c"
 static bool snapshot_changed(struct ks_fs *f, const struct ks_snapshot *old)
 {
 	struct buf raw = {0};
@@ -1145,7 +1199,7 @@ int ks_write(struct ks_fs *f, stqr_object_id id, u64 *position, const void *data
 		if (!err)
 			err = node_cas(f, &old, &next);
 		atomic64_add(ktime_get_ns() - phase, &f->write_publish_ns);
-		if (err && snapshot_changed(f, &old))
+		if ((err == -EAGAIN || err == -ENOENT) && snapshot_changed(f, &old))
 			err = -EAGAIN;
 		ks_snapshot_free(&old);
 		edits_free(next.edits);
@@ -1224,7 +1278,7 @@ static int ks_plain_setattr(struct ks_fs *f, stqr_object_id id, struct iattr *at
 		next.ctime = ktime_get_real_ns();
 		if (!err)
 			err = node_cas(f, &old, &next);
-		if (err && snapshot_changed(f, &old))
+		if ((err == -EAGAIN || err == -ENOENT) && snapshot_changed(f, &old))
 			err = -EAGAIN;
 		ks_snapshot_free(&old);
 		edits_free(next.edits);
@@ -1480,7 +1534,7 @@ int ks_newnode(struct ks_fs *f, stqr_object_id parent, const char *name, unsigne
 		}
 		edits_free(next.edits);
 		next.edits = NULL;
-		if (err && snapshot_changed(f, &old))
+		if ((err == -EAGAIN || err == -ENOENT) && snapshot_changed(f, &old))
 			err = -EAGAIN;
 		ks_snapshot_free(&old);
 		sq_free(entries);
@@ -1516,6 +1570,7 @@ static int transact(struct ks_fs *f, struct member *m, unsigned count)
 	struct buf b = {0};
 	unsigned i;
 	stqr_object_id id;
+	stqr_id origin = {{0}};
 	int err;
 	if (!count || count > 1024)
 		return -E2BIG;
@@ -1536,9 +1591,25 @@ static int transact(struct ks_fs *f, struct member *m, unsigned count)
 		else
 			number(&b, 0, 4);
 	}
-	err = b.err ? b.err : intent_store(f, &b, &id);
+	if (f->references && !b.err) {
+		err = sq_random(id.bytes, 32);
+		if (!err)
+			err = stqr_request_id(&origin);
+		if (!err)
+			err = ks_object_reference(f, id, origin, 0);
+		if (!err)
+			err = intent_store_at(f, &b, id);
+	} else
+		err = b.err ? b.err : intent_store(f, &b, &id);
 	drop(&b);
-	return err ? err : help_tx(f, id);
+	if (!err)
+		err = f->references ? help_tx_pinned(f, id, &origin) : help_tx(f, id);
+	if (!zero(origin.bytes, 16)) {
+		int released = ks_object_reference(f, id, origin, 1);
+		if (!err)
+			err = released;
+	}
+	return err;
 }
 int ks_remove(struct ks_fs *f, stqr_object_id parent, const char *name, bool dir)
 {
@@ -1557,6 +1628,7 @@ int ks_remove(struct ks_fs *f, stqr_object_id parent, const char *name, bool dir
 		struct buf content = {0};
 		struct ks_node next;
 		struct member *members = NULL;
+		unsigned member_count = 2;
 		err = ks_snapshot(f, parent, &old);
 		if (err)
 			return err;
@@ -1580,7 +1652,7 @@ int ks_remove(struct ks_fs *f, stqr_object_id parent, const char *name, bool dir
 			err = directory_image(f, &next, entries, n, &content);
 		}
 		if (!err) {
-			members = sq_alloc(2 * sizeof(*members));
+			members = sq_alloc(3 * sizeof(*members));
 			if (!members)
 				err = -ENOMEM;
 			if (!err)
@@ -1596,18 +1668,25 @@ int ks_remove(struct ks_fs *f, stqr_object_id parent, const char *name, bool dir
 			}
 			if (!err)
 				err = member_set(&members[1], &child, &next);
+			if (!err && (next.removed || !next.links)) {
+				bool queued;
+				err = orphan_member(f, child.id, true, &members[2], &queued);
+				if (!err && queued)
+					member_count++;
+			}
 			if (!err)
-				err = transact(f, members, 2);
+				err = transact(f, members, member_count);
 		}
 
 		if (members) {
 			member_free(&members[0]);
 			member_free(&members[1]);
+			member_free(&members[2]);
 			sq_free(members);
 		}
 		edits_free(next.edits);
 		next.edits = NULL;
-		if (err && snapshot_changed(f, &old))
+		if ((err == -EAGAIN || err == -ENOENT) && snapshot_changed(f, &old))
 			err = -EAGAIN;
 		ks_snapshot_free(&old);
 		ks_snapshot_free(&child);
@@ -1789,6 +1868,12 @@ int ks_rename(struct ks_fs *f, stqr_object_id from, const char *name, stqr_objec
 				removed.ctime = ktime_get_real_ns();
 				if (!err)
 					err = member_set(&m[count++], dest, &removed);
+				if (!err && (removed.removed || !removed.links)) {
+					bool queued;
+					err = orphan_member(f, dest->id, true, &m[count], &queued);
+					if (!err && queued)
+						count++;
+				}
 			}
 			if (!err && !same && source->node.kind == 2)
 				err = guard_path(f, to, source->id, m, &count, to_path, to_length);
@@ -1875,7 +1960,7 @@ int ks_link(struct ks_fs *f, stqr_object_id parent, const char *name, stqr_objec
 		sq_free(m);
 		sq_free(entries);
 		drop(&content);
-		if (err && snapshot_changed(f, &p))
+		if ((err == -EAGAIN || err == -ENOENT) && snapshot_changed(f, &p))
 			err = -EAGAIN;
 		ks_snapshot_free(&p);
 		ks_snapshot_free(&child);

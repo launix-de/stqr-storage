@@ -43,6 +43,58 @@ int main(void) {
     CHECK(!stqr_parse_id(getenv("STQR_TEST_BUCKET"), &bucket));
     CHECK(!stqr_parse_object_id("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", &id));
     CHECK(!stqr_dial(&c, url, getenv("STQR_TEST_USER"), getenv("STQR_TEST_PASSWORD"), bucket,"fs", 3000));
+    if (mode && !strcmp(mode,"references")) {
+        stqr_client *other=NULL;
+        stqr_id pin, claim, second;
+        CHECK(!stqr_request_id(&pin) && !stqr_request_id(&claim) && !stqr_request_id(&second));
+        CHECK(!stqr_dial(&other,url,getenv("STQR_TEST_USER"),getenv("STQR_TEST_PASSWORD"),bucket,"fs",3000));
+        CHECK(!stqr_object_pin(c,id,pin));
+        CHECK(!stqr_object_pin(c,id,pin));
+        CHECK(!stqr_reconnect(c));
+        CHECK(stqr_object_claim(other,id,claim)==-EBUSY);
+        CHECK(!stqr_object_unpin(c,id,pin));
+        CHECK(!stqr_object_unpin(c,id,pin));
+        CHECK(!stqr_object_claim(other,id,claim));
+        CHECK(!stqr_object_claim(other,id,claim));
+        CHECK(stqr_object_pin(c,id,second)==-EBUSY);
+        CHECK(!stqr_reconnect(other));
+        CHECK(stqr_object_pin(c,id,second)==-EBUSY);
+        CHECK(!stqr_object_release_claim(other,id,claim));
+        CHECK(!stqr_object_release_claim(other,id,claim));
+        CHECK(!stqr_object_pin(c,id,second));
+        CHECK(!stqr_object_unpin(c,id,second));
+        stqr_close(other);stqr_close(c);
+        puts("C durable pin/claim coordination passed");return 0;
+    }
+    if (mode && !strcmp(mode,"reuse")) {
+        unsigned char before[8192], after[8192], wrong[8192];
+        for (unsigned step=0;step<100;step++) {
+            memset(before,(int)step,sizeof(before));
+            memset(after,(int)(step^255),sizeof(after));
+            memset(wrong,(int)(step^127),sizeof(wrong));
+            o=fresh();CHECK(!stqr_put(c,id,before,sizeof(before),&o,&info));
+            CHECK(info.length==sizeof(before));
+            o=fresh();CHECK(stqr_cas(c,id,1,0,wrong,sizeof(wrong),after,sizeof(after),&o,&info)==-EAGAIN);
+            CHECK(stqr_status(c)==412);
+            CHECK(!stqr_get(c,id,&data,&n,&info));
+            CHECK(n==sizeof(before) && !memcmp(data,before,n));stqr_free(data);
+            o=fresh();CHECK(!stqr_cas(c,id,1,0,before,sizeof(before),after,sizeof(after),&o,&info));
+            CHECK(!stqr_get(c,id,&data,&n,&info));
+            CHECK(n==sizeof(after) && !memcmp(data,after,n));stqr_free(data);
+            if (!(step%25)) CHECK(!stqr_reconnect(c));
+        }
+        /* Reusing a deleted address must release the old payload without
+         * retaining another visible object for each generation. */
+        for (unsigned step=0;step<20;step++) {
+            o=fresh();CHECK(!stqr_delete(c,id,&o));
+            CHECK(stqr_get(c,id,&data,&n,&info)==-ENOENT && data==NULL);
+            o=fresh();o.absent=1;CHECK(!stqr_put(c,id,after,sizeof(after),&o,&info));
+        }
+        CHECK(!stqr_sync(c));CHECK(!stqr_reconnect(c));
+        CHECK(!stqr_get(c,id,&data,&n,&info));
+        CHECK(n==sizeof(after) && !memcmp(data,after,n));stqr_free(data);
+        stqr_close(c);puts("C PUT/CAS address-reuse lifecycle passed");return 0;
+    }
     if (mode && !strcmp(mode,"fence")) {
         stqr_fence *fence=NULL; stqr_commit_mark mark;
         struct fence_waiter waiter; pthread_t worker;

@@ -48,6 +48,19 @@ int save_settings(const char *url, const char *user, const char *password,
   parsing helpers are provided. The library never hashes an object ID again.
 - The API includes get/get-range, stat, put/put-range, append, truncate, delete
   and range/object CAS. Append returns the committed starting offset.
+- PUT and CAS address the caller's existing object ID. Repeated updates do not
+  introduce client-generated replacement objects; storage range reuse and
+  payload release are performed by the server. The C library has no filesystem
+  namespace, open-file reference tracker, snapshot manager or filesystem garbage
+  collector. Those operations belong to the Go filesystem or kernel adapter.
+- `stqr_object_pin`/`unpin` and `stqr_object_claim`/`release_claim` coordinate
+  object lifetimes when `STQR_CAP_OBJECT_REFERENCES` is advertised. Pins and
+  claims use caller-owned tokens, survive reconnect/restart/handoff, and must be
+  explicitly released. Claim conflict returns `-EBUSY`; unsupported servers
+  return `-EOPNOTSUPP`. These READ-authorized coordination operations do not grant
+  WRITE or DELETE permissions. Dependency pins have separate
+  `stqr_object_pin_dependency`/`unpin_dependency` APIs and must survive ordinary
+  open-handle recovery while an overlay or snapshot may still depend on them.
 - Return values are zero on success or negative errno. `stqr_status` exposes the
   last HTTP/STQR status, including 412 for an unmet precondition. There is no
   shared global error state. Dial failures leave the output pointer NULL.

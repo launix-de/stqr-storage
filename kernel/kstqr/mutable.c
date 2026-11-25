@@ -9,7 +9,26 @@ static bool segments_have(const struct segments *parts, stqr_object_id id)
 			return true;
 	return false;
 }
-static bool index_kept(struct ks_node *node, size_t parts, stqr_object_id id)
+static bool owns_data_block(const struct ks_node *node, const struct segment *part,
+			    u64 position)
+{
+	stqr_object_id owner;
+	u64 base, unit = SQ_CHUNK;
+	if (part->lower || nullid(part->id) || part->offset > position)
+		return false;
+	base = position - part->offset;
+	if (!(base % unit) && !stable_id(node->identity, 0, 0, base / unit, &owner) &&
+	    eqid(owner, part->id))
+		return true;
+	if (!(base % 4096) && !stable_id(node->identity, 0, 0, base / 4096, &owner) &&
+	    eqid(owner, part->id))
+		return true;
+	/* Go materializes legacy lower slices into a separately derived owner
+	 * namespace. Random/shared legacy IDs are never freed online. */
+	return !(base % 4096) && !stable_id(node->identity, 2, 0, base / 4096, &owner) &&
+	       eqid(owner, part->id);
+}
+static bool index_kept(const struct ks_node *node, size_t parts, stqr_object_id id)
 {
 	unsigned level = 0;
 	size_t count = parts, slot;
@@ -56,6 +75,7 @@ static int collect_index_ids(struct ks_fs *f, stqr_object_id id, unsigned depth,
 	for (i = 0; i < count; i++) {
 		stqr_object_id child;
 		const u8 *p;
+		bool lower = false;
 		readnum(&b, 8);
 		p = take(&b, 32);
 		if (!p) {
@@ -67,12 +87,12 @@ static int collect_index_ids(struct ks_fs *f, stqr_object_id id, unsigned depth,
 		if (version == 2)
 			readnum(&b, 8);
 		if (version == 3)
-			boolean(&b);
+			lower = boolean(&b);
 		if (b.err) {
 			err = b.err;
 			break;
 		}
-		if (!nullid(child)) {
+		if (!lower && !nullid(child)) {
 			err = collect_index_ids(f, child, depth - 1, ids);
 			if (err)
 				break;
@@ -86,6 +106,7 @@ static int retire_pages(struct ks_fs *f, const struct ks_node *old, struct ks_no
 {
 	struct segments prior = {0}, indexes = {0};
 	size_t i;
+	u64 position = 0;
 	int err = 0;
 	if (old->lower)
 		return 0;
@@ -93,8 +114,8 @@ static int retire_pages(struct ks_fs *f, const struct ks_node *old, struct ks_no
 		err = index_segments(f, old->root, old->size, old->depth, &prior);
 	if (!err)
 		err = collect_index_ids(f, old->root, old->depth, &indexes);
-	for (i = 0; !err && i < prior.n; i++)
-		if (!prior.p[i].lower && !nullid(prior.p[i].id) &&
+	for (i = 0; !err && i < prior.n; i++) {
+		if (owns_data_block(old, &prior.p[i], position) &&
 		    !segments_have(parts, prior.p[i].id)) {
 			size_t j;
 			bool seen = false;
@@ -104,8 +125,11 @@ static int retire_pages(struct ks_fs *f, const struct ks_node *old, struct ks_no
 			if (!seen)
 				err = stage_block(f, next, prior.p[i].id, 0, NULL, 0, false, true);
 		}
+		position += prior.p[i].length;
+	}
 	for (i = 0; !err && i < indexes.n; i++)
-		if (!index_kept(next, parts->n, indexes.p[i].id))
+		if (index_kept(old, prior.n, indexes.p[i].id) &&
+		    !index_kept(next, parts->n, indexes.p[i].id))
 			err = stage_block(f, next, indexes.p[i].id, 0, NULL, 0, false, true);
 	sq_free(prior.p);
 	sq_free(indexes.p);

@@ -649,7 +649,7 @@ static int request_payload(stqr_client *c, unsigned op, struct buf *body, stqr_i
     for (unsigned redirects=0;redirects<16;) {
         struct buf wrapped={0}; unsigned wire_op=op; struct buf *wire_body=body;
         c->status=0; c->redirect[0]=0;
-        c->query_valid=op>=0x100 && op<=0x110 && body->n>=80;
+        c->query_valid=((op>=0x100 && op<=0x110) || op==0x120) && body->n>=80;
         if (c->query_valid) memcpy(c->query.bytes,body->p+16,32);
         if (mutation>1 && (c->capabilities & STQR_CAP_DURABILITY)) {
             if (body->n<80) return -EINVAL;
@@ -707,7 +707,7 @@ static int reconnect_active(stqr_client *c) {
     if (!err) err = handshake(c);
     if (err) { broken(c); return err; }
     c->status = 0;
-    number(&body, 2, 2); number(&body, 2, 2); number(&body, STQR_CAP_DURABILITY, 8); blob(&body, "stqr-c", 6);
+    number(&body, 2, 2); number(&body, 2, 2); number(&body, STQR_CAP_DURABILITY|STQR_CAP_OBJECT_REFERENCES, 8); blob(&body, "stqr-c", 6);
     err = request(c, 1, &body, id, 0, &result, NULL);
     if (!err) {
         if (readnum(&result, 2) != 2) result.err = -EPROTO;
@@ -754,6 +754,36 @@ void stqr_close(stqr_client *c) {
 static void reference(stqr_client *c, struct buf *b, stqr_object_id id) {
     put(b, c->bucket.bytes, 16); put(b, id.bytes, 32); number(b, 0, 8); number(b, 0, 8); put(b, c->runtime.bytes, 16);
 }
+static int object_reference(stqr_client *c, stqr_object_id target, stqr_id token, unsigned action) {
+    static const char domain[]="STQR object references v1";
+    stqr_object_id root;
+    stqr_id request_id;
+    struct buf body={0}, result={0};
+    int err;
+    if (!c || !c->socket) return -ENOTCONN;
+    if (!(c->capabilities & STQR_CAP_OBJECT_REFERENCES)) return -EOPNOTSUPP;
+    if (zero(token.bytes,sizeof(token.bytes))) return -EINVAL;
+    err=sq_hash(256,domain,sizeof(domain)-1,root.bytes);
+    if (err) return err;
+    err=stqr_request_id(&request_id);
+    if (err) return err;
+    reference(c,&body,root);
+    put(&body,target.bytes,sizeof(target.bytes));
+    number(&body,action,1);put(&body,token.bytes,sizeof(token.bytes));
+    err=request(c,0x120,&body,request_id,1,&result,NULL);
+    if (!err) {
+        if (readnum(&result,1)!=1) result.err=-EPROTO;
+        err=done(&result);
+    }
+    drop(&body);drop(&result);
+    return err;
+}
+int stqr_object_pin(stqr_client *c, stqr_object_id target, stqr_id token) { return object_reference(c,target,token,0); }
+int stqr_object_unpin(stqr_client *c, stqr_object_id target, stqr_id token) { return object_reference(c,target,token,1); }
+int stqr_object_claim(stqr_client *c, stqr_object_id target, stqr_id token) { return object_reference(c,target,token,2); }
+int stqr_object_release_claim(stqr_client *c, stqr_object_id target, stqr_id token) { return object_reference(c,target,token,3); }
+int stqr_object_pin_dependency(stqr_client *c, stqr_object_id target, stqr_id token) { return object_reference(c,target,token,4); }
+int stqr_object_unpin_dependency(stqr_client *c, stqr_object_id target, stqr_id token) { return object_reference(c,target,token,5); }
 int stqr_object_lease(stqr_client *c, int readonly) {
     struct buf b = {0}, r = {0}; stqr_id id; int err;
     if (!c || !c->socket) return -ENOTCONN;

@@ -158,6 +158,11 @@ func TestOverlayWhitelistAndWhiteouts(t *testing.T) {
 	if _, err = o.WriteAt(ctx, conf.ID, []byte("local"), 0); err != nil {
 		t.Fatal(err)
 	}
+	openRef, err := o.Retain(ctx, conf.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer o.Release(ctx, conf.ID, openRef)
 	file, err := o.Create(ctx, dir.ID, "upload", 0600, 0, 0, false)
 	if err != nil {
 		t.Fatal(err)

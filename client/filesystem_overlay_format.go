@@ -24,9 +24,11 @@ func ParseFilesystemWhitelist(value string) ([]string, error) {
 // directory by OID; opaque records are independent upper directories. Root CAS
 // publishes a whole namespace change, including both halves of rename.
 type overlayState struct {
-	rootRaw []byte // exact bytes observed before editing this namespace
-	policy  []string
-	dirs    map[ObjectID]*overlayDirectory
+	orphaned      []ObjectID // transient publication participants; never encoded
+	orphanMembers []fsTxMember
+	rootRaw       []byte // exact bytes observed before editing this namespace
+	policy        []string
+	dirs          map[ObjectID]*overlayDirectory
 }
 type overlayDirectory struct {
 	lower            ObjectID

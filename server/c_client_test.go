@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/hex"
 	"github.com/launix-de/stqr-storage/volume"
 	"net/http"
 	"net/http/httptest"
@@ -57,6 +58,51 @@ func TestCClient(t *testing.T) {
 		t.Cleanup(host.Close)
 		admin := s.cfg.Auth.BootstrapAdmin
 		run(t, host.URL, admin.Username, admin.Password, client.ID(b.ID()).String(), "")
+	})
+	t.Run("reuse", func(t *testing.T) {
+		s := testServer(t)
+		addTestVolume(t, s, "c-reuse", "hdd", 4<<20)
+		b, _ := createProtocolBucket(t, s, "c-reuse")
+		host := httptest.NewServer(s.Handler())
+		defer host.Close()
+		v := b.allVolumes()[0]
+		baseline := v.Stats()
+		admin := s.cfg.Auth.BootstrapAdmin
+		run(t, host.URL, admin.Username, admin.Password, client.ID(b.ID()).String(), "reuse")
+		stats := v.Stats()
+		if stats.Objects != baseline.Objects+1 || stats.DataPhysical != baseline.DataPhysical+8192 {
+			t.Fatalf("C overwrite/CAS/delete loops retained payload: before=%+v after=%+v", baseline, stats)
+		}
+		rawID, err := hex.DecodeString("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
+		var oid client.ObjectID
+		copy(oid[:], rawID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		c, err := client.Dial(context.Background(), host.URL, admin.Username, admin.Password, client.ID(b.ID()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer c.Close()
+		got, _, err := c.Get(context.Background(), oid)
+		if err != nil || !bytes.Equal(got, bytes.Repeat([]byte{0x9c}, 8192)) {
+			t.Fatalf("Go could not read C client's final object: %d bytes, %v", len(got), err)
+		}
+		if err := v.Scrub(); err != nil {
+			t.Fatal(err)
+		}
+	})
+	t.Run("references", func(t *testing.T) {
+		s := testServer(t)
+		addTestVolume(t, s, "c-references", "hdd", 8<<20)
+		b, _ := createProtocolBucket(t, s, "c-references")
+		host := httptest.NewServer(s.Handler())
+		defer host.Close()
+		admin := s.cfg.Auth.BootstrapAdmin
+		run(t, host.URL, admin.Username, admin.Password, client.ID(b.ID()).String(), "references")
+		if err := b.allVolumes()[0].Scrub(); err != nil {
+			t.Fatal(err)
+		}
 	})
 	t.Run("independent-fence", func(t *testing.T) {
 		upgrade := websocket.Upgrader{Subprotocols: []string{"stqr.v2"}}
