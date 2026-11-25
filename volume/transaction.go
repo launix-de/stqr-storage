@@ -135,6 +135,9 @@ func (t *transaction) findSpace(n, a uint64, tail bool, lower ...uint64) (uint64
 				if maxlen < n {
 					continue
 				}
+				if e = checkTreeChild(t.node, node, x.value); e != nil {
+					return e
+				}
 				if e = visit(x.value); e != nil {
 					return e
 				}

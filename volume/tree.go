@@ -77,7 +77,7 @@ func decodeNode(b []byte, id ID) (treeNode, error) {
 	n.kind = b[4]
 	n.level = b[5]
 	count := int(diskOrder.Uint16(b[6:]))
-	if n.kind < 1 || n.kind > 2 || n.level > 32 || count > n.capacity() {
+	if n.kind < 1 || n.kind > 2 || n.level > 32 || count > n.capacity() || n.level > 0 && count == 0 {
 		return n, ErrCorrupt
 	}
 	at := 32
@@ -103,6 +103,25 @@ func decodeNode(b []byte, id ID) (treeNode, error) {
 	}
 	return n, nil
 }
+
+// Each descent must lower the level exactly once and retain the tree kind.
+// CRCs validate page bytes, not their graph: this also rejects multi-page
+// cycles without unbounded recursion or an object-count-sized visited set.
+func checkTreeChild(read func(uint64) (treeNode, error), parent treeNode, off uint64) error {
+	child, err := read(off)
+	if err != nil {
+		return err
+	}
+	return validateTreeChild(parent, child)
+}
+
+func validateTreeChild(parent, child treeNode) error {
+	if parent.level == 0 || child.level != parent.level-1 || child.kind != parent.kind {
+		return ErrCorrupt
+	}
+	return nil
+}
+
 func (v *Volume) node(off uint64) (treeNode, error) {
 	if n, ok := v.nodes.get(off); ok {
 		return n, nil
@@ -183,6 +202,9 @@ func (t *transaction) insertAt(off uint64, key indexKey, value uint64) (treeEntr
 		}
 	} else {
 		i := childIndex(n, key)
+		if e := checkTreeChild(t.node, n, n.entries[i].value); e != nil {
+			return treeEntry{}, nil, e
+		}
 		a, b, e := t.insertAt(n.entries[i].value, key, value)
 		if e != nil {
 			return treeEntry{}, nil, e
@@ -269,6 +291,9 @@ func (t *transaction) replaceKeyAt(off uint64, key, next indexKey, value uint64)
 			return treeEntry{}, ErrCorrupt
 		}
 		i := childIndex(n, key)
+		if e := checkTreeChild(t.node, n, n.entries[i].value); e != nil {
+			return treeEntry{}, e
+		}
 		entry, e := t.replaceKeyAt(n.entries[i].value, key, next, value)
 		if e != nil {
 			return treeEntry{}, e
@@ -294,6 +319,9 @@ func (t *transaction) deleteAt(off uint64, key indexKey) (treeEntry, error) {
 			return treeEntry{}, ErrCorrupt
 		}
 		i := childIndex(n, key)
+		if e := checkTreeChild(t.node, n, n.entries[i].value); e != nil {
+			return treeEntry{}, e
+		}
 		entry, e := t.deleteAt(n.entries[i].value, key)
 		if e != nil {
 			return treeEntry{}, e
@@ -319,6 +347,9 @@ func (t *transaction) deleteAt(off uint64, key indexKey) (treeEntry, error) {
 				if a > b {
 					a, b = b, a
 				}
+				if e := checkTreeChild(t.node, n, n.entries[j].value); e != nil {
+					return treeEntry{}, e
+				}
 				ln, e := t.node(n.entries[a].value)
 				if e != nil {
 					return treeEntry{}, e
@@ -336,6 +367,9 @@ func (t *transaction) deleteAt(off uint64, key indexKey) (treeEntry, error) {
 				}
 			}
 		}
+	}
+	if len(n.entries) == 0 {
+		n.level = 0
 	}
 	t.putNode(off, n)
 	return t.summary(off, n), nil
@@ -378,7 +412,11 @@ func treeLookup(read func(uint64) (treeNode, error), root uint64, key indexKey) 
 			}
 			return 0, nil
 		}
-		root = n.entries[childIndex(n, key)].value
+		child := n.entries[childIndex(n, key)].value
+		if e := checkTreeChild(read, n, child); e != nil {
+			return 0, e
+		}
+		root = child
 	}
 	return 0, ErrCorrupt
 }
@@ -391,6 +429,9 @@ func treeWalk(read func(uint64) (treeNode, error), root uint64, fn func(treeEntr
 		if n.level == 0 {
 			e = fn(x)
 		} else {
+			if e := checkTreeChild(read, n, x.value); e != nil {
+				return e
+			}
 			e = treeWalk(read, x.value, fn)
 		}
 		if e != nil {
@@ -432,6 +473,9 @@ func treeNeighbor(read func(uint64) (treeNode, error), root uint64, key indexKey
 	i := childIndex(n, key)
 	if ceil {
 		for ; i < len(n.entries); i++ {
+			if e := checkTreeChild(read, n, n.entries[i].value); e != nil {
+				return treeEntry{}, false, e
+			}
 			x, ok, e := treeNeighbor(read, n.entries[i].value, key, ceil)
 			if e != nil || ok {
 				return x, ok, e
@@ -439,6 +483,9 @@ func treeNeighbor(read func(uint64) (treeNode, error), root uint64, key indexKey
 		}
 	} else {
 		for ; i >= 0; i-- {
+			if e := checkTreeChild(read, n, n.entries[i].value); e != nil {
+				return treeEntry{}, false, e
+			}
 			x, ok, e := treeNeighbor(read, n.entries[i].value, key, ceil)
 			if e != nil || ok {
 				return x, ok, e
@@ -455,12 +502,18 @@ func (v *Volume) walkIndexBounds(lower, upper indexKey, fn func(indexEntry) erro
 	return treeWalkBounds(v.node, v.sb.ObjectRoot, lower, upper, 0, func(e treeEntry) error { return fn(indexEntry{e.key, e.value}) })
 }
 func treeWalkBounds(read func(uint64) (treeNode, error), root uint64, lower, upper indexKey, depth int, fn func(treeEntry) error) error {
-	if depth > 32 {
-		return ErrCorrupt
-	}
 	n, err := read(root)
 	if err != nil {
 		return err
+	}
+	return treeWalkBoundsNode(read, n, lower, upper, depth, fn)
+}
+
+// Carry the checked page into recursion: a bounded scan reads each selected
+// page once, rather than reading the child again after topology validation.
+func treeWalkBoundsNode(read func(uint64) (treeNode, error), n treeNode, lower, upper indexKey, depth int, fn func(treeEntry) error) error {
+	if depth > 32 {
+		return ErrCorrupt
 	}
 	if len(n.entries) == 0 {
 		return nil
@@ -481,7 +534,14 @@ func treeWalkBounds(read func(uint64) (treeNode, error), root uint64, lower, upp
 		if !lessKey(entry.key, upper) {
 			break
 		}
-		if err := treeWalkBounds(read, entry.value, lower, upper, depth+1, fn); err != nil {
+		child, err := read(entry.value)
+		if err != nil {
+			return err
+		}
+		if err := validateTreeChild(n, child); err != nil {
+			return err
+		}
+		if err := treeWalkBoundsNode(read, child, lower, upper, depth+1, fn); err != nil {
 			return err
 		}
 	}

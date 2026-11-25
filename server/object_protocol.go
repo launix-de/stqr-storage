@@ -29,6 +29,9 @@ func objectStatus(err error) int {
 	if errors.Is(err, volume.ErrRequestID) {
 		return 400
 	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return 503
+	}
 	if errors.Is(err, context.Canceled) {
 		return 499
 	}
@@ -115,13 +118,21 @@ func (s *Server) parseObject(m client.Message, ws *wsSession, p principal) (*obj
 		case 0x0106:
 			permission = BucketDelete
 		}
+		if m.Opcode == 0x0108 {
+			if _, err := b.authorize(p, BucketRead); err != nil {
+				return nil, d, err
+			}
+		}
 		if _, err := b.authorize(p, permission); err != nil {
 			return nil, d, err
 		}
 		if err := s.checkObjectOwner(bucketID, oid, permission == BucketRead); err != nil && !bucketScoped {
 			return nil, d, err
 		}
-		patch, _ := s.routingPatch(bucketID, oid)
+		patch, known := s.routingPatch(bucketID, oid)
+		if !bucketScoped && (!known || len(patch.Entries) == 0) {
+			return nil, d, fail(503, "object placement unavailable")
+		}
 		if !bucketScoped && epoch != 0 && epoch != patch.Entries[0].OwnerEpoch {
 			return nil, d, &objectRedirect{patch: patch}
 		}
@@ -142,7 +153,10 @@ func (s *Server) parseObject(m client.Message, ws *wsSession, p principal) (*obj
 	if description.Policy.StorageStrategy == "ram" {
 		currentRuntime := s.boot
 		if s.controller != nil {
-			patch, _ := s.routingPatch(bucketID, oid)
+			patch, known := s.routingPatch(bucketID, oid)
+			if !known || len(patch.Entries) == 0 {
+				return nil, d, fail(503, "RAM placement unavailable")
+			}
 			currentRuntime = patch.Entries[0].Runtime
 		}
 		if runtime != (client.ID{}) && runtime != currentRuntime {
@@ -182,7 +196,10 @@ func (s *Server) executeObjects(m client.Message, ws *wsSession, p principal) ([
 	if op.bucket.Describe().Policy.StorageStrategy == "ram" {
 		runtime = s.boot
 		if s.controller != nil {
-			patch, _ := s.routingPatch(op.bucket.ID(), op.object)
+			patch, known := s.routingPatch(op.bucket.ID(), op.object)
+			if !known || len(patch.Entries) == 0 {
+				return nil, 0, fail(503, "RAM placement unavailable")
+			}
 			runtime = patch.Entries[0].Runtime
 		}
 	}

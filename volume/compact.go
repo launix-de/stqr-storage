@@ -200,6 +200,9 @@ func (v *Volume) Scrub() error {
 	return v.scrubLocked()
 }
 func (v *Volume) scrubLocked() error {
+	if err := treeWalk(v.node, v.sb.FreeRoot, func(treeEntry) error { return nil }); err != nil {
+		return err
+	}
 	if _, _, err := v.localMetadataLocked(); err != nil {
 		return err
 	}
