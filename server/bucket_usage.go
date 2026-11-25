@@ -3,6 +3,7 @@ package server
 
 import (
 	"errors"
+	"github.com/launix-de/stqr-storage/client"
 	"github.com/launix-de/stqr-storage/volume"
 	"math"
 	"sync"
@@ -79,4 +80,57 @@ func (b *Bucket) updateUsage(old, next uint64, repeated bool, err error) {
 		return
 	}
 	u.bytes = u.bytes - old + next
+}
+
+// Fully pinned single-copy maps have one physical record per logical object.
+// Maintained ownership counters therefore give the exact logical total without
+// walking every object on a cold quota/dashboard read. Unbound maps, replicas
+// and inherited COW views keep the logical merge path.
+func (b *Bucket) pinnedLogicalUsage() (uint64, bool, error) {
+	s := b.server
+	if s.controller == nil || len(b.storageDescription().ClonePeers) != 0 {
+		return 0, false, nil
+	}
+	placement := s.placement.Load()
+	if placement == nil {
+		return 0, false, nil
+	}
+	entries := placement.bucketEntries(client.ID(b.ID()))
+	if len(entries) == 0 {
+		return 0, false, nil
+	}
+	for _, entry := range entries {
+		if entry.State != 0 || len(entry.Locations) != 1 || entry.Locations[0].Role != 0 || entry.Locations[0].Volume == (client.ID{}) {
+			return 0, false, nil
+		}
+	}
+	stamp := inventoryStamp(entries, client.ID{})
+	var total uint64
+	for _, v := range s.quotaVolumes() {
+		if err := s.refreshQuotaOwnership(v); err != nil {
+			return 0, true, err
+		}
+		h, err := v.Open(false)
+		if err != nil {
+			return 0, true, err
+		}
+		usage, err := h.OwnedStorageUsage()
+		h.Close()
+		if err != nil {
+			return 0, true, err
+		}
+		for _, u := range usage {
+			if u.Bucket != b.ID() {
+				continue
+			}
+			if u.Logical > math.MaxUint64-total {
+				return 0, true, volume.ErrRange
+			}
+			total += u.Logical
+		}
+	}
+	if inventoryStamp(s.placement.Load().bucketEntries(client.ID(b.ID())), client.ID{}) != stamp {
+		return 0, true, fail(503, "bucket ownership changed during usage measurement")
+	}
+	return total, true, nil
 }

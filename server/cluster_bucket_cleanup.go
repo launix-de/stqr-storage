@@ -274,7 +274,7 @@ func (s *Server) reclaimBucketStep() bool {
 				return true
 			}
 			if !progress.objectsDone {
-				records, err := h.ScanBucketObjects(id, progress.objectAfter, 8)
+				records, err := h.ScanBucketObjects(id, progress.objectAfter, 32)
 				if err != nil {
 					return false
 				}
@@ -303,8 +303,10 @@ func (s *Server) reclaimBucketStep() bool {
 					remove = append(remove, record.ID)
 				}
 			}
-			if err = h.ForgetRequests(remove); err != nil {
-				return false
+			if len(remove) > 0 {
+				if err = h.ForgetRequests(remove); err != nil {
+					return false
+				}
 			}
 			next := records[len(records)-1].ID
 			progress.requestAfter = &next

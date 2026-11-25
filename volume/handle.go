@@ -240,12 +240,10 @@ func (h *Handle) Check(k Key, opts Options) error {
 // CAS compares bytes under the volume write lock. WholeObject also compares
 // the complete old length before replacing the object; CreateOnly requires absence.
 func (h *Handle) CAS(k Key, offset uint64, expected, replacement []byte, opts Options) (Info, error) {
-	r, e := withHandle(h, true, func(v *Volume) (Result, error) {
-		if e := validateCAS(offset, expected, replacement, opts); e != nil {
-			return Result{}, e
-		}
-		return v.mutateWithRetryLocked(opCAS, k, offset, uint64(len(replacement)), bytes.NewReader(replacement), expected, opts)
-	})
+	if e := validateCAS(offset, expected, replacement, opts); e != nil {
+		return Info{}, e
+	}
+	r, e := h.mutate(opCAS, k, offset, uint64(len(replacement)), bytes.NewReader(replacement), expected, opts)
 	return r.Info, e
 }
 
