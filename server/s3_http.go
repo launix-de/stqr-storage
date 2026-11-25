@@ -136,7 +136,17 @@ func (s *Server) serveS3(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if r.Method == http.MethodPut || r.Method == http.MethodPost {
-		staged, n, e := s3StageRequest(r, bodySHA)
+		limit := uint64(maxObjectStagingBytes)
+		// Object/part bodies cannot exceed a finite logical bucket quota.
+		// Physical quotas cannot bound decoded bytes when compression is used.
+		limits := b.storageDescription().Policy.Limits
+		if r.Method == http.MethodPut && !limits.Unlimited && limits.Accounting == "logical" {
+			limit = min(limit, limits.Absolute)
+		}
+		if r.Method == http.MethodPost {
+			limit = min(limit, uint64(4<<20)) // multipart completion / delete XML
+		}
+		staged, n, e := s3StageRequest(r, bodySHA, limit)
 		if e != nil {
 			s3Failure(w, e)
 			return
@@ -288,6 +298,11 @@ func (s *Server) serveS3ReadAttempt(w http.ResponseWriter, r *http.Request, api 
 	if w.Header().Get("Content-Type") == "" {
 		w.Header().Set("Content-Type", "application/octet-stream")
 	}
+	// Object metadata is untrusted. Apply these after copying it, including
+	// for HEAD and range responses, so stored headers cannot weaken isolation.
+	w.Header().Set("Content-Disposition", "attachment")
+	w.Header().Set("Content-Security-Policy", "sandbox; default-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
 	if match := r.Header.Get("If-Match"); match != "" && !s3ETagMatch(match, etag, false) {
 		s3Error(w, 412, "PreconditionFailed", "ETag mismatch")
 		return nil

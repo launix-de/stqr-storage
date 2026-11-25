@@ -29,7 +29,10 @@ try{
   await submit.click();await grow.waitFor({state:'hidden'});await system.getByText('4 MiB',{exact:true}).waitFor();
   await list.locator('[data-search]').fill('nothing-matches');await list.getByText('Keine passenden Disks.',{exact:true}).waitFor();
   await list.locator('[data-search]').fill('system');await system.waitFor();
-  await system.locator('[data-grow]').click();await size.fill('9007199254741504');await submit.click();await grow.waitFor({state:'hidden'});
+  // A storage telemetry refresh must not replace the disk dialog's actions
+  // with the physical-volume handlers, even though both use data-grow.
+  await page.evaluate(async()=>{await document.querySelector('#refresh').onclick()});
+  await system.locator('[data-grow]').click();await grow.waitFor({state:'visible'});await size.fill('9007199254741504');await submit.click();await grow.waitFor({state:'hidden'});
   await system.getByText('Sparse · 9.007.199.254.741.504 Bytes',{exact:true}).waitFor();
   // The modal stays within a narrow viewport; its table can scroll horizontally.
   await page.setViewportSize({width:390,height:844});
