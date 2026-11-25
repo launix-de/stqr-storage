@@ -160,7 +160,7 @@ those owners and migrates ranges as capacity and placement requirements change.
 | Placement | Central PG storage/compression/replication policies, node/volume filters, capacity distribution and migration for policy changes |
 | Dashboard | Users, grants, S3 keys, quotas/guarantees, PG editing, node/volume management and live statistics; searchable bucket/user lists with endless scrolling |
 | Go client | Authenticated, bucket-bound connections, direct routing to range owners, reconnects and request IDs for retry deduplication |
-| C client | Native static/shared library, object operations, subscriptions and Sync; range-owner redirects for reads and inline mutations |
+| C client | Native static/shared library, object operations, subscriptions and Sync; range-owner redirects including streamed mutations |
 | S3 | GET/HEAD/PUT/DELETE, ranges/conditions, listing, multipart, copy, bulk delete, checksums, SigV4, presigned URLs and private/public-read object ACLs |
 | Linux FUSE | Read/write and readonly mounts, permissions, sparse files, rename, symlinks, hardlinks, xattrs, FIFO/socket inodes, live capacity reporting and offline `--fsck` |
 | Linux kernel client | Standalone `kstqr` mounts sharing the normal native filesystem format, subscriptions, mmap/writeback and live capacity reporting; see [kernel documentation](kernel/kstqr/README.md) |
@@ -407,8 +407,8 @@ multi-object transaction. See [subscriptions](docs/object-subscriptions.md).
 The [native C library](client/c/README.md) offers object operations, subscriptions,
 capacity queries and Sync as static/shared libraries. Build it with
 `make -C client/c`. It uses authenticated bucket-bound connections directly,
-without a Go helper. Reads and inline mutations follow range-owner redirects;
-chunked writes above 1 MiB need the correct owner. Callers preserve retry IDs
+without a Go helper. Reads and mutations, including chunked uploads, follow
+range-owner redirects. Callers preserve retry IDs
 across reconnects. See the C guide for routing and transport limits.
 
 ## Planning your deployment
