@@ -34,7 +34,7 @@ const (
 	BucketMaintenance    uint16 = 0x0115
 	BucketScan           uint16 = 0x0116
 	BucketObjectList     uint16 = 0x0117
-	BucketFormatOpen     uint16 = 0x0120
+	BucketFormatOpen     uint16 = 0x0121
 	BucketObjectLease    uint16 = 0x011c
 	// Deprecated: use BucketObjectLease; the server does not interpret device formats.
 	BucketBlockMaintenance         = BucketObjectLease

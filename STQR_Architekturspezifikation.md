@@ -334,7 +334,7 @@ Bucket an, bei unbenutzten Buckets `-`.
 Die entfernten Disk-Verwaltungsnachrichten 0x011e, 0x011f, 0x203e und 0x203f
 und ihre Capability 65536 bleiben reserviert und werden nicht mehr angeboten.
 
-`BUCKET_FORMAT_OPEN` (0x0120) öffnet auf einem authentifizierten Admin-WebSocket
+`BUCKET_FORMAT_OPEN` (0x0121) öffnet auf einem authentifizierten Admin-WebSocket
 einen Bucket mit explizitem Format (`bucket:ID,format:Text`); vor Objektzugriffen
 ist diese Deklaration erforderlich. Peer-Nachricht 0x10b0 koordiniert ausschließlich
 die autorisierte Erstbindung im globalen Metadaten-Commit. Sie ist von den

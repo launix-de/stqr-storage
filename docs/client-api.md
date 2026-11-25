@@ -344,7 +344,7 @@ permissions are granted. A clone inherits the source format. Clearing objects
 retains it. The dashboard displays the format or `-` while unset.
 
 Administrative browser sockets may select multiple namespaces using
-`BUCKET_FORMAT_OPEN` (`0x0120`, request body: bucket ID, Text format). They must
+`BUCKET_FORMAT_OPEN` (`0x0121`, request body: bucket ID, Text format). They must
 open a namespace on that socket before ordinary or delegated object requests.
 Private, authenticated object-copy sessions preserve the application format;
 public credentials cannot claim their maintenance exemption.
