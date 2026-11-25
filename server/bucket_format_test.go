@@ -250,6 +250,71 @@ func TestBucketFormatBackgroundAndInvalidUpgradeDoNotBind(t *testing.T) {
 	}
 }
 
+func TestBucketFormatDeniedUpgradeDoesNotBind(t *testing.T) {
+	for _, mode := range []string{"invalid-maintenance-header", "active-maintenance", "shutdown"} {
+		t.Run(mode, func(t *testing.T) {
+			s := testServer(t)
+			b, _ := createProtocolBucket(t, s, "denied-format")
+			host := httptest.NewServer(s.Handler())
+			defer host.Close()
+			a := s.cfg.Auth.BootstrapAdmin
+			header := http.Header{}
+			header.Set("Authorization", "Basic "+base64.StdEncoding.EncodeToString([]byte(a.Username+":"+a.Password)))
+			header.Set(client.BucketHeader, b.ID().String())
+			header.Set(client.FormatHeader, "custom-client")
+			want := 403
+			reset := func() {}
+			switch mode {
+			case "invalid-maintenance-header":
+				header.Set(bucketLeaseHeader, "invalid")
+				reset = func() { header.Del(bucketLeaseHeader) }
+			case "active-maintenance":
+				actor := userPrincipal(t, s)
+				lease := bucketLease{Bucket: b.ID(), Epoch: 1, Sequence: 1, Request: client.NewRequestID(), Token: client.NewRequestID(), Owner: client.ID(mustBucketActor(s.cfg.Node.ID)), Boot: s.boot, User: actor.User.ID, Username: actor.User.Name}
+				if err := s.storeLease(b, lease); err != nil {
+					t.Fatal(err)
+				}
+				reset = func() {
+					lease.Released = true
+					if err := s.storeLease(b, lease); err != nil {
+						t.Error(err)
+					}
+				}
+				want = 409
+			case "shutdown":
+				s.shortStopping.Store(true)
+				reset = func() { s.shortStopping.Store(false) }
+				want = 503
+			}
+			t.Cleanup(reset)
+			open := func() (int, error) {
+				conn, response, err := (&websocket.Dialer{Subprotocols: []string{"stqr.v2"}, HandshakeTimeout: 5 * time.Second}).Dial("ws"+strings.TrimPrefix(host.URL, "http")+"/api/ws", header)
+				if conn != nil {
+					conn.Close()
+				}
+				if response == nil {
+					t.Fatal(err)
+				}
+				response.Body.Close()
+				return response.StatusCode, err
+			}
+			if status, err := open(); status != want {
+				t.Fatalf("denied opening: status=%d want=%d err=%v", status, want, err)
+			}
+			if format := b.Describe().Format; format != "" {
+				t.Errorf("rejected upgrade persisted format %q", format)
+			}
+			reset()
+			if status, err := open(); status != 101 || err != nil {
+				t.Fatalf("valid opening after rejection: status=%d err=%v", status, err)
+			}
+			if b.Describe().Format != "custom-client" {
+				t.Fatal("successful opening did not bind format")
+			}
+		})
+	}
+}
+
 func TestRetiredDiskManagementIsNotAdvertised(t *testing.T) {
 	s := testServer(t)
 	profile := s.protocolVersion()

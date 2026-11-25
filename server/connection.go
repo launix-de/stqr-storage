@@ -68,7 +68,7 @@ func (s *Server) requireAdmin(p principal) error {
 
 // Called with opMu held through registration: a grant/account change cannot
 // slip between validation and insertion into the live socket registry.
-func (s *Server) authorizeConnection(r *http.Request, p principal) (*connectionAuthorization, principal, error) {
+func (s *Server) authorizeConnection(r *http.Request, p principal, allowUnboundFormat bool) (*connectionAuthorization, principal, error) {
 	auth := &connectionAuthorization{}
 	if p.ClusterPeer {
 		if !p.isPeer() {
@@ -113,7 +113,11 @@ func (s *Server) authorizeConnection(r *http.Request, p principal) (*connectionA
 			return nil, p, err
 		}
 		if p.frontendPermission == 0 || r.Header.Get(client.FormatHeader) != internalObjectFormat || b.Describe().Format != "" {
-			if format := r.Header.Get(client.FormatHeader); format == "" || format != b.Describe().Format {
+			format, stored := r.Header.Get(client.FormatHeader), b.Describe().Format
+			if !validBucketFormat(format, false) {
+				return nil, p, fail(400, "a nonempty bucket format is required")
+			}
+			if format != stored && !(allowUnboundFormat && stored == "") {
 				return nil, p, fail(409, fmt.Sprintf("bucket format mismatch on connection: expected %q, got %q", b.Describe().Format, format))
 			}
 		}
@@ -157,6 +161,9 @@ func (s *Server) authorizeConnection(r *http.Request, p principal) (*connectionA
 		}
 	} else if !auth.admin && !auth.clusterPeer {
 		return nil, p, fail(400, "a bucket ID is required for client connections")
+	}
+	if (s.shortStopping.Load() || s.drainClosing.Load()) && !auth.clusterPeer {
+		return nil, p, fail(503, "node is shutting down")
 	}
 	p.connection = auth
 	return auth, p, nil
