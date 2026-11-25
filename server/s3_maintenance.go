@@ -32,7 +32,7 @@ func (s *Server) maintainS3(ctx context.Context, now time.Time) error {
 		return ErrBucketForbidden
 	}
 	for _, d := range s.bucketSnapshots() {
-		if d.State != BucketActive || d.ID == systemBucket.String() {
+		if d.State != BucketActive || d.ID == systemBucket.String() || d.Format != "s3" {
 			continue
 		}
 		if e := s.maintainS3Bucket(ctx, now, d, accounts, admin); e != nil {
@@ -152,7 +152,7 @@ func (s *Server) maintainS3Page(ctx context.Context, now time.Time, cursor *s3Ma
 	descriptions := s.bucketSnapshots()
 	active := descriptions[:0]
 	for _, d := range descriptions {
-		if d.State == BucketActive && d.ID != systemBucket.String() {
+		if d.State == BucketActive && d.ID != systemBucket.String() && d.Format == "s3" {
 			active = append(active, d)
 		}
 	}

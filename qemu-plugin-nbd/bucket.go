@@ -16,7 +16,7 @@ type Bucket struct {
 }
 
 func Open(ctx context.Context, url, username, password string, id client.BucketID, readonly bool) (*Bucket, error) {
-	c, e := client.Dial(ctx, url, username, password, id)
+	c, e := client.Dial(ctx, url, username, password, id, "bd")
 	if e != nil {
 		return nil, e
 	}
@@ -26,12 +26,6 @@ func Open(ctx context.Context, url, username, password string, id client.BucketI
 	}
 	catalog := NewCatalog(c)
 	if e = catalog.CheckFormat(ctx); e != nil {
-		c.Close()
-		return nil, e
-	}
-	if e = c.RegisterObjectControl(ctx, func(ctx context.Context, body []byte) ([]byte, error) {
-		return catalog.Manage(ctx, body, readonly)
-	}); e != nil {
 		c.Close()
 		return nil, e
 	}

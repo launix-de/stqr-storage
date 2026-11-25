@@ -184,6 +184,24 @@ func (s *Server) Handler() http.Handler {
 					return
 				}
 			}
+			formatMessage := m
+			if m.Opcode == client.NodeAdminRequest {
+				if inner, err := client.DecodeNodeAdmin(m.Body); err == nil {
+					formatMessage.Opcode, formatMessage.Body = inner.Opcode, inner.Body
+				}
+			}
+			if socketFormatRequired(formatMessage.Opcode) && len(formatMessage.Body) >= 16 && !p.isPeer() {
+				id := client.Decoder{B: formatMessage.Body}
+				bucket := id.ID()
+				if err := s.openBucketFormat(r.Context(), bucket.String(), r.Header.Get(client.FormatHeader), p); err != nil {
+					status := statusOf(err)
+					w.Header().Set("Content-Type", "application/octet-stream")
+					w.WriteHeader(status)
+					w.Write(client.EncodeMessage(client.Message{Kind: client.Response, Opcode: m.Opcode, ID: m.ID, Body: client.ResponseBody(status, nil, err.Error())}))
+					return
+				}
+			}
+
 			body, status := s.dispatchAs(m, nil, p)
 			w.Header().Set("Content-Type", "application/octet-stream")
 			w.WriteHeader(status)

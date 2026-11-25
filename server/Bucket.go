@@ -99,6 +99,7 @@ type BucketDescription struct {
 	Schema        uint16        `json:"schema"`
 	ID            string        `json:"id"`
 	Name          string        `json:"name"`
+	Format        string        `json:"format,omitempty"`
 	State         BucketState   `json:"state"`
 	Revision      uint64        `json:"revision"`
 	Policy        BucketPolicy  `json:"policy"`
@@ -249,7 +250,10 @@ func validateBucketPolicy(p BucketPolicy) error {
 func normalizeBucketDescription(d BucketDescription) (BucketDescription, error) {
 	d = cloneBucketDescription(d)
 	id, err := bucketID(d.ID)
-	if err != nil || d.Schema != 1 || d.Revision == 0 || len(d.Name) == 0 || len(d.Name) > 255 || !utf8.ValidString(d.Name) || strings.ContainsRune(d.Name, 0) {
+	if err != nil || (d.Schema != 1 && d.Schema != 2) || d.Revision == 0 || len(d.Name) == 0 || len(d.Name) > 255 || !utf8.ValidString(d.Name) || strings.ContainsRune(d.Name, 0) {
+		return d, ErrBucketInvalid
+	}
+	if !validBucketFormat(d.Format, true) || d.Format != "" && d.Schema < 2 || d.Schema == 2 && d.Format == "" {
 		return d, ErrBucketInvalid
 	}
 	if _, ok := bucketEnum(string(d.State), "active", "locked", "deleting"); !ok {
@@ -568,6 +572,9 @@ func (c *BucketCatalog) Save(d BucketDescription, expectedRevision uint64) (*Buc
 		return nil, ErrBucketInvalid
 	}
 	d.Schema = 1
+	if d.Format != "" {
+		d.Schema = 2
+	}
 	d.Revision = expectedRevision + 1
 	d, err := normalizeBucketDescription(d)
 	if err != nil {
@@ -582,6 +589,9 @@ func (c *BucketCatalog) Save(d BucketDescription, expectedRevision uint64) (*Buc
 		for i, current := range descriptions {
 			if current.ID == d.ID {
 				index = i
+				if current.Format != "" && current.Format != d.Format {
+					return nil, ErrBucketInvalid
+				}
 				if current.Revision != expectedRevision {
 					return nil, ErrBucketConflict
 				}

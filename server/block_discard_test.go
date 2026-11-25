@@ -29,7 +29,7 @@ func TestObjectLeaseRetainsGrantsAndNBDTrimUsesNativeReplacement(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	c, err := client.Dial(ctx, source.node.cfg.Node.Advertise, "block-user", "block-test-password", client.ID(b.ID()))
+	c, err := client.Dial(ctx, source.node.cfg.Node.Advertise, "block-user", "block-test-password", client.ID(b.ID()), "bd")
 	if err != nil {
 		t.Fatal(err)
 	}

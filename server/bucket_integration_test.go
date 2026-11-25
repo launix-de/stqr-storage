@@ -79,7 +79,7 @@ func TestBucketAdminAndClientObjectsEndToEnd(t *testing.T) {
 	defer host.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	c, err := client.Dial(ctx, host.URL, user.Name, "bucket-test-password", client.BucketID(b.ID()))
+	c, err := client.Dial(ctx, host.URL, user.Name, "bucket-test-password", client.BucketID(b.ID()), "fs")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -134,7 +134,7 @@ func TestBucketAdminAndClientObjectsEndToEnd(t *testing.T) {
 	}
 	// Different connections isolate namespaces even when an OID is identical.
 	other, _ := createProtocolBucket(t, s, "other")
-	second, err := client.Dial(ctx, host.URL, admin.Username, admin.Password, client.BucketID(other.ID()))
+	second, err := client.Dial(ctx, host.URL, admin.Username, admin.Password, client.BucketID(other.ID()), "fs")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -163,7 +163,7 @@ func TestBucketClientStreamingAndFilesystem(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	admin := s.cfg.Auth.BootstrapAdmin
-	c, err := client.Dial(ctx, host.URL, admin.Username, admin.Password, client.BucketID(b.ID()))
+	c, err := client.Dial(ctx, host.URL, admin.Username, admin.Password, client.BucketID(b.ID()), "fs")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -210,7 +210,7 @@ func TestBucketConfigurationAndAsynchronousDeletion(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	admin := s.cfg.Auth.BootstrapAdmin
-	c, err := client.Dial(ctx, host.URL, admin.Username, admin.Password, client.BucketID(b.ID()))
+	c, err := client.Dial(ctx, host.URL, admin.Username, admin.Password, client.BucketID(b.ID()), "fs")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -310,7 +310,7 @@ func TestBucketLogicalQuotaAndAppendOnlyUser(t *testing.T) {
 	defer host.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	c, err := client.Dial(ctx, host.URL, user.Name, "bucket-test-password", client.BucketID(b.ID()))
+	c, err := client.Dial(ctx, host.URL, user.Name, "bucket-test-password", client.BucketID(b.ID()), "fs")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -350,7 +350,7 @@ func TestBucketLogicalQuotaAndAppendOnlyUser(t *testing.T) {
 		t.Fatal("append permission implied read", err)
 	}
 	admin := s.cfg.Auth.BootstrapAdmin
-	a, err := client.Dial(ctx, host.URL, admin.Username, admin.Password, client.BucketID(b.ID()))
+	a, err := client.Dial(ctx, host.URL, admin.Username, admin.Password, client.BucketID(b.ID()), "fs")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -374,7 +374,7 @@ func TestBucketPlacementDrainAndRestartPreserveRetries(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	admin := s.cfg.Auth.BootstrapAdmin
-	c, err := client.Dial(ctx, host.URL, admin.Username, admin.Password, client.BucketID(b.ID()))
+	c, err := client.Dial(ctx, host.URL, admin.Username, admin.Password, client.BucketID(b.ID()), "fs")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -410,7 +410,7 @@ func TestBucketPlacementDrainAndRestartPreserveRetries(t *testing.T) {
 	defer reopened.Close()
 	host = httptest.NewServer(reopened.Handler())
 	defer host.Close()
-	c, err = client.Dial(ctx, host.URL, admin.Username, admin.Password, client.BucketID(id))
+	c, err = client.Dial(ctx, host.URL, admin.Username, admin.Password, client.BucketID(id), "fs")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -433,7 +433,7 @@ func TestBucketDiskPolicyMovePreservesVersionsAndRetries(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	admin := s.cfg.Auth.BootstrapAdmin
-	c, err := client.Dial(ctx, host.URL, admin.Username, admin.Password, client.BucketID(b.ID()))
+	c, err := client.Dial(ctx, host.URL, admin.Username, admin.Password, client.BucketID(b.ID()), "fs")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -538,7 +538,7 @@ func TestBucketRAMResetRejectsLearnedClientRuntime(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	admin := s.cfg.Auth.BootstrapAdmin
-	c, err := client.Dial(ctx, host.URL, admin.Username, admin.Password, client.BucketID(draft.ID()))
+	c, err := client.Dial(ctx, host.URL, admin.Username, admin.Password, client.BucketID(draft.ID()), "fs")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -569,7 +569,7 @@ func TestBucketRAMResetRejectsLearnedClientRuntime(t *testing.T) {
 	if _, err = c.Append(ctx, oid, []byte("before-reset"), client.AppendOptions{RequestID: request}); !errors.Is(err, client.ErrGone) {
 		t.Fatal("pre-reset retry was replayed into empty RAM", err)
 	}
-	fresh, err := client.Dial(ctx, next.URL, admin.Username, admin.Password, client.BucketID(draft.ID()))
+	fresh, err := client.Dial(ctx, next.URL, admin.Username, admin.Password, client.BucketID(draft.ID()), "fs")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -588,6 +588,7 @@ func TestBucketStreamingDigestFailureDoesNotCommit(t *testing.T) {
 	auth, _ := http.NewRequest(http.MethodGet, host.URL, nil)
 	auth.SetBasicAuth(admin.Username, admin.Password)
 	auth.Header.Set(client.BucketHeader, b.ID().String())
+	auth.Header.Set(client.FormatHeader, "fs")
 	dialer := websocket.Dialer{Subprotocols: []string{"stqr.v2"}}
 	conn, _, err := dialer.Dial("ws"+strings.TrimPrefix(host.URL, "http")+"/api/ws", auth.Header)
 	if err != nil {

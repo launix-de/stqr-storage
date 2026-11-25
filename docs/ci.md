@@ -24,24 +24,21 @@ The ordinary suite already tests clusters through localhost; cluster CI does not
 need an external machine. Fuzz seeds run normally; long fuzz campaigns are not
 represented as passing merely because the seed corpus passed.
 
-## Format checkpoints are mandatory before format changes
+## Retained deployment and release checkpoints
 
-Before changing a persistent format, tag the last compatible committed state.
-This covers system/control/account/placement structures, volume layouts,
-filesystem and overlay metadata, S3 representations and block-device metadata.
-Use an annotated release tag or a name such as
-`format-checkpoint/2026-11-24-1`, then push that tag. Never move an existing tag.
-The checkpoint must include `server/format_compat_test.go`; retain a working old
-producer in each checkpoint. Future fixture/manifest changes must preserve
-the current reader's ability to verify older manifests.
+Keep a checkpoint for deployed or released data that current readers must still
+support. The retained deployed-master checkpoint is the baseline during alpha
+development; intermediate source edits do not require additional tags. Never
+move an existing retained tag. A checkpoint must include a working
+`server/format_compat_test.go` producer. Future fixture/manifest changes must
+preserve the current reader's ability to verify its older manifests.
 
-CI also checks the PR/push base: if format-owning implementation files changed,
-an ancestor tag must capture the same previous format sources as that base.
-An older tag from before an intervening format revision is insufficient. The
-ownership patterns are in `FORMAT_PATHS` in the checker and deliberately include
-compatible edits to these files; this conservative guard does not try to infer
-binary compatibility from source text. Add newly introduced format owners there.
-Manual runs can select a comparison base with `--base COMMIT`.
+When format-owning files change, CI requires a retained checkpoint to be an
+ancestor of the PR/push base and tests every retained tag. Changes between that
+checkpoint and the base do not create a new checkpoint obligation: compatibility
+is decided by reading the generated data, not by identical source files.
+`FORMAT_PATHS` lists format owners; extend it when adding an owner. Manual runs
+can select a comparison base with `--base COMMIT`.
 
 `tools/compat/check.py` enumerates **all** Git tags, including annotated and
 lightweight tags. For each tag it:

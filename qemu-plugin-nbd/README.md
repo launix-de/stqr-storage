@@ -41,20 +41,6 @@ guest-facing hardware properties separately when a guest needs a specific vendor
 
 ## Growing devices
 
-In the dashboard, open **Buckets → Disks** on the desired bucket. The device
-list shows each disk's virtual capacity and identity, supports search and loads
-additional pages while scrolling. **Vergrößern** opens the same size controls as
-the rest of the dashboard: unit input, a discrete slider, quick increments and a
-before/after preview. Readonly exporters have the action disabled.
-
-The dashboard also works when the exporter runs on another machine. An updated
-exporter registers a bounded native control handler on its original STQR lease
-socket; the cluster forwards the administrator's request to that owner. It does
-not open the private Unix socket remotely, release the lease or permit a second
-writer. Without an exporter, the dashboard acquires its own ordinary exclusive
-block lease for the operation. An old/unreachable lease owner remains fenced and
-produces an explicit error rather than being bypassed.
-
 Grow a device while its exporter is stopped, using the usual bucket credentials:
 
 ```sh
@@ -183,10 +169,7 @@ Run `make -C qemu-plugin-nbd check` for range/sparse/format/NBD tests. The real
 STQR/QEMU integration is `STQR_TEST_NETWORKBOOT=1 go test ./server -run
 '^TestNetworkbootNBDWithQEMU$' -count=1` after `make -C networkboot`.
 
-The dashboard is another client of this format. A connected exporter handles
-opaque management requests on its original lease socket. Without an exporter,
-the browser lists ordinary native objects, reads descriptors and conditionally
-changes their eight-byte size field with ranged CAS. Each CAS compares the old
-descriptor bytes under the volume lock; there are no object content versions.
-A concurrently acquired exclusive lease rejects the offline object request.
-The server never opens a disk catalog or decodes a descriptor for administration.
+Disk management belongs to `stqr-nbd` and its private local control socket.
+The storage dashboard displays only the bucket format string; it does not list
+or modify disk descriptors. The NBD client declares the opaque format `bd`
+when connecting to its bucket.

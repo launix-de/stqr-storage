@@ -57,6 +57,11 @@ func s3TestSetup(t *testing.T) (*Server, *Bucket, account) {
 	if _, status := s.dispatchAs(userMessage(client.UserS3KeySet, enc), nil, userPrincipal(t, s)); status != 200 {
 		t.Fatal(status)
 	}
+	_, closeS3, err := s.openS3(context.Background(), b, userPrincipal(t, s))
+	if err != nil {
+		t.Fatal(err)
+	}
+	closeS3()
 	return s, b, user
 }
 func signS3Test(req *http.Request, body []byte, secret string) {
@@ -290,7 +295,7 @@ func TestS3NativeSDKAndFailedPublication(t *testing.T) {
 	defer host.Close()
 	ctx := context.Background()
 	a := s.cfg.Auth.BootstrapAdmin
-	conn, err := client.Dial(ctx, host.URL, a.Username, a.Password, client.ID(b.ID()))
+	conn, err := client.Dial(ctx, host.URL, a.Username, a.Password, client.ID(b.ID()), "s3")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -544,7 +549,7 @@ func TestS3NativeSnapshotVersionMismatchEmitsNoBytes(t *testing.T) {
 	host := httptest.NewServer(s.Handler())
 	defer host.Close()
 	ctx := context.Background()
-	conn, err := client.Dial(ctx, host.URL, a.Username, a.Password, client.ID(b.ID()))
+	conn, err := client.Dial(ctx, host.URL, a.Username, a.Password, client.ID(b.ID()), "s3")
 	if err != nil {
 		t.Fatal(err)
 	}

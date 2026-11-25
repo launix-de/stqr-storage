@@ -24,7 +24,7 @@ const CapabilityReplicaTopology uint64 = 16384
 
 // CapabilityCompactAuthority permits the bounded STVA management encoding.
 const CapabilityCompactAuthority uint64 = 32768
-const CapabilityBlockControl uint64 = 65536
+const CapabilityBucketFormat uint64 = 131072
 const NodeHelloMessage uint16 = 0x1000
 
 type NodeHello struct {

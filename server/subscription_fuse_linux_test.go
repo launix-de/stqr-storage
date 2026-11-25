@@ -151,12 +151,12 @@ func TestSubscribedOverlayKernelCopyUpInvalidation(t *testing.T) {
 	// Reuse the HTTP endpoint already represented by the test client.
 	host := httptest.NewServer(s.Handler())
 	t.Cleanup(host.Close)
-	uc, err := client.Dial(ctx, host.URL, admin.Username, admin.Password, client.BucketID(upper.ID()))
+	uc, err := client.Dial(ctx, host.URL, admin.Username, admin.Password, client.BucketID(upper.ID()), "fs")
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { uc.Close() })
-	writer, err := client.Dial(ctx, host.URL, admin.Username, admin.Password, client.BucketID(upper.ID()))
+	writer, err := client.Dial(ctx, host.URL, admin.Username, admin.Password, client.BucketID(upper.ID()), "fs")
 	if err != nil {
 		t.Fatal(err)
 	}

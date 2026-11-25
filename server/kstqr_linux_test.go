@@ -310,12 +310,12 @@ func TestKSTQRVirtualMachine(t *testing.T) {
 		current.Load().Handler().ServeHTTP(w, r)
 	}))
 	defer host.Close()
-	conn, err := client.Dial(ctx, host.URL, admin.Username, admin.Password, client.ID(b.ID()))
+	conn, err := client.Dial(ctx, host.URL, admin.Username, admin.Password, client.ID(b.ID()), "fs")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer conn.Close()
-	corruptConn, err := client.Dial(ctx, host.URL, admin.Username, admin.Password, client.ID(corrupt.ID()))
+	corruptConn, err := client.Dial(ctx, host.URL, admin.Username, admin.Password, client.ID(corrupt.ID()), "fs")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -548,7 +548,7 @@ rmmod kstqr
 		makeUpper := func(name string, policy []string) client.ID {
 			upper, _ := createProtocolBucket(t, s, name)
 			id := client.ID(upper.ID())
-			uc, e := client.Dial(ctx, host.URL, admin.Username, admin.Password, id)
+			uc, e := client.Dial(ctx, host.URL, admin.Username, admin.Password, id, "fs")
 			if e != nil {
 				t.Fatal(e)
 			}
@@ -572,7 +572,7 @@ rmmod kstqr
 			return id
 		}
 		nativeUpperID = makeUpper("native-upper", nil)
-		watcher, e = client.Dial(ctx, host.URL, admin.Username, admin.Password, nativeUpperID)
+		watcher, e = client.Dial(ctx, host.URL, admin.Username, admin.Password, nativeUpperID, "fs")
 		if e != nil {
 			t.Fatal(e)
 		}
@@ -740,7 +740,7 @@ poweroff -f
 		}
 		upper, _ := createProtocolBucket(t, s, "retention-upper")
 		upperID := client.ID(upper.ID())
-		uc, e := client.Dial(ctx, host.URL, admin.Username, admin.Password, upperID)
+		uc, e := client.Dial(ctx, host.URL, admin.Username, admin.Password, upperID, "fs")
 		if e != nil {
 			t.Fatal(e)
 		}
@@ -859,7 +859,7 @@ poweroff -f
 		t.Fatalf("kernel VM: %v\n%s", err, output)
 	}
 	if os.Getenv("STQR_KERNEL_OVERLAY") == "1" {
-		uc, e := client.Dial(ctx, host.URL, admin.Username, admin.Password, nativeUpperID)
+		uc, e := client.Dial(ctx, host.URL, admin.Username, admin.Password, nativeUpperID, "fs")
 		if e != nil {
 			t.Fatal(e)
 		}
@@ -1009,7 +1009,7 @@ poweroff -f
 	if info, err := fs.Stat(ctx, file.ID); err != nil || info.Nlink != 2 {
 		t.Fatal(info, err)
 	}
-	initialized, err := client.Dial(ctx, host.URL, admin.Username, admin.Password, client.ID(empty.ID()))
+	initialized, err := client.Dial(ctx, host.URL, admin.Username, admin.Password, client.ID(empty.ID()), "fs")
 	if err != nil {
 		t.Fatal(err)
 	}

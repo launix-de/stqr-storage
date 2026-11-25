@@ -516,7 +516,7 @@ func TestBoundObjectSDKAndAdministrativeRoleBoundary(t *testing.T) {
 	defer host.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	c, e := client.Dial(ctx, host.URL, "app-user", "user-password", client.BucketID{9})
+	c, e := client.Dial(ctx, host.URL, "app-user", "user-password", client.BucketID{9}, "fs")
 	if e != nil {
 		t.Fatal("ordinary bucket user cannot negotiate the object transport", e)
 	}

@@ -28,7 +28,7 @@ func TestBucketSpaceUnlimitedQuotaAndGrant(t *testing.T) {
 	defer host.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	c, err := client.Dial(ctx, host.URL, user.Name, "bucket-test-password", client.ID(b.ID()))
+	c, err := client.Dial(ctx, host.URL, user.Name, "bucket-test-password", client.ID(b.ID()), "fs")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -110,7 +110,7 @@ func TestBucketSpaceUnlimitedQuotaAndGrant(t *testing.T) {
 		t.Fatal(status)
 	}
 	admin := s.cfg.Auth.BootstrapAdmin
-	zero, err := client.Dial(ctx, host.URL, admin.Username, admin.Password, client.ID(draft.ID()))
+	zero, err := client.Dial(ctx, host.URL, admin.Username, admin.Password, client.ID(draft.ID()), "fs")
 	if err != nil {
 		t.Fatal(err)
 	}

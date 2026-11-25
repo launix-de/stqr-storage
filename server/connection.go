@@ -3,7 +3,9 @@ package server
 
 import (
 	"encoding/hex"
+	"fmt"
 	"net/http"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -15,6 +17,7 @@ import (
 // Roles, bucket pointer and permissions are immutable; administrative changes
 // revoke the capability instead of making data requests reread account/ACL data.
 type connectionAuthorization struct {
+	openedFormats              sync.Map // bucket ID -> immutable format, for administrative object clients
 	lease                      atomic.Pointer[bucketLease]
 	leaseOwner                 atomic.Bool
 	admin, clusterPeer         bool
@@ -65,7 +68,7 @@ func (s *Server) requireAdmin(p principal) error {
 
 // Called with opMu held through registration: a grant/account change cannot
 // slip between validation and insertion into the live socket registry.
-func (s *Server) authorizeConnection(r *http.Request, p principal) (*connectionAuthorization, principal, error) {
+func (s *Server) authorizeConnection(r *http.Request, p principal, allowUnboundFormat bool) (*connectionAuthorization, principal, error) {
 	auth := &connectionAuthorization{}
 	if p.ClusterPeer {
 		if !p.isPeer() {
@@ -109,6 +112,15 @@ func (s *Server) authorizeConnection(r *http.Request, p principal) (*connectionA
 		if err != nil {
 			return nil, p, err
 		}
+		if p.frontendPermission == 0 || r.Header.Get(client.FormatHeader) != internalObjectFormat || b.Describe().Format != "" {
+			format, stored := r.Header.Get(client.FormatHeader), b.Describe().Format
+			if !validBucketFormat(format, false) {
+				return nil, p, fail(400, "a nonempty bucket format is required")
+			}
+			if format != stored && !(allowUnboundFormat && stored == "") {
+				return nil, p, fail(409, fmt.Sprintf("bucket format mismatch on connection: expected %q, got %q", b.Describe().Format, format))
+			}
+		}
 		user, err := bucketID(p.User.ID)
 		if err != nil {
 			return nil, p, ErrBucketForbidden
@@ -149,6 +161,9 @@ func (s *Server) authorizeConnection(r *http.Request, p principal) (*connectionA
 		}
 	} else if !auth.admin && !auth.clusterPeer {
 		return nil, p, fail(400, "a bucket ID is required for client connections")
+	}
+	if (s.shortStopping.Load() || s.drainClosing.Load()) && !auth.clusterPeer {
+		return nil, p, fail(503, "node is shutting down")
 	}
 	p.connection = auth
 	return auth, p, nil

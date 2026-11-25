@@ -158,7 +158,7 @@ func connect(ctx context.Context, c config, name string) (*client.Client, error)
 	if err != nil {
 		return nil, err
 	}
-	return client.Dial(ctx, c.URI, c.Username, c.Password, id)
+	return client.Dial(ctx, c.URI, c.Username, c.Password, id, "bd")
 }
 func publish(ctx context.Context, c config, bucket, dir string) error {
 	release, err := lockPublication(dir)

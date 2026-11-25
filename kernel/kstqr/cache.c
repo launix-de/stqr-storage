@@ -344,7 +344,7 @@ int ks_cache_start(struct ks_fs *f, const char *user, const char *password, unsi
 	mutex_init(&c->wire);
 	hash_init(c->objects);
 	INIT_LIST_HEAD(&c->lru);
-	err = stqr_dial(&c->client, f->url, user, password, f->bucket, timeout);
+	err = stqr_dial(&c->client, f->url, user, password, f->bucket, "fs", timeout);
 	if (err) {
 		kfree(c);
 		return err;

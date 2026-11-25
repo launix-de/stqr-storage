@@ -23,7 +23,7 @@ func TestClusterBlockMaintenanceRoutesAndFences(t *testing.T) {
 	admin := source.node.cfg.Auth.BootstrapAdmin
 	dial := func(url string) *client.Client {
 		t.Helper()
-		c, e := client.Dial(ctx, url, admin.Username, admin.Password, client.ID(bucket.ID()))
+		c, e := client.Dial(ctx, url, admin.Username, admin.Password, client.ID(bucket.ID()), "fs")
 		if e != nil {
 			t.Fatal(e)
 		}
@@ -84,7 +84,7 @@ func TestClusterBlockMaintenanceRoutesAndFences(t *testing.T) {
 		t.Fatal("cluster begin", e)
 	}
 	for _, s := range []*Server{source.node, target.node} {
-		if other, e := client.Dial(ctx, s.cfg.Node.Advertise, admin.Username, admin.Password, client.ID(bucket.ID())); e == nil {
+		if other, e := client.Dial(ctx, s.cfg.Node.Advertise, admin.Username, admin.Password, client.ID(bucket.ID()), "fs"); e == nil {
 			other.Close()
 			t.Fatal("another client entered cluster lease")
 		}
@@ -147,7 +147,7 @@ func TestClusterBlockMaintenanceRoutesAndFences(t *testing.T) {
 	if _, e := target.node.executeBucketCopy(ctx, copyMessage, actor); e != nil {
 		t.Fatalf("cluster clone status %d: %v", statusOf(e), e)
 	}
-	cloneClient, e := client.Dial(ctx, source.node.cfg.Node.Advertise, admin.Username, admin.Password, client.ID(clone.ID()))
+	cloneClient, e := client.Dial(ctx, source.node.cfg.Node.Advertise, admin.Username, admin.Password, client.ID(clone.ID()), "fs")
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -163,7 +163,7 @@ func TestClusterBlockMaintenanceRoutesAndFences(t *testing.T) {
 	if _, e := target.node.executeBucketCopy(ctx, clearMessage, actor); e != nil {
 		t.Fatal("cluster clear", e)
 	}
-	cloneClient, e = client.Dial(ctx, source.node.cfg.Node.Advertise, admin.Username, admin.Password, client.ID(clone.ID()))
+	cloneClient, e = client.Dial(ctx, source.node.cfg.Node.Advertise, admin.Username, admin.Password, client.ID(clone.ID()), "fs")
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -175,7 +175,7 @@ func TestClusterBlockMaintenanceRoutesAndFences(t *testing.T) {
 	if _, e := source.node.executeBucketCopy(ctx, clearMessage, userPrincipal(t, source.node)); e != nil {
 		t.Fatal("clear replay from other node", e)
 	}
-	cloneClient, e = client.Dial(ctx, source.node.cfg.Node.Advertise, admin.Username, admin.Password, client.ID(clone.ID()))
+	cloneClient, e = client.Dial(ctx, source.node.cfg.Node.Advertise, admin.Username, admin.Password, client.ID(clone.ID()), "fs")
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -194,7 +194,7 @@ func TestClusterMaintenanceRetainsFenceAndReleasesOrphan(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 35*time.Second)
 	defer cancel()
 	a := source.node.cfg.Auth.BootstrapAdmin
-	c, e := client.Dial(ctx, source.node.cfg.Node.Advertise, a.Username, a.Password, client.ID(b.ID()))
+	c, e := client.Dial(ctx, source.node.cfg.Node.Advertise, a.Username, a.Password, client.ID(b.ID()), "fs")
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -220,7 +220,7 @@ func TestClusterMaintenanceRetainsFenceAndReleasesOrphan(t *testing.T) {
 	if e = source.node.scopes.move(ctx, plan); e != nil {
 		t.Fatal(e)
 	}
-	c, e = client.Dial(ctx, source.node.cfg.Node.Advertise, a.Username, a.Password, client.ID(b.ID()))
+	c, e = client.Dial(ctx, source.node.cfg.Node.Advertise, a.Username, a.Password, client.ID(b.ID()), "fs")
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -244,7 +244,7 @@ func TestClusterMaintenanceRetainsFenceAndReleasesOrphan(t *testing.T) {
 	if data, _, e := c.Get(ctx, client.ObjectID{0x81}); e != nil || string(data) != "persistent" {
 		t.Fatal("auxiliary socket did not reauthenticate after passive restart", e)
 	}
-	if other, e := client.Dial(ctx, target.node.cfg.Node.Advertise, a.Username, a.Password, client.ID(b.ID())); e == nil {
+	if other, e := client.Dial(ctx, target.node.cfg.Node.Advertise, a.Username, a.Password, client.ID(b.ID()), "fs"); e == nil {
 		other.Close()
 		t.Fatal("participant restart admitted another client")
 	}
@@ -281,7 +281,7 @@ func TestClusterMaintenanceRetainsFenceAndReleasesOrphan(t *testing.T) {
 			t.Fatal("delayed reserve resurrected released lease")
 		}
 	}
-	fresh, e := client.Dial(ctx, target.node.cfg.Node.Advertise, a.Username, a.Password, client.ID(b.ID()))
+	fresh, e := client.Dial(ctx, target.node.cfg.Node.Advertise, a.Username, a.Password, client.ID(b.ID()), "fs")
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -315,7 +315,7 @@ func TestDaemonBucketCopyReceiptSurvivesRestart(t *testing.T) {
 	defer cancel()
 	put := func(bucket volume.ID, data string) {
 		t.Helper()
-		c, e := client.Dial(ctx, node.node.cfg.Node.Advertise, a.Username, a.Password, client.ID(bucket))
+		c, e := client.Dial(ctx, node.node.cfg.Node.Advertise, a.Username, a.Password, client.ID(bucket), "fs")
 		if e != nil {
 			t.Fatal(e)
 		}
@@ -343,7 +343,7 @@ func TestDaemonBucketCopyReceiptSurvivesRestart(t *testing.T) {
 	if _, e := node.node.executeBucketCopy(ctx, clear, userPrincipal(t, node.node)); e != nil {
 		t.Fatal("replay", e)
 	}
-	c, e := client.Dial(ctx, node.node.cfg.Node.Advertise, a.Username, a.Password, client.ID(dst.ID()))
+	c, e := client.Dial(ctx, node.node.cfg.Node.Advertise, a.Username, a.Password, client.ID(dst.ID()), "fs")
 	if e != nil {
 		t.Fatal(e)
 	}

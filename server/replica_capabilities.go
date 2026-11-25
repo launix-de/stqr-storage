@@ -20,6 +20,9 @@ func replicaPoliciesRequired(descriptions []BucketDescription) bool {
 	return false
 }
 func supportsReplicaPolicies(view *systemView, caps uint64) bool {
+	if view != nil && view.manifest.Schema >= 2 && caps&client.CapabilityBucketFormat == 0 {
+		return false
+	}
 	return view == nil || (view.manifest.ReplicationProtocol == 0 && !replicaPoliciesRequired(view.descriptions)) || (caps&client.CapabilityReplication != 0 && (view.manifest.ReplicationProtocol < 2 || caps&client.CapabilityReplicaTopology != 0))
 }
 func (s *Server) requireReplicaCapabilities(descriptions []BucketDescription, nodes []client.ID) error {

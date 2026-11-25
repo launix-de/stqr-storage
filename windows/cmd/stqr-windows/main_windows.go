@@ -214,7 +214,7 @@ func mount(ctx context.Context, c mountConfig, initialize bool, installation ins
 			return e
 		}
 	}
-	conn, e := client.Dial(ctx, c.URI, c.Username, c.Password, id)
+	conn, e := client.Dial(ctx, c.URI, c.Username, c.Password, id, "fs")
 	if e != nil {
 		return e
 	}
