@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"sort"
 
 	"github.com/launix-de/stqr-storage/client"
@@ -82,6 +83,17 @@ func (s *Server) refreshInventoryMap(ctx context.Context, bucket volume.ID) erro
 	return nil
 }
 
+// Inventory distinguishes a lost owner link from cancellation of its caller.
+func inventoryCallError(ctx context.Context, err error) error {
+	if !errors.Is(err, context.Canceled) {
+		return err
+	}
+	if callerErr := ctx.Err(); callerErr != nil {
+		return callerErr
+	}
+	return fail(503, "required inventory owner connection closed")
+}
+
 func (b *Bucket) scanCluster(ctx context.Context, description BucketDescription, p principal, after *volume.ObjectID, limit int) ([]volume.ObjectRecord, volume.ObjectID, bool, error) {
 	if b.server.bucketAwaitingRecovery(client.ID(b.ID())) {
 		return nil, volume.ObjectID{}, false, fail(503, "bucket inventory awaits recovered volumes")
@@ -141,6 +153,7 @@ func (b *Bucket) scanCluster(ctx context.Context, description BucketDescription,
 			e.ID(token)
 			body, callErr := (peerControlParticipants{runtime: s.control}).call(ctx, node, peerBucketInventory, e.B)
 			if callErr != nil {
+				callErr = inventoryCallError(ctx, callErr)
 				// Normal pages use the already pushed map. Only a rejected/stale
 				// owner or lost connection needs archive catch-up, not every page.
 				if code := statusOf(callErr); code == 503 || code == 409 {
