@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io"
 	"sort"
+	"sync"
 )
 
 // Accepted mutations live in a bounded page overlay. Neither payload nor metadata
@@ -151,7 +152,97 @@ func (v *Volume) FlushAccepted() error {
 	}
 	return v.flushDeferred()
 }
-func (v *Volume) flushDeferred() error {
+
+// IsDurableThrough only inspects local flush progress. The counter belongs to
+// the existing volume checkpoint; it is not a user-visible object version.
+// PendingCheckpoint lets a caller leave its own admission lock before a slow
+// flush or a full accepted-write buffer. It is a hint, not mutation authority;
+// the actual operation must recheck placement/permissions after waiting.
+func (v *Volume) PendingCheckpoint(accepted bool, length uint64) (uint64, bool) {
+	v.mu.RLock()
+	defer v.mu.RUnlock()
+	return v.sb.Generation, v.checkpointing || v.deferred != nil &&
+		(!accepted || length > 1<<20 || len(v.deferred.pages) > deferredPageLimit/2)
+}
+
+func (v *Volume) IsDurableThrough(generation uint64) bool {
+	v.mu.RLock()
+	defer v.mu.RUnlock()
+	return generation <= v.durableGeneration
+}
+
+func (v *Volume) flushDeferred() (err error) {
+	// All callers own the exclusive metadata lock. A second barrier waits for
+	// the same physical checkpoint while releasing that lock to readers.
+	for v.checkpointing {
+		v.prepareCond.Wait()
+	}
+	if err = v.check(false); err != nil {
+		return err
+	}
+	if v.deferred == nil {
+		return nil
+	}
+	if v.preparing || v.staging != nil || v.overlay != nil {
+		return ErrBusy
+	}
+	if v.prepareCond == nil {
+		v.prepareCond = sync.NewCond(&v.mu)
+	}
+	return v.checkpointIO((*Volume).flushDeferredIO)
+}
+
+// syncVisible confirms already published storage without holding the metadata
+// lock during the physical fence. Private payload staging is not visible yet;
+// its publisher still owns its own WAL/durability ordering.
+func (v *Volume) syncVisible() error {
+	for v.checkpointing {
+		v.prepareCond.Wait()
+	}
+	if err := v.check(false); err != nil {
+		return err
+	}
+	if v.deferred != nil {
+		return v.flushDeferred()
+	}
+	if v.preparing {
+		if v.sb.Generation <= v.durableGeneration {
+			return nil
+		}
+		return ErrBusy
+	}
+	if v.prepareCond == nil {
+		v.prepareCond = sync.NewCond(&v.mu)
+	}
+	return v.checkpointIO((*Volume).rawSync)
+}
+
+func (v *Volume) checkpointIO(run func(*Volume) error) (err error) {
+	// Mutations cannot change these pages until completion. Readers continue to
+	// use the same visible pages while disk blocks are written in place. The
+	// private I/O view also keeps failure reporting from racing those readers.
+	ioView := &Volume{dev: v.dev, sb: v.sb, limit: v.limit, deferred: v.deferred,
+		durableGeneration: v.durableGeneration}
+	v.preparing, v.checkpointing = true, true
+	v.mu.Unlock()
+	defer func() {
+		v.mu.Lock()
+		v.preparing, v.checkpointing = false, false
+		if ioView.failed != nil {
+			v.failed = ioView.failed
+		}
+		if err == nil {
+			v.durableGeneration = ioView.durableGeneration
+			v.deferred = ioView.deferred
+		}
+		v.prepareCond.Broadcast()
+	}()
+	return run(ioView)
+}
+
+// Only the checkpoint owner uses this private view. WAL encoding, ordering and
+// crash recovery are unchanged; metadata publication happens back under v.mu.
+func (v *Volume) flushDeferredIO() error {
 	g := v.deferred
 	if g == nil {
 		return nil

@@ -3,6 +3,7 @@ package server
 
 import (
 	"context"
+	"errors"
 	"github.com/launix-de/stqr-storage/client"
 	"github.com/launix-de/stqr-storage/volume"
 
@@ -114,9 +115,21 @@ func TestAcceptedVolumeSwitchOrdering(t *testing.T) {
 	defer b.Close()
 	bucket := volume.ID(client.NewRequestID())
 	key := volume.Key{Bucket: bucket, Object: volume.ObjectID{1}}
-	s.opMu.Lock()
-	defer s.opMu.Unlock()
-	if err = s.switchAcceptedVolume(bucket, a, true); err != nil {
+	switchTo := func(target *volume.Volume) error {
+		for {
+			s.opMu.Lock()
+			err := s.switchAcceptedVolume(bucket, target, true)
+			s.opMu.Unlock()
+			var wait *acceptedCheckpoint
+			if !errors.As(err, &wait) {
+				return err
+			}
+			if err = wait.volume.CheckpointThrough(wait.generation); err != nil {
+				return err
+			}
+		}
+	}
+	if err = switchTo(a); err != nil {
 		t.Fatal(err)
 	}
 	h, err := a.Open(true)
@@ -132,7 +145,7 @@ func TestAcceptedVolumeSwitchOrdering(t *testing.T) {
 		t.Fatal(err)
 	}
 	s.recordAccepted(bucket, a, gen)
-	if err = s.switchAcceptedVolume(bucket, b, true); err != nil {
+	if err = switchTo(b); err != nil {
 		t.Fatal(err)
 	}
 	syncs := a.IOStats().SyncOps
@@ -143,13 +156,13 @@ func TestAcceptedVolumeSwitchOrdering(t *testing.T) {
 		t.Fatal("volume switch did not checkpoint dependency")
 	}
 	// A confirmed detached store must not block the next destination.
-	if err = s.switchAcceptedVolume(bucket, a, true); err != nil {
+	if err = switchTo(a); err != nil {
 		t.Fatal(err)
 	}
 	if err = a.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if err = s.switchAcceptedVolume(bucket, b, true); err != nil {
+	if err = switchTo(b); err != nil {
 		t.Fatal(err)
 	}
 }

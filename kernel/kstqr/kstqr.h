@@ -13,6 +13,7 @@ struct ks_overlay_state;
 struct ks_rpc {
 	struct mutex lock;
 	stqr_client *client;
+
 };
 #define KS_DIR_LIMIT (16U << 20)
 struct ks_edit;
@@ -73,8 +74,10 @@ struct ks_fs {
 	struct file *boot_lifetime;
 	struct ks_rpc rpc[KS_RPC_SLOTS];
 	struct mutex sync_lock;
+	stqr_fence *fence;
 	stqr_commit_mark durable;
 	struct ks_cache *cache;
+	struct workqueue_struct *read_queue;
 	size_t cache_budget;
 	struct super_block *sb;
 	spinlock_t inode_lock;
@@ -88,6 +91,7 @@ struct ks_fs {
 	stqr_id bucket;
 	bool readonly, failed, stopping;
 	atomic64_t cache_hits, cache_misses, rpc_gets, rpc_ranges, rpc_cas, read_windows;
+	atomic64_t read_bytes, read_ns, read_queue_ns;
 	atomic64_t writeback_batches, writeback_folios, writeback_bytes, writeback_errors,
 	    writeback_ns;
 	atomic64_t write_snapshot_ns, write_prepare_ns, write_publish_ns, write_retries;
@@ -110,7 +114,8 @@ static inline struct ks_inode *KS_I(struct inode *i)
 bool ks_cache_stamp(struct ks_fs *, stqr_object_id, const stqr_info *, struct ks_cache_stamp *);
 bool ks_cache_stamp_current(struct ks_fs *, stqr_object_id, const struct ks_cache_stamp *);
 int ks_checkpoint(struct ks_fs *);
-int ks_cache_sync(struct ks_fs *);
+int ks_cache_fence_add(struct ks_fs *, stqr_fence *);
+void ks_cache_fence_apply(struct ks_fs *, const stqr_fence *);
 int ks_plain_snapshot(struct ks_fs *, stqr_object_id, struct ks_snapshot *);
 int ks_overlay_lookup(struct ks_fs *, stqr_object_id, const char *, stqr_object_id *,
 		      struct ks_directory_proof *);

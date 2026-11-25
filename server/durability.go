@@ -24,6 +24,17 @@ type durabilityState struct {
 	buckets map[volume.ID]*bucketDurability
 }
 
+// acceptedCheckpoint is returned before consuming an incoming payload or
+// changing an object. The caller drops node admission locks, waits, then reruns
+// all authorization/placement/quota checks. It is not a transaction or a client
+// retry: the same storage request and payload remain local to this operation.
+type acceptedCheckpoint struct {
+	volume     *volume.Volume
+	generation uint64
+}
+
+func (*acceptedCheckpoint) Error() string { return "waiting for local write fence" }
+
 // Called under opMu before every object mutation. Keeping just one volatile
 // volume per bucket preserves causal data/index/inode ordering across local
 // volumes: a change of destination checkpoints the preceding volume first.
@@ -39,14 +50,14 @@ func (s *Server) switchAcceptedVolume(bucket volume.ID, v *volume.Volume, accept
 		d.buckets[bucket] = state
 	}
 	var previous *volume.Volume
+	var generation uint64
 	if state != nil {
 		previous = state.active
+		generation = state.volumes[previous]
 	}
 	d.mu.Unlock()
-	if previous != nil && previous != v {
-		if err := previous.CheckpointThrough(previous.Header().Generation); err != nil {
-			return err
-		}
+	if previous != nil && previous != v && !previous.IsDurableThrough(generation) {
+		return &acceptedCheckpoint{previous, generation}
 	}
 	if state != nil {
 		d.mu.Lock()

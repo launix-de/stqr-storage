@@ -431,6 +431,21 @@ func (b *Bucket) Stat(ctx context.Context, p principal, id volume.ObjectID) (vol
 	return info, b.absenceError(id, info, err)
 }
 func (b *Bucket) mutateUnmetered(ctx context.Context, p principal, id volume.ObjectID, opcode uint16, offset, length uint64, src io.Reader, expected []byte, opt volume.Options) (volume.Result, error) {
+	for {
+		result, err := b.mutateAttempt(ctx, p, id, opcode, offset, length, src, expected, opt)
+		var wait *acceptedCheckpoint
+		if !errors.As(err, &wait) {
+			return result, err
+		}
+		if err = ctx.Err(); err != nil {
+			return volume.Result{}, err
+		}
+		if err = wait.volume.CheckpointThrough(wait.generation); err != nil {
+			return volume.Result{}, err
+		}
+	}
+}
+func (b *Bucket) mutateAttempt(ctx context.Context, p principal, id volume.ObjectID, opcode uint16, offset, length uint64, src io.Reader, expected []byte, opt volume.Options) (volume.Result, error) {
 	if b.server == nil {
 		return volume.Result{}, fail(503, "bucket not attached")
 	}
@@ -575,6 +590,13 @@ func (b *Bucket) mutateUnmetered(ctx context.Context, p principal, id volume.Obj
 	}
 	if opcode == cowRestoreOpcode && exists {
 		return volume.Result{Info: old}, nil
+	}
+	payloadLength := length
+	if opcode == 0x0105 || opcode == 0x0106 {
+		payloadLength = 0
+	}
+	if generation, pending := v.PendingCheckpoint(opt.Accepted, payloadLength); pending {
+		return volume.Result{}, &acceptedCheckpoint{v, generation}
 	}
 	if err := s.switchAcceptedVolume(b.ID(), v, opt.Accepted); err != nil {
 		return volume.Result{}, err
@@ -809,9 +831,15 @@ func (b *Bucket) mutateUnmetered(ctx context.Context, p principal, id volume.Obj
 			b.usage.mu.Unlock()
 		}
 	}()
-	h, err = v.Open(true)
+	var acquired bool
+	h, acquired, err = v.TryOpen(true)
 	if err != nil {
 		return volume.Result{}, err
+	}
+	if !acquired {
+		// A zero target only waits for the volume lock outside node admission.
+		// Do not take a second, potentially blocking read lock here.
+		return volume.Result{}, &acceptedCheckpoint{v, 0}
 	}
 	defer h.Close()
 	if src != nil {

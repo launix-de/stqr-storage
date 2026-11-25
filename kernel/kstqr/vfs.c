@@ -721,38 +721,80 @@ static int ks_read_folio(struct file *file, struct folio *folio)
 	folio_unlock(folio);
 	return err;
 }
-/* Read a contiguous window once, then fill the requested page-cache folios.
- * This mapping does not enable large folios; request windows are page aligned. */
+/* Queue contiguous windows without waiting in the caller. A bounded worker
+ * pool allocates the payload buffers only when it runs; queued jobs retain
+ * locked folios, not an extra MiB buffer per speculative read. No disk format
+ * or object identity changes are involved. */
+#define KS_READ_BYTES (1U << 20)
+#define KS_READ_FOLIOS (KS_READ_BYTES / PAGE_SIZE)
+struct ks_read_window {
+ struct work_struct work;
+ struct ks_fs *fs;
+ stqr_object_id id;
+ loff_t offset;
+ size_t length;
+ u64 queued;
+ unsigned count;
+ struct folio *folios[KS_READ_FOLIOS];
+};
+static void ks_read_window_worker(struct work_struct *work)
+{
+ struct ks_read_window *job = container_of(work, struct ks_read_window, work);
+ struct ks_fs *f = job->fs;
+ struct ks_snapshot snapshot = {0};
+ u64 started = ktime_get_ns();
+ size_t pos = 0, bytes = 0;
+ unsigned saved = enter_fs(f);
+ void *buffer = sq_alloc(job->length);
+ int err = buffer ? ks_snapshot(f, job->id, &snapshot) : -ENOMEM;
+ atomic64_inc(&f->read_windows);
+ atomic64_add(started - job->queued, &f->read_queue_ns);
+ if (!err && job->offset < snapshot.node.size) {
+  bytes = min_t(u64, job->length, snapshot.node.size - job->offset);
+  err = ks_read(f, &snapshot.node, buffer, bytes, job->offset);
+ }
+ ks_snapshot_free(&snapshot);
+ if (!err) atomic64_add(bytes, &f->read_bytes);
+ atomic64_add(ktime_get_ns() - started, &f->read_ns);
+ // All filesystem/RPC work finishes before releasing the last locked folio;
+ // inode eviction may proceed immediately after that unlock.
+ for (unsigned n = 0; n < job->count; n++) {
+  struct folio *folio = job->folios[n];
+  size_t length = folio_size(folio);
+  if (!err) {
+   memcpy_to_folio(folio, 0, (u8 *)buffer + pos, length);
+   folio_mark_uptodate(folio);
+  }
+  pos += length;
+  folio_unlock(folio);
+  folio_put(folio);
+ }
+ sq_free(buffer);
+ leave_fs(f, saved);
+ kfree(job);
+}
 static void ks_readahead(struct readahead_control *rac)
 {
-	struct inode *i = rac->mapping->host;
-	struct ks_fs *f = i->i_sb->s_fs_info;
-	while (readahead_count(rac)) {
-		loff_t offset = readahead_pos(rac);
-		size_t length = min_t(size_t, readahead_length(rac), 1U << 20);
-		struct ks_snapshot s = {0};
-		void *buffer = sq_alloc(length);
-		struct folio *folio;
-		size_t pos = 0;
-		unsigned saved = enter_fs(f);
-		int err = buffer ? ks_snapshot(f, KS_I(i)->id, &s) : -ENOMEM;
-		atomic64_inc(&f->read_windows);
-		if (!err && offset < s.node.size)
-			err = ks_read(f, &s.node, buffer, min_t(u64, length, s.node.size - offset),
-				      offset);
-		ks_snapshot_free(&s);
-		leave_fs(f, saved);
-		while (pos < length && (folio = readahead_folio(rac))) {
-			size_t n = folio_size(folio);
-			if (!err && n <= length - pos) {
-				memcpy_to_folio(folio, 0, (u8 *)buffer + pos, n);
-				folio_mark_uptodate(folio);
-			}
-			folio_unlock(folio);
-			pos += n;
-		}
-		sq_free(buffer);
-	}
+ struct inode *i = rac->mapping->host;
+ struct ks_fs *f = i->i_sb->s_fs_info;
+ while (readahead_count(rac)) {
+  struct ks_read_window *job = kzalloc(sizeof(*job), GFP_NOFS);
+  struct folio *folio;
+  if (!job) return; // VFS falls back to read_folio for unconsumed folios.
+  job->fs = f;
+  job->id = KS_I(i)->id;
+  job->offset = readahead_pos(rac);
+  job->queued = ktime_get_ns();
+  while (job->length < KS_READ_BYTES && job->count < KS_READ_FOLIOS &&
+         (folio = readahead_folio(rac))) {
+   folio_get(folio);
+   job->folios[job->count++] = folio;
+   job->length += folio_size(folio);
+  }
+  if (!job->count) { kfree(job); return; }
+  INIT_WORK(&job->work, ks_read_window_worker);
+  queue_work(f->read_queue, &job->work);
+ }
 }
 #define KS_WRITEBACK_BYTES (1U << 20)
 #define KS_WRITEBACK_FOLIOS (KS_WRITEBACK_BYTES / PAGE_SIZE)
@@ -1185,8 +1227,11 @@ static void ks_close_lower(struct ks_fs *f)
 		return;
 	WRITE_ONCE(f->stopping, true);
 	ks_cache_stop(f);
-	for (unsigned slot = 0; slot < KS_RPC_SLOTS; slot++)
+	stqr_fence_close(f->fence);
+	f->fence = NULL;
+	for (unsigned slot = 0; slot < KS_RPC_SLOTS; slot++) {
 		stqr_close(f->rpc[slot].client);
+	}
 	kfree(f->url);
 	kfree(f);
 }
@@ -1195,6 +1240,10 @@ static void ks_put_super(struct super_block *sb)
 	struct ks_fs *f = sb->s_fs_info;
 	if (!f)
 		return;
+ if (f->read_queue) {
+  destroy_workqueue(f->read_queue);
+  f->read_queue = NULL;
+ }
 	if (!f->readonly) {
 		int err = ks_checkpoint(f);
 		if (err)
@@ -1202,11 +1251,14 @@ static void ks_put_super(struct super_block *sb)
 	}
 	WRITE_ONCE(f->stopping, true);
 	ks_cache_stop(f);
+	stqr_fence_close(f->fence);
+	f->fence = NULL;
 	cancel_work_sync(&f->invalidation_work);
 	ks_close_lower(f->lower);
 	f->lower = NULL;
-	for (unsigned slot = 0; slot < KS_RPC_SLOTS; slot++)
+	for (unsigned slot = 0; slot < KS_RPC_SLOTS; slot++) {
 		stqr_close(f->rpc[slot].client);
+	}
 	ks_overlay_stop(f);
 	if (f->boot_lifetime)
 		fput(f->boot_lifetime);
@@ -1236,13 +1288,14 @@ static int ks_show_stats(struct seq_file *m, struct dentry *root)
 	struct ks_fs *f = root->d_sb->s_fs_info;
 	seq_printf(m,
 		   "\tstqr: cache_hits=%lld cache_misses=%lld rpc_get=%lld rpc_range=%lld "
-		   "rpc_cas=%lld read_windows=%lld writeback_batches=%lld writeback_folios=%lld "
+		   "rpc_cas=%lld read_windows=%lld read_bytes=%lld read_ns=%lld read_queue_ns=%lld writeback_batches=%lld writeback_folios=%lld "
 		   "writeback_bytes=%lld writeback_errors=%lld writeback_ns=%lld "
 		   "write_snapshot_ns=%lld write_prepare_ns=%lld write_publish_ns=%lld "
 		   "write_retries=%lld\n",
 		   atomic64_read(&f->cache_hits), atomic64_read(&f->cache_misses),
 		   atomic64_read(&f->rpc_gets), atomic64_read(&f->rpc_ranges),
 		   atomic64_read(&f->rpc_cas), atomic64_read(&f->read_windows),
+ atomic64_read(&f->read_bytes), atomic64_read(&f->read_ns), atomic64_read(&f->read_queue_ns),
 		   atomic64_read(&f->writeback_batches), atomic64_read(&f->writeback_folios),
 		   atomic64_read(&f->writeback_bytes), atomic64_read(&f->writeback_errors),
 		   atomic64_read(&f->writeback_ns), atomic64_read(&f->write_snapshot_ns),
@@ -1345,6 +1398,9 @@ static int ks_fill_super(struct super_block *sb, struct fs_context *fc)
 	if (f->readonly)
 		sb->s_flags |= SB_RDONLY;
 	set_default_d_op(sb, &ks_dentry_ops);
+ f->read_queue = alloc_workqueue("kstqr-read", WQ_UNBOUND | WQ_MEM_RECLAIM, KS_RPC_SLOTS);
+ if (!f->read_queue) { ks_put_super(sb); return -ENOMEM; }
+
 	saved = enter_fs(f);
 	err = 0;
 	for (unsigned slot = 0; slot < KS_RPC_SLOTS && !err; slot++)

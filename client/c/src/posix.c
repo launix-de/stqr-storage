@@ -4,6 +4,7 @@
 #include <stdlib.h>
 #include <unistd.h>
 #include <netdb.h>
+#include <netinet/tcp.h>
 #include <sys/socket.h>
 #include <sys/time.h>
 #include <poll.h>
@@ -44,6 +45,11 @@ int sq_connect(struct stqr_socket **out, const char *host, unsigned port, unsign
             err = soerr ? -soerr : -ETIMEDOUT; close(fd); fd = -1; continue;
         }
         if (fcntl(fd, F_SETFL, 0) < 0) { err = -errno; close(fd); fd = -1; continue; }
+        /* A notification ACK followed by a small RPC must not wait for
+         * delayed TCP ACKs. WebSocket frames are already sent contiguously. */
+        { int on=1; if (setsockopt(fd,IPPROTO_TCP,TCP_NODELAY,&on,sizeof(on))) {
+            err=-errno;close(fd);fd=-1;continue;
+        } }
         tv.tv_sec = ms / 1000; tv.tv_usec = (ms % 1000) * 1000;
         if (setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)) || setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv))) {
             err = -errno; close(fd); fd = -1; continue;

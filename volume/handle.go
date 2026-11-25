@@ -19,6 +19,8 @@ import (
 // management methods and standalone Stat acquire locks and must be called
 // outside a handle session.
 // A write handle excludes other mutations; a read handle excludes publication.
+// A pinned checkpoint temporarily admits readers while waiting for physical I/O;
+// it still excludes other writers and preserves the handle's accepted bytes.
 // PrepareMutation alone admits readers during its private payload staging, so
 // large uploads never hide the previous committed object behind a network read.
 // Multiple mutations under a write handle are individually committed, not one
@@ -40,7 +42,8 @@ type handleLease struct {
 }
 
 // Open acquires the volume lock. write=false allows concurrent readers;
-// write=true also permits mutations and excludes every other volume operation.
+// write=true also permits mutations. Checkpoints may temporarily admit readers
+// while retaining the exclusive right to mutate this volume.
 // The returned handle is the only supported way to compose locked operations.
 func (v *Volume) Open(write bool) (*Handle, error) {
 	if write {
@@ -60,6 +63,10 @@ func (v *Volume) TryOpen(write bool) (h *Handle, acquired bool, err error) {
 		acquired = v.mu.TryRLock()
 	}
 	if !acquired {
+		return nil, false, nil
+	}
+	if write && v.checkpointing {
+		v.mu.Unlock()
 		return nil, false, nil
 	}
 	h, err = v.openHandleLocked(write)

@@ -15,7 +15,7 @@ libstqr.a: $(OBJECTS)
 libstqr.so: $(OBJECTS)
 	$(CC) -shared -Wl,-soname,libstqr.so -o $@ $^ $(LDLIBS)
 tests/integration: tests/integration.c libstqr.a
-	$(CC) $(CPPFLAGS) $(CFLAGS) $(WARN) -o $@ $< libstqr.a $(LDLIBS)
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(WARN) -o $@ $< libstqr.a $(LDLIBS) -pthread
 check: tests/integration
 	./tests/integration
 clean:

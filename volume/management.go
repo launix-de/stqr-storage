@@ -53,7 +53,7 @@ func (v *Volume) syncThroughLocked(k Key) error {
 	if e != nil {
 		return e
 	}
-	return v.sync()
+	return v.syncVisible()
 }
 
 // Detach only closes an empty draining volume. The caller must first ensure

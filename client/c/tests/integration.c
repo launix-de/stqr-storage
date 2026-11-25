@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: GPL-3.0-only */
 #include "stqr.h"
 #include <errno.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -18,6 +19,10 @@ static void observe(void *arg, const stqr_update *update) {
 static void wait_change(stqr_client *c, struct observer *o, unsigned count) {
     for (unsigned j = 0; j < 30 && o->changes < count; j++) CHECK(stqr_poll(c, 100) >= 0);
     CHECK(o->changes == count);
+}
+struct fence_waiter { stqr_fence *fence; int error; };
+static void *wait_fence(void *arg) {
+ struct fence_waiter *w=arg; w->error=stqr_fence_wait(w->fence); return NULL;
 }
 int main(void) {
     stqr_client *c = NULL;
@@ -37,6 +42,54 @@ int main(void) {
     CHECK(!stqr_parse_id(getenv("STQR_TEST_BUCKET"), &bucket));
     CHECK(!stqr_parse_object_id("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", &id));
     CHECK(!stqr_dial(&c, url, getenv("STQR_TEST_USER"), getenv("STQR_TEST_PASSWORD"), bucket, 3000));
+    if (mode && !strcmp(mode,"fence")) {
+        stqr_fence *fence=NULL; stqr_commit_mark mark;
+        struct fence_waiter waiter; pthread_t worker;
+        o=fresh();o.accepted=1;CHECK(!stqr_put(c,id,"hello",5,&o,&info));
+        CHECK(!stqr_fence_capture(c,&fence));
+        CHECK(!stqr_fence_add(c,fence) && stqr_fence_count(fence)==1);
+        waiter.fence=fence;waiter.error=1;
+        CHECK(!pthread_create(&worker,NULL,wait_fence,&waiter));
+        // The fixture holds SYNC until this original session reads again.
+        CHECK(!stqr_stat(c,id,&info));
+        CHECK(!pthread_join(worker,NULL) && !waiter.error);
+        stqr_fence_apply(c,fence);
+        CHECK(!stqr_pending_mark(c,&mark) && !mark.sequence);
+        o=fresh();o.accepted=1;CHECK(!stqr_put(c,id,"hello",5,&o,&info));
+        CHECK(!stqr_fence_capture(c,&fence));
+        o=fresh();o.accepted=1;CHECK(!stqr_put(c,id,"hello",5,&o,&info));
+        CHECK(!stqr_fence_wait(fence));stqr_fence_apply(c,fence);
+        CHECK(!stqr_pending_mark(c,&mark) && mark.sequence==3);
+        CHECK(!stqr_fence_capture(c,&fence));
+        CHECK(!stqr_fence_wait(fence));stqr_fence_apply(c,fence);
+        CHECK(!stqr_pending_mark(c,&mark) && !mark.sequence);
+        {
+            stqr_client *second=NULL,*other_bucket=NULL;stqr_id foreign=bucket;
+            CHECK(!stqr_dial(&second,url,getenv("STQR_TEST_USER"),getenv("STQR_TEST_PASSWORD"),bucket,3000));
+            o=fresh();o.accepted=1;CHECK(!stqr_put(second,id,"hello",5,&o,&info));
+            o=fresh();o.accepted=1;CHECK(!stqr_put(c,id,"hello",5,&o,&info));
+            CHECK(!stqr_fence_reset(&fence));
+            CHECK(!stqr_fence_add(second,fence) && !stqr_fence_add(c,fence));
+            CHECK(stqr_fence_count(fence)==1); // maximum mark for the same owner
+            CHECK(!stqr_fence_wait(fence));stqr_fence_apply(c,fence);stqr_fence_apply(second,fence);
+            CHECK(!stqr_pending_mark(c,&mark) && !mark.sequence);
+            CHECK(!stqr_pending_mark(second,&mark) && !mark.sequence);
+            foreign.bytes[0]^=2;
+            CHECK(!stqr_dial(&other_bucket,url,getenv("STQR_TEST_USER"),getenv("STQR_TEST_PASSWORD"),foreign,3000));
+            o=fresh();o.accepted=1;CHECK(!stqr_put(c,id,"hello",5,&o,&info));
+            o=fresh();o.accepted=1;CHECK(!stqr_put(other_bucket,id,"hello",5,&o,&info));
+            CHECK(!stqr_fence_capture(other_bucket,&fence));
+            CHECK(!stqr_fence_wait(fence));stqr_fence_apply(c,fence);
+            // Node boot IDs are shared by buckets; their sequence counters are not.
+            CHECK(!stqr_pending_mark(c,&mark) && mark.sequence==6);
+            stqr_fence_apply(other_bucket,fence);
+            CHECK(!stqr_pending_mark(other_bucket,&mark) && !mark.sequence);
+            CHECK(!stqr_fence_capture(c,&fence) && !stqr_fence_wait(fence));stqr_fence_apply(c,fence);
+            CHECK(!stqr_pending_mark(c,&mark) && !mark.sequence);
+            stqr_close(other_bucket);stqr_close(second);
+        }
+        stqr_fence_close(fence);stqr_close(c);puts("independent storage fence passed");return 0;
+    }
     if (mode && (!strcmp(mode,"transient") || !strcmp(mode,"unavailable") || !strcmp(mode,"transient-stream") || !strcmp(mode,"disconnect-stream"))) {
         size_t length=strstr(mode,"-stream")?(2U<<20)+17:5;
         unsigned char *payload=malloc(length);CHECK(payload);memset(payload,'r',length);
