@@ -73,9 +73,12 @@ static int cas_object(struct ks_fs *f, stqr_object_id id, const void *p, size_t 
 	ks_cache_forget(f, id);
 	atomic64_inc(&f->rpc_cas);
 	err = stqr_cas(rpc->client, id, 1, 0, expected, expected_size, p, n, &o, &info);
-	if (err == -EINPROGRESS || err == -EACCES) {
+	if (err == -EINPROGRESS || err == -EACCES || err == -ENOTCONN ||
+	    err == -ECONNRESET || err == -EPIPE || err == -ETIMEDOUT ||
+	    (err == -EAGAIN && !stqr_status(rpc->client))) {
 		// A bucket unlock/grant change may leave this socket with its old
-		// read-only capability. Reauthenticate before one same-ID retry.
+		// read-only capability. A transport failure also requires reconnect.
+		// Preserve the request ID so a lost CAS reply is not applied twice.
 		if (!stqr_reconnect(rpc->client))
 			err = stqr_cas(rpc->client, id, 1, 0, expected, expected_size, p, n, &o,
 				       &info);

@@ -266,9 +266,14 @@ func (s *Server) fulfillQuotaDemand(h quotaDemand) {
 		e.ID(client.NewRequestID())
 		e.ID(client.ID(h.bucket))
 		e.ID(a.Epoch)
-		// Obtain a small reusable budget so tiny synchronous APPENDs do not
-		// require a new peer round trip for every few bytes.
-		asked := max(needed, uint64(64<<10))
+		// Amortize the durable grant exchange across several native 1-MiB
+		// blocks. A 64-KiB budget throttles a new owner to one small write per
+		// worker/ledger round trip after a handoff. The donor still caps this
+		// request at its unused allowance, preserving the global hard quota.
+		// Small quotas shared by replica owners need smaller reusable shares:
+		// do not drain the donor's entire remaining budget after one write.
+		reusable := min(uint64(4<<20), max(uint64(64<<10), a.Limit/uint64(4*len(view.manifest.Membership.Members))))
+		asked := max(needed, reusable)
 		e.U64(asked)
 		ctx, cancel := context.WithTimeout(s.ctx, 3*time.Second)
 		body, err := (peerControlParticipants{runtime: s.control}).call(ctx, member.ID, peerQuotaRequest, e.B)

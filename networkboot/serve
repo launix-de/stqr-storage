@@ -21,6 +21,16 @@ from native_sessions import NativeSessions
 from common import cli, BIN, ctl, require, run, boot_network
 
 
+class BootHTTPHandler(http.server.BaseHTTPRequestHandler):
+    def handle(self):
+        try:
+            super().handle()
+        except (BrokenPipeError, ConnectionResetError):
+            # Aborting an artifact download or closing a keep-alive connection
+            # is a normal peer disconnect, not a failed boot allocation.
+            self.close_connection = True
+
+
 def dnsmasq_config(server, interface, clients, tftp, http_port):
     if not interface or any(c not in 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.:-' for c in interface):
         raise ValueError('invalid interface name')
@@ -134,7 +144,7 @@ def main():
                     f'boot=stqr ip=dhcp stqr.server={args.server} '
                     f'stqr.http-port={args.http_port} stqr.session={token}\n'
                     f'initrd http://{args.server}:{args.http_port}/releases/{version}/initrd.img\nboot\n').encode()
-        class Handler(http.server.BaseHTTPRequestHandler):
+        class Handler(BootHTTPHandler):
             protocol_version = "HTTP/1.1"
             def log_message(self, format, *values):
                 # Claim tokens are capabilities: never include request paths in logs.

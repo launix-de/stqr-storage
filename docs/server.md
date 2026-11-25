@@ -587,7 +587,18 @@ into an inherited RAM range report that range's runtime, not the target's boot.
 `TestStreamingPutFinishesWithMapRedirectAfterHandoff` pauses a two-MiB upload,
 commits handoff, then verifies the 301 patch and identical-ID retry at the target.
 
-Finite logical quotas now use durable per-node growth credits. Credit transfers
+A newly created single-owner disk bucket avoids an already pressured coordinator
+volume when an eligible healthy peer is available. Existing placements stay
+unchanged. Foreground capacity handoffs use a soft 4-MiB batch budget (or the
+waiting write's larger requirement); one indivisible object can exceed that
+budget but must still fit the target. This bounds copying before a waiting write
+can resume without repeatedly moving empty hash leaves.
+
+Finite logical quotas now use durable per-node growth credits. Grant requests
+obtain reusable budgets up to 4 MiB where the donor has unused credits, scaled
+down for small quotas shared across members;
+the donor caps every grant at that unused allowance. This amortizes durable
+credit exchanges without increasing the bucket's hard quota. Credit transfers
 flush the donor debit before transmission, then flush the recipient credit before
 acknowledgement. They have no timeout-based refund. Range handoffs carry their
 sealed live-byte total into both READY records and transfer that used budget at

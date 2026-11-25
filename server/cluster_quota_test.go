@@ -225,3 +225,76 @@ func TestDaemonQuotaMovesLiveBytesAndChangesLimits(t *testing.T) {
 		t.Fatal("quota overflow after migration", err)
 	}
 }
+
+func TestDaemonQuotaNewOwnerReceivesReusableBlockBudget(t *testing.T) {
+	source, target := startAutomaticDaemonPair(t, false)
+	addTestVolume(t, source.node, "credit-source", "hdd", 16<<20)
+	v := addTestVolume(t, target.node, "credit-target", "hdd", 16<<20)
+	draft := newTestBucket(t, "reusable-block-credits")
+	draft.description.Policy.Limits.Unlimited = false
+	draft.description.Policy.Limits.Absolute = 16 << 20
+	if _, status, _ := adminBucketMessage(t, source.node, client.BucketCreate, bucketPolicyBody(t, draft)); status != 201 {
+		t.Fatal(status)
+	}
+	before, _ := source.node.routingPatch(draft.ID(), volume.ObjectID{})
+	_, right, err := client.SplitRange(before.Entries[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	vid, _ := parseID(v.VolumeID)
+	plan, err := planRangeMove(before, right, target.node.control.ledger.node, vid, uint8(volume.HDD), volume.Raw, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	if err = source.node.scopes.move(ctx, plan); err != nil {
+		t.Fatal(err)
+	}
+	// Model the post-handoff case: only transferred live bytes were credited,
+	// and this empty new range has no unused local allowance yet.
+	target.node.opMu.Lock()
+	initial, err := target.node.quotaAllowance(client.ID(draft.ID()))
+	allocation := findQuota(target.node.currentSystem.Load(), client.ID(draft.ID()))
+	if err != nil {
+		target.node.opMu.Unlock()
+		t.Fatal(err)
+	}
+	if initial != 0 {
+		grant, err := target.node.quotas.ledger.debit(quotaGrant{ID: client.NewRequestID(), Bucket: client.ID(draft.ID()), Epoch: allocation.Epoch, Source: target.node.control.ledger.node, Target: source.node.control.ledger.node, Bytes: initial}, initial)
+		target.node.opMu.Unlock()
+		if err != nil {
+			t.Fatal(err)
+		}
+		wire, err := encodeQuotaGrant(grant)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ack, err := source.node.quotaPeerMessage(client.Message{Kind: client.Request, Opcode: peerQuotaGrant, Body: wire}, grant.Source)
+		if err != nil {
+			t.Fatal(err)
+		}
+		proof, err := client.DecodeProof(ack)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err = target.node.quotas.ledger.settle(grant.ID, proof, grant.Target); err != nil {
+			t.Fatal(err)
+		}
+	} else {
+		target.node.opMu.Unlock()
+	}
+	target.node.fulfillQuotaDemand(quotaDemand{bucket: draft.ID(), object: volume.ObjectID{0x81}, growth: 210})
+	target.node.opMu.Lock()
+	allowance, err := target.node.quotaAllowance(client.ID(draft.ID()))
+	target.node.opMu.Unlock()
+	if err != nil || allowance < 1<<20 || allowance > draft.description.Policy.Limits.Absolute {
+		t.Fatal("new owner lacks reusable block credits", allowance, err)
+	}
+	source.node.opMu.Lock()
+	remaining, err := source.node.quotaAllowance(client.ID(draft.ID()))
+	source.node.opMu.Unlock()
+	if err != nil || remaining+allowance != draft.description.Policy.Limits.Absolute {
+		t.Fatal("grant changed total quota", remaining, allowance, err)
+	}
+}
