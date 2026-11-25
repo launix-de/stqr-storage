@@ -36,3 +36,10 @@
 .block-device-summary{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;margin:20px 0;padding:16px;border:1px solid var(--border);border-radius:12px}
 .block-device-summary span,.block-device-summary strong{display:block}.block-device-summary span{font-size:12px;color:var(--muted);margin-bottom:6px}
 @media(max-width:600px){.block-device-tools{width:100%}.block-device-tools .search{flex:1}.block-device-summary{gap:8px;padding:12px}.block-devices-dialog .panel-heading{flex-wrap:wrap;gap:12px}}
+
+.grow-presets{display:flex;gap:8px;flex-wrap:wrap;margin:12px 0}
+.grow-summary{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;border:1px solid var(--border);border-radius:12px;padding:16px;margin:20px 0}
+.grow-summary[hidden]{display:none}.grow-summary span,.grow-summary strong{display:block}.grow-summary span{color:var(--muted);font-size:12px;margin-bottom:6px}
+.grow-status{margin:16px 0}#grow-source{overflow-wrap:anywhere}#grow-validation:empty{display:none}
+@media(max-width:600px){.grow-summary{padding:12px;gap:8px}.grow-summary strong{font-size:13px}}
+#grow-slider{width:100%;accent-color:var(--accent)}
