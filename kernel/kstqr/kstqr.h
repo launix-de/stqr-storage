@@ -100,6 +100,8 @@ struct ks_fs {
 	atomic64_t write_snapshot_ns, write_prepare_ns, write_publish_ns, write_retries;
 };
 struct ks_inode {
+	/* Volatile continuous subscription coverage, never an on-disk version. */
+	struct ks_cache_stamp data_stamp;
 	struct ks_directory_proof directory_proof;
 	struct mutex metadata_lock;
 	struct list_head mount_list;
