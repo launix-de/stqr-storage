@@ -5,6 +5,7 @@ import (
 	"context"
 	"github.com/launix-de/stqr-storage/client"
 	"log"
+	"runtime"
 	"time"
 )
 
@@ -106,6 +107,7 @@ func (r *rangeManager) runPGWorker(group string, worker pgRebuildWorker) {
 	s := r.server
 	var reported string
 	var reportedAt time.Time
+	var targets *placementTargetMap
 	for {
 		select {
 		case <-s.ctx.Done():
@@ -117,12 +119,6 @@ func (r *rangeManager) runPGWorker(group string, worker pgRebuildWorker) {
 		if s.joinPending() || s.shortStopping.Load() || s.clusterPaused() || s.forceFrozen() {
 			continue
 		}
-		// Only the NULL scope runs node-wide housekeeping and drain finalization.
-		if group == "" {
-			_ = r.collectMemos()
-			_ = r.collectAbortedImports()
-			_ = r.finishEmptyDrains()
-		}
 		catalog := r.pgCatalog.Load()
 		if catalog == nil {
 			continue
@@ -133,7 +129,17 @@ func (r *rangeManager) runPGWorker(group string, worker pgRebuildWorker) {
 			plan, ok = r.nextPressureGroup(group)
 		}
 		if !ok {
-			plan, ok = r.planNextGroup(group, descriptions)
+			if targets == nil {
+				targets = r.buildPlacementTargets(group, descriptions)
+			}
+			plan, ok = r.nextPlacementTarget(targets)
+		}
+		if !ok {
+			// RAM recovery and bounded capacity splits retain their existing
+			// specialized paths. Infeasible whole ranges can require a split.
+			maintenanceOnly := targets != nil && targets.pending == 0
+			plan, ok = r.planNextGroup(group, descriptions, maintenanceOnly)
+			targets = nil
 		}
 		var err error
 		if ok {
@@ -156,8 +162,16 @@ func (r *rangeManager) runPGWorker(group string, worker pgRebuildWorker) {
 				}
 			}
 		} else if group == "" {
-			err = r.finishNodeDrain(s.ctx)
+			// Long-lived cleanup/drain intents do not delay a runnable diff.
+			// Their idle admission also observes work in the other PG workers.
+			if s.cleanupIdle() {
+				_ = r.collectMemos()
+				_ = r.collectAbortedImports()
+				_ = r.finishEmptyDrains()
+				err = r.finishNodeDrain(s.ctx)
+			}
 		}
+		runtime.Gosched()
 		if err != nil && (err.Error() != reported || time.Since(reportedAt) > 30*time.Second) {
 			log.Printf("STQR rebuild node=%s pg=%q: %v", r.node, group, err)
 			reported, reportedAt = err.Error(), time.Now()

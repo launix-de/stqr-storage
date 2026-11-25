@@ -160,7 +160,7 @@ those owners and migrates ranges as capacity and placement requirements change.
 | Placement | Central PG storage/compression/replication policies, node/volume filters, capacity distribution and migration for policy changes |
 | Dashboard | Users, grants, S3 keys, quotas/guarantees, PG editing, node/volume management and live statistics; searchable bucket/user lists with endless scrolling |
 | Go client | Authenticated, bucket-bound connections, direct routing to range owners, reconnects and request IDs for retry deduplication |
-| C client | Native static/shared library, object operations, subscriptions and Sync; direct-node connections without cluster redirect following |
+| C client | Native static/shared library, object operations, subscriptions and Sync; range-owner redirects including streamed mutations |
 | S3 | GET/HEAD/PUT/DELETE, ranges/conditions, listing, multipart, copy, bulk delete, checksums, SigV4, presigned URLs and private/public-read object ACLs |
 | Linux FUSE | Read/write and readonly mounts, permissions, sparse files, rename, symlinks, hardlinks, xattrs, FIFO/socket inodes, live capacity reporting and offline `--fsck` |
 | Linux kernel client | Standalone `kstqr` mounts sharing the normal native filesystem format, subscriptions, mmap/writeback and live capacity reporting; see [kernel documentation](kernel/kstqr/README.md) |
@@ -305,8 +305,8 @@ These figures are advisory snapshots, described in [capacity reporting](docs/spa
 
 Linux also has a standalone [kernel client](docs/kstqr.md) with no resident FUSE
 process. It shares normal filesystem buckets with FUSE and supports native page
-cache/mmap writeback. Its C transport connects to the configured node and does
-not follow cluster redirects. The [Windows client](windows/README.md) mounts the
+cache/mmap writeback. Its C transport follows validated range-owner redirects.
+The [Windows client](windows/README.md) mounts the
 same normal filesystem format through WinFsp. Its setup dialog can save an
 encrypted per-user profile and reconnect a drive at login; subscription updates
 notify Explorer about remote changes. Frontend-specific limits are in those guides.
@@ -407,8 +407,9 @@ multi-object transaction. See [subscriptions](docs/object-subscriptions.md).
 The [native C library](client/c/README.md) offers object operations, subscriptions,
 capacity queries and Sync as static/shared libraries. Build it with
 `make -C client/c`. It uses authenticated bucket-bound connections directly,
-without a Go helper; callers handle reconnects and retry IDs, and cluster redirect
-following is not implemented in this client.
+without a Go helper. Reads and mutations, including chunked uploads, follow
+range-owner redirects. Callers preserve retry IDs
+across reconnects. See the C guide for routing and transport limits.
 
 ## Planning your deployment
 

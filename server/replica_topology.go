@@ -169,9 +169,12 @@ func (r *rangeManager) planReplicaRemove(d BucketDescription) (rangePlan, bool) 
 	if d.DesiredPolicy != nil {
 		goal = *d.DesiredPolicy
 	}
-	if goal.StorageStrategy != d.Policy.StorageStrategy {
+	if goal.StorageStrategy == "ram" || d.Policy.StorageStrategy == "ram" {
 		return rangePlan{}, false
 	}
+	target := d
+	target.Policy = goal
+	destinations, _ := r.destinations(target)
 	need := r.replicaRemovalCount(goal)
 	if need < 1 {
 		return rangePlan{}, false
@@ -190,8 +193,7 @@ func (r *rangeManager) planReplicaRemove(d BucketDescription) (rangePlan, bool) 
 		}
 		index := len(entry.Locations) - 1
 		for i := 1; i < len(entry.Locations); i++ {
-			_, draining := r.replicaLocationState(entry.Locations[i])
-			if draining || !r.server.replicaLocationAllowed(goal, entry.Locations[i]) {
+			if r.replicaLocationNeedsMove(goal, entry.Locations[i], destinations) {
 				index = i
 				break
 			}

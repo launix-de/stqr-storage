@@ -2,13 +2,15 @@
 package server
 
 import (
+	"context"
 	"reflect"
 
 	"github.com/launix-de/stqr-storage/client"
 	"github.com/launix-de/stqr-storage/volume"
 )
 
-func (c *clusterController) markExcludedRangesLost(patches []client.MapPatch, descriptions []BucketDescription, x *controlExclusion, membership client.Membership) error {
+func (c *clusterController) markExcludedRangesLost(ctx context.Context, patches []client.MapPatch, descriptions []BucketDescription, claim controlClaim, membership client.Membership) error {
+	x := claim.Exclusion
 	s := c.server
 	for i := range patches {
 		p := &patches[i]
@@ -24,6 +26,28 @@ func (c *clusterController) markExcludedRangesLost(patches []client.MapPatch, de
 		}
 		for j := range p.Entries {
 			entry := &p.Entries[j]
+			if next, changed := replicaSurvivors(*entry, x); changed {
+				before := *p
+				before.Membership = claim.Base.Membership.Epoch
+				before.Addresses = nil
+				for _, member := range claim.Base.Membership.Members {
+					addresses := member.Addresses
+					if len(addresses) == 0 {
+						addresses = c.addresses(member.ID)
+					}
+					if len(addresses) > 0 {
+						before.Addresses = append(before.Addresses, client.NodeAddress{Node: member.ID, Addresses: addresses})
+					}
+				}
+				before.Begin = entry.Start
+				before.End, before.ToEnd, _ = client.RangeEnd(entry.Start, entry.PrefixBits)
+				before.Entries = []client.RangeEntry{*entry}
+				if err := c.checkReplicaSurvivors(ctx, claim, before, next); err != nil {
+					return err
+				}
+				*entry = next
+				continue
+			}
 			removed := false
 			for _, loc := range entry.Locations {
 				if loc.Role == 0 && hasControlNode(x.Nodes, loc.Node) {
@@ -118,7 +142,7 @@ func (s *Server) prepareExclusionImage(view *systemView, proposal controlProposa
 				continue
 			}
 			next, known := view.placement.lookup(client.ID(bucket), entry.Start)
-			if !known || !reflect.DeepEqual(next, entry) && !recoveryReplacement(s, view, proposal.Claim.Exclusion, client.ID(bucket), entry, next) {
+			if !known || !reflect.DeepEqual(next, entry) && !replicaExclusionReplacement(proposal.Claim.Exclusion, entry, next) && !recoveryReplacement(s, view, proposal.Claim.Exclusion, client.ID(bucket), entry, next) {
 				return fail(409, "exclusion would replace an authoritative survivor range")
 			}
 		}
@@ -129,7 +153,7 @@ func (s *Server) prepareExclusionImage(view *systemView, proposal controlProposa
 				old, known := current.lookup(patch.Bucket, entry.Start)
 				if !known || !reflect.DeepEqual(old, entry) {
 					for _, location := range entry.Locations {
-						if location.Role == 0 && location.Node == l.node && !s.hasSealedExclusionRange(proposal.Claim, patch.Bucket, entry) && !recoveryHold(view, proposal.Claim.Exclusion, patch.Bucket, entry) && !isRestoredEntry(view, proposal.Claim.Exclusion, patch.Bucket, entry) {
+						if location.Role == 0 && location.Node == l.node && !s.hasSealedExclusionRange(proposal.Claim, patch.Bucket, entry) && !recoveryHold(view, proposal.Claim.Exclusion, patch.Bucket, entry) && !replicaExclusionReplacement(proposal.Claim.Exclusion, old, entry) && !isRestoredEntry(view, proposal.Claim.Exclusion, patch.Bucket, entry) {
 							return fail(409, "new survivor ownership lacks a sealed recovery snapshot")
 						}
 					}

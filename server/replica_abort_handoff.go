@@ -140,7 +140,7 @@ func (s *Server) receiveReplicaAbortHistory(m client.Message, actor client.ID) (
 	return nil, nil
 }
 
-func (r *rangeManager) replicaAbortCost(before client.MapPatch, entry client.RangeEntry) (uint64, error) {
+func (r *rangeManager) replicaAbortCost(before client.MapPatch, entry client.RangeEntry, retained ...map[volume.ID]uint64) (uint64, error) {
 	p := rangePlan{Before: before, Moving: entry, Source: r.node}
 	var cost uint64
 	for _, store := range r.sourceVolumes(p) {
@@ -151,6 +151,10 @@ func (r *rangeManager) replicaAbortCost(before client.MapPatch, entry client.Ran
 		err = h.ScanReplicas(func(record volume.ReplicaRecord) error {
 			if record.State == volume.ReplicaAborted && client.ID(record.Request.Key.Bucket) == before.Bucket && p.contains(record.Request.Key.Object) {
 				cost = addCapacity(cost, 512)
+				if len(retained) > 0 {
+					id := store.Identity().VolumeID
+					retained[0][id] = addCapacity(retained[0][id], 512)
+				}
 			}
 			return nil
 		})

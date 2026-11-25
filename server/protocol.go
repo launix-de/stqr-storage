@@ -207,6 +207,15 @@ func (s *Server) dispatchAs(m client.Message, ws *wsSession, p principal) ([]byt
 			}
 			return client.ResponseBody(200, result, ""), 200
 		}
+		if m.Opcode == peerForceReplicaState {
+			actor, _ := parseID(p.User.ID)
+			result, err := s.forceReplicaState(m.Body, client.ID(actor))
+			if err != nil {
+				status := statusOf(err)
+				return client.ResponseBody(status, nil, err.Error()), status
+			}
+			return client.ResponseBody(200, result, ""), 200
+		}
 		if m.Opcode == peerForceScopes {
 			actor, _ := parseID(p.User.ID)
 			result, err := s.receiveForceScopes(m.Body, client.ID(actor))

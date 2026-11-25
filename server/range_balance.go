@@ -101,6 +101,37 @@ func (r *rangeManager) capacityNeed(v rangeDestination, destinations []rangeDest
 	return g.observe(v, total, free, time.Now(), 4*r.capacityMoveTime)
 }
 
+// Evaluate a whole candidate pool once, rather than summing the same pool for
+// every range/replica. The resulting thresholds are advisory placement input.
+func (r *rangeManager) capacityNeeds(destinations []rangeDestination) map[client.ID]uint64 {
+	type totals struct{ capacity, free uint64 }
+	pools := make(map[uint8]totals)
+	for _, d := range destinations {
+		p := pools[d.volume.Class]
+		p.capacity = addCapacity(p.capacity, d.capacity)
+		p.free = addCapacity(p.free, min(d.free, d.capacity))
+		pools[d.volume.Class] = p
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.capacityGoals == nil {
+		r.capacityGoals = make(map[volume.ID]*capacityGoal)
+	}
+	needs := make(map[client.ID]uint64, len(destinations))
+	now := time.Now()
+	for _, d := range destinations {
+		id := volume.ID(d.volume.ID)
+		g := r.capacityGoals[id]
+		if g == nil {
+			g = &capacityGoal{}
+			r.capacityGoals[id] = g
+		}
+		pool := pools[d.volume.Class]
+		needs[d.volume.ID] = g.observe(d, pool.capacity, pool.free, now, 4*r.capacityMoveTime)
+	}
+	return needs
+}
+
 type capacityMove struct {
 	plan   rangePlan
 	relief uint64 // progress toward the actual reserve, not merely copied bytes

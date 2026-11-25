@@ -64,15 +64,17 @@ func whitelistReplicaMask(s *Server, v *volume.Volume) PlacementNode {
 }
 
 func TestDaemonReplicaVolumeRelocationPreservesDataAndReceipts(t *testing.T) {
-	for _, codec := range []string{"raw", "gzip"} {
-		t.Run(codec, func(t *testing.T) {
+	for _, tc := range []struct{ before, after, codec string }{{"hdd", "hdd", "raw"}, {"hdd", "hdd", "gzip"}, {"hdd", "ssd", "raw"}, {"ssd", "hdd", "gzip"}} {
+		codec := tc.codec
+		t.Run(tc.before+"-"+tc.after+"-"+codec, func(t *testing.T) {
 			source, target := startAutomaticDaemonPair(t, false)
-			oldSource := addReplicaDataVolume(t, source.node, "old", "hdd", 8<<20)
-			oldTarget := addReplicaDataVolume(t, target.node, "old", "hdd", 8<<20)
-			newSource := addReplicaDataVolume(t, source.node, "new", "hdd", 8<<20)
-			newTarget := addReplicaDataVolume(t, target.node, "new", "hdd", 8<<20)
+			oldSource := addReplicaDataVolume(t, source.node, "old", tc.before, 8<<20)
+			oldTarget := addReplicaDataVolume(t, target.node, "old", tc.before, 8<<20)
+			newSource := addReplicaDataVolume(t, source.node, "new", tc.after, 8<<20)
+			newTarget := addReplicaDataVolume(t, target.node, "new", tc.after, 8<<20)
 			group := volume.ID(client.NewRequestID())
 			storage := storagePolicy(DefaultBucketPolicy())
+			storage.StorageStrategy = tc.before
 			storage.Redundancy = BucketRedundancy{Mode: "replication", Replicas: 2, ACK: "all"}
 			centralPGRequest(t, source.node, group, 0, PlacementMask{NodeSelection: "list", Storage: &storage, Nodes: []PlacementNode{whitelistReplicaMask(source.node, oldSource), whitelistReplicaMask(target.node, oldTarget)}})
 			idBucket := client.NewRequestID()
@@ -107,6 +109,7 @@ func TestDaemonReplicaVolumeRelocationPreservesDataAndReceipts(t *testing.T) {
 				t.Fatal(err)
 			}
 			storage.Compression = codec
+			storage.StorageStrategy = tc.after
 			centralPGRequest(t, source.node, group, 1, PlacementMask{NodeSelection: "list", Storage: &storage, Nodes: []PlacementNode{whitelistReplicaMask(source.node, newSource), whitelistReplicaMask(target.node, newTarget)}})
 			for i := 0; i < 2; i++ {
 				p := awaitReplicaPlan(t, source.node, b.ID())

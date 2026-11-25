@@ -154,7 +154,7 @@ func (s *Server) ensureVolumeAuthorityLocked(allowances ...map[volume.ID]uint64)
 			var cohort []client.ID
 			for _, store := range b.volumesFor(description) {
 				id := store.Identity().VolumeID
-				if stores[id] != nil && bucketClass(description.Policy).Allows(store.Identity().Class) && s.volumeAllowedForEntry(client.ID(bid), entry, id, view) {
+				if stores[id] != nil && s.rangeClass(description.Policy, entry).Allows(store.Identity().Class) && s.volumeAllowedForEntry(client.ID(bid), entry, id, view) {
 					cohort = append(cohort, client.ID(id))
 				}
 			}
@@ -295,4 +295,16 @@ func (s *Server) invalidateVolumeAuthorityLocked(p rangePlan) error {
 		}
 	}
 	return nil
+}
+
+// A committed location is the effective storage contract during a policy
+// migration. The bucket's desired class cannot invalidate an already activated
+// copy, nor can the old bucket class hide the replacement before finalization.
+func (s *Server) rangeClass(policy BucketPolicy, entry client.RangeEntry) volume.Class {
+	for _, loc := range entry.Locations {
+		if loc.Node == s.control.ledger.node && loc.Role <= 1 && loc.Volume != (client.ID{}) {
+			return volume.Class(loc.Class)
+		}
+	}
+	return bucketClass(policy)
 }

@@ -12,7 +12,11 @@ import (
 	"github.com/launix-de/stqr-storage/volume"
 )
 
-func (r *rangeManager) move(ctx context.Context, p rangePlan) (retErr error) {
+func (r *rangeManager) move(ctx context.Context, p rangePlan) error {
+	return r.executeMove(ctx, p, false)
+}
+
+func (r *rangeManager) moveSerial(ctx context.Context, p rangePlan) (retErr error) {
 	defer func() {
 		if retErr != nil {
 			cleanup, cancel := context.WithTimeout(r.server.ctx, 3*time.Second)
@@ -27,8 +31,6 @@ func (r *rangeManager) move(ctx context.Context, p rangePlan) (retErr error) {
 	if err := r.server.waitForUserIO(ctx); err != nil {
 		return err
 	}
-	r.server.ioPriority.rebuilds.Add(1)
-	defer r.server.ioPriority.rebuilds.Add(-1)
 	stage := "source reservation"
 	defer func() {
 		if retErr != nil {
@@ -274,6 +276,11 @@ func (r *rangeManager) cleanup(ctx context.Context, p rangePlan) error {
 	if p.ReplicaAdd || p.ReplicaRemove || p.ReplicaPromote || p.ReplicaRelocate {
 		return nil
 	}
+	end, err := r.server.beginRebuildIO(ctx)
+	if err != nil {
+		return err
+	}
+	defer end()
 	for _, v := range r.sourceVolumes(p) {
 		var after *volume.ObjectID
 		for {
@@ -295,6 +302,9 @@ func (r *rangeManager) cleanup(ctx context.Context, p rangePlan) error {
 			for _, record := range records {
 				if !p.contains(record.Key.Object) {
 					continue
+				}
+				if err := r.server.waitForUserIO(ctx); err != nil {
+					return err
 				}
 				r.server.opMu.Lock()
 				if err := r.cleanupAllowed(p); err != nil {
