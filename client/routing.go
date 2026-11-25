@@ -53,6 +53,13 @@ func (c *Client) routeMessage(m *Message) (string, ID, error) {
 	// authority. Select only nodes in this object's committed replica set.
 	read := m.Opcode == 0x0100 || m.Opcode == 0x0101 || m.Opcode == 0x0107
 	c.mu.Lock()
+	if m.Opcode == ObjectSubscribe && c.paused[owner] {
+		// A replica can serve GET but cannot promise the primary's future
+		// updates. Let subscription-backed caches fall back to uncached GET
+		// instead of parking a readable replica behind the paused writer.
+		c.mu.Unlock()
+		return "", ID{}, ErrSubscriptionResync
+	}
 	if read && c.paused[owner] {
 		for _, loc := range entry.Locations {
 			if loc.Role != 1 || c.paused[loc.Node] {
