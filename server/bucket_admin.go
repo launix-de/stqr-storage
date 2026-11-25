@@ -207,6 +207,7 @@ func (s *Server) executeBuckets(m client.Message, p principal) ([]byte, int, err
 	d := client.Decoder{B: m.Body}
 	var target volume.ID
 	var grantedUser string
+	var deleteUsers bool
 	var description BucketDescription
 	var b *Bucket
 	if m.Opcode == client.BucketCreate || m.Opcode == client.BucketCreateInGroup {
@@ -306,6 +307,9 @@ func (s *Server) executeBuckets(m client.Message, p principal) ([]byte, int, err
 				description = b.Describe()
 				switch m.Opcode {
 				case client.BucketDelete:
+					if len(m.Body) > 16 {
+						deleteUsers = d.Bool()
+					}
 					description.State = BucketDeleting
 					receipt.Running = true
 					receipt.Status = 202
@@ -405,6 +409,14 @@ func (s *Server) executeBuckets(m client.Message, p principal) ([]byte, int, err
 		// will report 507 until an eligible local volume exists; no admin-file fallback.
 		receipt.Status = 201
 	}
+	var orphanAccounts *accountsImage
+	var orphanIDs []string
+	if m.Opcode == client.BucketDelete && deleteUsers {
+		orphanAccounts, orphanIDs, err = s.bucketOrphanAccounts(description)
+		if err != nil {
+			return nil, 0, err
+		}
+	}
 	description.Receipts = append(description.Receipts, receipt)
 	revision := description.Revision
 	if m.Opcode == client.BucketCreate || m.Opcode == client.BucketCreateInGroup {
@@ -413,6 +425,25 @@ func (s *Server) executeBuckets(m client.Message, p principal) ([]byte, int, err
 	saved, err := s.buckets.Save(description, revision)
 	if err != nil {
 		return nil, 0, err
+	}
+	if orphanAccounts != nil {
+		if err = s.writeBlob("accounts", *orphanAccounts); err != nil {
+			return nil, 0, err
+		}
+		for _, id := range orphanIDs {
+			s.invalidateUserConnections(id)
+		}
+		removed := make(map[string]bool, len(orphanIDs))
+		for _, id := range orphanIDs {
+			removed[id] = true
+		}
+		s.authMu.Lock()
+		for key, session := range s.sessions {
+			if removed[session.UserID] {
+				delete(s.sessions, key)
+			}
+		}
+		s.authMu.Unlock()
 	}
 	s.updateAdminCapacity()
 	if m.Opcode == client.BucketDelete || description.DesiredPolicy != nil {
