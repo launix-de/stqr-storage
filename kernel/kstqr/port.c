@@ -138,7 +138,7 @@ int sq_connect(struct stqr_socket **out, const char *host, unsigned port, unsign
 	flush_work(&job.work);
 	return job.result;
 }
-int sq_send(struct stqr_socket *s, const void *p, size_t n)
+static int sq_send_direct(struct stqr_socket *s, const void *p, size_t n)
 {
 	struct msghdr msg = {.msg_flags = MSG_NOSIGNAL};
 	struct kvec vec;
@@ -154,7 +154,7 @@ int sq_send(struct stqr_socket *s, const void *p, size_t n)
 	}
 	return 0;
 }
-int sq_recv(struct stqr_socket *s, void *p, size_t n)
+static int sq_recv_direct(struct stqr_socket *s, void *p, size_t n)
 {
 	struct msghdr msg = {0};
 	struct kvec vec;
@@ -169,6 +169,51 @@ int sq_recv(struct stqr_socket *s, void *p, size_t n)
 		n -= k;
 	}
 	return 0;
+}
+/* A shared filesystem RPC is not a process socket. SIGCHLD, timers and
+ * service signals must not interrupt a partially transferred frame and poison
+ * another task's session. Finish each transfer in a NOFS worker, then return to
+ * the caller. Socket timeouts still bound stalled transfers. A fatal signal
+ * before dispatch can cancel the operation; an already dispatched job owns
+ * pointers into the caller's frame until it has fully returned.
+ */
+struct sq_transfer_work {
+	struct work_struct work;
+	struct completion done;
+	struct stqr_socket *socket;
+	void *data;
+	size_t length;
+	bool send;
+	int result;
+};
+static void sq_transfer_worker(struct work_struct *work)
+{
+	struct sq_transfer_work *job = container_of(work, struct sq_transfer_work, work);
+	unsigned nofs = memalloc_nofs_save();
+	job->result = job->send ? sq_send_direct(job->socket, job->data, job->length)
+			       : sq_recv_direct(job->socket, job->data, job->length);
+	memalloc_nofs_restore(nofs);
+	complete(&job->done);
+}
+static int sq_transfer(struct stqr_socket *s, void *p, size_t n, bool send)
+{
+	struct sq_transfer_work job = {.socket = s, .data = p, .length = n, .send = send};
+	if (fatal_signal_pending(current))
+		return -EINTR;
+	INIT_WORK(&job.work, sq_transfer_worker);
+	init_completion(&job.done);
+	queue_work(system_unbound_wq, &job.work);
+	wait_for_completion(&job.done);
+	flush_work(&job.work);
+	return job.result;
+}
+int sq_send(struct stqr_socket *s, const void *p, size_t n)
+{
+	return sq_transfer(s, (void *)p, n, true);
+}
+int sq_recv(struct stqr_socket *s, void *p, size_t n)
+{
+	return sq_transfer(s, p, n, false);
 }
 void sq_disconnect(struct stqr_socket *s)
 {
@@ -200,4 +245,12 @@ int sq_wait(struct stqr_socket *s, unsigned ms)
 }
 
 stqr_u64 sq_now_ms(void) { return ktime_get_boottime_ns()/1000000; }
-int sq_pause(unsigned ms) { return msleep_interruptible(ms) ? -EINTR : 0; }
+int sq_pause(unsigned ms)
+{
+	/* Nonfatal process signals must not abort the shared transport's bounded
+	 * retry delay. Fatal signals are observed between transfer attempts. */
+	if (fatal_signal_pending(current))
+		return -EINTR;
+	msleep(ms);
+	return fatal_signal_pending(current) ? -EINTR : 0;
+}

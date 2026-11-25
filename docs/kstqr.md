@@ -340,3 +340,5 @@ Both normal inode and STOR namespace readers resolve interrupted intents;
 read-only mounts apply committed edits virtually. Ordinary older inode layouts
 remain readable. Old lower-inode references require verified conversion or a
 recreated upper before kernel use. See [the shared contract](filesystem-posix.md).
+
+Kernel transport transfers run in NOFS workers, independent of the task issuing filesystem I/O. Nonfatal process signals (including SIGCHLD and restartable timers) do not break partial shared RPC frames or invalidate other tasks' sessions. Socket timeouts still bound stalled transfers; fatal cancellation is observed between dispatches, and dispatched buffers remain owned until the worker has returned. The VM regression suite exercises repeated reads, writes and fsync under a 500-microsecond restartable timer.
