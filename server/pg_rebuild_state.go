@@ -571,6 +571,7 @@ func (r *rangeManager) finishPG(ctx context.Context, p rangePlan) error {
 type pgArchiveRequest struct {
 	Group client.ID
 	After uint64
+	Head  [32]byte
 }
 
 func (r *rangeManager) pgArchive(body []byte) ([]byte, error) {
@@ -580,6 +581,14 @@ func (r *rangeManager) pgArchive(body []byte) ([]byte, error) {
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if req.After > 0 {
+		for _, id := range r.pgOrder {
+			prior := r.pgRounds[id]
+			if prior.Group == req.Group && prior.Generation == req.After && prior.ID != req.Head {
+				return nil, errControlConflict
+			}
+		}
+	}
 	rounds := []pgRebuildRound{}
 	for _, id := range r.pgOrder {
 		a := r.pgRounds[id]
@@ -606,11 +615,13 @@ func (r *rangeManager) syncPGArchive(ctx context.Context, node, group client.ID)
 	for {
 		r.mu.Lock()
 		after := uint64(0)
+		var head [32]byte
 		if state := r.pgStates[group]; state != nil {
 			after = state.Generation
+			head = state.Head
 		}
 		r.mu.Unlock()
-		body, err := r.pgCall(ctx, node, peerPGRebuildArchive, pgArchiveRequest{Group: group, After: after})
+		body, err := r.pgCall(ctx, node, peerPGRebuildArchive, pgArchiveRequest{Group: group, After: after, Head: head})
 		if err != nil {
 			return err
 		}

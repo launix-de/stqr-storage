@@ -56,3 +56,18 @@ func TestPGRoundRejectsWrongPredecessorWithoutPoisoningJournal(t *testing.T) {
 		t.Fatalf("prepared round lost after restart: %+v", info)
 	}
 }
+
+func TestPGArchiveRejectsEqualCounterWithDifferentHead(t *testing.T) {
+	group := client.ID{1}
+	id := [32]byte{2}
+	r := &rangeManager{pgOrder: [][32]byte{id}, pgRounds: map[[32]byte]pgRebuildRound{id: {Group: group, ID: id, Generation: 1}}}
+	wrong, _ := json.Marshal(pgArchiveRequest{Group: group, After: 1, Head: [32]byte{3}})
+	if _, err := r.pgArchive(wrong); err == nil {
+		t.Fatal("equal PG counters concealed conflicting round heads")
+	}
+	right, _ := json.Marshal(pgArchiveRequest{Group: group, After: 1, Head: id})
+	body, err := r.pgArchive(right)
+	if err != nil || string(body) != "[]" {
+		t.Fatalf("matching head could not finish catchup: %s %v", body, err)
+	}
+}
