@@ -214,7 +214,9 @@ func (r *rangeManager) buildPlacementTargets(group string, descriptions []Bucket
 		// move, measure once, shared by every candidate destination.
 		var cost uint64
 		var soleSource volume.ID
+		var retained map[volume.ID]uint64
 		if !valid {
+			retained = make(map[volume.ID]uint64)
 			before, ok := s.routingPatch(volume.ID(shape.bucket), volume.ObjectID(shape.start))
 			if !ok {
 				continue
@@ -226,12 +228,16 @@ func (r *rangeManager) buildPlacementTargets(group string, descriptions []Bucket
 				}
 			}
 			var err error
-			cost, _, err = r.policyPlacementCost(before, entry, client.ID{}, volume.ID{}, bucketCodec(d.Policy))
+			cost, _, err = r.policyPlacementCost(before, entry, client.ID{}, volume.ID{}, bucketCodec(d.Policy), retained)
 			if err != nil {
 				continue
 			}
 		}
 		demands[i].Bytes = cost
+		var movement uint64
+		for _, n := range retained {
+			movement = addCapacity(movement, n)
+		}
 		for _, id := range eligible[shape.bucket] {
 			destination := destinations[id]
 			stays := false
@@ -250,15 +256,30 @@ func (r *rangeManager) buildPlacementTargets(group string, descriptions []Bucket
 			if valid && !stays {
 				continue
 			}
-			allocate, move := cost, max(cost, uint64(1))
+			// The shared index reserve is admission headroom, not copied bytes.
+			allocate, move := cost, movement
+			existing := stays
+			if entry.Locations[0].Volume == (client.ID{}) && destination.node == r.node {
+				if saved, present := retained[volume.ID(destination.volume.ID)]; present {
+					existing = true
+					move = subtractCapacity(movement, saved)
+					allocate = subtractCapacity(cost, saved)
+					if move == 0 {
+						allocate = 0
+					}
+				}
+			}
 			if stays {
 				allocate, move = 0, 0
 			}
 			charge := uint64(0)
 			if shape.copies > len(entry.Locations) {
 				charge = allocate
+				if destination.node == entry.Locations[0].Node && entry.Locations[0].Volume == (client.ID{}) {
+					charge = 0
+				}
 			}
-			options = append(options, placementOption{Range: i, Volume: id, Allocate: allocate, Move: move, Quota: charge})
+			options = append(options, placementOption{Range: i, Volume: id, Allocate: allocate, Move: move, Quota: charge, Existing: existing})
 		}
 	}
 	solution := solvePlacement(demands, resources, options, budgets)

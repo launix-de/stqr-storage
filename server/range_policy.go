@@ -130,14 +130,19 @@ func (r *rangeManager) planPolicyPlacement(description BucketDescription, draini
 // A local target already holding authoritative bytes does not need another
 // payload allocation. Changed encodings budget a conservative logical extent
 // size (not sparse holes), so gzip->raw cannot be admitted at its old gzip size.
-func (r *rangeManager) policyPlacementCost(before client.MapPatch, moving client.RangeEntry, target client.ID, destination volume.ID, codec volume.Compression) (uint64, uint64, error) {
+func (r *rangeManager) policyPlacementCost(before client.MapPatch, moving client.RangeEntry, target client.ID, destination volume.ID, codec volume.Compression, retained ...map[volume.ID]uint64) (uint64, uint64, error) {
 	p := rangePlan{Before: before, Moving: moving, Source: r.node, Target: target, Volume: destination}
 	var cost, count uint64
 	b, err := r.server.Bucket(volume.ID(before.Bucket))
 	if err != nil {
 		return 0, 0, err
 	}
+	description := b.storageDescription()
 	for _, store := range r.sourceVolumes(p) {
+		storeID := store.Identity().VolumeID
+		if len(retained) > 0 {
+			retained[0][storeID] = 0
+		}
 		var after *volume.ObjectID
 		for {
 			h, err := store.Open(false)
@@ -156,7 +161,7 @@ func (r *rangeManager) policyPlacementCost(before client.MapPatch, moving client
 				if !p.contains(record.Key.Object) {
 					continue
 				}
-				selected, _, _, err := b.selectVolume(b.Describe(), record.Key, volume.ID{}, false)
+				selected, _, _, err := b.selectVolume(description, record.Key, volume.ID{}, false)
 				if err != nil {
 					return 0, 0, err
 				}
@@ -185,6 +190,9 @@ func (r *rangeManager) policyPlacementCost(before client.MapPatch, moving client
 					return 0, 0, err
 				}
 				cost = addCapacity(cost, addCapacity(allocated, 256))
+				if len(retained) > 0 {
+					retained[0][storeID] = addCapacity(retained[0][storeID], addCapacity(allocated, 256))
+				}
 				count++
 			}
 			next := records[len(records)-1].Key.Object
@@ -197,6 +205,9 @@ func (r *rangeManager) policyPlacementCost(before client.MapPatch, moving client
 		err = h.ScanRequests(func(record volume.RequestRecord) error {
 			if record.Key.Bucket == volume.ID(before.Bucket) && p.contains(record.Key.Object) {
 				cost = addCapacity(cost, 512)
+				if len(retained) > 0 {
+					retained[0][storeID] = addCapacity(retained[0][storeID], 512)
+				}
 			}
 			return nil
 		})
@@ -205,7 +216,7 @@ func (r *rangeManager) policyPlacementCost(before client.MapPatch, moving client
 			return 0, 0, err
 		}
 	}
-	abortCost, err := r.replicaAbortCost(before, moving)
+	abortCost, err := r.replicaAbortCost(before, moving, retained...)
 	if err != nil {
 		return 0, 0, err
 	}
@@ -233,7 +244,7 @@ func (r *rangeManager) policyPlacementCost(before client.MapPatch, moving client
 					if !p.contains(record.Key.Object) || record.Info.Deleted || record.Info.Compression == codec {
 						continue
 					}
-					selected, _, _, err := b.selectVolume(b.Describe(), record.Key, volume.ID{}, false)
+					selected, _, _, err := b.selectVolume(description, record.Key, volume.ID{}, false)
 					if err != nil {
 						return 0, 0, err
 					}

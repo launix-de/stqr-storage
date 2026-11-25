@@ -4,12 +4,66 @@ package server
 import (
 	"bytes"
 	"context"
+	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/launix-de/stqr-storage/client"
 	"github.com/launix-de/stqr-storage/volume"
 )
+
+func TestPlacementTargetMapRetainsLargestExistingCohortCopy(t *testing.T) {
+	node := startDaemonTestNode(t, filepath.Join(t.TempDir(), "node.yaml"), nil, false)
+	s := node.node
+	hdd := addReplicaDataVolume(t, s, "hdd", "hdd", 8<<20)
+	retained := addReplicaDataVolume(t, s, "retained", "ssd", 8<<20)
+	bucket, _ := createProtocolBucket(t, s, "cohort-minimum-copy")
+	small, large := volume.ObjectID{1}, volume.ObjectID{2}
+	for _, record := range []struct {
+		store  *volume.Volume
+		object volume.ObjectID
+		size   int
+	}{{hdd, small, 16 << 10}, {retained, large, 512 << 10}} {
+		h, err := record.store.Open(true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = h.Put(volume.Key{Bucket: bucket.ID(), Object: record.object}, bytes.Repeat([]byte{'x'}, record.size), volume.Options{RequestID: volume.ID(client.NewRequestID())})
+		h.Close()
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	// A larger empty destination must not win over retaining the majority of
+	// an unpinned cohort's payload on an already suitable SSD.
+	addReplicaDataVolume(t, s, "empty", "ssd", 32<<20)
+	storage := storagePolicy(DefaultBucketPolicy())
+	storage.StorageStrategy = "ssd"
+	centralPGRequest(t, s, defaultPlacementGroup, 1, PlacementMask{NodeSelection: "all", Storage: &storage})
+	m := s.scopes.buildPlacementTargets(defaultPlacementGroup.String(), s.bucketSnapshots())
+	p, ok := s.scopes.nextPlacementTarget(m)
+	if !ok || p.Volume != retained.Identity().VolumeID {
+		t.Fatal("copied existing SSD data to the empty volume", p)
+	}
+	if p.Physical >= 128<<10 {
+		t.Fatal("budget includes payload already retained at the destination", p.Physical)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	if err := s.scopes.move(ctx, p); err != nil {
+		t.Fatal(err)
+	}
+	for _, object := range []volume.ObjectID{small, large} {
+		data, _, err := bucket.Get(ctx, userPrincipal(t, s), object)
+		want := 16 << 10
+		if object == large {
+			want = 512 << 10
+		}
+		if err != nil || len(data) != want {
+			t.Fatal("cohort data after consolidation", object, len(data), err)
+		}
+	}
+}
 
 func TestPlacementTargetMapRelievesReplicaVolumePressure(t *testing.T) {
 	source, target := startAutomaticDaemonPair(t, false)
