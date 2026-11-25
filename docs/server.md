@@ -1014,6 +1014,8 @@ placement commits. Bulk snapshot completion preflights the physical budget befor
 source fencing; an impossible 507 cancels the unfenced handoff. The final READY
 and COMMIT checks still enforce the exact resulting quota after codec/layout changes.
 
+For a new empty single-copy disk bucket, a finite absolute quota also serves as a soft initial placement hint. If its default owner cannot fit that size and another eligible volume can, initial placement chooses the fitting volume. This creates no reservation, never moves an existing map, and does not prevent extension when no single volume fits. Repeated capacity waits reuse queued or active handoffs rather than repeatedly scanning the bucket index.
+
 ## Join a cluster from the dashboard
 
 A standalone daemon with no application buckets offers **Join cluster** on its
