@@ -114,22 +114,9 @@ func newBootSession(ctx context.Context, c config, lowerName string, quota uint6
 	if _, err = control(ctx, c, client.UserCreate, e.B); err != nil {
 		return
 	}
-	s.Upper, err = createID(ctx, c, s.Username+"-root", s.Upper)
+	s.Upper, err = createIDWithQuota(ctx, c, s.Username+"-root", s.Upper, quota)
 	if err != nil {
 		return
-	}
-	if quota > 0 {
-		e = client.Encoder{}
-		e.ID(s.Upper)
-		e.U8(0)
-		e.U64(0)
-		e.Bool(false)
-		e.U64(quota)
-		e.U32(150000)
-		e.U64(1)
-		if _, err = control(ctx, c, client.BucketSetQuota, e.B); err != nil {
-			return
-		}
 	}
 	var conn *client.Client
 	conn, err = client.Dial(ctx, c.URI, c.Username, c.Password, s.Upper)
