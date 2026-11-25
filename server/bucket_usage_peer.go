@@ -61,7 +61,14 @@ func (s *Server) receiveBucketUsage(ctx context.Context, body []byte, actor clie
 	}
 	policy := b.storageDescription().Policy
 	policy.Limits.Accounting = accounting
-	used, err := b.accountedUsageFor(policy)
+	var used uint64
+	var exact bool
+	if accounting == "logical" {
+		used, exact, err = b.pinnedLogicalUsage()
+	}
+	if !exact && err == nil {
+		used, err = b.accountedUsageFor(policy)
+	}
 	if err != nil {
 		return nil, err
 	}

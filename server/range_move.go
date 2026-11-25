@@ -274,96 +274,78 @@ func (r *rangeManager) cleanup(ctx context.Context, p rangePlan) error {
 	if p.ReplicaAdd || p.ReplicaRemove || p.ReplicaPromote || p.ReplicaRelocate {
 		return nil
 	}
-	end, err := r.server.beginRebuildIO(ctx)
-	if err != nil {
-		return err
-	}
-	defer end()
+	const pageSize = 32
 	for _, v := range r.sourceVolumes(p) {
 		var after *volume.ObjectID
 		for {
-			if err := ctx.Err(); err != nil {
-				return err
-			}
-			h, err := v.Open(false)
-			if err != nil {
-				return err
-			}
-			records, err := p.scanObjects(h, after, 128)
-			h.Close()
+			var records []volume.ObjectRecord
+			err := r.cleanupPage(ctx, p, v, func(h *volume.Handle) (err error) {
+				records, err = p.scanObjects(h, after, pageSize)
+				if err != nil || len(records) == 0 {
+					return err
+				}
+				return h.PurgeBatch(records)
+			})
 			if err != nil {
 				return err
 			}
 			if len(records) == 0 {
 				break
 			}
-			var obsolete []volume.ObjectRecord
-			for _, record := range records {
-				if p.contains(record.Key.Object) {
-					obsolete = append(obsolete, record)
-				}
-			}
-			for len(obsolete) > 0 {
-				n := min(len(obsolete), 32)
-				if err := r.cleanupBatch(ctx, p, v, func(h *volume.Handle) error {
-					return h.PurgeBatch(obsolete[:n])
-				}); err != nil {
-					return err
-				}
-				obsolete = obsolete[n:]
-			}
-			last := records[len(records)-1].Key.Object
-			after = &last
+			next := records[len(records)-1].Key.Object
+			after = &next
 		}
-		// Page retry IDs directly from the B-tree. No full-volume read lock or
-		// temporary file is needed, and settled receipts share one commit.
-		var cursor *volume.ID
+		var requestAfter *volume.ID
 		for {
-			if err := r.server.waitForUserIO(ctx); err != nil {
-				return err
-			}
-			h, err := v.Open(false)
-			if err != nil {
-				return err
-			}
-			records, err := h.ScanRequestRecords(cursor, 128)
-			h.Close()
+			var records []volume.RequestRecord
+			err := r.cleanupPage(ctx, p, v, func(h *volume.Handle) (err error) {
+				records, err = h.ScanRequestRecords(requestAfter, 128)
+				if err != nil || len(records) == 0 {
+					return err
+				}
+				var remove []volume.ID
+				for _, record := range records {
+					if record.Key.Bucket == volume.ID(p.Before.Bucket) && p.contains(record.Key.Object) {
+						remove = append(remove, record.ID)
+					}
+				}
+				if len(remove) == 0 {
+					return nil
+				}
+				return h.ForgetRequests(remove)
+			})
 			if err != nil {
 				return err
 			}
 			if len(records) == 0 {
 				break
 			}
-			var obsolete []volume.ID
-			for _, record := range records {
-				if record.Key.Bucket == volume.ID(p.Before.Bucket) && p.contains(record.Key.Object) {
-					obsolete = append(obsolete, record.ID)
-				}
-			}
-			for len(obsolete) > 0 {
-				n := min(len(obsolete), 32)
-				if err := r.cleanupBatch(ctx, p, v, func(h *volume.Handle) error {
-					return h.ForgetRequests(obsolete[:n])
-				}); err != nil {
-					return err
-				}
-				obsolete = obsolete[n:]
-			}
-			last := records[len(records)-1].ID
-			cursor = &last
+			next := records[len(records)-1].ID
+			requestAfter = &next
 		}
 	}
 	return nil
 }
 
-// Each bounded cleanup batch rechecks the committed fence under opMu, and
-// releases all locks before yielding to foreground requests or scanning again.
-func (r *rangeManager) cleanupBatch(ctx context.Context, p rangePlan, v *volume.Volume, fn func(*volume.Handle) error) error {
-	if err := r.server.waitForUserIO(ctx); err != nil {
+// Scope priority and locks to one local page, never to the complete sweep.
+// Revalidate the ownership fence before every atomic physical deletion batch.
+func (r *rangeManager) cleanupPage(ctx context.Context, p rangePlan, v *volume.Volume, work func(*volume.Handle) error) error {
+	// Give an unfinished bucket purge a bounded turn after releasing this page's
+	// locks and priority. Polling alone can miss every inter-page idle window.
+	defer r.server.reclaimBucketStep()
+	if err := ctx.Err(); err != nil {
 		return err
 	}
+	end, err := r.server.beginRebuildIO(ctx)
+	if err != nil {
+		return err
+	}
+	defer end()
 	r.server.opMu.Lock()
 	defer r.server.opMu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if err := r.cleanupAllowed(p); err != nil {
 		return err
 	}
@@ -372,7 +354,7 @@ func (r *rangeManager) cleanupBatch(ctx context.Context, p rangePlan, v *volume.
 		return err
 	}
 	defer h.Close()
-	return fn(h)
+	return work(h)
 }
 
 // The scan is advisory. Recheck authority under opMu immediately before each
