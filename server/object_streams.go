@@ -82,10 +82,25 @@ func (ws *wsSession) discardUpload(id client.ID) {
 		if u.finishing {
 			return
 		} // CANCEL cancels its context; owner closes it
-		ws.stagedBytes -= u.op.length
-		u.close()
-		ws.releaseObjectContext(id)
-		delete(ws.uploads, id)
+		ws.discardUploadLocked(id, u)
+	}
+}
+
+func (ws *wsSession) discardUploadLocked(id client.ID, u *serverObjectUpload) {
+	ws.stagedBytes -= u.op.length
+	u.close()
+	ws.releaseObjectContext(id)
+	delete(ws.uploads, id)
+}
+
+// Retire the exact transfer before exposing its terminal response. A retry may
+// immediately reuse the request ID; a deferred old cleanup must not erase it.
+func (ws *wsSession) completeUpload(u *serverObjectUpload) {
+	ws.uploadMu.Lock()
+	defer ws.uploadMu.Unlock()
+	id := u.op.message.ID
+	if ws.uploads[id] == u {
+		ws.discardUploadLocked(id, u)
 	}
 }
 func (ws *wsSession) sendMessage(m client.Message) error { return ws.sendMessageContext(ws.ctx, m) }
@@ -170,13 +185,9 @@ func (ws *wsSession) objectTransfer(m client.Message, p principal, startCall fun
 				u.finishing = true
 				ws.uploadMu.Unlock()
 				if startCall(func() {
-					defer func() {
-						ws.uploadMu.Lock()
-						u.finishing = false
-						ws.uploadMu.Unlock()
-						ws.discardUpload(id)
-					}()
+					defer ws.completeUpload(u)
 					result, status, commitErr := u.op.commit(ws.objectContext(id), p, u.file, runtime)
+					ws.completeUpload(u)
 					if ws.finishUpload(u, result, status, commitErr) != nil {
 						ws.close()
 					}
@@ -190,9 +201,8 @@ func (ws *wsSession) objectTransfer(m client.Message, p principal, startCall fun
 			}
 		}
 	}
-	sendErr := ws.finishUpload(u, nil, 0, err)
 	ws.discardUpload(id)
-	return sendErr
+	return ws.finishUpload(u, nil, 0, err)
 }
 func equalObjectBytes(a, b []byte) bool {
 	if len(a) != len(b) {

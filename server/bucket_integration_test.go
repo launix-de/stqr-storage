@@ -610,30 +610,34 @@ func TestBucketStreamingDigestFailureDoesNotCommit(t *testing.T) {
 	body.U64(3)
 	body.B = append(body.B, digest[:]...)
 	body.Blob(nil)
-	if err = conn.WriteMessage(websocket.BinaryMessage, client.EncodeMessage(client.Message{Kind: client.Request, Opcode: 0x0102, ID: id, Body: body.B})); err != nil {
-		t.Fatal(err)
+	// A rejected transfer may immediately reuse its ID. Its context and
+	// staging slot must already be retired when the response is observed.
+	for attempt := 0; attempt < 16; attempt++ {
+		if err = conn.WriteMessage(websocket.BinaryMessage, client.EncodeMessage(client.Message{Kind: client.Request, Opcode: 0x0102, ID: id, Body: body.B})); err != nil {
+			t.Fatal(err)
+		}
+		chunk := client.Encoder{}
+		chunk.ID(id)
+		chunk.U64(0)
+		chunk.U64(0)
+		chunk.Blob([]byte("xyz"))
+		conn.WriteMessage(websocket.BinaryMessage, client.EncodeMessage(client.Message{Kind: client.FireAndForget, Opcode: 5, ID: client.NewRequestID(), Body: chunk.B}))
+		end := client.Encoder{}
+		end.ID(id)
+		end.U64(3)
+		end.B = append(end.B, digest[:]...)
+		conn.WriteMessage(websocket.BinaryMessage, client.EncodeMessage(client.Message{Kind: client.FireAndForget, Opcode: 6, ID: client.NewRequestID(), Body: end.B}))
+		conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+		_, replyBytes, err := conn.ReadMessage()
+		if err != nil {
+			t.Fatal(err)
+		}
+		reply, err := client.DecodeMessage(replyBytes)
+		if err != nil || reply.ID != id {
+			t.Fatal(reply, err)
+		}
+		bucketReplyResult(t, reply, 400)
 	}
-	chunk := client.Encoder{}
-	chunk.ID(id)
-	chunk.U64(0)
-	chunk.U64(0)
-	chunk.Blob([]byte("xyz"))
-	conn.WriteMessage(websocket.BinaryMessage, client.EncodeMessage(client.Message{Kind: client.FireAndForget, Opcode: 5, ID: client.NewRequestID(), Body: chunk.B}))
-	end := client.Encoder{}
-	end.ID(id)
-	end.U64(3)
-	end.B = append(end.B, digest[:]...)
-	conn.WriteMessage(websocket.BinaryMessage, client.EncodeMessage(client.Message{Kind: client.FireAndForget, Opcode: 6, ID: client.NewRequestID(), Body: end.B}))
-	conn.SetReadDeadline(time.Now().Add(5 * time.Second))
-	_, replyBytes, err := conn.ReadMessage()
-	if err != nil {
-		t.Fatal(err)
-	}
-	reply, err := client.DecodeMessage(replyBytes)
-	if err != nil || reply.ID != id {
-		t.Fatal(reply, err)
-	}
-	bucketReplyResult(t, reply, 400)
 	actor, err := s.findAccount(admin.Username)
 	if err != nil {
 		t.Fatal(err)
