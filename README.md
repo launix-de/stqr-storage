@@ -305,8 +305,8 @@ These figures are advisory snapshots, described in [capacity reporting](docs/spa
 
 Linux also has a standalone [kernel client](docs/kstqr.md) with no resident FUSE
 process. It shares normal filesystem buckets with FUSE and supports native page
-cache/mmap writeback. Its C transport connects to the configured node and does
-not follow cluster redirects. The [Windows client](windows/README.md) mounts the
+cache/mmap writeback. Its C transport follows validated range-owner redirects.
+The [Windows client](windows/README.md) mounts the
 same normal filesystem format through WinFsp. Its setup dialog can save an
 encrypted per-user profile and reconnect a drive at login; subscription updates
 notify Explorer about remote changes. Frontend-specific limits are in those guides.
