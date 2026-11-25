@@ -2058,7 +2058,7 @@ int ks_checkpoint(struct ks_fs *f)
   jobs[n].target = n;
   INIT_WORK(&jobs[n].work, ks_fence_worker);
   init_completion(&jobs[n].done);
-  queue_work(system_unbound_wq, &jobs[n].work);
+  ks_queue_fence_work(&jobs[n].work);
  }
  for (unsigned n = 0; n < count; n++) {
   wait_for_completion(&jobs[n].done);

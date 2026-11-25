@@ -348,6 +348,7 @@ Overlay eviction never resolves metadata over the network from the background in
 ### Read-ahead and storage fences
 
 Readahead queues bounded windows up to 1 MiB on a per-mount background workqueue.
+Transport and fence jobs use separate unbound `WQ_MEM_RECLAIM` queues: read/writeback workers may synchronously wait on them under reclaim. Fence jobs depend on the transport queue, so they must not share its single reclaim rescuer. Module initialization creates both queues before registering the filesystem; teardown drains fences before transport.
 Only running workers allocate payload buffers; queued work retains locked folios.
 Unmount drains this queue before closing caches or RPC sessions. `mountstats`
 reports `read_windows`, successfully read `read_bytes`, `read_ns` and
@@ -370,3 +371,5 @@ user transactions; the on-disk encoding and required persistence ordering are
 unchanged. The server waits for volume-switch and buffer-pressure fences outside
 node admission and reruns authorization, placement and quota checks before using
 the untouched incoming payload.
+
+Kernel VM regressions set `panic_on_warn=1` and reject every `WARNING:`, including Linux 7 diagnostics of the form `WARNING: kernel/workqueue.c`. A workqueue warning is a failed test even if the VM later reaches its success marker.

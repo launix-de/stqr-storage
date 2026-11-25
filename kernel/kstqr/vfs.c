@@ -1647,11 +1647,21 @@ static struct file_system_type ks_type = {
     .parameters = ks_parameters,
     .kill_sb = kill_anon_super,
 };
-static int __init ks_init(void) { return register_filesystem(&ks_type); }
+static int __init ks_init(void)
+{
+	int err = ks_transport_start();
+	if (err)
+		return err;
+	err = register_filesystem(&ks_type);
+	if (err)
+		ks_transport_stop();
+	return err;
+}
 static void __exit ks_exit(void)
 {
 	unregister_filesystem(&ks_type);
 	rcu_barrier();
+	ks_transport_stop();
 }
 module_init(ks_init);
 module_exit(ks_exit);
