@@ -8,9 +8,9 @@ migration, drain and deletion paths. The required order is:
 2. Mandatory migrations in the active rebuild round.
 3. Resumable background work such as draining, deletion and reclamation.
 
-The current base uses the constrained greedy target planner. The unbounded
-exact A* extension is excluded; see the [bounded improvement plan and archived
-project review](placement-improvement-plan.md) for the separate follow-up.
+The current planner uses constrained greedy initialization followed by bounded
+continuous improvement. The unbounded exact A* extension is excluded; see the
+[implemented improvement loop and archived project review](placement-improvement-plan.md).
 
 A request waiting for migration or an unavailable owner must not count as
 runnable foreground work and thereby prevent its own dependency from running.
@@ -80,6 +80,12 @@ Equal class/mask eligibility pools are reused across buckets. Indexed range and
 capacity heaps invalidate only crossed thresholds. New replica copies precede
 removals, and primary roles can change without payload transfers. Temporary
 volume allocation and final bucket quota growth are distinct costs.
+
+The additional single-incumbent transformation search has a deadline of at most
+100 ms (5 ms under observed foreground load), exact admission counters and bounded
+workspace. It balances transfer, future capacity and measured traffic preferences.
+It replaces the former separate role-balancing pass. Healthy unpinned cohorts
+can remain unchanged; new bucket indexes avoid per-PG global range scans.
 
 This is not yet a single durable, complete PG-wide NEXT map: source owners
 still negotiate individual handoffs. Infeasible whole ranges fall back to the

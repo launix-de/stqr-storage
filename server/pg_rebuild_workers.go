@@ -12,10 +12,11 @@ import (
 type pgRebuildWorker struct{ wake, stop chan struct{} }
 
 type pgRebuildCatalog struct {
-	groups    map[string][]BucketDescription
-	captured  time.Time
-	snapshots []client.StatsSnapshot
-	seen      map[client.ID]time.Time
+	groups      map[string][]BucketDescription
+	captured    time.Time
+	snapshots   []client.StatsSnapshot
+	seen        map[client.ID]time.Time
+	volumeRates map[client.ID]placementVolumeRate
 }
 
 // Collect catalog/telemetry once per node tick; PG workers never enumerate the
@@ -39,7 +40,7 @@ func (r *rangeManager) startPGWorkers() {
 			}
 			now := time.Now()
 			catalog := &pgRebuildCatalog{groups: map[string][]BucketDescription{"": nil}, captured: now, seen: map[client.ID]time.Time{r.node: now}}
-			catalog.snapshots = []client.StatsSnapshot{s.CollectStats(client.StatsFilter{})}
+			catalog.snapshots = []client.StatsSnapshot{s.CollectStats(client.StatsFilter{IncludeRanges: true})}
 			s.peerStatsMu.RLock()
 			for _, p := range s.peerStats {
 				if p.online && p.snapshot != nil && p.connection.Capabilities&client.CapabilityRangeHandoff != 0 {
@@ -48,6 +49,7 @@ func (r *rangeManager) startPGWorkers() {
 				}
 			}
 			s.peerStatsMu.RUnlock()
+			catalog.volumeRates = placementVolumeRates(catalog.snapshots, r.pgCatalog.Load())
 			for _, d := range s.bucketSnapshots() {
 				if d.ID == systemBucket.String() || d.DeletionComplete || d.State == BucketDeleting {
 					continue

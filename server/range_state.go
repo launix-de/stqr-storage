@@ -90,6 +90,9 @@ type rangeTxn struct {
 	remaining                                                     uint64
 }
 type rangeManager struct {
+	metrics          sync.Map
+	measurements     sync.Map
+	improveSequence  atomic.Uint64
 	pgOffers         map[client.ID]rangePlan
 	pgCatalog        atomic.Pointer[pgRebuildCatalog]
 	pgRuntime        pgRebuildRuntime

@@ -406,6 +406,65 @@ Ranges, V Ressourcen und E expliziten zulässigen Range-/Volume-Optionen ist fü
 diesen Solver O(R+E+V) Speicher und O((R+E) log(R+E)) Scheduling anzustreben;
 die Ermittlung der Nutzdaten-/Metadatenkosten wird gesondert ausgewiesen.
 
+#### 5.3.2 Kontinuierliche, budgetierte Placement-Verbesserung
+
+Die PG-Worker erkunden auch ohne neue Konfigurationsänderung regelmäßig bessere
+Zuordnungen. Nach Greedy wird noch im selben Planungszyklus dessen gültige
+Zuordnung verbessert; erst der anschließend gewählte CURRENT→Ziel-Diff wird
+ausgeführt. Die bestehende Belegung anderer PGs bleibt dabei fest. Als nutzbar
+gelten nur tatsächlich freier Platz und die eigenen zulässigen Reserven; eine
+erhoffte Evakuierung anderer PGs ist keine verfügbare Kapazität.
+
+Ohne geänderte Anforderungen bleibt die Ausgangszuordnung identisch zur alten
+Map, einschließlich nicht auf ein einzelnes Volume gepinnter lokaler Cohorts.
+Bei geänderter Klasse, Kopienzahl oder Maske erfüllt Greedy zunächst diese
+Anforderungen. Fehlende Zuordnungen bleiben ausstehend; die Verbesserung darf
+eine unvollständige Ausgangszuordnung nicht als erfüllte Policy deklarieren.
+
+Die Verbesserungssuche besitzt eine Deadline von **höchstens 100 ms** je Zyklus,
+einschließlich ihrer eigenen Indizes und Initialisierung. Bei Foreground-I/O darf
+sie früher enden. Messung von Objekt-/Receipt-Metadaten, Greedy und Materialisierung
+der Ergebnis-Map sind getrennte Phasen und werden getrennt gemessen. Nach Ablauf
+oder Abbruch bleibt der beste bereits übernommene gültige Stand erhalten. Die
+Implementierung prüft die Deadline kooperativ an begrenzten Rechenschritten;
+Go-Scheduler und GC besitzen keine harte Echtzeitgarantie.
+
+Eine Transformation kann eine Location ersetzen, Primary-/Replica-Rollen
+tauschen oder zwei Zuordnungen gemeinsam ändern. Alle Replica-/Node-, Klassen-,
+Masken-, Quota-, Garantie- und physischen Admission-Constraints bleiben hart.
+Kopierplatz wird konservativ **vor** Freigabe alter Kopien geprüft. Ein gültiger
+Endzustand allein genügt nicht als Beweis einer ausführbaren Move-Reihenfolge.
+Harte Byte-Summen werden exakt geprüft, auch oberhalb von 2^53 und bei uint64-
+Überlauf; nur weiche Bewertungen verwenden Gleitkommazahlen.
+
+Weiche, modular gewichtbare Kriterien sind:
+
+- **Transfer:** geschätzte tatsächlich neu zu kopierende Payloads und Receipts
+  relativ zu CURRENT; bereits am Ziel vorhandene Bytes werden angerechnet.
+- **Künftige Moves:** unausgewogene physische Belegung und prognostizierter
+  Platzmangel innerhalb eines definierten Planungshorizonts. Kopierte Bytes
+  werden nicht als dauerhaftes Anwendungswachstum hochgerechnet.
+- **Traffic/Last:** zusätzliche Netzwerk-Kopien, gemessene Lese-/Schreiblast
+  sowie kapazitätsbezogene Primary-Verteilung. Fehlende Messdaten werden nicht
+  als erfundene Hotspots behandelt.
+
+Der aktuelle erste Ansatz verwendet randomisierte lokale Verbesserungen eines
+einzigen gültigen Incumbents, einen 30-Sekunden-Horizont und gleich gewichtete
+Byte-Äquivalente dieser drei Kriterien. Er hält keine exponentiell wachsende
+Suchfront und behauptet keine globale Optimalität. Einzelversuche betreffen
+höchstens zwei Zuordnungen und einen begrenzten Ressourcenbereich. Ein
+zusätzliches Workspace-Admission-Limit begrenzt die Suchdaten. Die Kandidatenfolge
+wechselt zwischen Zyklen, sodass wiederholte Erkundung nicht dieselben wenigen
+Alternativen bevorzugt. Ablehnung eines Kandidaten oder Budgetablauf beweist
+keine Unlösbarkeit.
+
+Die Map bleibt bucketbezogen. Immutable Bucket-Spannen und Primary-Zähler
+verhindern wiederholte globale Map-Scans pro PG-Worker. Größenmessungen werden
+aus Metadaten gewonnen, gecacht und für gesunde Ranges in kleinen wechselnden
+Fenstern erneuert; aktuelle Admission wird beim tatsächlichen Handoff erneut
+geprüft. Klassen-/Garantie-Vorplanung darf Probleme vereinfachen, ersetzt aber
+nicht die konkrete Node-/Volume-Prüfung.
+
 Primary-/Replica-Rollen werden kapazitätsgewichtet über die Ranges verteilt.
 Bei drei gleich großen Nodes und drei Kopien rotiert die Primary-Rolle über
 die Nodes; vorhandene korrekte Replica-Payloads bleiben dabei an ihrem Ort.
@@ -609,9 +668,10 @@ Bei **1 PB** logischer Daten und **10 GB** je Range entstehen näherungsweise **
 - Nur **binäre Halbierung des Hashintervalls**, mathematisch exakt auf Bit-/Präfixgrenze.
 - **Split allein verursacht keine Payload-Migration**; beide Tochter-Ranges können zunächst dieselbe Location-Gruppe besitzen.
 - Vor und nach Split werden tatsächliche `live_bytes`, `objects`, `read_ops`, `write_ops`, `read_bytes`, `write_bytes` ermittelt.
-- Split nach Kapazität oder Last; Größenheuristik z. B. `target=10 GiB`, `split_trigger=8 GiB`, mit Hysterese und Ausnahmen für Hotspots.
+- Split nach Kapazität oder Last; Größenheuristik z. B. `target=4 GiB`, `split_trigger=8 GiB`, mit Hysterese und Ausnahmen für Hotspots.
 - Hashbereich ≠ Datenmenge. Eine Halbierung erzeugt nicht zwingend gleich viele Bytes; die Statistik muss tatsächlich gemessen bzw. aus lokalem Index abgeleitet werden.
 - Ein einzelnes Hot-Object kann durch wiederholte Splits isoliert, aber nicht innerhalb desselben Objekts durch Range-Moves lastmäßig verteilt werden; dafür Read-Caches/Chunking.
+- Clients sollen Objekte auf ungefähr 1 MiB begrenzen; FS- und BD-Frontends teilen ihre Nutzdaten entsprechend auf. Das begrenzt die kleinste verschiebbare Dateneinheit, nicht automatisch die Größe einer Range. Split-Entscheidungen reagieren auf tatsächlich gemessene Größe **oder** Verkehr; durch wiederholtes Splitten lässt sich ein Problemobjekt von kalten Nachbarn isolieren. Der Split schafft zusätzliche Placement-Optionen, ohne selbst einen Move zu verlangen.
 
 ### 6.6 Merging
 
@@ -620,6 +680,7 @@ Bei **1 PB** logischer Daten und **10 GB** je Range entstehen näherungsweise **
 - Merges sind eine **Generationsentscheidung**. Sie dürfen neue Data-Ownership und Kopierarbeit erfordern, wenn die zusammengefassten Ranges verschiedene Nodes haben.
 - Für nichtleere Ranges wählt die Planung bevorzugt den Node, der bereits die meisten Bytes der späteren Range hält (**minimaler Umkopieraufwand**), sofern Kapazität, Failure Domains, Policy und I/O-Last es zulassen.
 - Ein Merge und Split dürfen als logische Map-Änderungen vorbereitet werden, bevor eine spätere Migration nötig ist; physische Segmente müssen nicht sofort reorganisiert werden.
+- Kleine, kühle Geschwister mit identischen Locations/Layout werden bevorzugt ohne Kopierarbeit gemergt. Größen- und Last-Hysterese verhindert Split/Merge-Pendeln; ein gerade isolierter Hotspot darf nicht unmittelbar mit seinen kalten Nachbarn zurückgemergt werden. Diese Granularitätsplanung ist von der anschließenden budgetierten Zuordnungsverbesserung getrennt.
 
 ### 6.7 Range-Policy und Locations
 

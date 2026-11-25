@@ -118,6 +118,9 @@ func (s *Server) CollectStats(filter client.StatsFilter) client.StatsSnapshot {
 		}
 	}
 	s.collectQuotaStats(&snap, filter)
+	if filter.IncludeRanges && s.scopes != nil {
+		s.scopes.collectRangeTelemetry(&snap)
+	}
 	sort.Slice(snap.Volumes, func(i, j int) bool { return snap.Volumes[i].ID.String() < snap.Volumes[j].ID.String() })
 	return snap
 }
@@ -161,7 +164,7 @@ func filterSnapshot(snap client.StatsSnapshot, f client.StatsFilter) client.Stat
 }
 func (s *Server) publishStats() {
 	s.publishVersions()
-	snap := s.CollectStats(client.StatsFilter{})
+	snap := s.CollectStats(client.StatsFilter{IncludeRanges: true})
 	s.latest.Store(&snap)
 	s.broadcastStats(snap)
 }
