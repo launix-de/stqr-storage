@@ -21,7 +21,7 @@ func TestBlockLeaseRangesAndReadonly(t *testing.T) {
 	a := s.cfg.Auth.BootstrapAdmin
 	dial := func() *client.Client {
 		t.Helper()
-		c, e := client.Dial(ctx, host.URL, a.Username, a.Password, client.ID(b.ID()))
+		c, e := client.Dial(ctx, host.URL, a.Username, a.Password, client.ID(b.ID()), "bd")
 		if e != nil {
 			t.Fatal(e)
 		}
@@ -44,7 +44,7 @@ func TestBlockLeaseRangesAndReadonly(t *testing.T) {
 	if e != nil || !bytes.Equal(got, payload) || info.Length != 4608 {
 		t.Fatal("ranged read", info, e)
 	}
-	if other, e := client.Dial(ctx, host.URL, a.Username, a.Password, client.ID(b.ID())); e == nil {
+	if other, e := client.Dial(ctx, host.URL, a.Username, a.Password, client.ID(b.ID()), "bd"); e == nil {
 		other.Close()
 		t.Fatal("exclusive bucket opened elsewhere")
 	}

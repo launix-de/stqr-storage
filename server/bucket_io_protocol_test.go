@@ -22,7 +22,7 @@ func TestBucketTrafficIncludesStreamingAcceptedObjectProtocol(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
 	defer cancel()
 	admin := source.cfg.Auth.BootstrapAdmin
-	c, err := client.Dial(ctx, host.URL, admin.Username, admin.Password, client.ID(b.ID()))
+	c, err := client.Dial(ctx, host.URL, admin.Username, admin.Password, client.ID(b.ID()), "fs")
 	if err != nil {
 		t.Fatal(err)
 	}

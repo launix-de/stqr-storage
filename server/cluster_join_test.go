@@ -201,7 +201,7 @@ func TestDashboardClusterJoinPreparedVolumes(t *testing.T) {
 			}
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
-			c, err := client.Dial(ctx, address, remote.Username, remote.Password, client.BucketID(bucket.ID()))
+			c, err := client.Dial(ctx, address, remote.Username, remote.Password, client.BucketID(bucket.ID()), "fs")
 			if err != nil {
 				t.Fatal(err)
 			}

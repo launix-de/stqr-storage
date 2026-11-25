@@ -21,7 +21,7 @@ func TestRecoveryOnNewNodeThroughDashboardPeer(t *testing.T) {
 	admin := source.node.cfg.Auth.BootstrapAdmin
 	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
 	defer cancel()
-	c, err := client.Dial(ctx, source.node.cfg.Node.Advertise, admin.Username, admin.Password, client.BucketID(bucket.ID()))
+	c, err := client.Dial(ctx, source.node.cfg.Node.Advertise, admin.Username, admin.Password, client.BucketID(bucket.ID()), "fs")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -87,7 +87,7 @@ func TestRecoveryOnNewNodeThroughDashboardPeer(t *testing.T) {
 	if status := proxy(client.VolumeRecoveryCommit, e.B, client.NewRequestID()); status != 200 {
 		t.Fatal("proxy takeover", status)
 	}
-	c, err = client.Dial(ctx, survivor.node.cfg.Node.Advertise, admin.Username, admin.Password, client.BucketID(bucket.ID()))
+	c, err = client.Dial(ctx, survivor.node.cfg.Node.Advertise, admin.Username, admin.Password, client.BucketID(bucket.ID()), "fs")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -106,7 +106,7 @@ func TestRecoveryQuotaRejectionDoesNotFreezeCluster(t *testing.T) {
 	admin := source.node.cfg.Auth.BootstrapAdmin
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	c, err := client.Dial(ctx, source.node.cfg.Node.Advertise, admin.Username, admin.Password, client.BucketID(bucket.ID()))
+	c, err := client.Dial(ctx, source.node.cfg.Node.Advertise, admin.Username, admin.Password, client.BucketID(bucket.ID()), "fs")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -150,7 +150,7 @@ func TestRecoveryQuotaRejectionDoesNotFreezeCluster(t *testing.T) {
 	}
 	// A policy revision alone must not make the recovered cohort invisible.
 	setLimit(512 << 10)
-	c, err = client.Dial(ctx, target.node.cfg.Node.Advertise, admin.Username, admin.Password, client.BucketID(bucket.ID()))
+	c, err = client.Dial(ctx, target.node.cfg.Node.Advertise, admin.Username, admin.Password, client.BucketID(bucket.ID()), "fs")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -203,7 +203,7 @@ func TestRecoveryBeginPreservesUnavailableRanges(t *testing.T) {
 	admin := source.node.cfg.Auth.BootstrapAdmin
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	c, err := client.Dial(ctx, source.node.cfg.Node.Advertise, admin.Username, admin.Password, client.BucketID(bucket.ID()))
+	c, err := client.Dial(ctx, source.node.cfg.Node.Advertise, admin.Username, admin.Password, client.BucketID(bucket.ID()), "fs")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -239,7 +239,7 @@ func TestRecoveryBeginPreservesUnavailableRanges(t *testing.T) {
 	if len(view.manifest.VolumeRecoveries) != 1 || view.manifest.VolumeRecoveries[0].Complete || view.manifest.VolumeRecoveries[0].After.State != 4 {
 		t.Fatal("missing recovery hold", len(view.manifest.VolumeRecoveries))
 	}
-	c, err = client.Dial(ctx, target.node.cfg.Node.Advertise, admin.Username, admin.Password, client.BucketID(bucket.ID()))
+	c, err = client.Dial(ctx, target.node.cfg.Node.Advertise, admin.Username, admin.Password, client.BucketID(bucket.ID()), "fs")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -279,7 +279,7 @@ func TestRecoveryBeginPreservesUnavailableRanges(t *testing.T) {
 	if store.IOStats().WriteBytes-before.IO.WriteBytes >= 512<<10 {
 		t.Fatal("takeover copied the payload")
 	}
-	c2, err := client.Dial(ctx, target.node.cfg.Node.Advertise, admin.Username, admin.Password, client.BucketID(bucket.ID()))
+	c2, err := client.Dial(ctx, target.node.cfg.Node.Advertise, admin.Username, admin.Password, client.BucketID(bucket.ID()), "fs")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -334,7 +334,7 @@ func TestRecoveryRequiresCompleteCohort(t *testing.T) {
 	admin := source.node.cfg.Auth.BootstrapAdmin
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	c, err := client.Dial(ctx, source.node.cfg.Node.Advertise, admin.Username, admin.Password, client.BucketID(bucket.ID()))
+	c, err := client.Dial(ctx, source.node.cfg.Node.Advertise, admin.Username, admin.Password, client.BucketID(bucket.ID()), "fs")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -367,7 +367,7 @@ func TestRecoveryRequiresCompleteCohort(t *testing.T) {
 	if status, _ := commitTestRecoveredVolumes(t, target, admin, one, two); status != 200 {
 		t.Fatal("complete cohort", status)
 	}
-	c, err = client.Dial(ctx, target.node.cfg.Node.Advertise, admin.Username, admin.Password, client.BucketID(bucket.ID()))
+	c, err = client.Dial(ctx, target.node.cfg.Node.Advertise, admin.Username, admin.Password, client.BucketID(bucket.ID()), "fs")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -397,7 +397,7 @@ func TestRecoveredStaleCopiesCannotOverrideOtherRanges(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	c, err := client.Dial(ctx, source.node.cfg.Node.Advertise, admin.Username, admin.Password, client.BucketID(rescued.ID()))
+	c, err := client.Dial(ctx, source.node.cfg.Node.Advertise, admin.Username, admin.Password, client.BucketID(rescued.ID()), "fs")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -405,7 +405,7 @@ func TestRecoveredStaleCopiesCannotOverrideOtherRanges(t *testing.T) {
 		t.Fatal(err)
 	}
 	c.Close()
-	c, err = client.Dial(ctx, target.node.cfg.Node.Advertise, admin.Username, admin.Password, client.BucketID(other.ID()))
+	c, err = client.Dial(ctx, target.node.cfg.Node.Advertise, admin.Username, admin.Password, client.BucketID(other.ID()), "fs")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -435,7 +435,7 @@ func TestRecoveredStaleCopiesCannotOverrideOtherRanges(t *testing.T) {
 	if status, _ := commitTestRecoveredVolumes(t, target, admin, id); status != 200 {
 		t.Fatal(status)
 	}
-	c, err = client.Dial(ctx, target.node.cfg.Node.Advertise, admin.Username, admin.Password, client.BucketID(other.ID()))
+	c, err = client.Dial(ctx, target.node.cfg.Node.Advertise, admin.Username, admin.Password, client.BucketID(other.ID()), "fs")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -468,7 +468,7 @@ func TestRecoveredStaleCopiesCannotOverrideOtherRanges(t *testing.T) {
 		t.Fatal("obsolete unrelated copies kept recovered drive attached")
 	}
 	target = restartDaemonTestNode(t, target)
-	c, err = client.Dial(ctx, target.node.cfg.Node.Advertise, admin.Username, admin.Password, client.BucketID(rescued.ID()))
+	c, err = client.Dial(ctx, target.node.cfg.Node.Advertise, admin.Username, admin.Password, client.BucketID(rescued.ID()), "fs")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -494,7 +494,7 @@ func TestRecoveryResumesCommittedTakeoverAfterRestart(t *testing.T) {
 	admin := source.node.cfg.Auth.BootstrapAdmin
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	c, err := client.Dial(ctx, source.node.cfg.Node.Advertise, admin.Username, admin.Password, client.BucketID(bucket.ID()))
+	c, err := client.Dial(ctx, source.node.cfg.Node.Advertise, admin.Username, admin.Password, client.BucketID(bucket.ID()), "fs")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -528,7 +528,7 @@ func TestRecoveryResumesCommittedTakeoverAfterRestart(t *testing.T) {
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	c, err = client.Dial(ctx, target.node.cfg.Node.Advertise, admin.Username, admin.Password, client.BucketID(bucket.ID()))
+	c, err = client.Dial(ctx, target.node.cfg.Node.Advertise, admin.Username, admin.Password, client.BucketID(bucket.ID()), "fs")
 	if err != nil {
 		t.Fatal(err)
 	}

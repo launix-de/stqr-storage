@@ -60,8 +60,12 @@ func (s *Server) dispatchAs(m client.Message, ws *wsSession, p principal) ([]byt
 			return client.ResponseBody(403, nil, "bucket connection has no administrative privileges"), 403
 		}
 	}
-	if m.Opcode == client.BucketLeaseControlRegister {
-		return s.registerLeaseControl(m, ws)
+	if m.Opcode == client.BucketFormatOpen {
+		return s.openSocketBucketFormat(m, ws, p)
+	}
+	if err := checkSocketBucketFormat(m, p); err != nil {
+		status := statusOf(err)
+		return client.ResponseBody(status, nil, err.Error()), status
 	}
 
 	if m.Opcode >= clusterJoinStatus && m.Opcode <= clusterJoinPrepare {
@@ -119,6 +123,15 @@ func (s *Server) dispatchAs(m client.Message, ws *wsSession, p principal) ([]byt
 				return client.ResponseBody(403, nil, "peer is excluded from committed membership"), 403
 			}
 		}
+		if m.Opcode == peerBucketFormat {
+			result, err := s.receiveBucketFormat(s.ctx, m.Body)
+			if err != nil {
+				status := statusOf(err)
+				return client.ResponseBody(status, nil, err.Error()), status
+			}
+			return client.ResponseBody(200, result, ""), 200
+		}
+
 		if m.Opcode == peerRecoveryReady {
 			actor, _ := parseID(p.User.ID)
 			result, err := s.recoveryReady(m.Body, client.ID(actor))
@@ -410,9 +423,6 @@ func (s *Server) dispatchAs(m client.Message, ws *wsSession, p principal) ([]byt
 	if !p.isAdmin() && m.Opcode != client.Hello && m.Opcode != client.Ping && !(m.Opcode >= 0x0100 && m.Opcode <= client.BucketObjectList || m.Opcode == client.ObjectAccepted || m.Opcode == client.BucketObjectLease || m.Opcode == client.BucketLeaseControlRegister || m.Opcode == client.BucketMaintenanceEnd || m.Opcode == client.BucketStatFS || m.Opcode == client.BucketSync || m.Opcode == client.ObjectReference) {
 		return client.ResponseBody(403, nil, "administrator required"), 403
 	}
-	if m.Opcode == client.LeaseControlRead || m.Opcode == client.LeaseControlWrite {
-		return s.leaseControlAdmin(m, ws, p)
-	}
 
 	if s.clusterPaused() || s.forceFrozen() {
 		switch m.Opcode {
@@ -605,7 +615,7 @@ func (s *Server) dispatchAs(m client.Message, ws *wsSession, p principal) ([]byt
 		}
 		return client.ResponseBody(status, result, ""), status
 	}
-	if m.Opcode >= 0x0100 && m.Opcode <= 0x0108 || m.Opcode == client.ObjectAccepted || m.Opcode == client.BucketObjectLease || m.Opcode == client.BucketLeaseControlRegister || m.Opcode == client.BucketMaintenanceEnd || m.Opcode == client.BucketMaintenance || m.Opcode == client.BucketScan || m.Opcode == client.BucketObjectList {
+	if m.Opcode >= 0x0100 && m.Opcode <= 0x0108 || m.Opcode == client.ObjectAccepted || m.Opcode == client.BucketObjectLease || m.Opcode == client.BucketMaintenanceEnd || m.Opcode == client.BucketMaintenance || m.Opcode == client.BucketScan || m.Opcode == client.BucketObjectList {
 		result, status, err := s.executeObjects(m, ws, p)
 		if errors.Is(err, errObjectStaged) {
 			return nil, 0
@@ -687,7 +697,7 @@ func (s *Server) execute(m client.Message, ws *wsSession) ([]byte, int, error) {
 		} else {
 			e.U16(1)
 		}
-		caps, membership, revision := client.CapabilityObjectReferences|client.CapabilityBlockControl|client.CapabilityPeerTransport|client.CapabilityNodeAdmin|client.CapabilityObjectSubscriptions|client.CapabilityDurability, uint64(1), c.Generation
+		caps, membership, revision := client.CapabilityObjectReferences|client.CapabilityBucketFormat|client.CapabilityPeerTransport|client.CapabilityNodeAdmin|client.CapabilityObjectSubscriptions|client.CapabilityDurability, uint64(1), c.Generation
 		if s.control != nil {
 			caps |= client.CapabilityClusterControl
 			s.control.ledger.mu.Lock()

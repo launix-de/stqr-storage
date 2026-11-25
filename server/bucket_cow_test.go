@@ -241,7 +241,7 @@ func TestBucketCOWFilesystemFsckPreservesSource(t *testing.T) {
 	admin := s.cfg.Auth.BootstrapAdmin
 	dial := func(bucket volume.ID) *client.Client {
 		t.Helper()
-		c, err := client.Dial(ctx, host.URL, admin.Username, admin.Password, client.ID(bucket))
+		c, err := client.Dial(ctx, host.URL, admin.Username, admin.Password, client.ID(bucket), "fs")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -326,12 +326,12 @@ func TestBucketCOWSubscriptionUsesNoReadMaterializationAndEnforcesOriginalGrant(
 	}
 	host := httptest.NewServer(s.Handler())
 	defer host.Close()
-	c, err := client.Dial(ctx, host.URL, user.Name, "bucket-test-password", client.ID(target.ID()))
+	c, err := client.Dial(ctx, host.URL, user.Name, "bucket-test-password", client.ID(target.ID()), "fs")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer c.Close()
-	if forbidden, err := client.Dial(ctx, host.URL, user.Name, "bucket-test-password", client.ID(source.ID())); err == nil {
+	if forbidden, err := client.Dial(ctx, host.URL, user.Name, "bucket-test-password", client.ID(source.ID()), "fs"); err == nil {
 		forbidden.Close()
 		t.Fatal("copy-only user acquired source grant")
 	}
@@ -416,7 +416,7 @@ func TestBucketCOWReplicatedSparseMaterialization(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	admin := first.node.cfg.Auth.BootstrapAdmin
-	c, err := client.Dial(ctx, first.node.cfg.Node.Advertise, admin.Username, admin.Password, client.ID(source.ID()))
+	c, err := client.Dial(ctx, first.node.cfg.Node.Advertise, admin.Username, admin.Password, client.ID(source.ID()), "fs")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -537,6 +537,9 @@ func TestBucketCOWInterruptedMaterializationRecoversAfterPrimaryRestart(t *testi
 	storage.Redundancy = BucketRedundancy{Mode: "replication", Replicas: 2, ACK: "all"}
 	centralPGRequest(t, first.node, group, 0, PlacementMask{NodeSelection: "all", Storage: &storage})
 	a := replicaTestBucket(t, first.node, group, "cow-resume-source")
+	if err := first.node.openBucketFormat(context.Background(), a.ID().String(), "fs", userPrincipal(t, first.node)); err != nil {
+		t.Fatal(err)
+	}
 	id := volume.ObjectID{31}
 	entry, _ := first.node.placement.Load().lookup(client.ID(a.ID()), client.ObjectID(id))
 	primary, offline := first, second
@@ -659,7 +662,7 @@ func TestBucketCOWInterruptedMaterializationRecoversAfterPrimaryRestart(t *testi
 	}
 	credentials := primary.node.cfg.Auth.BootstrapAdmin
 	primary.close()
-	reader, err := client.Dial(ctx, offline.node.cfg.Node.Advertise, credentials.Username, credentials.Password, client.ID(readCopy.ID()))
+	reader, err := client.Dial(ctx, offline.node.cfg.Node.Advertise, credentials.Username, credentials.Password, client.ID(readCopy.ID()), "fs")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -752,7 +755,7 @@ func TestBucketCOWDifferentReplicationPolicyMaterializesInBackground(t *testing.
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	admin := first.node.cfg.Auth.BootstrapAdmin
-	c, err := client.Dial(ctx, first.node.cfg.Node.Advertise, admin.Username, admin.Password, client.ID(source.ID()))
+	c, err := client.Dial(ctx, first.node.cfg.Node.Advertise, admin.Username, admin.Password, client.ID(source.ID()), "fs")
 	if err != nil {
 		t.Fatal(err)
 	}

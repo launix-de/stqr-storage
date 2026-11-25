@@ -92,7 +92,7 @@ func testSubscriptionSnapshotACK(t *testing.T, bufferedUpdate bool) {
 	defer host.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	c, err := Dial(ctx, host.URL, "user", "password", BucketID{7})
+	c, err := Dial(ctx, host.URL, "user", "password", BucketID{7}, "fs")
 	if err != nil {
 		t.Fatal(err)
 	}

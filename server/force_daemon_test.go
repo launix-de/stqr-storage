@@ -29,7 +29,7 @@ func TestDaemonExplicitExclusionMarksLostAndPurgesStaleCopies(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
 	defer cancel()
 	admin := source.node.cfg.Auth.BootstrapAdmin
-	c, err := client.Dial(ctx, source.node.cfg.Node.Advertise, admin.Username, admin.Password, client.BucketID(draft.ID()))
+	c, err := client.Dial(ctx, source.node.cfg.Node.Advertise, admin.Username, admin.Password, client.BucketID(draft.ID()), "fs")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -255,7 +255,7 @@ func checkExclusionWithSurvivingHandoff(t *testing.T, restartRAMSource bool) {
 		t.Fatal(err)
 	}
 	admin := original.node.cfg.Auth.BootstrapAdmin
-	objects, err := client.Dial(ctx, b.node.cfg.Node.Advertise, admin.Username, admin.Password, client.BucketID(bucket.ID()))
+	objects, err := client.Dial(ctx, b.node.cfg.Node.Advertise, admin.Username, admin.Password, client.BucketID(bucket.ID()), "fs")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -428,7 +428,7 @@ func TestDaemonExclusionCancelsUncommittedHandoffs(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
 			defer cancel()
 			admin := source.node.cfg.Auth.BootstrapAdmin
-			objects, err := client.Dial(ctx, source.node.cfg.Node.Advertise, admin.Username, admin.Password, client.BucketID(bucket.ID()))
+			objects, err := client.Dial(ctx, source.node.cfg.Node.Advertise, admin.Username, admin.Password, client.BucketID(bucket.ID()), "fs")
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -523,7 +523,7 @@ func TestDaemonExclusionCancelsUncommittedHandoffs(t *testing.T) {
 			if err := survivor.node.scopes.reserve(p); err == nil {
 				t.Fatal("restart forgot cancelled handoff")
 			}
-			reader, err := client.Dial(ctx, survivor.node.cfg.Node.Advertise, admin.Username, admin.Password, client.BucketID(bucket.ID()))
+			reader, err := client.Dial(ctx, survivor.node.cfg.Node.Advertise, admin.Username, admin.Password, client.BucketID(bucket.ID()), "fs")
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -579,7 +579,7 @@ func TestDaemonForceReplacesUncommittedGlobalRound(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
 	defer cancel()
 	admin := source.node.cfg.Auth.BootstrapAdmin
-	objects, err := client.Dial(ctx, target.node.cfg.Node.Advertise, admin.Username, admin.Password, client.BucketID(bucket.ID()))
+	objects, err := client.Dial(ctx, target.node.cfg.Node.Advertise, admin.Username, admin.Password, client.BucketID(bucket.ID()), "fs")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -847,7 +847,7 @@ func TestDaemonForceCompletesCommittedDepartureWithoutLosingData(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
 	defer cancel()
 	admin := source.node.cfg.Auth.BootstrapAdmin
-	objects, err := client.Dial(ctx, target.node.cfg.Node.Advertise, admin.Username, admin.Password, client.BucketID(bucket.ID()))
+	objects, err := client.Dial(ctx, target.node.cfg.Node.Advertise, admin.Username, admin.Password, client.BucketID(bucket.ID()), "fs")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -980,7 +980,7 @@ func TestDaemonForcePreservesEarlierForceCommit(t *testing.T) {
 			}
 			bucket, _ := createProtocolBucket(t, original.node, "force-parent-data")
 			admin := original.node.cfg.Auth.BootstrapAdmin
-			objects, err := client.Dial(ctx, b.node.cfg.Node.Advertise, admin.Username, admin.Password, client.BucketID(bucket.ID()))
+			objects, err := client.Dial(ctx, b.node.cfg.Node.Advertise, admin.Username, admin.Password, client.BucketID(bucket.ID()), "fs")
 			if err != nil {
 				t.Fatal(err)
 			}

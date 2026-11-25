@@ -50,7 +50,7 @@ typedef struct {
  * URLs are http:// or ws://; encrypted transport is not currently supported.
  */
 int stqr_dial(stqr_client **out, const char *url, const char *username,
-              const char *password, stqr_id bucket, unsigned timeout_ms);
+              const char *password, stqr_id bucket, const char *format, unsigned timeout_ms);
 void stqr_close(stqr_client *client);
 int stqr_reconnect(stqr_client *client);
 int stqr_status(const stqr_client *client);

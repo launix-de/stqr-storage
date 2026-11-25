@@ -26,7 +26,11 @@ func TestS3MaintenanceBoundedPagesAndBucketFairness(t *testing.T) {
 		}
 	}
 	other, _ := createProtocolBucket(t, s, "maintenance-other")
-	uploads := client.NewS3(s3Store{b: other, p: p})
+	uploads, closeUploads, err := s.openS3(ctx, other, p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeUploads()
 	u, e := uploads.CreateMultipart(ctx, "expired", user.ID, "", "", client.S3PutOptions{})
 	if e != nil {
 		t.Fatal(e)

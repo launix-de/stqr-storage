@@ -37,7 +37,7 @@ func runSSHReplication(t *testing.T, f sshRecoveryFixture) {
 	centralPGRequest(t, s, localGroup, 0, PlacementMask{NodeSelection: "list", Nodes: []PlacementNode{{NodeID: s.cfg.Node.ID, Mode: VolumesAll}}, Storage: &localStorage})
 	other := replicaTestBucket(t, s, localGroup, "ssh-independent")
 	admin := s.cfg.Auth.BootstrapAdmin
-	c, err := client.Dial(ctx, s.cfg.Node.Advertise, admin.Username, admin.Password, client.BucketID(b.ID()))
+	c, err := client.Dial(ctx, s.cfg.Node.Advertise, admin.Username, admin.Password, client.BucketID(b.ID()), "fs")
 	if err != nil {
 		t.Fatal(err)
 	}

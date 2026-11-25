@@ -32,7 +32,7 @@ func TestStorageSafetyCASPermissions(t *testing.T) {
 		}
 		host := httptest.NewServer(s.Handler())
 		defer host.Close()
-		c, err := client.Dial(ctx, host.URL, user.Name, "bucket-test-password", client.ID(b.ID()))
+		c, err := client.Dial(ctx, host.URL, user.Name, "bucket-test-password", client.ID(b.ID()), "s3")
 		if err != nil {
 			t.Fatal(err)
 		}

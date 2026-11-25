@@ -1578,7 +1578,7 @@ static int ks_fill_super(struct super_block *sb, struct fs_context *fc)
 	saved = enter_fs(f);
 	err = 0;
 	for (unsigned slot = 0; slot < KS_RPC_SLOTS && !err; slot++)
-		err = stqr_dial(&f->rpc[slot].client, c->url, c->username, c->password, c->bucket,
+		err = stqr_dial(&f->rpc[slot].client, c->url, c->username, c->password, c->bucket, "fs",
 				c->timeout);
 	if (!err)
 		f->references = !!(stqr_capabilities(f->rpc[0].client) & STQR_CAP_OBJECT_REFERENCES);
@@ -1609,7 +1609,7 @@ static int ks_fill_super(struct super_block *sb, struct fs_context *fc)
 				for (unsigned slot = 0; slot < KS_RPC_SLOTS && !err; slot++)
 					err =
 					    stqr_dial(&lower->rpc[slot].client, c->url, c->username,
-						      c->password, c->lower, c->timeout);
+						      c->password, c->lower, "fs", c->timeout);
 				if (!err)
 					lower->references = !!(stqr_capabilities(lower->rpc[0].client) &
 							      STQR_CAP_OBJECT_REFERENCES);

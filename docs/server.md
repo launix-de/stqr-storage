@@ -1109,12 +1109,11 @@ that generation. Each node reclaims bounded pages in idle cycles, skips occupied
 locks, and yields to user I/O and active rebuild work. Completion is observed
 before starting the later, short catalog-cleanup decision.
 
-Dashboard disk administration follows the same client boundary. The server
-relays bounded, opaque requests to registered object-lease owners; an absent
-owner is reported without opening a disk catalog. The browser handles offline
-descriptors using delegated native GET/STAT/inventory/ranged-CAS operations.
-Delegation requires an administrator and retains ordinary bucket authorization,
-lease exclusion, owner routing and traffic accounting.
+The storage dashboard does not interpret bucket objects or manage virtual disks.
+It displays the client-declared, opaque format string from bucket metadata.
+The first authorized bucket connection persists an unset format atomically;
+a later connection declaring a different format is rejected with HTTP 409.
+Format-specific operations belong to external clients.
 
 
 ## PG-local rebuild cycles

@@ -247,7 +247,7 @@ func runSSHClusterAcceptance(t *testing.T, usePM2 bool, recovery ...bool) {
 		runSSHRecoveryFence(t, sshRecoveryFixture{ctx: ctx, source: s, http: h, remote: peer, remoteDir: remoteDir, sshTarget: sshTarget, bucket: bucket, localVolume: localVolume.VolumeID, remoteVolume: remoteVolume, request: request, ssh: ssh, start: start})
 		return
 	}
-	c, err := client.Dial(ctx, s.cfg.Node.Advertise, admin.Username, admin.Password, client.BucketID(bucket.ID()))
+	c, err := client.Dial(ctx, s.cfg.Node.Advertise, admin.Username, admin.Password, client.BucketID(bucket.ID()), "fs")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -262,7 +262,7 @@ func runSSHClusterAcceptance(t *testing.T, usePM2 bool, recovery ...bool) {
 		versions[i] = info.Length
 	}
 	t.Log("extension wrote six MiB")
-	remoteClient, err := client.Dial(ctx, peer.Node.Advertise, admin.Username, admin.Password, client.BucketID(bucket.ID()))
+	remoteClient, err := client.Dial(ctx, peer.Node.Advertise, admin.Username, admin.Password, client.BucketID(bucket.ID()), "fs")
 	if err != nil {
 		t.Fatal(err)
 	}
