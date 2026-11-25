@@ -85,6 +85,7 @@ func TestKSTQRVirtualMachine(t *testing.T) {
 	run("cc", "-static", "-std=c11", "-Wall", "-Wextra", "-Werror", "-O2", "-o", filepath.Join(initrdRoot, "mount.kstqr"), filepath.Join(root, "mount.c"))
 	run("cc", "-static", "-std=c11", "-Wall", "-Wextra", "-Werror", "-O2", "-o", filepath.Join(initrdRoot, "smoke"), filepath.Join(root, "tests/smoke.c"))
 	run("cc", "-static", "-std=c11", "-Wall", "-Wextra", "-Werror", "-O2", "-o", filepath.Join(initrdRoot, "coherence"), filepath.Join(root, "tests/coherence.c"))
+	run("cc", "-static", "-std=c11", "-Wall", "-Wextra", "-Werror", "-O2", "-o", filepath.Join(initrdRoot, "cache-capacity"), filepath.Join(root, "tests/cache_capacity.c"))
 	run("cc", "-static", "-std=c11", "-Wall", "-Wextra", "-Werror", "-O2", "-o", filepath.Join(initrdRoot, "throughput"), filepath.Join(root, "tests/throughput.c"))
 	run("cc", "-static", "-std=c11", "-Wall", "-Wextra", "-Werror", "-O2", "-o", filepath.Join(initrdRoot, "writeback"), filepath.Join(root, "tests/writeback.c"))
 	run("cc", "-static", "-std=c11", "-Wall", "-Wextra", "-Werror", "-O2", "-o", filepath.Join(initrdRoot, "crash-reconnect"), filepath.Join(root, "tests/crash_reconnect.c"))
@@ -112,6 +113,22 @@ func TestKSTQRVirtualMachine(t *testing.T) {
 	var subscriptionFS *client.Filesystem
 	var nativeOverlay atomic.Pointer[client.OverlayFilesystem]
 	host := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/__kstqr_test/native-directory" {
+			dir, err := subscriptionFS.Lookup(r.Context(), client.FilesystemRootID(), "live-directory")
+			mode := uint32(0700)
+			if err == nil {
+				_, err = subscriptionFS.SetAttributes(r.Context(), dir.ID, client.FSAttributes{Mode: &mode})
+			}
+			if err == nil {
+				_, err = subscriptionFS.Create(r.Context(), dir.ID, "new-from-go", 0600, 0, 0, false)
+			}
+			if err != nil {
+				http.Error(w, err.Error(), 500)
+			} else {
+				w.WriteHeader(200)
+			}
+			return
+		}
 		if r.URL.Path == "/__kstqr_test/native-upper" || r.URL.Path == "/__kstqr_test/native-lower" {
 			var err error
 			if strings.HasSuffix(r.URL.Path, "upper") {
@@ -454,6 +471,7 @@ if pidof mount.kstqr; then exit 1; fi
 /writeback
 /mount.kstqr --uri @@URL@@ --bucket @@EMPTY@@ --credentials /credentials --metadata-cache-bytes 2048 /fresh
 /coherence @@URL@@
+/cache-capacity
 umount /fresh
 /mount.kstqr --uri @@URL@@ --bucket @@BUCKET@@ --credentials /readonly-credentials --readonly --metadata-cache-bytes 0 /fresh
 test "$(cat /fresh/go.txt)" = 'Hello from Go'
@@ -501,6 +519,9 @@ rmmod kstqr
 	var nativeUpperID client.ID
 	var watcher *client.Client
 	if os.Getenv("STQR_KERNEL_OVERLAY") == "1" {
+		if _, err := fs.Create(ctx, client.FilesystemRootID(), "live-directory", 0755, 0, 0, true); err != nil {
+			t.Fatal(err)
+		}
 		source, e := fs.Create(ctx, client.FilesystemRootID(), "overlay-source", 0644, 0, 0, false)
 		if e != nil {
 			t.Fatal(e)
@@ -601,6 +622,15 @@ if /mount.kstqr --uri %[1]s --bucket %[2]s --credentials /credentials /mnt; then
 /mount.kstqr --uri %[1]s --bucket %[2]s --readonly-bucket %[3]s --credentials /credentials /mnt
 test "$(stat -f -c %%t /mnt)" = 53545152
 test "$(cat /mnt/go-created)" = from-go
+for attempt in 1 2 3; do test "$(stat -c %%a /mnt/live-directory)" = 755; done
+test ! -e /mnt/live-directory/new-from-go
+wget -qO- %[1]s/__kstqr_test/native-directory
+for attempt in 1 2 3 4 5; do test "$(stat -c %%a /mnt/live-directory)" = 700 && break; sleep 1; done
+test "$(stat -c %%a /mnt/live-directory)" = 700
+for attempt in 1 2 3 4 5; do test -f /mnt/live-directory/new-from-go && break; sleep 1; done
+test -f /mnt/live-directory/new-from-go
+chmod 0711 /mnt/live-directory
+test "$(stat -c %%a /mnt/live-directory)" = 711
 wget -qO- %[1]s/__kstqr_test/native-upper
 for attempt in 1 2 3 4 5; do test "$(cat /mnt/go-created)" = 'new-go!' && break; sleep 1; done
 test "$(cat /mnt/go-created)" = 'new-go!'

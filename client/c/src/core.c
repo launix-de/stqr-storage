@@ -510,11 +510,12 @@ static void broken(stqr_client *c) {
 }
 static int request(stqr_client *c, unsigned op, struct buf *body, stqr_id id, int mutation, struct buf *result, struct download *s) {
     int err;
+    stqr_u64 started = sq_now_ms();
     if (!c || !c->socket) return -ENOTCONN;
     if (mutation && c->durability_lost) return -ESTALE;
     if (body->err) return body->err;
     if (zero(id.bytes,16)) { if (mutation) return -EINVAL; if ((err=stqr_request_id(&id))) return err; }
-    for (unsigned attempt=0;attempt<16;attempt++) {
+    for (unsigned redirects=0;redirects<16;) {
         struct buf wrapped={0}; unsigned wire_op=op; struct buf *wire_body=body;
         c->status=0; c->redirect[0]=0;
         c->query_valid=op>=0x100 && op<=0x110 && body->n>=80;
@@ -527,7 +528,22 @@ static int request(stqr_client *c, unsigned op, struct buf *body, stqr_id id, in
         err=message_send(c,1,wire_op,id,wire_body);
         if (!err) err=reply(c,wire_op,id,result,s);
         drop(&wrapped);
+        /* 503 denotes temporary cluster backpressure, including quota-credit
+         * transfer and maintenance. It is not a permanent filesystem failure.
+         * Retry the identical operation/ID on this connection; never reissue an
+         * uncertain transport failure here. Bound retries by the caller's timeout.
+         */
+        if (err && c->status==503) {
+            stqr_u64 elapsed = sq_now_ms()-started;
+            if (elapsed >= c->timeout) return err;
+            err = sq_pause((unsigned)((c->timeout-elapsed)<50 ? c->timeout-elapsed : 50));
+            if (err) return err;
+            drop(result);
+            if (s) { drop(&s->data); memset(s,0,sizeof(*s)); }
+            continue;
+        }
         if (err && (c->status==301 || c->status==302) && c->redirect[0]) {
+            redirects++;
             char endpoint[512]; stqr_u64 revision=c->redirect_revision, epoch=c->redirect_epoch;
             stqr_id runtime=c->redirect_runtime;
             memcpy(endpoint,c->redirect,sizeof(endpoint));

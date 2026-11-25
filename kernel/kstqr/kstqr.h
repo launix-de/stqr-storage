@@ -16,7 +16,18 @@ struct ks_rpc {
 };
 #define KS_DIR_LIMIT (16U << 20)
 struct ks_edit;
+/* Runtime-only cache identities. These fields are never encoded in STFS/STOR. */
+struct ks_cache_stamp {
+	stqr_id subscription;
+	u64 cursor;
+};
+struct ks_directory_proof {
+	struct ks_cache_stamp root, lower;
+	stqr_object_id lower_id;
+	bool valid, has_lower;
+};
 struct ks_node {
+	const struct ks_directory_proof *directory_proof;
 	stqr_object_id identity;
 	bool mutable;
 	u8 digest[32], head_digest[32], guard_digest[32], lower_digest[32];
@@ -41,6 +52,7 @@ struct ks_node {
 	const u8 *inline_data;
 };
 struct ks_snapshot {
+	struct ks_directory_proof *directory_proof;
 	stqr_object_id id;
 	stqr_info info;
 	struct ks_node node;
@@ -81,6 +93,7 @@ struct ks_fs {
 	atomic64_t write_snapshot_ns, write_prepare_ns, write_publish_ns, write_retries;
 };
 struct ks_inode {
+	struct ks_directory_proof directory_proof;
 	struct mutex metadata_lock;
 	struct list_head mount_list;
 	u64 invalidated_generation;
@@ -94,9 +107,13 @@ static inline struct ks_inode *KS_I(struct inode *i)
 {
 	return container_of(i, struct ks_inode, inode);
 }
+bool ks_cache_stamp(struct ks_fs *, stqr_object_id, const stqr_info *, struct ks_cache_stamp *);
+bool ks_cache_stamp_current(struct ks_fs *, stqr_object_id, const struct ks_cache_stamp *);
 int ks_checkpoint(struct ks_fs *);
 int ks_cache_sync(struct ks_fs *);
 int ks_plain_snapshot(struct ks_fs *, stqr_object_id, struct ks_snapshot *);
+int ks_overlay_lookup(struct ks_fs *, stqr_object_id, const char *, stqr_object_id *,
+		      struct ks_directory_proof *);
 int ks_overlay_snapshot(struct ks_fs *, stqr_object_id, struct ks_snapshot *);
 int ks_overlay_initialize(struct ks_fs *, const char *);
 int ks_overlay_validate_policy(struct ks_fs *, const char *);

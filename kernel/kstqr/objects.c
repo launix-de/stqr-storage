@@ -299,6 +299,7 @@ static void encode_node(struct buf *b, const struct ks_node *node)
 }
 void ks_snapshot_free(struct ks_snapshot *s)
 {
+	kfree(s->directory_proof);
 	sq_free(s->namespace_head);
 	sq_free(s->raw);
 	sq_free(s->view);

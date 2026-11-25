@@ -547,8 +547,8 @@ static int ov_entry(struct ov_dir *d, const char *name, stqr_object_id id)
 	d->entries[at].id = id;
 	return 0;
 }
-static int ov_entries(struct ks_fs *f, struct ks_overlay_state *s, stqr_object_id id,
-		      struct ks_entry **out, size_t *count)
+static int ov_entries_info(struct ks_fs *f, struct ks_overlay_state *s, stqr_object_id id,
+			   struct ks_entry **out, size_t *count, stqr_info *lower_info)
 {
 	struct ov_dir *d = ov_find(s, id);
 	struct ks_snapshot lower;
@@ -561,6 +561,8 @@ static int ov_entries(struct ks_fs *f, struct ks_overlay_state *s, stqr_object_i
 		err = ks_plain_snapshot(f->lower, d ? d->lower : id, &lower);
 		if (err)
 			return err;
+		if (lower_info)
+			*lower_info = lower.info;
 		err = ks_directory(f->lower, &lower.node, &base, &n);
 		ks_snapshot_free(&lower);
 		if (err)
@@ -594,22 +596,89 @@ fail:
 	sq_free(next);
 	return err;
 }
+static int ov_entries(struct ks_fs *f, struct ks_overlay_state *s, stqr_object_id id,
+		      struct ks_entry **out, size_t *count)
+{
+	return ov_entries_info(f, s, id, out, count, NULL);
+}
+
+/* Point lookups must not materialize, merge and sort a complete virtual
+ * directory. Upper entries (including whiteouts) win; otherwise consult exactly
+ * the lower directory represented by this overlay-state snapshot. */
+/* Certify a single name binding without materializing a virtual directory. */
+static int ov_child_proven(struct ks_fs *f, struct ks_overlay_state *s, stqr_object_id parent,
+			   const char *name, stqr_object_id *out, struct ks_directory_proof *proof)
+{
+	struct ov_dir *d = ov_find(s, parent);
+	struct ks_snapshot lower = {0};
+	struct ks_entry *entries = NULL;
+	stqr_info lower_info = {0};
+	size_t count = 0;
+	bool consulted_lower = false;
+	int err = 0;
+	long at;
+	if (proof)
+		memset(proof, 0, sizeof(*proof));
+	if (d) {
+		if (d->node.removed)
+			return -ENOENT;
+		at = find_entry(d->entries, d->count, name);
+		if (at >= 0) {
+			if (nullid(d->entries[at].id))
+				err = -ENOENT;
+			else
+				*out = d->entries[at].id;
+			goto done;
+		}
+		if (d->opaque) {
+			err = -ENOENT;
+			goto done;
+		}
+	}
+	consulted_lower = true;
+	err = ks_plain_snapshot(f->lower, d ? d->lower : parent, &lower);
+	if (!err) {
+		lower_info = lower.info;
+		err = ks_directory(f->lower, &lower.node, &entries, &count);
+	}
+	ks_snapshot_free(&lower);
+	if (err)
+		goto done;
+	at = find_entry(entries, count, name);
+	if (at < 0)
+		err = -ENOENT;
+	else if (ov_upper_ref(s, entries[at].id))
+		err = -EOPNOTSUPP;
+	else
+		*out = entries[at].id;
+done:
+	sq_free(entries);
+	if (proof && (!err || err == -ENOENT)) {
+		proof->has_lower = consulted_lower;
+		proof->lower_id = d ? d->lower : parent;
+		proof->valid = ks_cache_stamp(f, ks_root_id, &s->info, &proof->root) &&
+			       (!consulted_lower || ks_cache_stamp(f->lower, proof->lower_id,
+								   &lower_info, &proof->lower));
+	}
+	return err;
+}
 static int ov_child(struct ks_fs *f, struct ks_overlay_state *s, stqr_object_id parent,
 		    const char *name, stqr_object_id *out)
 {
-	struct ks_entry *entries;
-	size_t n;
-	int err = ov_entries(f, s, parent, &entries, &n);
+	return ov_child_proven(f, s, parent, name, out, NULL);
+}
+int ks_overlay_lookup(struct ks_fs *f, stqr_object_id parent, const char *name, stqr_object_id *out,
+		      struct ks_directory_proof *proof)
+{
+	struct ks_overlay_state *s;
+	int err = ov_state(f, &s);
 	if (err)
 		return err;
-	long at = find_entry(entries, n, name);
-	if (at < 0)
-		err = -ENOENT;
-	else
-		*out = entries[at].id;
-	sq_free(entries);
+	err = ov_child_proven(f, s, parent, name, out, proof);
+	ov_put(s);
 	return err;
 }
+
 static int ov_dir(struct ks_fs *f, struct ks_overlay_state *s, stqr_object_id id,
 		  struct ov_dir **out)
 {
@@ -679,6 +748,8 @@ static int ov_snapshot(struct ks_fs *f, struct ks_overlay_state *state, stqr_obj
 {
 	struct ov_dir *d = ov_find(state, id);
 	struct ks_snapshot base = {0};
+	stqr_info lower_info = {0};
+	struct ks_directory_proof directory_proof = {0};
 	struct ks_entry *entries = NULL;
 	size_t n = 0;
 	struct ks_node node;
@@ -718,7 +789,7 @@ static int ov_snapshot(struct ks_fs *f, struct ks_overlay_state *state, stqr_obj
 		ks_snapshot_free(&base);
 		return -ENOENT;
 	}
-	err = ov_entries(f, state, id, &entries, &n);
+	err = ov_entries_info(f, state, id, &entries, &n, &lower_info);
 	if (err)
 		goto done;
 	put(&data, "STDR\1\0", 6);
@@ -751,6 +822,18 @@ static int ov_snapshot(struct ks_fs *f, struct ks_overlay_state *state, stqr_obj
 			out->node.upper_absent = state->info.proof;
 		out->info = state->info;
 		out->info.length = data.n;
+		directory_proof.has_lower = !d || !d->opaque;
+		directory_proof.lower_id = d ? d->lower : id;
+		directory_proof.valid =
+		    ks_cache_stamp(f, ks_root_id, &state->info, &directory_proof.root) &&
+		    (!directory_proof.has_lower ||
+		     ks_cache_stamp(f->lower, directory_proof.lower_id, &lower_info,
+				    &directory_proof.lower));
+		if (directory_proof.valid) {
+			out->directory_proof =
+			    kmemdup(&directory_proof, sizeof(directory_proof), GFP_NOFS);
+			out->node.directory_proof = out->directory_proof;
+		}
 		out->namespace_head = kmemdup(state->root_head.p, state->root_head.n, GFP_NOFS);
 		if (!out->namespace_head)
 			err = -ENOMEM;

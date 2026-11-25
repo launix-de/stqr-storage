@@ -147,3 +147,9 @@ bounded ranged writes for the native filesystem path.
 
 The unversioned object schema uses WebSocket subprotocol `stqr.v2` and HELLO
 version 2. Upgrade all native clients and nodes together; v1 messages are rejected.
+
+Temporary `503` replies are retried on the existing connection, with the same
+request ID and body, for at most the connection's configured timeout. Backoff is
+interruptible and does not consume the redirect budget. Transport failures with
+an uncertain mutation outcome still return `-EINPROGRESS`; callers must preserve
+the original request ID when reconnecting. Permanent errors are returned directly.
