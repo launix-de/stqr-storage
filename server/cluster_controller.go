@@ -235,7 +235,8 @@ func (c *clusterController) patches(membership client.Membership, descriptions [
 				}
 				// A finite limit is a soft sizing hint for an empty bucket, not a
 				// reservation. Prefer a destination that can accommodate that size
-				// if the default owner cannot; otherwise retain normal extension.
+				// if the default owner cannot. If none fits, maximize initial
+				// headroom and let normal extension handle subsequent growth.
 				// Existing maps above are deliberately never changed by this hint.
 				if description.Policy.StorageStrategy != "ram" && !description.Policy.Limits.Unlimited && description.Policy.Limits.Absolute > 0 && c.server.requiredReplicas(description.Policy, membership) == 1 {
 					ownerFits := false
@@ -246,11 +247,28 @@ func (c *clusterController) patches(membership client.Membership, descriptions [
 						}
 					}
 					if !ownerFits {
-						for _, target := range destinations {
-							if target.free >= description.Policy.Limits.Absolute && hasControlNode(membershipIDs(membership), target.node) {
+						best, fitted := -1, false
+						members := membershipIDs(membership)
+						for i, target := range destinations {
+							if !hasControlNode(members, target.node) {
+								continue
+							}
+							if target.free >= description.Policy.Limits.Absolute {
 								patch.Entries[0].Locations = []client.Location{{Node: target.node, Volume: target.volume.ID, Class: target.volume.Class}}
+								fitted = true
 								break
 							}
+							if best < 0 || target.free > destinations[best].free {
+								best = i
+							}
+						}
+						if !fitted && best >= 0 && destinations[best].free > 0 {
+							// An absolute quota is a cluster-wide maximum, not a
+							// promise that one volume can hold the whole bucket.
+							// Start where growth has the most headroom instead of
+							// stranding an empty bucket on a tiny coordinator disk.
+							target := destinations[best]
+							patch.Entries[0].Locations = []client.Location{{Node: target.node, Volume: target.volume.ID, Class: target.volume.Class}}
 						}
 					}
 				}
