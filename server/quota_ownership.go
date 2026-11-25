@@ -3,6 +3,7 @@ package server
 
 import (
 	"reflect"
+	"slices"
 
 	"github.com/launix-de/stqr-storage/client"
 	"github.com/launix-de/stqr-storage/volume"
@@ -35,7 +36,7 @@ func (stamp quotaOwnershipStamp) ChangedOwnershipBuckets(previous any) ([]volume
 	if stamp.view != nil {
 		nextOrigins = stamp.view.manifest.VolumeRecoveries
 	}
-	if !reflect.DeepEqual(previousOrigins, nextOrigins) {
+	if !slices.EqualFunc(previousOrigins, nextOrigins, func(a, b volumeRecoveryOrigin) bool { return reflect.DeepEqual(a, b) }) {
 		return nil, false
 	}
 	buckets := make(map[client.ID]bool)

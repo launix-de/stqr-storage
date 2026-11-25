@@ -33,6 +33,8 @@ func TestQuotaOwnershipIgnoresMetadataButTracksOwnership(t *testing.T) {
 		}
 	}
 	assert(after, true, volume.ID{})
+	after.view.manifest.VolumeRecoveries = []volumeRecoveryOrigin{}
+	assert(after, true, volume.ID{})
 	added := patch
 	added.Bucket = client.ID{4}
 	after.placement = build(patch, added)
