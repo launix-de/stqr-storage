@@ -1350,11 +1350,13 @@ static int ks_statfs(struct dentry *d, struct kstatfs *s)
 	stqr_space space;
 	int err;
 	mutex_lock(&f->rpc[0].lock);
-	err = stqr_bucket_space(f->rpc[0].client, &space);
-	if (err == -ENOTCONN || err == -ECONNRESET || err == -EPIPE || err == -ETIMEDOUT) {
-		err = stqr_reconnect(f->rpc[0].client);
-		if (!err)
-			err = stqr_bucket_space(f->rpc[0].client, &space);
+	for (;;) {
+		err = stqr_bucket_space(f->rpc[0].client, &space);
+		if (!ks_transport_retryable(f->rpc[0].client, err))
+			break;
+		err = ks_reconnect_wait(f, f->rpc[0].client);
+		if (err)
+			break;
 	}
 	mutex_unlock(&f->rpc[0].lock);
 	if (err)
@@ -1373,7 +1375,17 @@ static int ks_sync_fs(struct super_block *sb, int wait)
 {
 	return wait ? ks_checkpoint(sb->s_fs_info) : 0;
 }
+/* A forced local unmount is an explicit cancellation of hard reconnects.
+ * Ordinary unmounts keep their durability/wait-on-node contract. */
+static void ks_umount_begin(struct super_block *sb)
+{
+	struct ks_fs *f = sb->s_fs_info;
+	WRITE_ONCE(f->stopping, true);
+	if (f->lower)
+		WRITE_ONCE(f->lower->stopping, true);
+}
 static const struct super_operations ks_super_ops = {
+    .umount_begin = ks_umount_begin,
     .alloc_inode = ks_alloc_inode,
     .free_inode = ks_free_inode,
     .evict_inode = ks_evict,

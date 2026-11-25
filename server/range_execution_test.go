@@ -3,6 +3,8 @@ package server
 
 import (
 	"context"
+	"errors"
+	"net/http/httptest"
 	"path/filepath"
 	"testing"
 	"time"
@@ -148,5 +150,97 @@ func TestRebuildYieldsWithoutStarvingUnderForegroundLoad(t *testing.T) {
 	cancel()
 	if err := s.waitForUserIO(ctx); err != context.Canceled {
 		t.Fatal("cancelled maintenance ignored context", err)
+	}
+}
+
+// A helper can select a live capacity offer before the worker rejects it, but
+// only acquire its execution gate after the rejection has been persisted.
+func TestRangeCapacityHelperRetriesAbortedHandoff(t *testing.T) {
+	node := startDaemonTestNode(t, filepath.Join(t.TempDir(), "node.yaml"), nil, false)
+	s := node.node
+	a := addReplicaDataVolume(t, s, "source", "hdd", 8<<20)
+	b := addReplicaDataVolume(t, s, "target", "hdd", 8<<20)
+	bucket, _ := createProtocolBucket(t, s, "aborted-capacity-helper")
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	actor := userPrincipal(t, s)
+	object := volume.ObjectID{4}
+	if _, err := bucket.Put(ctx, actor, object, []byte("original"), volume.Options{RequestID: volume.ID(client.NewRequestID())}); err != nil {
+		t.Fatal(err)
+	}
+	before, _ := s.routingPatch(bucket.ID(), object)
+	pin, err := planRangeMove(before, before.Entries[0], s.scopes.node, a.Identity().VolumeID, uint8(volume.HDD), volume.Raw, 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.scopes.move(ctx, pin); err != nil {
+		t.Fatal(err)
+	}
+	before, _ = s.routingPatch(bucket.ID(), object)
+	source := a.Identity().VolumeID
+	target := b
+	p, err := planRangeMove(before, before.Entries[0], s.scopes.node, target.Identity().VolumeID, uint8(volume.HDD), volume.Raw, 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.scopes.reserve(p); err != nil {
+		t.Fatal(err)
+	}
+	// Hold the worker's gate at the exact selection/recheck boundary.
+	r := s.scopes
+	runtime := &r.pgRuntime
+	e := &rangeExecution{gate: make(chan struct{}, 1), refs: 1}
+	e.gate <- struct{}{}
+	runtime.executionsMu.Lock()
+	if runtime.executions == nil {
+		runtime.executions = make(map[[32]byte]*rangeExecution)
+	}
+	runtime.executions[p.id()] = e
+	runtime.executionsMu.Unlock()
+	released := false
+	defer func() {
+		if !released {
+			<-e.gate
+		}
+		runtime.executionsMu.Lock()
+		e.refs--
+		if e.refs == 0 {
+			delete(runtime.executions, p.id())
+		}
+		runtime.executionsMu.Unlock()
+	}()
+	done := make(chan error, 1)
+	go func() {
+		helped, err := r.stealSpace(ctx, bucket.ID(), source)
+		if !helped && err == nil {
+			err = errors.New("helper did not select the reserved capacity offer")
+		}
+		done <- err
+	}()
+	for e.urgent.Load() != 1 {
+		select {
+		case <-ctx.Done():
+			t.Fatal("capacity helper did not wait for execution", ctx.Err())
+		case <-time.After(time.Millisecond):
+		}
+	}
+	if err := r.cancelBeforeFence(ctx, p, volume.ErrFull); !errors.Is(err, volume.ErrFull) {
+		t.Fatal("worker's capacity rejection did not abort cleanly", err)
+	}
+	<-e.gate
+	released = true
+	select {
+	case err := <-done:
+		response := httptest.NewRecorder()
+		s3Failure(response, err)
+		if objectStatus(err) != 503 || response.Code != 503 {
+			t.Fatalf("aborted capacity helper must retry: native=%d S3=%d error=%v", objectStatus(err), response.Code, err)
+		}
+	case <-ctx.Done():
+		t.Fatal("aborted capacity helper remained blocked", ctx.Err())
+	}
+	data, _, err := bucket.Get(ctx, actor, object)
+	if err != nil || string(data) != "original" {
+		t.Fatal("aborted helper changed source data", string(data), err)
 	}
 }
