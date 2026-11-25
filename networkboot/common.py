@@ -205,7 +205,27 @@ def install_native_kernel(socket, work, version):
     guest_many(socket, commands)
 
 
-def extract(socket, work, kernel_version=None):
+def install_logins(socket, work, config):
+    """Prepare identities using host admin rights; publish no admin credentials."""
+    plan = Path(work) / 'login.json'
+    plan.unlink(missing_ok=True)
+    ctl(config, 'prepare-logins', plan)
+    if not (BIN / 'pam_stqr.so').is_file():
+        raise RuntimeError('Run make -C networkboot all pam before preparing logins')
+    commands = [('mkdir-p', '/usr/libexec'), ('mkdir-p', '/usr/lib/stqr-networkboot')]
+    for source, target, mode in (
+        (plan, '/usr/lib/stqr-networkboot/login.json', '0600'),
+        (BIN / 'pam_stqr.so', '/usr/lib/stqr-networkboot/pam_stqr.so', '0644'),
+        (BIN / 'stqr-bootctl', '/usr/libexec/stqr-bootctl', '0755'),
+        (HERE / 'pam/stqr-home', '/usr/libexec/stqr-home', '0755'),
+        (HERE / 'pam/install-login', '/usr/lib/stqr-networkboot/install-login', '0755'),
+    ):
+        commands.extend([('upload', source, target), ('chmod', mode, target)])
+    commands.append(('command', '/usr/bin/python3 /usr/lib/stqr-networkboot/install-login /usr/lib/stqr-networkboot/login.json'))
+    guest_many(socket, commands)
+
+
+def extract(socket, work, kernel_version=None, config=None):
     """Install boot support offline, then archive root with all Linux metadata."""
     work = Path(work)
     listing = guest(socket, 'ls', '/boot', readonly=True,
@@ -226,6 +246,9 @@ def extract(socket, work, kernel_version=None):
                       capture_output=True, text=True).stdout.strip()
     if available != 'true':
         raise RuntimeError('Networkboot preparation requires initramfs-tools-core (mkinitramfs) in the installed image')
+    if config is None:
+        raise RuntimeError("STQR configuration required for login preparation")
+    install_logins(socket, work, config)
     install_native_kernel(socket, work, version)
     print('Generating dedicated networkboot initramfs...', flush=True)
     network_initrd = '/boot/initrd.stqr-' + version

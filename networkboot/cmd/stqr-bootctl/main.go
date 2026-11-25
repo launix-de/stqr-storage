@@ -290,7 +290,7 @@ func run() error {
 	ro := flags.Bool("readonly", false, "readonly NBD export")
 	record := flags.String("session-record", "", "private boot-session recovery record")
 	flags.Usage = func() {
-		fmt.Fprintln(flags.Output(), "Usage: stqr-bootctl --config FILE [--size BYTES|--socket PATH] COMMAND BUCKET [ARG]\nCommands: resolve, manifest, create, clear, delete, clone SOURCE DEST, publish BUCKET DIRECTORY, fetch BUCKET DIRECTORY, init-disk, nbd, gc, boot-session-create ROOT_BUCKET, boot-session-delete USER_ID UPPER_ID LOWER_ID")
+		fmt.Fprintln(flags.Output(), "Usage: stqr-bootctl --config FILE [--size BYTES|--socket PATH] COMMAND BUCKET [ARG]\nCommands: prepare-logins OUTPUT_JSON, resolve, manifest, create, clear, delete, clone SOURCE DEST, publish BUCKET DIRECTORY, fetch BUCKET DIRECTORY, init-disk, nbd, gc, boot-session-create ROOT_BUCKET, boot-session-delete USER_ID UPPER_ID LOWER_ID")
 		flags.PrintDefaults()
 	}
 	if err := flags.Parse(os.Args[1:]); err != nil {
@@ -309,6 +309,10 @@ func run() error {
 	defer cancel()
 	cmd, name := args[0], args[1]
 	switch cmd {
+	case "prepare-logins":
+		ctx, cancel := context.WithTimeout(ctx, 10*time.Minute)
+		defer cancel()
+		return prepareLogins(ctx, c, name)
 	case "boot-session-create", "boot-session-delete":
 		ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 		defer cancel()
