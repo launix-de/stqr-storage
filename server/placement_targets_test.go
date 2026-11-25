@@ -2,6 +2,7 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"testing"
 	"time"
@@ -9,6 +10,70 @@ import (
 	"github.com/launix-de/stqr-storage/client"
 	"github.com/launix-de/stqr-storage/volume"
 )
+
+func TestPlacementTargetMapRelievesReplicaVolumePressure(t *testing.T) {
+	source, target := startAutomaticDaemonPair(t, false)
+	old := addReplicaDataVolume(t, source.node, "old", "hdd", 8<<20)
+	retained := addReplicaDataVolume(t, target.node, "retained", "hdd", 8<<20)
+	awaitReplicaDestinations(t, source.node, 2)
+	group := volume.ID(client.NewRequestID())
+	storage := storagePolicy(DefaultBucketPolicy())
+	storage.Redundancy = BucketRedundancy{Mode: "replication", Replicas: 2, ACK: "all"}
+	centralPGRequest(t, source.node, group, 0, PlacementMask{NodeSelection: "all", Storage: &storage})
+	bucket := replicaTestBucket(t, source.node, group, "replica-pressure")
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	actor := userPrincipal(t, source.node)
+	object := volume.ObjectID{4}
+	opt := volume.Options{RequestID: volume.ID(client.NewRequestID())}
+	original := retryReplicaMutation(t, ctx, func() (volume.Result, error) { return bucket.Append(ctx, actor, object, []byte("once"), opt) })
+	// Occupy the source volume with unrelated bytes. The replica itself is
+	// small; moving it must not require relocating the valid follower.
+	filler := volume.ID(client.NewRequestID())
+	for i := byte(0); ; i++ {
+		stats := old.Stats()
+		if stats.AdmissionFreePhysical < stats.CapacityPhysical/12 {
+			break
+		}
+		if i == 100 {
+			t.Fatal("failed to create real volume pressure")
+		}
+		h, err := old.Open(true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = h.Put(volume.Key{Bucket: filler, Object: volume.ObjectID{i}}, bytes.Repeat([]byte{'x'}, 128<<10), volume.Options{RequestID: volume.ID(client.NewRequestID())})
+		h.Close()
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	fresh := addReplicaDataVolume(t, source.node, "fresh", "hdd", 32<<20)
+	m := source.node.scopes.buildPlacementTargets(group.String(), source.node.bucketSnapshots())
+	p, ok := source.node.scopes.nextPlacementTarget(m)
+	if !ok || !p.ReplicaRelocate || p.Target != source.node.scopes.node || p.Volume != fresh.Identity().VolumeID {
+		t.Fatal("pressure did not relocate only the constrained copy", p)
+	}
+	if err := source.node.scopes.move(ctx, p); err != nil {
+		t.Fatal(err)
+	}
+	entry, _ := source.node.placement.Load().lookup(client.ID(bucket.ID()), client.ObjectID(object))
+	found := false
+	for _, loc := range entry.Locations {
+		if loc.Node == target.node.scopes.node && loc.Volume == client.ID(retained.Identity().VolumeID) {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("moved valid follower unnecessarily", entry)
+	}
+	if _, ok := source.node.scopes.nextPlacementTarget(m); ok {
+		t.Fatal("extra move after solving pressure placement")
+	}
+	if result, err := bucket.Append(ctx, actor, object, []byte("once"), opt); err != nil || result != original {
+		t.Fatal("pressure move changed receipt", result, err)
+	}
+}
 
 func TestPlacementTargetMapExecutesStorageClassDiff(t *testing.T) {
 	source, target := startAutomaticDaemonPair(t, false)
