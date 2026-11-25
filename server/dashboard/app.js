@@ -56,7 +56,7 @@ const forceView=setupForceDisconnect({connection:()=>node,config:()=>configView,
 $('add-error').insertAdjacentHTML('beforebegin','<section id="volume-pg-selection" class="bucket-form-section"></section>');
 const pgViews=setupPlacementGroups({connection:()=>node,escape,toast,states:nodeStates});
 const bucketViews=setupBucketViews({connection:()=>node,escape,toast,showView,statsEntries:()=>currentSnapshots(configView,nodeStates)});
-const userViews=setupUserViews({connection:()=>node,currentUsername:()=>$('profile-name').textContent,escape,toast,showView,requireLogin,openBucketCreate:options=>bucketViews.openCreate(options),statsEntries:()=>currentSnapshots(configView,nodeStates)});
+const userViews=setupUserViews({connection:()=>node,currentUsername:()=>$('profile-name').textContent,escape,toast,showView,requireLogin,openBucketCreate:options=>bucketViews.openCreate(options),onUserDeleted:()=>bucketViews.load(),statsEntries:()=>currentSnapshots(configView,nodeStates)});
 
 const joinView=setupClusterJoin({connection:()=>node,onJoined:beginSession});
 function applyConfig(view){

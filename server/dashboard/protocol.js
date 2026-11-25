@@ -147,7 +147,7 @@ export class NodeConnection{
  createUser(user,password,id){return this.request(OP.USER_CREATE,new Writer().id(user.id).text(user.name).u8(user.role??0).bool(false).text(password).bytes(),id)}
  setUserRole(user,role,id){return this.request(OP.USER_UPDATE,new Writer().id(user.id).text(user.name).u8(role).bool(user.disabled).bytes(),id)}
  setUserPassword(user,password,id){return this.request(OP.USER_SET_PASSWORD,new Writer().id(user).text(password).bytes(),id)}
- deleteUser(user,id){return this.request(OP.USER_DELETE,new Writer().id(user).bytes(),id)}
+ deleteUser(user,id,deleteBuckets=true){return this.request(OP.USER_DELETE,new Writer().id(user).bool(deleteBuckets).bytes(),id)}
  volumeGrowInfo(volume){return this.request(OP.VOLUME_GROW_INFO,new Writer().id(volume).bytes())}
  growVolume(volume,size,id){return this.request(OP.VOLUME_GROW,new Writer().id(volume).u64(size).bytes(),id)}
  volumeCapacity(){return this.request(OP.VOLUME_CAPACITY)}
