@@ -532,8 +532,13 @@ static int help_tx(struct ks_fs *f, stqr_object_id first)
 }
 int ks_snapshot_cached(struct ks_fs *f, stqr_object_id id, struct ks_snapshot *s)
 {
-	if (f->lower)
-		return ks_overlay_snapshot(f, id, s);
+	/* The overlay resolver can fetch STOM payloads and register subscriptions.
+	 * Calling it from the invalidator makes eviction resubscribe other evicted
+	 * inodes indefinitely. Leave refresh to foreground access on a cache miss. */
+	if (f->lower) {
+		memset(s, 0, sizeof(*s));
+		return -ENODATA;
+	}
 	int err;
 	memset(s, 0, sizeof(*s));
 	s->id = id;
