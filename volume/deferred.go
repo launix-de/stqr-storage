@@ -130,9 +130,14 @@ func (v *Volume) acceptedMutation(op uint8, k Key, off, length uint64, src io.Re
 
 // CheckpointThrough may also confirm a generation after clean close. A later
 // failed operation cannot revoke a previously completed durable checkpoint.
+// Generation zero waits only for an ongoing checkpoint/admission lock. It does
+// not start another flush; callers must recheck mutation authority afterward.
 func (v *Volume) CheckpointThrough(generation uint64) error {
 	v.mu.Lock()
 	defer v.mu.Unlock()
+	for generation == 0 && v.checkpointing {
+		v.prepareCond.Wait()
+	}
 	if generation <= v.durableGeneration {
 		return nil
 	}
@@ -153,18 +158,23 @@ func (v *Volume) FlushAccepted() error {
 	return v.flushDeferred()
 }
 
-// IsDurableThrough only inspects local flush progress. The counter belongs to
-// the existing volume checkpoint; it is not a user-visible object version.
 // PendingCheckpoint lets a caller leave its own admission lock before a slow
 // flush or a full accepted-write buffer. It is a hint, not mutation authority;
 // the actual operation must recheck placement/permissions after waiting.
 func (v *Volume) PendingCheckpoint(accepted bool, length uint64) (uint64, bool) {
 	v.mu.RLock()
 	defer v.mu.RUnlock()
-	return v.sb.Generation, v.checkpointing || v.deferred != nil &&
+	if v.checkpointing {
+		// An explicit Sync may already cover a durable generation. Wait for
+		// its pinned I/O rather than repeatedly retrying the same busy volume.
+		return 0, true
+	}
+	return v.sb.Generation, v.deferred != nil &&
 		(!accepted || length > 1<<20 || len(v.deferred.pages) > deferredPageLimit/2)
 }
 
+// IsDurableThrough only inspects local flush progress. The counter belongs to
+// the existing volume checkpoint; it is not a user-visible object version.
 func (v *Volume) IsDurableThrough(generation uint64) bool {
 	v.mu.RLock()
 	defer v.mu.RUnlock()

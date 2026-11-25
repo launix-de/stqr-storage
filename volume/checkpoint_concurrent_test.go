@@ -193,6 +193,18 @@ func TestExplicitSyncAllowsReaders(t *testing.T) {
 	read := make(chan error, 1)
 	go func() { _, _, err := testGet(v, testKey(1)); read <- err }()
 	awaitCheckpointTest(t, read)
+	generation, pending := v.PendingCheckpoint(true, 1)
+	if !pending || generation != 0 {
+		t.Fatalf("explicit flush must request an admission wait: %d %v", generation, pending)
+	}
+	waited := make(chan error, 1)
+	go func() { waited <- v.CheckpointThrough(generation) }()
+	select {
+	case err := <-waited:
+		t.Fatalf("admission wait returned before explicit flush: %v", err)
+	case <-time.After(20 * time.Millisecond):
+	}
 	release()
 	awaitCheckpointTest(t, flushed)
+	awaitCheckpointTest(t, waited)
 }
