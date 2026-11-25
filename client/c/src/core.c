@@ -1139,7 +1139,9 @@ int stqr_fence_add(stqr_client *c, stqr_fence *f) {
     return err;
 }
 int stqr_fence_capture(stqr_client *c, stqr_fence **out) {
-    int err=stqr_fence_reset(out);
+    int err;
+    if (!c || !out) return -EINVAL;
+    err=stqr_fence_reset(out);
     return err?err:stqr_fence_add(c,*out);
 }
 unsigned stqr_fence_count(const stqr_fence *f) { return f?f->targets:0; }
@@ -1147,6 +1149,7 @@ int stqr_fence_wait_one(stqr_fence *f, unsigned target) {
     struct sq_fence_entry *e; int err;
     if (!f || target>=f->targets) return -EINVAL;
     e=&f->entries[f->active[target]];
+    if (e->confirmed) return 0;
     err=e->client->socket?0:stqr_reconnect(e->client);
     if (!err) err=stqr_sync_through(e->client,&e->target,&e->durable);
     /* A barrier is idempotent, even after an unknown transport outcome. */

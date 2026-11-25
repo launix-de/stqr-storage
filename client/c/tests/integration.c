@@ -38,6 +38,7 @@ int main(void) {
     CHECK(stqr_parse_object_id("1234", &id) == -EINVAL);
     CHECK(stqr_dial(&c, "http://localhost", "user", "pw", bucket, 1000) == -EINVAL);
     CHECK(c == NULL);
+    { stqr_fence *empty=NULL;CHECK(stqr_fence_capture(NULL,&empty)==-EINVAL && empty==NULL);stqr_fence_close(empty); }
     if (!url) { puts("local API validation passed; network tests run through STQR_TEST_C=1 go test ./server"); return 0; }
     CHECK(!stqr_parse_id(getenv("STQR_TEST_BUCKET"), &bucket));
     CHECK(!stqr_parse_object_id("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", &id));
