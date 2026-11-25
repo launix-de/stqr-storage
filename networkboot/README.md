@@ -38,7 +38,7 @@ These are distinct storage roles:
 | --- | --- |
 | Template bucket (`ubuntu`) | Persistent installer disk (`disk.raw`) plus boot artifacts and the current release manifest. This is what `edit-image` boots read/write. |
 | Native release bucket | Automatically created, read-only STFS root filesystem. Each publication creates a new release; existing clients keep their old release. |
-| Per-boot upper bucket | Automatically created STOR/STOM overlay for one boot session. Root writes are temporary and the upper is scheduled for deletion when the client disconnects. |
+| Per-boot upper bucket | Automatically created STOR/STOM overlay for one boot session. The hard logical quota defaults to 16 GiB (`serve --upper-gib`); space is consumed as written. Root writes are temporary and the upper is scheduled for deletion when the client disconnects. |
 | Personal home (`alice_home`) | Automatically provisioned persistent filesystem bucket, mounted at login by PAM. |
 
 Changing files on a PXE client's temporary root does **not** update the template.
