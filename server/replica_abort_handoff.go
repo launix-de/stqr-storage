@@ -144,11 +144,7 @@ func (r *rangeManager) replicaAbortCost(before client.MapPatch, entry client.Ran
 	p := rangePlan{Before: before, Moving: entry, Source: r.node}
 	var cost uint64
 	for _, store := range r.sourceVolumes(p) {
-		h, err := store.Open(false)
-		if err != nil {
-			return 0, err
-		}
-		err = h.ScanReplicas(func(record volume.ReplicaRecord) error {
+		err := scanRangeReplicas(r.server.ctx, store, func(record volume.ReplicaRecord) error {
 			if record.State == volume.ReplicaAborted && client.ID(record.Request.Key.Bucket) == before.Bucket && p.contains(record.Request.Key.Object) {
 				cost = addCapacity(cost, 512)
 				if len(retained) > 0 {
@@ -158,7 +154,6 @@ func (r *rangeManager) replicaAbortCost(before client.MapPatch, entry client.Ran
 			}
 			return nil
 		})
-		h.Close()
 		if err != nil {
 			return 0, err
 		}
