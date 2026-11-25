@@ -233,6 +233,27 @@ func (c *clusterController) patches(membership client.Membership, descriptions [
 						}
 					}
 				}
+				// A finite limit is a soft sizing hint for an empty bucket, not a
+				// reservation. Prefer a destination that can accommodate that size
+				// if the default owner cannot; otherwise retain normal extension.
+				// Existing maps above are deliberately never changed by this hint.
+				if description.Policy.StorageStrategy != "ram" && !description.Policy.Limits.Unlimited && description.Policy.Limits.Absolute > 0 && c.server.requiredReplicas(description.Policy, membership) == 1 {
+					ownerFits := false
+					owner := patch.Entries[0].Locations[0]
+					for _, target := range destinations {
+						if target.node == owner.Node && (owner.Volume == (client.ID{}) || owner.Volume == target.volume.ID) && target.free >= description.Policy.Limits.Absolute {
+							ownerFits = true
+						}
+					}
+					if !ownerFits {
+						for _, target := range destinations {
+							if target.free >= description.Policy.Limits.Absolute && hasControlNode(membershipIDs(membership), target.node) {
+								patch.Entries[0].Locations = []client.Location{{Node: target.node, Volume: target.volume.ID, Class: target.volume.Class}}
+								break
+							}
+						}
+					}
+				}
 				need := c.server.requiredReplicas(description.Policy, membership)
 				var copies []client.Location
 				seen := map[client.ID]bool{}
