@@ -235,7 +235,10 @@ func TestDaemonLargeQuotaOwnerReceivesReusableBurstBudget(t *testing.T) {
 func testReusableQuotaBudget(t *testing.T, limit, minimum uint64) {
 	t.Helper()
 	source, target := startAutomaticDaemonPair(t, false)
-	addTestVolume(t, source.node, "credit-source", "hdd", 16<<20)
+	// This fixture intentionally starts with all credits on source, then
+	// transfers an empty range. Give source the larger initial headroom;
+	// finite buckets are allowed to choose a different owner otherwise.
+	addTestVolume(t, source.node, "credit-source", "hdd", 32<<20)
 	v := addTestVolume(t, target.node, "credit-target", "hdd", 16<<20)
 	draft := newTestBucket(t, "reusable-block-credits")
 	draft.description.Policy.Limits.Unlimited = false

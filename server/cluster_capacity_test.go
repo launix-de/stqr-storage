@@ -37,12 +37,16 @@ func TestClusterQuotaDisplayUsesAllMembersWithoutBlockingLocalWrites(t *testing.
 	}
 	before, _ := source.node.routingPatch(bucket.ID(), volume.ObjectID(oid))
 	vid, _ := parseID(targetVolume.VolumeID)
-	plan, err := planRangeMove(before, before.Entries[0], target.node.control.ledger.node, vid, uint8(volume.HDD), volume.Raw, 2<<20)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := source.node.scopes.move(ctx, plan); err != nil {
-		t.Fatal(err)
+	// The capacity hint can already place the new bucket on target. This
+	// test requires remote ownership, not a redundant handoff to itself.
+	if before.Entries[0].Locations[0].Node != target.node.control.ledger.node {
+		plan, err := planRangeMove(before, before.Entries[0], target.node.control.ledger.node, vid, uint8(volume.HDD), volume.Raw, 2<<20)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := source.node.scopes.move(ctx, plan); err != nil {
+			t.Fatal(err)
+		}
 	}
 	other, _ := createProtocolBucket(t, source.node, "independent-local-write")
 	localClient, err := client.Dial(ctx, source.node.cfg.Node.Advertise, admin.Username, admin.Password, client.BucketID(other.ID()))

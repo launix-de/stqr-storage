@@ -17,6 +17,7 @@ type placementMeasurement struct {
 	cost          uint64
 	retained      map[volume.ID]uint64
 	growth        float64
+	estimateOnly  bool
 }
 
 func (r *rangeManager) measuredPlacement(shape placementShape, entry client.RangeEntry, d BucketDescription, required bool, allowance *int) (placementMeasurement, bool) {
@@ -25,7 +26,7 @@ func (r *rangeManager) measuredPlacement(shape placementShape, entry client.Rang
 	var prior placementMeasurement
 	if value, ok := r.measurements.Load(key); ok {
 		prior = value.(placementMeasurement)
-		if prior.epoch == entry.OwnerEpoch && prior.policy == entry.PolicyVersion && prior.codec == codec && time.Since(prior.at) < 30*time.Second {
+		if prior.epoch == entry.OwnerEpoch && prior.policy == entry.PolicyVersion && prior.codec == codec && (!required || !prior.estimateOnly) && time.Since(prior.at) < 30*time.Second {
 			return prior, true
 		}
 	}
@@ -40,16 +41,42 @@ func (r *rangeManager) measuredPlacement(shape placementShape, entry client.Rang
 		return placementMeasurement{}, false
 	}
 	measurement := placementMeasurement{epoch: entry.OwnerEpoch, policy: entry.PolicyVersion, codec: codec, at: time.Now(), retained: make(map[volume.ID]uint64)}
+	if !required && shape.bits == 0 && d.DesiredPolicy == nil {
+		measurement.estimateOnly = true
+		// A whole bucket already has physical accounting maintained by volume
+		// callbacks. Optimization needs an estimate, not another receipt census.
+		// diffPlacementTarget still measures and reserves the actual move.
+		usage := r.server.quotaUsage.Load()
+		if usage == nil {
+			return placementMeasurement{}, false
+		}
+		p := rangePlan{Before: before, Moving: entry, Source: r.node}
+		for _, store := range r.sourceVolumes(p) {
+			id := store.Identity().VolumeID
+			rows, known := usage.volumes[id]
+			if !known {
+				return placementMeasurement{}, false
+			}
+			n := storagePhysical(rows, volume.ID(shape.bucket))
+			measurement.cost = addCapacity(measurement.cost, n)
+			measurement.retained[id] = n
+		}
+		return r.storePlacementMeasurement(key, prior, measurement), true
+	}
 	var err error
 	measurement.cost, _, err = r.policyPlacementCost(before, entry, client.ID{}, volume.ID{}, codec, measurement.retained)
 	if err != nil {
 		return placementMeasurement{}, false
 	}
-	if prior.epoch == entry.OwnerEpoch && prior.policy == entry.PolicyVersion && prior.codec == codec && prior.at.Before(measurement.at) && !prior.at.IsZero() && measurement.cost > prior.cost {
+	return r.storePlacementMeasurement(key, prior, measurement), true
+}
+
+func (r *rangeManager) storePlacementMeasurement(key rangeMetricKey, prior, measurement placementMeasurement) placementMeasurement {
+	if prior.epoch == measurement.epoch && prior.policy == measurement.policy && prior.codec == measurement.codec && prior.estimateOnly == measurement.estimateOnly && prior.at.Before(measurement.at) && !prior.at.IsZero() && measurement.cost > prior.cost {
 		measurement.growth = float64(measurement.cost-prior.cost) / measurement.at.Sub(prior.at).Seconds()
 	}
 	r.measurements.Store(key, measurement)
-	return measurement, true
+	return measurement
 }
 
 // Keep discovery linear in the PG's ranges. Four oldest hot measurements win;
