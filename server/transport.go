@@ -28,6 +28,7 @@ type terminalFrame struct {
 }
 
 type wsSession struct {
+	blockControl       atomic.Bool
 	durabilityCap      atomic.Bool
 	versionsSubscribed bool   // guarded by subMu
 	versionSent        string // guarded by subMu
@@ -203,7 +204,7 @@ func (s *Server) serveWebSocket(w http.ResponseWriter, r *http.Request, p princi
 			}
 			continue
 		}
-		if m.Opcode >= 0x0100 && m.Opcode <= 0x0108 || m.Opcode == client.ObjectSubscribe || m.Opcode == client.ObjectAccepted || m.Opcode == client.BucketBlockMaintenance || m.Opcode == client.BucketMaintenanceEnd || m.Opcode == client.BucketStatFS || m.Opcode == client.BucketSync || m.Opcode == client.BucketMaintenance || m.Opcode == client.BucketScan {
+		if m.Opcode >= 0x0100 && m.Opcode <= 0x0108 || m.Opcode == client.ObjectSubscribe || m.Opcode == client.ObjectAccepted || m.Opcode == client.BucketObjectLease || m.Opcode == client.BucketMaintenanceEnd || m.Opcode == client.BucketStatFS || m.Opcode == client.BucketSync || m.Opcode == client.BucketMaintenance || m.Opcode == client.BucketScan {
 			if !ws.registerObjectContext(m.ID) {
 				return
 			}
@@ -296,7 +297,7 @@ func (ws *wsSession) requestLoop() {
 			if status == 0 {
 				continue
 			}
-			if m.Opcode >= 0x0100 && m.Opcode <= 0x0108 || m.Opcode == client.ObjectSubscribe || m.Opcode == client.ObjectAccepted || m.Opcode == client.BucketBlockMaintenance || m.Opcode == client.BucketMaintenanceEnd || m.Opcode == client.BucketStatFS || m.Opcode == client.BucketSync || m.Opcode == client.BucketMaintenance || m.Opcode == client.BucketScan {
+			if m.Opcode >= 0x0100 && m.Opcode <= 0x0108 || m.Opcode == client.ObjectSubscribe || m.Opcode == client.ObjectAccepted || m.Opcode == client.BucketObjectLease || m.Opcode == client.BucketMaintenanceEnd || m.Opcode == client.BucketStatFS || m.Opcode == client.BucketSync || m.Opcode == client.BucketMaintenance || m.Opcode == client.BucketScan {
 				ws.releaseObjectContext(m.ID)
 			}
 			if m.Kind == client.Request {

@@ -14,13 +14,18 @@ type NodeAdmin struct {
 }
 
 // NodeLocalAdminOpcode is deliberately an allowlist. Users, bucket policies,
-// user mutations, object commands and recursive proxy calls cannot bypass their own protocols.
+// user mutations and recursive proxy calls cannot bypass their own protocols.
+// The dashboard may forward native GET/STAT/CAS/inventory requests; these retain
+// normal bucket grants, lease exclusion, routing and volume-lock semantics.
 func NodeLocalAdminOpcode(op uint16) bool {
+	if NodeAdminObjectOpcode(op) {
+		return true
+	}
 	switch op {
 	case UserListPage, VolumeAddWithGroups, VolumePlacementRelease, NodeDrain, NodeShutdown, VolumeAdd, VolumeRemove, VolumeRescan, VolumeGrow, VolumeGrowInfo,
 		VolumeRecoveryStage, VolumeRecoveryCommit, VolumeRecoveryRelease,
 		VolumeCandidates, VolumeCapacityGet, NodeConfigGet, NodeConfigSet,
-		AdminOperationStatus:
+		AdminOperationStatus, BlockDeviceList, BlockDeviceResize:
 		return true
 	}
 	return false
@@ -77,4 +82,14 @@ func DecodePeerAdmin(body []byte) (PeerAdmin, error) {
 		return PeerAdmin{}, ErrProtocol
 	}
 	return m, nil
+}
+
+// NodeAdminObjectOpcode permits only bounded non-streaming object requests.
+// Normal bucket authorization and maintenance exclusion still apply.
+func NodeAdminObjectOpcode(op uint16) bool {
+	switch op {
+	case 0x0100, 0x0107, 0x0108, BucketObjectList:
+		return true
+	}
+	return false
 }

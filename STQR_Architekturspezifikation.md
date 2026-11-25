@@ -1350,7 +1350,7 @@ Normale Clients bekommen ausschließlich Objektzugriff und die dafür nötigen R
 | 0x0119 | BUCKET_SYNC / Q, Capability 8192 | `bucket:ID,mark:CommitMark` => bestätigter `CommitMark`; alter Boot => 410 |
 | 0x011a | DURABILITY_NOTICE / P, Capability 8192 | `mark:CommitMark`; vor einem Subscription-Update mit akzeptiertem Zustand |
 | 0x011b | BUCKET_STATFS / Q | `bucket:ID` => `used:u64,total:u64,free:u64,available:u64,quota:u64,quota_limited:Bool`; authentifizierter Bucket-Grant genügt; ohne Quota verfügbarer nutzbarer Cluster-Platz, mit Quota zusätzlich begrenzt; siehe `docs/space.md` |
-| 0x011c | BUCKET_BLOCK_MAINTENANCE / Q | `ObjectRef,readonly:Bool` => `mode:u8=1,token:ID`; ALL-Member-Blockdevice-Lease, READ sowie bei RW WRITE; PUT/PUT_RANGE zusätzlich zu Recovery-CAS/DELETE, RO verbietet alle Mutationen. Native RW-Block-Leases dürfen Stripe-DELETE als WRITE für Discard ausführen; gewöhnliche Objektclients und private Clear-/Clone-Frontends behalten den DELETE-Grant. Ursprüngliche Sitzung bleibt gebunden, geroutete Hilfssockets führen den Grant im Header X-STQR-Maintenance mit. Native Block-Leases erlauben interne Range-Migrationen; private Clear-/Clone-Leases halten die Platzierung fest. Bei lokalem Platzmangel wird sofort eine gezielte Kapazitätsmigration geweckt; 503 lässt den Client mit gleicher Request-ID warten und nach dem Cutover fortsetzen. 507 erst bei fehlendem geeignetem Cluster-Platz. |
+| 0x011c | BUCKET_OBJECT_LEASE / Q | `ObjectRef,readonly:Bool` => `mode:u8=1,token:ID`; allgemeine exklusive Objekt-Lease über ALL-Mitglieder. READ sowie bei RW WRITE zum Erwerb; jede Objektoperation behält ihren regulären Grant, DELETE erfordert immer DELETE. RO verbietet alle Mutationen. Der alte Name BUCKET_BLOCK_MAINTENANCE bleibt als SDK-Alias erhalten. Der Server interpretiert keine FS-/Disk-/Stripe-Formate. Ursprüngliche Sitzung bleibt gebunden, geroutete Hilfssockets führen den Grant im Header X-STQR-Maintenance mit. Allgemeine Objekt-Leases erlauben interne Range-Migrationen; private Clear-/Clone-Inventuren halten die Platzierung fest. Bei Platzmangel wird gezielte Kapazitätsmigration geweckt; 503 lässt den Client mit gleicher Request-ID warten. 507 erst bei fehlendem geeignetem Cluster-Platz. |
 | 0x011d | BUCKET_MAINTENANCE_END / Q | `ObjectRef` => leer; nur ursprüngliche Owner-Sitzung; ALL-Freigabe vor ACK |
 
 CAS-Scope `0 RANGE,1 OBJECT`; OP_STATUS-State `0 UNKNOWN,1 PENDING,2 COMMITTED,3 FAILED,4 EXPIRED`. UNKNOWN/EXPIRED ist keine Zusicherung „nie ausgeführt“. ObjectUpdate-Change `0 REPLACE,1 RANGE_WRITE,2 APPEND,3 TRUNC,4 DELETE,5 RESYNC_REQUIRED`. SUBSCRIBE/UNSUBSCRIBE/ACK benötigen HELLO-Capability `512`; ohne Unterstützung gilt Q => 501 und F wird nicht gesendet. Die initiale SUBSCRIBE-Antwort belegt keinen Update-Journalplatz und benötigt daher kein zusätzliches ACK; während des Snapshot-Aufbaus bereits gepufferte Updates und spätere Push-Updates werden weiter über ihren Cursor bestätigt. Die erste Implementierung publiziert vollständige Replacement-Snapshots, DELETE oder explizites RESYNC_REQUIRED; unvollständige oder unbekannte Teilupdate-Sätze invalidieren den Client-Snapshot.
@@ -1864,6 +1864,10 @@ ADMIN oder ausdrücklich ADMIN_READ für reine Leseoperationen. `C` bedeutet glo
 | 0x2028 | BUCKET_CLEAR / Q, Admin | `bucket:ID` => `objects:u64`; offline, Single-Node-Maintenance; persistente Replay-Sperre |
 | 0x2029 | BUCKET_CLONE / Q, Admin | `source:ID,target:ID` => `objects:u64`; frischer physisch leerer Zielbucket; veröffentlicht objektweises COW ohne initiale Payload-Kopie, `objects=0` bezeichnet synchron kopierte Objekte; Grants bleiben getrennt |
 | 0x202a | BUCKET_MAINTENANCE_STATUS / Q, Admin | leer => leer nach rein lesendem Capability-/Erreichbarkeits-Preflight aller Mitglieder; vor jeder Bucket-Allokation |
+| 0x203e | LEASE_CONTROL_READ (historisch BLOCK_DEVICE_LIST) / Q, Admin | `schema:u16=1,bucket:ID,expected_owner:ID,request:Blob` => `live:Bool,readonly:Bool,owner:ID,result:Blob`; opake Verwaltungsanfrage an den registrierten Lease-Client, Request maximal 2048 Bytes. Ohne aktiven Owner: `live=false,result=leer`; der aufrufende Client verwaltet seine Daten dann über native Objektoperationen. |
+| 0x203f | LEASE_CONTROL_WRITE (historisch BLOCK_DEVICE_RESIZE) / Q, Admin | gleiche äußere Felder und Antwort; bei readonly Lease verboten. `expected_owner` null beim Dashboard-Aufruf, bei Weiterleitung auf die konkrete Lease-Owner-Node gebunden. Der Server interpretiert weder Request noch Result. |
+| 0x011e | LEASE_CONTROL_REGISTER (historisch BLOCK_CONTROL_REGISTER) / Q, Object-Lease-Owner | `schema:u16=1` => leer; nur auf dem ursprünglichen Lease-Socket, niemals auf Hilfsverbindungen. HELLO-Capability 65536 signalisiert Unterstützung. |
+| 0x011f | LEASE_CONTROL (historisch BLOCK_CONTROL) / umgekehrtes Q auf Owner-Socket | opake Request-Bytes => opake Result-Bytes; nur nach Registrierung, maximal ein laufender SDK-Handler, Request höchstens 2048 Bytes, Antwort höchstens 1 MiB, Timeout 30 Sekunden; Verarbeitung außerhalb des Framing-Loops. Relay 0x203e/0x203f verwendet Semantikrevision 2; alte Peers lehnen die neue Offline-Antwort mit 426 ab. |
 | 0x201e | VOLUME_CAPACITY_GET / Q / L | leer => `filesystem_available:u64,ram_available:u64,ram_limit:u64`; Available-Wert für das aktive Volume-Verzeichnis, verfügbarer System-RAM und wirksame RAM-Grenze nach optionalem Budget |
 | 0x2024 | NODE_ADMIN_REQUEST / Q/F / L | `target:ID,opcode:u16,body:Blob` => Status/Folgeheader/result des inneren Befehls; Operations-ID bleibt die ID des äußeren Requests; kein beliebiges URL-Ziel |
 | 0x2025 | USER_S3_KEY_LIST / Q | `user_id:ID` => `access_key_ids:Vec(Text)`; nur IDs, keine Secrets |
@@ -1872,8 +1876,12 @@ ADMIN oder ausdrücklich ADMIN_READ für reine Leseoperationen. `C` bedeutet glo
 
 `NODE_ADMIN_REQUEST` erlaubt ausschließlich Volume-Anlegen/-Entfernen/-Rescan/
 -Vergrößern, Volume-Kandidaten/Kapazität/Wachstumsgrenzen, lokale Config-Ansicht/
-Feldänderungen und Operationsstatus. Rekursive Weiterleitung, Objekt-, Bucket-
-und Benutzerbefehle sind ausgeschlossen. Nur die Ziel-Node speichert ihre
+Feldänderungen, Operationsstatus und die explizit freigegebenen lokalen
+Verwaltungsbefehle. Für browserseitige Frontends sind zusätzlich natives GET,
+STAT, CAS und BUCKET_OBJECT_LIST erlaubt: Bucket-Autorisierung, Lease-Ausschluss,
+Routing und Volume-Locks gelten unverändert; keine Auswertung von FS- oder
+Blockdevice-Payloads im Server. Rekursive Weiterleitung sowie globale Bucket-
+und Benutzermutationen sind ausgeschlossen. Nur die Ziel-Node speichert ihre
 Volume-Konfiguration und lokalen Operationsbelege. Der interne Peer-Aufruf
 unterscheidet Transporterfolg (äußere Antwort) und den vollständigen inneren
 Admin-Response-Body; der Dashboard-Proxy reicht dessen Status unverändert durch,
@@ -2020,7 +2028,8 @@ Der Go-Client und Daemon implementieren HELLO, Objekt-Dispatcher, Bucketverwaltu
 ### 14.3 C-/Rust-Anbindung und Blockdevice-Library
 
 - C erhält eine versionierte Handle-ABI mit expliziten Ownership-/Bufferregeln; Rust native Wrapper/async-Anbindung. Ob C auf Go-c-shared oder einen eigenen Codec setzt, bleibt eine Implementierungsentscheidung.
-- Die Blockdevice-Library liegt im Go-Package `qemu-plugin-nbd` und nutzt die native Clientbibliothek. Implementiert sind `ReadAt`, `WriteAt`, `Sync`, `Trim`, benannte Geräte und Standard-NBD für QEMU; `Resize` sowie eine C-ABI bleiben Ausbau.
+- Die Blockdevice-Library liegt im Go-Package `qemu-plugin-nbd` und nutzt die native Clientbibliothek. Implementiert sind `ReadAt`, `WriteAt`, `Sync`, `Trim`, wachsendes `Resize`, benannte Geräte und Standard-NBD für QEMU; eine C-ABI bleibt Ausbau.
+- `Resize` vergrößert die virtuelle Byte-Größe per vollständigem Descriptor-CAS und bestätigt erst nach Sync. Generation, Stripe-Adressen und bestehende Daten bleiben unverändert; der neue Bereich bleibt sparse und liest sich als Null. Größen sind positive Vielfache von 512 bis `2^63-1`; Verkleinern ist nicht erlaubt. Ein Retry derselben Größe flusht erneut. Der CLI-Aufruf verwendet entweder eine eigene Block-Lease bei gestopptem Exporter oder den privaten Unix-Steuersocket des laufenden Exporters unter dessen bestehender Lease. Bestehende NBD-Verbindungen behalten ihre ausgehandelte Größe; nach Reconnect wird die neue Größe geliefert. Automatische Kapazitätsbenachrichtigungen an laufende NBD-Clients und die Vergrößerung von Gastpartitionen/-dateisystemen bleiben Ausbau.
 - Gerät = genau ein binäres Metadatenobjekt plus systematisch adressierte **1-MiB-Datenobjekte**, ohne Segmentliste. Kleinere 512-B-/4-KiB-Blöcke verwenden GET_RANGE/PUT_RANGE; Grenzübertritte werden aufgeteilt. Ein 1-MiB-Objekt ist keine Mindest-I/O-Größe.
 - Das Metadatenobjekt wird über CAS angelegt. Verteilte partielle Updates erhalten die native Atomizität pro Objektoperation; mehrteilige Writes über mehrere Objekte sind keine native Multi-Object-Transaktion. `FLUSH` reicht bis zum Durable-ACK aller zuvor bestätigungspflichtigen Mutationen; `TRIM` und Vergrößerung müssen Null-Leseverhalten und physische Freigabe korrekt umsetzen.
 
@@ -2093,6 +2102,7 @@ Beispiel:
 - **Volumes:** Baumstruktur, Online-/Draining-/Unmounted-Zustand, Class, Mount-Pfad, Kapazität, SMART/IO-Fehler, Add/Remove.
 - **Storage-Volume vergrößern:** im bestehenden Node-/Volume-Baum, mit Node und Backend-Pfad, Einheiteneingabe, diskretem Slider, Schnellschritten, Vorher-/Nachher-Vorschau und erneut abrufbaren Kapazitätsgrenzen. Datei/RAM wachsen höchstens auf bisherige Kapazität plus verfügbaren Platz; 4-KiB-Ausrichtung wird in UI und API geprüft. Physische Storage-Devices übernehmen ausschließlich ihre volle extern vergrößerte Kapazität. Ein laufender Auftrag bindet Node, Volume, Zielgröße und Operations-ID; Bedienelemente und Schließen sind bis zur Antwort gesperrt. Eine verlorene Antwort kann mit derselben ID erneut geprüft werden. Keine Verwaltung virtueller Disks oder ihrer Frontend-Metadaten im Objektserver.
 - **Buckets:** anlegen, löschen, konfigurieren; Replikationszahl, EC-Profil, Basis-Storage-Class, Read-Replica-/RAMCACHE-Budget, Quotas, Zugriffsrechte; `CURRENT` vs. `DESIRED`/`NEXT` anzeigen.
+- **Virtuelle Disks:** pro Bucket durchsuchbare Übersicht mit API-Cursor-Pagination und Endless Scroll; virtuelle Größe und Geräteidentität anzeigen. Vergrößern mit Einheiteneingabe, diskretem Slider, Schnellschritten und Vorher-/Nachher-Vorschau; positive 512-Byte-Ausrichtung, int64-Grenze und Wachstum validieren. Readonly-Exporter sperren die Aktion. Native Weiterleitung zur bestehenden Exporter-Verbindung erhält die exklusive Lease auch über andere Cluster-Nodes; ohne Exporter normale exklusive Lease erwerben. Alte/offline Owner niemals umgehen. Größere NBD-Kapazität wird nach Client-Reconnect sichtbar; Dialog erklärt separate Gastdateisystem-Vergrößerung. Größen werden binär als u64 und im Browser als BigInt verarbeitet.
 - **Bucket-Statistiken:** logische/physische Bytes, Objektzahl, Reads, Writes, Appends, Top Hot-Ranges, Cache Hit Rate, Durable-Copies, EC-Overhead, Policy-Erfüllung.
 - **Generationen:** CURRENT/NEXT, Rebuild-Gründe, gewählter Koordinator, Plan-Kosten, bytes moved/remaining, Migrationsstatus je Range, ETA nur als geschätzte Metrik, Quorum-Fortschritt.
 - **User:** Admin/User, Bucket-Freigaben, Credential- und Token-Rotation, Audit-Log.
@@ -2368,7 +2378,7 @@ Hier stehen nur noch nicht entschiedene Details. Bereits geklärt sind: Intranet
 ### 20.4 Frontends und spätere Features
 
 - Multi-Mount-FUSE: CAS-/Intent-Protokolle für Rename/Link/Unlink über mehrere Metadatenobjekte und Recovery. Alte Testcaches sind bis SUBSCRIBE erlaubt; bei dessen Einführung müssen Cache-/Kernel-Sichtbarkeit konsistent umgesetzt werden.
-- S3: binäre Objektformate mit Metadaten-/Payload-Envelope und native Inventur für LIST sowie Prefix/Pagination. LIST und Range-GET gehören zum ersten integrierten Umfang; Multipart einschließlich Recovery/Cleanup sowie Copy, Sammellöschen und Bucket-Discovery sind implementierter Umfang. Blockdevice: NBD-Frontend mit Flush/FUA und Standard-QEMU-Anbindung ist implementiert; Trim und verteilte Exklusion durch ALL-Member-Bucket-Leases sind implementiert; Resize bleibt Ausbau.
+- S3: binäre Objektformate mit Metadaten-/Payload-Envelope und native Inventur für LIST sowie Prefix/Pagination. LIST und Range-GET gehören zum ersten integrierten Umfang; Multipart einschließlich Recovery/Cleanup sowie Copy, Sammellöschen und Bucket-Discovery sind implementierter Umfang. Blockdevice: NBD-Frontend mit Flush/FUA und Standard-QEMU-Anbindung ist implementiert; Trim, wachsendes Resize und verteilte Exklusion durch ALL-Member-Bucket-Leases sind implementiert; automatische Live-Kapazitätsbenachrichtigungen bleiben Ausbau.
 - SUBSCRIBE/UNSUBSCRIBE: Journal-Retention, Resync für langsame Leser, Relay-/Reconnect-Handoff und Ende durch Rechteentzug. Snapshot-/Registrierungsbarriere und Übergabe bei Migration stehen bereits fest.
 - CACHE-Strategie: Verdrängungs-/Miss-Verhalten und Klassenwahl; bis dahin reserviert und Aktivierung mit 501 ablehnen. RAM-Replikation und Replica-Restore gehören zu v1.
 - ENet: Channel-Pool, optionale cgo-Builds, HTTP-Authentifizierung zur Sessionbindung, Transportversion und Ordered-Stream-Reconnect-Barrieren; RELIABLE_UNORDERED ist kein nativer ENet-Modus (§13.9). Keine TLS-/Zertifikatsabhängigkeit hinzufügen.
@@ -2609,3 +2619,34 @@ Die privaten COW-Bodies sind im v2-Codec wie folgt aufgebaut. `ObjectID` hat 32 
 Metadatenproben liefern eine Null-Transfer-ID ohne Extents und reservieren keinen Payload-Snapshot. Nur der öffentliche Readpfad darf eine vorhandene erforderliche Replica als Quelle wählen; die Sicherung vor Mutationen bleibt beim wirksamen Primary. `graphProof` bezeichnet die veröffentlichten Verbindungen, keine Inhaltsversion. Eine implizite Abwesenheit darf nur als expliziter Tombstone mit leerer Quelle materialisiert werden. GET_RANGE sichert höchstens die angefragten Bytes und den optionalen Bytevergleich (maximal zwei Bereiche); ein Write sichert stets die vollständige Präimage. Der optionale Range-Zusatz von COW_CAPTURE wird durch Opcode-Semantik 2 ausgehandelt. Die Auflösung ist rekursiv über Ketten und Verzweigungen, mit besuchten Buckets gegen Zyklen. Materialisierung direkter Nachbarn bewahrt deren gesamte transitiv abhängige Sicht; beim Entfernen eines Zwischen-Buckets bleiben die unterschiedlichen Nachbar-Sichten erhalten. Logische Quotas zählen geerbte Bytes genau einmal; die Clone-Veröffentlichung prüft endliche Zielquotas vorab. Ein verbundenes COW-Teilnetz ist auf 4096 Buckets begrenzt; weitere Clones werden vor der Veröffentlichung abgewiesen.
 
 Die Implementierung schreibt native Volumes im Format 5 und akzeptiert die bekannten Formate 2/3/4/5. Veraltete Inhaltszähler werden beim Lesen ignoriert; bekannte alte Request-Receipts bleiben für Wiederholungen gültig. Beim nächsten Schreiben wird der Header auf Format 5 umgestellt, sodass inkompatible ältere Binaries nicht weiterschreiben. Unbekannte Formate werden ohne Neuformatierung abgewiesen. Der Upgrade-Vertrag wird für alle Git-Format-Checkpoints mit echten Datensätzen und zwei Wiederanläufen geprüft; Downgrades bleiben unzulässig.
+
+
+### Clientformat-Grenze und Hintergrundarbeit
+
+FUSE, kstqr und WinFsp interpretieren das gemeinsame Dateisystemformat ausschließlich
+im Client. QEMU/NBD interpretiert seine Geräte-Metadaten und systematisch benannten
+1-MiB-Stripes ebenfalls im Client. Der Server bietet Buckets und undurchsichtige
+Objekte mit GET, PUT, PUT_RANGE, APPEND, TRUNC, DELETE und byteweisem CAS unter dem
+Volume-Lock; PUT/Range-PUT/CAS ändern bestehende Objekte in-place und besitzen keine
+Objektversionsnummern. Das integrierte S3-Frontend verwendet dieselben Objektmethoden.
+Allgemeine exklusive Objekt-Leases sind unabhängig vom Nutzdatenformat. Für TRIM
+wählt allein der NBD-Client DELETE oder bei WRITE-only das Leeren des Stripe-Payloads.
+
+Priorität 1 gilt ausführbaren Benutzer-I/Os, Priorität 2 Umschichtungen laut
+Rebuild-Map und Priorität 3 physischer Bucket-Bereinigung. Ein atomarer Speicherschritt
+wird fertiggestellt; vor dem nächsten begrenzten Schritt wird die Priorität erneut
+geprüft. Auf entfernte Peers wartende RPCs halten keine lokale I/O-Priorität fest.
+Die bestätigte Löschvormerkung macht den Bucket sofort unerreichbar und wird in
+nachfolgende Generationen übernommen. Physische Bereinigung ist kein Abschlusskriterium
+der ankündigenden Generation. Jede Node arbeitet in kleinen Idle-Portionen weiter,
+überspringt belegte Sperren und meldet ihren lokalen Abschluss. Erst danach kann eine
+kurze spätere Kontrollentscheidung die verbleibenden Verwaltungsreste abschließen.
+
+Das NBD-Dashboard ist ebenfalls ein Client des Objektprotokolls. Der Browser
+interpretiert STNBD001, adressiert Descriptoren nach dem NBD-Clientformat und
+vergrößert Offline-Disks per byteweisem Range-CAS der Größenangabe (Offset 14,
+8 Bytes, Vergleich des bisherigen Descriptors unter demselben Volume-Lock).
+Es gibt keine Objekt-Inhaltsversion. Bei einem laufenden Exporter verarbeitet
+dessen registrierter SDK-Handler das NBD-Verwaltungsformat; das Server-Relay
+bleibt opak. Format-/Protokoll- und Placement-Revisionen sind keine Versionen
+von Objektinhalten.

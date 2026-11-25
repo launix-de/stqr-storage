@@ -100,7 +100,7 @@ func (s *Server) parseObject(m client.Message, ws *wsSession, p principal) (*obj
 		}
 	}
 	description := b.storageDescription()
-	bucketScoped := m.Opcode == client.BucketMaintenance || m.Opcode == client.BucketBlockMaintenance || m.Opcode == client.BucketMaintenanceEnd || m.Opcode == client.BucketScan || m.Opcode == client.BucketObjectList
+	bucketScoped := m.Opcode == client.BucketMaintenance || m.Opcode == client.BucketObjectLease || m.Opcode == client.BucketMaintenanceEnd || m.Opcode == client.BucketScan || m.Opcode == client.BucketObjectList
 	// No caller may enter the reserved metadata namespace through object RPCs.
 	if bucketID == systemBucket {
 		return nil, d, ErrBucketForbidden
@@ -113,7 +113,7 @@ func (s *Server) parseObject(m client.Message, ws *wsSession, p principal) (*obj
 		case 0x0104:
 			permission = BucketAppend
 		case 0x0106:
-			permission = blockDeletePermission(p)
+			permission = BucketDelete
 		}
 		if _, err := b.authorize(p, permission); err != nil {
 			return nil, d, err
@@ -189,7 +189,7 @@ func (s *Server) executeObjects(m client.Message, ws *wsSession, p principal) ([
 	switch m.Opcode {
 	case client.BucketObjectList:
 		return s.executeObjectList(ctx, op, d, p, runtime)
-	case client.BucketMaintenance, client.BucketBlockMaintenance, client.BucketMaintenanceEnd, client.BucketScan:
+	case client.BucketMaintenance, client.BucketObjectLease, client.BucketMaintenanceEnd, client.BucketScan:
 		return s.executeMaintenance(ctx, op, d, ws, p, runtime)
 	case 0x0100, 0x0101:
 		length := uint64(math.MaxUint64)

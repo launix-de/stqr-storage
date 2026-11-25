@@ -4,10 +4,8 @@ package client
 import (
 	"bytes"
 	"context"
-	"errors"
 	"fmt"
 	"sort"
-	"time"
 )
 
 // FSCheckResult counts live bucket objects, not volume tombstones or retry
@@ -34,69 +32,6 @@ func (c *Client) beginMaintenance(ctx context.Context) error {
 	return c.beginMaintenanceCommand(ctx, BucketMaintenance, false)
 }
 
-// BeginBlockMaintenance exclusively binds a bucket for direct ranged block I/O.
-// The lease is socket-scoped and cannot reconnect after loss.
-func (c *Client) BeginBlockMaintenance(ctx context.Context, readonly bool) error {
-	return c.beginMaintenanceCommand(ctx, BucketBlockMaintenance, readonly)
-}
-
-func (c *Client) beginMaintenanceCommand(ctx context.Context, opcode uint16, readonly bool) error {
-	t, err := c.connection(ctx)
-	if err != nil {
-		return err
-	}
-	c.mu.Lock()
-	if c.maintenance != nil {
-		c.mu.Unlock()
-		return errors.New("client: maintenance already started; use a dedicated connection")
-	}
-	c.maintenance = t
-	c.mu.Unlock()
-	e := Encoder{}
-	c.objectRef(&e, ObjectID{})
-	if opcode == BucketBlockMaintenance {
-		e.Bool(readonly)
-	}
-	token := NewRequestID()
-	c.mu.Lock()
-	c.maintenanceToken = token
-	c.mu.Unlock()
-	var r wireReply
-	for {
-		r, err = c.do(ctx, opcode, e.B, token, false, nil)
-		var status *StatusError
-		if !errors.As(err, &status) || status.Status != 503 {
-			break
-		}
-		r.close()
-		// A scoped handoff/control barrier must finish before acquiring a
-		// lease. Keep the same original socket and logical request, rather
-		// than making an otherwise healthy export fail during balancing.
-		timer := time.NewTimer(100 * time.Millisecond)
-		select {
-		case <-ctx.Done():
-			timer.Stop()
-			return ctx.Err()
-		case <-c.done:
-			timer.Stop()
-			return ErrClosed
-		case <-timer.C:
-		}
-	}
-	defer r.close()
-	if err == nil {
-		if len(r.result) == 17 && r.result[0] == 1 {
-			c.mu.Lock()
-			copy(c.maintenanceToken[:], r.result[1:])
-			c.distributedMaintenance = true
-			c.mu.Unlock()
-		} else if len(r.result) != 0 {
-			err = ErrProtocol
-		}
-	}
-	return err
-}
-
 type fsCheckObject = ObjectEntry
 type fsCheckStore interface {
 	FilesystemStore
@@ -106,54 +41,6 @@ type fsCheckStore interface {
 
 func (c *Client) scanFilesystemObjects(ctx context.Context, after *ObjectID, limit uint32) ([]fsCheckObject, *ObjectID, error) {
 	return c.scanObjectEntries(ctx, after, limit, BucketScan)
-}
-func (c *Client) scanObjectEntries(ctx context.Context, after *ObjectID, limit uint32, opcode uint16) ([]ObjectEntry, *ObjectID, error) {
-	e := Encoder{}
-	c.objectRef(&e, ObjectID{})
-	e.Bool(after != nil)
-	if after != nil {
-		e.B = append(e.B, after[:]...)
-	}
-	e.U32(limit)
-	r, err := c.do(ctx, opcode, e.B, NewRequestID(), false, nil)
-	defer r.close()
-	if err != nil {
-		return nil, nil, err
-	}
-	d := Decoder{B: r.result}
-	count := d.U32()
-	if count > limit {
-		return nil, nil, ErrProtocol
-	}
-	objects := make([]fsCheckObject, 0, count)
-	previous := after
-	for i := uint32(0); i < count; i++ {
-		var id ObjectID
-		copy(id[:], d.Take(32))
-		info := readObjectInfo(&d)
-		if d.Err != nil || previous != nil && bytes.Compare(id[:], previous[:]) <= 0 {
-			return nil, nil, ErrProtocol
-		}
-		if err = c.acceptObjectInfo(info); err != nil {
-			return nil, nil, err
-		}
-		objects = append(objects, fsCheckObject{id, info})
-		copyID := id
-		previous = &copyID
-	}
-	var next *ObjectID
-	if d.Bool() {
-		var id ObjectID
-		copy(id[:], d.Take(32))
-		next = &id
-		if after != nil && bytes.Compare(id[:], after[:]) <= 0 || previous != nil && bytes.Compare(id[:], previous[:]) < 0 {
-			return nil, nil, ErrProtocol
-		}
-	}
-	if err = d.Done(); err != nil {
-		return nil, nil, err
-	}
-	return objects, next, nil
 }
 
 func checkFilesystem(ctx context.Context, store fsCheckStore, opaqueRoots ...ObjectID) (FSCheckResult, error) {

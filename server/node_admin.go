@@ -43,6 +43,16 @@ func (s *Server) nodeAdmin(m client.Message, ws *wsSession, p principal) ([]byte
 	local := s.cfg.Node.ID == request.Target.String()
 	s.mu.RUnlock()
 	if local {
+		if client.NodeAdminObjectOpcode(request.Opcode) {
+			// Dashboard sockets discard password hashes after authentication.
+			// Revalidate the delegated identity, as on the remote peer path,
+			// before entering ordinary object authorization without a bound grant.
+			user, err := s.findAccount(p.User.Name)
+			if err != nil || user.ID != p.User.ID || user.Role != "ADMIN" || user.Disabled {
+				return failure(403, "delegated administrator is no longer authorized")
+			}
+			p.User, p.connection = user, nil
+		}
 		return s.dispatchAs(inner, nil, p)
 	}
 	s.peerStatsMu.RLock()

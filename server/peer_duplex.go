@@ -49,6 +49,10 @@ func (ws *wsSession) requestPeer(ctx context.Context, opcode uint16, body []byte
 	if err := checkPeerMessage(ws.server.protocolVersion(), ws.authorization.peerProfile, client.Message{Opcode: opcode, Body: body}); err != nil {
 		return nil, err
 	}
+	return ws.requestDuplex(ctx, opcode, body)
+}
+
+func (ws *wsSession) requestDuplex(ctx context.Context, opcode uint16, body []byte) ([]byte, error) {
 	id := client.NewRequestID()
 	pending := peerPending{opcode: opcode, result: make(chan peerReply, 1)}
 	ws.peerMu.Lock()
@@ -83,7 +87,7 @@ func (ws *wsSession) requestPeer(ctx context.Context, opcode uint16, body []byte
 }
 
 func (ws *wsSession) receivePeerReply(m client.Message) bool {
-	if ws.authorization == nil || !ws.authorization.peerVerified.Load() {
+	if ws.authorization == nil || (!ws.authorization.peerVerified.Load() && !(m.Opcode == client.BucketBlockControl && ws.blockControl.Load() && !ws.authorization.invalid.Load())) {
 		return false
 	}
 	ws.peerMu.Lock()

@@ -113,7 +113,7 @@ func (s *Server) clusterBucketCopy(ctx context.Context, m client.Message, p prin
 			return nil, fmt.Errorf("open copy connection: %w", e)
 		}
 		clients[id] = c
-		if e = c.BeginBlockMaintenance(ctx, src != dst && id == src); e != nil {
+		if e = c.BeginObjectLease(ctx, src != dst && id == src); e != nil {
 			return nil, fmt.Errorf("copy lease: %w", e)
 		}
 	}

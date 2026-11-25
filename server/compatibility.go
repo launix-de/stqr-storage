@@ -323,6 +323,12 @@ func baselineOpcode(op uint16) bool {
 // Safe unchanged messages (PING, stats, directory, config) remain revision 1.
 func currentOperationSemantics() map[string]operationSemantics {
 	result := map[string]operationSemantics{}
+	for _, op := range []uint16{client.BucketBlockControlRegister, client.BucketBlockControl} {
+		result[fmt.Sprintf("%04x", op)] = operationSemantics{Emit: 1, Min: 1, Max: 1}
+	}
+	for _, op := range []uint16{client.LeaseControlRead, client.LeaseControlWrite} {
+		result[fmt.Sprintf("%04x", op)] = operationSemantics{Emit: 2, Min: 2, Max: 2}
+	}
 	for _, op := range []uint16{0x0100, 0x0101, 0x0102, 0x0103, 0x0104, 0x0105, 0x0106, 0x0107, 0x0108, client.ObjectSubscribe, client.ObjectUpdateMessage, client.BucketScan, client.BucketObjectList, client.ObjectAccepted} {
 		result[fmt.Sprintf("%04x", op)] = operationSemantics{Emit: 2, Min: 2, Max: 2}
 	}

@@ -38,6 +38,8 @@ type Client struct {
 	maintenanceToken             ID
 	distributedMaintenance       bool
 	maintenance                  *objectTransport // pinned session; never reconnect during fsck
+	blockControl                 func(context.Context, []byte) ([]byte, error)
+	blockControlBusy             bool
 	dialGate                     chan struct{}
 	closed                       bool
 	closeOnce                    sync.Once

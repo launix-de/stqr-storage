@@ -20,18 +20,20 @@ const (
 	Push
 )
 const (
-	Hello                   uint16 = 0x0001
-	Ping                    uint16 = 0x0002
-	Event                   uint16 = 0x0004
-	StatsGet                uint16 = 0x0008
-	StatsSubscribe          uint16 = 0x0009
-	StatsUnsubscribe        uint16 = 0x000a
-	StatsSnapshotMessage    uint16 = 0x000b
-	BucketInfoGet           uint16 = 0x010c
-	BucketMaintenance       uint16 = 0x0115
-	BucketScan              uint16 = 0x0116
-	BucketObjectList        uint16 = 0x0117
-	BucketBlockMaintenance  uint16 = 0x011c
+	Hello                uint16 = 0x0001
+	Ping                 uint16 = 0x0002
+	Event                uint16 = 0x0004
+	StatsGet             uint16 = 0x0008
+	StatsSubscribe       uint16 = 0x0009
+	StatsUnsubscribe     uint16 = 0x000a
+	StatsSnapshotMessage uint16 = 0x000b
+	BucketInfoGet        uint16 = 0x010c
+	BucketMaintenance    uint16 = 0x0115
+	BucketScan           uint16 = 0x0116
+	BucketObjectList     uint16 = 0x0117
+	BucketObjectLease    uint16 = 0x011c
+	// Deprecated: use BucketObjectLease; the server does not interpret device formats.
+	BucketBlockMaintenance         = BucketObjectLease
 	BucketMaintenanceEnd    uint16 = 0x011d
 	UserListPage            uint16 = 0x2038
 	BucketListPage          uint16 = 0x2039
@@ -84,6 +86,13 @@ const (
 	UserUpdate        uint16 = 0x200c
 	UserSetPassword   uint16 = 0x200d
 	UserDelete        uint16 = 0x200e
+)
+
+const (
+	BucketBlockControlRegister uint16 = 0x011e
+	BucketBlockControl         uint16 = 0x011f
+	BlockDeviceList            uint16 = 0x203e
+	BlockDeviceResize          uint16 = 0x203f
 )
 
 type ID [16]byte
@@ -269,3 +278,12 @@ func DecodeStatsFilter(d *Decoder) StatsFilter {
 	}
 	return f
 }
+
+// Opaque lease-owner control. Historical Block* names are wire-compatible
+// aliases; neither the native transport nor the server parses client formats.
+const (
+	LeaseControlRead           = BlockDeviceList
+	LeaseControlWrite          = BlockDeviceResize
+	BucketLeaseControlRegister = BucketBlockControlRegister
+	BucketLeaseControl         = BucketBlockControl
+)

@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 import {bucketThroughput} from './throughput.js';
+import {setupBlockDevices} from './block-devices.js';
 import {EndlessList} from './endless.js';
 import {newID,Writer} from './protocol.js';
 import {writeBucketPolicy,parseQuota,defaultBucketPolicy} from './bucket-codec.js';
@@ -23,14 +24,16 @@ function bucketUsage(b,escape){
 }
 const permissions=[[1,'Lesen'],[2,'Schreiben'],[4,'Anhängen'],[8,'Löschen']];
 export function setupBucketViews({connection,escape,toast,showView,statsEntries=()=>[]}){
+ const seenStats=new Set(),checkedCatalog=new Set(),pendingCatalog=new Set();let syncingCatalog=false;
+ const disks=setupBlockDevices({connection,escape,toast});
  let groups=[],buckets=[],users=[],epoch=0,poll,editor,createProgress,access,grantRetry,action,actionRetry,editorPending=false;
  let pageMeta={},searchTimer,userChoices=[],userSearchTimer,userSearchEpoch=0;
  let quotaInfo=null,quotaSteps=[],quotaEpoch=0,quotaPoll,grantRows=[],lockRetry;
  async function fetchGroups(){const out=[];let after='';const seen=new Set;for(;;){const page=await connection().listPlacementGroups(after);out.push(...page.groups);if(!page.next)return out;if(seen.has(page.next))throw Error('Ungültige PG-Folgeseite.');seen.add(page.next);after=page.next}}
  function applyGroup(){const g=groups.find(g=>g.id===$('bucket-pg').value);if(!g)return;const p=(g.desired??g.effective).storage;$('bucket-storage').value=p.storage_strategy;$('bucket-compression').value=p.compression;$('bucket-placement').value=p.placement_mode;$('bucket-replicas').value=p.redundancy.replicas||1;updateFields()}
  $('bucket-pg').onchange=()=>{applyGroup();refreshQuota()};
- const pager=new EndlessList({container:$('bucket-rows').closest('.storage-panel'),visible:()=>!$('buckets-view').hidden,fetchPage:(after,limit,query)=>connection().listBucketsPage(after,limit,query),entries:page=>page.buckets,onUpdate:(items,state)=>{buckets=items;pageMeta=state.meta;render(state);schedulePoll()},onError:e=>{$('buckets-error').textContent=e.message},onLoading:busy=>{$('refresh-buckets').disabled=busy}});
- async function load(){const seq=++epoch;clearTimeout(poll);$('buckets-error').textContent='';try{groups=await fetchGroups();if(seq!==epoch)return;await pager.reset($('bucket-search').value.trim())}catch(e){if(seq===epoch)$('buckets-error').textContent=e.message}}
+ const pager=new EndlessList({container:$('bucket-rows').closest('.storage-panel'),visible:()=>!$('buckets-view').hidden,fetchPage:(after,limit,query)=>connection().listBucketsPage(after,limit,query),entries:page=>page.buckets,onUpdate:(items,state)=>{buckets=items;pageMeta=state.meta;render(state);schedulePoll();syncStats()},onError:e=>{$('buckets-error').textContent=e.message},onLoading:busy=>{$('refresh-buckets').disabled=busy}});
+ async function load(){checkedCatalog.clear();const seq=++epoch;clearTimeout(poll);$('buckets-error').textContent='';try{groups=await fetchGroups();if(seq!==epoch)return;await pager.reset($('bucket-search').value.trim())}catch(e){if(seq===epoch)$('buckets-error').textContent=e.message}}
  function schedulePoll(){clearTimeout(poll);if(!$('buckets-view').hidden&&buckets.some(b=>!b.policy.limits.absolute_unlimited||BigInt(b.policy.limits.guaranteed_quota_bytes)>0n||b.desired_policy||b.state==='deleting'))poll=setTimeout(refreshVisible,3000)}
  async function refreshVisible(){
   if($('buckets-view').hidden)return;const seq=epoch;
@@ -56,7 +59,7 @@ export function setupBucketViews({connection,escape,toast,showView,statsEntries=
  function rowHTML(b){
    const p=b.policy,system=b.id===SYSTEM,busy=b.state==='deleting',locked=b.state==='locked';
    const disabled=system||busy?'disabled':'',changing=!!b.desired_policy;
-   return `<tr data-bucket="${b.id}"><td><div class="user-cell"><span class="bucket-avatar">▱</span><div><div class="volume-name"><button type="button" class="bucket-open" data-bucket-edit="${b.id}" ${disabled||changing?'disabled':''}>${escape(b.name)}</button>${system?'<span class="system-label">SYSTEM</span>':''}</div><div class="volume-path">${escape(b.id)}</div></div></div></td><td><span class="class-badge ${p.storage_strategy}">${p.storage_strategy.toUpperCase()}</span><div class="bucket-sub">${escape(groups.find(g=>g.id===p.placement_group)?.name??'PG')} · v${p.placement_mask_version??'—'}</div><div class="bucket-sub">${p.placement_mode==='everywhere'?'Jede Node':p.redundancy.replicas+' Kopie'+(p.redundancy.replicas===1?'':'n')}</div></td><td><span class="class-badge">${escape(p.compression.toUpperCase())}</span></td><td>${bucketUsage(b,escape)}</td><td data-bucket-throughput="${b.id}">${bucketThroughput(statsEntries(),b.id)}</td><td>${system?'Alle Admins':(b.grants??[]).length+' User'}</td><td><span class="state-badge ${busy?'draining':locked?'detached':''}"><i></i>${busy?'Wird gelöscht':changing?'Wird umgestellt · PG v'+(b.desired_policy.placement_mask_version??'—'):locked?'Gesperrt':'Aktiv'}</span></td><td><div class="row-actions bucket-actions"><button class="row-action" data-bucket-action="clone" data-id="${b.id}" ${disabled}>Kopieren</button><button class="row-action" data-bucket-action="rename" data-id="${b.id}" ${disabled}>Umbenennen</button><button class="row-action danger-action" data-bucket-action="delete" data-id="${b.id}" ${disabled}>Löschen</button></div></td></tr>`;
+   return `<tr data-bucket="${b.id}"><td><div class="user-cell"><span class="bucket-avatar">▱</span><div><div class="volume-name"><button type="button" class="bucket-open" data-bucket-edit="${b.id}" ${disabled||changing?'disabled':''}>${escape(b.name)}</button>${system?'<span class="system-label">SYSTEM</span>':''}</div><div class="volume-path">${escape(b.id)}</div></div></div></td><td><span class="class-badge ${p.storage_strategy}">${p.storage_strategy.toUpperCase()}</span><div class="bucket-sub">${escape(groups.find(g=>g.id===p.placement_group)?.name??'PG')} · v${p.placement_mask_version??'—'}</div><div class="bucket-sub">${p.placement_mode==='everywhere'?'Jede Node':p.redundancy.replicas+' Kopie'+(p.redundancy.replicas===1?'':'n')}</div></td><td><span class="class-badge">${escape(p.compression.toUpperCase())}</span></td><td>${bucketUsage(b,escape)}</td><td data-bucket-throughput="${b.id}">${bucketThroughput(statsEntries(),b.id)}</td><td>${system?'Alle Admins':(b.grants??[]).length+' User'}</td><td><span class="state-badge ${busy?'draining':locked?'detached':''}"><i></i>${busy?'Wird gelöscht':changing?'Wird umgestellt · PG v'+(b.desired_policy.placement_mask_version??'—'):locked?'Gesperrt':'Aktiv'}</span></td><td><div class="row-actions bucket-actions"><button class="row-action" data-bucket-action="disks" data-id="${b.id}" ${disabled||locked?'disabled':''}>Disks</button><button class="row-action" data-bucket-action="clone" data-id="${b.id}" ${disabled}>Kopieren</button><button class="row-action" data-bucket-action="rename" data-id="${b.id}" ${disabled}>Umbenennen</button><button class="row-action danger-action" data-bucket-action="delete" data-id="${b.id}" ${disabled}>Löschen</button></div></td></tr>`;
  }
  function bindRows(){
   for(const bar of $('bucket-rows').querySelectorAll('[data-percent]'))bar.style.width=bar.dataset.percent+'%';
@@ -203,6 +206,7 @@ export function setupBucketViews({connection,escape,toast,showView,statsEntries=
   finally{if(access===owner&&$('bucket-create-dialog').open)renderAccess()}
  }
  function openAction(id,kind){
+  if(kind==='disks'){const bucket=buckets.find(b=>b.id===id);if(bucket)disks.open(bucket);return}
   const b=buckets.find(b=>b.id===id);if(!b||b.id===SYSTEM||b.state==='deleting')return;action={bucket:b,kind};actionRetry=null;
   const locked=b.state==='locked',title=kind==='clone'?'Bucket kopieren':kind==='rename'?'Bucket umbenennen':kind==='delete'?'Bucket löschen':locked?'Bucket entsperren':'Bucket sperren';
   $('bucket-action-title').textContent=title;$('bucket-action-submit').textContent=title;$('bucket-action-submit').classList.toggle('danger-button',kind==='delete');$('bucket-action-description').textContent=`„${b.name}“`;$('bucket-action-error').textContent='';
@@ -216,6 +220,29 @@ export function setupBucketViews({connection,escape,toast,showView,statsEntries=
    $('bucket-action-dialog').close();toast(kind==='clone'?'Bucket wurde kopiert. Benutzerfreigaben können jetzt eingerichtet werden.':kind==='delete'?'Bucket wird gelöscht.':kind==='rename'?'Bucket wurde umbenannt.':b.state==='locked'?'Bucket wurde entsperrt.':'Bucket wurde gesperrt.');await load();
   }catch(err){$('bucket-action-error').textContent=kind==='clone'&&actionRetry.created?'Der Zielbucket ist angelegt. Kopieren erneut versuchen: '+err.message:err.message;if(kind==='clone'&&actionRetry.created)e.submitter.textContent='Kopieren erneut versuchen'}finally{e.submitter.disabled=false}
  });
+
+ function syncStats(snapshot){
+  const prior=seenStats.size;
+  for(const b of snapshot?.buckets??[]) {
+   if(b.id===SYSTEM)continue;
+   if(prior&&!seenStats.has(b.id))pendingCatalog.add(b.id);
+   seenStats.add(b.id);
+  }
+  if(!pager.more&&buckets.length)for(const id of seenStats)if(!buckets.some(b=>b.id===id)&&!checkedCatalog.has(id))pendingCatalog.add(id);
+  if(pendingCatalog.size&&!syncingCatalog)void fetchNewBuckets();
+ }
+ async function fetchNewBuckets(){
+  syncingCatalog=true;const seq=epoch,ids=[...pendingCatalog].slice(0,1000);for(const id of ids)pendingCatalog.delete(id);
+  try{
+   const page=await connection().listBucketsPage('',ids.length,$('bucket-search').value.trim(),ids);
+   if(seq!==epoch)return;for(const id of ids)checkedCatalog.add(id);
+   const byID=new Map(buckets.map(b=>[b.id,b])),last=buckets.at(-1)?.name;
+   for(const b of page.buckets)if(!pager.more||!last||b.name<=last)byID.set(b.id,b);
+   buckets=[...byID.values()].sort((a,b)=>a.name<b.name?-1:a.name>b.name?1:0);pager.items=buckets;
+   pageMeta.all_total=page.all_total;if(!$('bucket-search').value.trim())pageMeta.total=page.all_total;
+   pager.meta={...pager.meta,...pageMeta};render();pager.status();
+  }catch(e){if(seq===epoch)$('buckets-error').textContent=e.message}finally{syncingCatalog=false;if(pendingCatalog.size)void fetchNewBuckets()}
+ }
  function refreshThroughput(){for(const cell of $('bucket-rows').querySelectorAll('[data-bucket-throughput]'))cell.innerHTML=bucketThroughput(statsEntries(),cell.dataset.bucketThroughput)}
- return {load,openCreate,refreshThroughput,clear(){epoch++;clearTimeout(poll);clearTimeout(searchTimer);pager.clear();pageMeta={};userSearchEpoch++;clearTimeout(userSearchTimer);userChoices=[];buckets=[];users=[];render()}};
+ return {load,openCreate,refreshThroughput,syncStats,clear(){disks.clear();epoch++;seenStats.clear();checkedCatalog.clear();pendingCatalog.clear();clearTimeout(poll);clearTimeout(searchTimer);pager.clear();pageMeta={};userSearchEpoch++;clearTimeout(userSearchTimer);userChoices=[];buckets=[];users=[];render()}};
 }

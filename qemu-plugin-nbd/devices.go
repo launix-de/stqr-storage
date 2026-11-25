@@ -37,7 +37,8 @@ type Store interface {
 }
 
 // Metadata is the only per-device descriptor. No stripe/segment list is stored.
-// ID is a generation identifier so a recreated name never exposes older stripes.
+// ID is the disk identity, unchanged by writes or resize. Recreating a deleted
+// name creates a new disk identity so it cannot expose the old disk's stripes.
 type Metadata struct {
 	ID           client.ID `json:"id"`
 	Name         string    `json:"name"`
@@ -126,7 +127,7 @@ func (c *Catalog) CheckFormat(ctx context.Context) error {
 	return nil
 }
 func (c *Catalog) Create(ctx context.Context, m Metadata) (Metadata, error) {
-	// Each new name gets its own generation, including callers reusing Metadata.
+	// Each new disk gets its own identity, including callers reusing Metadata.
 	m.ID = client.NewRequestID()
 	if m.Manufacturer == "" {
 		m.Manufacturer = "STQR"
@@ -156,6 +157,48 @@ func (c *Catalog) Lookup(ctx context.Context, name string) (Metadata, error) {
 		return m, client.ErrProtocol
 	}
 	return m, e
+}
+
+// Resize grows a device without changing its generation or allocating stripes.
+// The caller must hold the bucket's writable block-maintenance lease. Existing
+// Metadata handles retain their previous bounds; look up the device again to
+// access the extension. Shrinking is deliberately rejected.
+// A failed Sync has an unknown durable outcome; retrying the same size is safe.
+func (c *Catalog) Resize(ctx context.Context, device Metadata, size uint64) (Metadata, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	raw, _, err := c.store.Get(ctx, MetadataID(device.Name))
+	if err != nil {
+		return Metadata{}, err
+	}
+	m, err := decodeMetadata(raw)
+	if err != nil {
+		return Metadata{}, err
+	}
+	if m.ID != device.ID || m.Name != device.Name {
+		return Metadata{}, client.ErrPrecondition
+	}
+	if size < m.Size {
+		return Metadata{}, client.ErrRange
+	}
+	oldSize := m.Size
+	m.Size = size
+	if err = m.validate(); err != nil {
+		return Metadata{}, err
+	}
+	if size != oldSize {
+		_, err = c.store.CAS(ctx, MetadataID(m.Name), 0, raw, encodeMetadata(m), client.CASOptions{
+			Scope:           client.CASObject,
+			MutationOptions: client.MutationOptions{RequestID: client.NewRequestID()},
+		})
+		if err != nil {
+			return Metadata{}, err
+		}
+	}
+	if err = c.store.Sync(ctx); err != nil {
+		return Metadata{}, err
+	}
+	return m, nil
 }
 func (c *Catalog) List(ctx context.Context) ([]Metadata, error) {
 	var out []Metadata
@@ -216,6 +259,23 @@ func (c *Catalog) ReadAt(ctx context.Context, m Metadata, dst []byte, off uint64
 			data, info, e = c.store.Get(ctx, id)
 		} else {
 			data, info, e = c.store.GetRange(ctx, id, at, n)
+			var status *client.StatusError
+			if errors.Is(e, client.ErrRange) || (errors.As(e, &status) && status.Status == 400) {
+				// Object ranges are bounded by payload length. Disk holes/tails are
+				// interpreted here, never by the storage server. No extra Stat is needed
+				// for ordinary reads within a populated stripe.
+				info, e = c.store.Stat(ctx, id)
+				if e == nil {
+					if info.Length > StripeSize {
+						return client.ErrProtocol
+					}
+					if at >= info.Length {
+						data = nil
+					} else {
+						data, info, e = c.store.GetRange(ctx, id, at, min(n, info.Length-at))
+					}
+				}
+			}
 		}
 		if e != nil && !errors.Is(e, client.ErrNotFound) {
 			return e
@@ -275,11 +335,15 @@ func (c *Catalog) Trim(ctx context.Context, m Metadata, off, length uint64) erro
 		if err != nil && !errors.Is(err, client.ErrNotFound) {
 			return err
 		}
-		if err == nil {
+		if err == nil && info.Length > 0 {
 			if at == 0 && n == StripeSize {
 				err = c.store.Delete(ctx, id, client.DeleteOptions{Accepted: true, RequestID: client.NewRequestID()})
 				if errors.Is(err, client.ErrNotFound) {
 					err = nil
+				} else if errors.Is(err, client.ErrUnauthorized) {
+					// WRITE permits replacing stripe payload, not native DELETE. Keep
+					// the representation decision here instead of a server device exception.
+					_, err = c.store.Put(ctx, id, nil, client.PutOptions{Accepted: true, RequestID: client.NewRequestID()})
 				}
 			} else if at < info.Length {
 				count := min(n, info.Length-at)

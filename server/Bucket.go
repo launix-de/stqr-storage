@@ -125,7 +125,7 @@ type Bucket struct {
 	usage       bucketUsage
 	description BucketDescription
 	server      *Server
-	maintenance *connectionAuthorization // exclusive, socket-scoped fsck owner
+	maintenance *connectionAuthorization // exclusive native object/inventory owner
 }
 
 func (b *Bucket) ID() volume.ID {

@@ -39,12 +39,60 @@ Credentials stay in the private exporter process; QEMU receives only the socket.
 Manufacturer/model/serial are metadata and NBD descriptions. Configure QEMU's
 guest-facing hardware properties separately when a guest needs a specific vendor.
 
+## Growing devices
+
+In the dashboard, open **Buckets → Disks** on the desired bucket. The device
+list shows each disk's virtual capacity and identity, supports search and loads
+additional pages while scrolling. **Vergrößern** opens the same size controls as
+the rest of the dashboard: unit input, a discrete slider, quick increments and a
+before/after preview. Readonly exporters have the action disabled.
+
+The dashboard also works when the exporter runs on another machine. An updated
+exporter registers a bounded native control handler on its original STQR lease
+socket; the cluster forwards the administrator's request to that owner. It does
+not open the private Unix socket remotely, release the lease or permit a second
+writer. Without an exporter, the dashboard acquires its own ordinary exclusive
+block lease for the operation. An old/unreachable lease owner remains fenced and
+produces an explicit error rather than being bypassed.
+
+Grow a device while its exporter is stopped, using the usual bucket credentials:
+
+```sh
+stqr-nbd --config /private/credentials.json --bucket vm-disks \
+  --size 68719476736 resize system
+```
+
+With an exporter running, send the request to that process instead. It keeps its
+existing exclusive cluster lease and uses no additional STQR connection:
+
+```sh
+stqr-nbd --socket /private/vm-disks.sock --size 68719476736 resize system
+```
+
+The exporter creates `/private/vm-disks.sock.control`, a Unix control socket with
+mode 0600. Keep both sockets in a private directory. Readonly exporters reject
+resize requests. A stale socket is an error; the command never falls back to a
+second connection or removes another process's socket.
+
+Sizes are absolute bytes, positive multiples of 512, at most `2^63-1`. Only
+growth is supported. Resize atomically compares/replaces the existing descriptor
+and flushes it before success. Device generation, serial, existing stripe IDs and
+data remain unchanged; the extension stays sparse and reads as zeros. No disk
+format change or stripe rewrite is involved. After a lost response or flush
+error, inspect the size or retry the same size; the retry flushes again.
+
+An established NBD connection retains its negotiated size. Reconnect the NBD
+client to discover the extension; this does not restart the exporter or affect
+other disks. This does not resize an attached guest's partition/filesystem or
+provide automatic live capacity notifications to QEMU/the Linux NBD client.
+
 ## Storage format
 
 Each device has exactly one binary metadata object: `STNBD001`, version u16=1,
 stripe size u32=1048576, virtual byte size u64, generation ID (16 bytes), followed
 by native Text fields for name, manufacturer, model and serial. Integers are
-big endian. Device sizes must be positive multiples of 512 bytes.
+little endian, as in the shared native codec. Device sizes must be positive
+multiples of 512 bytes.
 
 Metadata addresses have eight zero bytes followed by the first 24 bytes of
 SHA-256(`"STQR NBD metadata v1\0" + name`). A sorted object scan lists descriptors
@@ -69,7 +117,7 @@ Writes use native accepted operations. NBD FLUSH, FUA and clean disconnect use
 explicit bucket Sync barriers. Ordinary writes need a later FLUSH/FUA for durable
 completion; force-killing an exporter does not substitute for a flush.
 
-One exporter holds a socket-scoped exclusive block lease (`0x011c`), with
+One exporter holds a socket-scoped generic exclusive object lease (`0x011c`), with
 READ+WRITE or READ-only authorization. It admits one writer per named device;
 different devices run concurrently on the shared connection. Multiple readonly
 connections are supported by a readonly exporter. The NBD multi-connection flag
@@ -84,7 +132,7 @@ lease grant. The original owning socket remains pinned; losing it stops the SDK
 from continuing and triggers orphan cleanup. A passive participant restart keeps
 the fence. A network timeout alone never releases ownership.
 
-Internal range migration remains available while a native block lease is held.
+Internal range migration remains available while a generic object lease is held.
 Local capacity exhaustion immediately wakes the range worker; the native client
 waits through retryable responses and continues the same request after handoff.
 Placement classes/groups still apply, and genuine cluster exhaustion returns a
@@ -93,26 +141,30 @@ their placement fence so an offline inventory cannot change underneath them.
 
 Writable exports advertise NBD TRIM. Enable `discard=unmap` on QEMU's NBD block
 node (the networkboot builder does this automatically), then run `fstrim` inside
-the guest. A discarded complete 1-MiB stripe is deleted as a native object,
-returning its payload allocation to STQR. Partial stripes are zeroed through
+the guest. With DELETE permission a discarded complete 1-MiB stripe is deleted
+as a native object. With WRITE permission alone, the client replaces its payload
+with an empty object instead; its small object header remains. Both forms release
+the stripe payload allocation. Partial stripes are zeroed through
 PUT_RANGE; adjacent data survives. Missing stripes and sparse tails remain
 unallocated. Repeated partial discards do not accumulate a bitmap: only a single
 request covering a complete stripe deletes that stripe. FLUSH/FUA also persist
 discard operations. Readonly exports reject TRIM.
 
-Native READ+WRITE block grants cover deleting stripes during an exclusive RW
-lease. Ordinary object DELETE still requires its separate DELETE grant. TRIM
+Exclusive object leases preserve the ordinary per-operation grants. Native
+DELETE always requires DELETE permission; the WRITE-only fallback belongs to the
+NBD client, and the server never recognizes disk/stripe metadata. TRIM
 releases space inside STQR volumes; it does not shrink the configured volume file
 or promise a physical SSD discard through the host storage stack. WRITE_ZEROES,
-online resize and structured allocation-status replies remain unimplemented.
+automatic live NBD capacity notifications and structured allocation-status replies
+remain unimplemented.
 
 Clean close sends `BUCKET_MAINTENANCE_END` (`0x011d`) before disconnecting.
 Journal epochs, monotonically increasing sequences and fresh server-generated
 bearer tokens reject delayed prepares/releases and stale auxiliary connections.
 Handoffs of this bucket and ordinary membership changes are blocked while leased;
 unrelated bucket operations remain available. All nodes and the exporter must
-use the upgraded protocol. Device resize, discard/trim, write-zeroes and snapshots
-remain unimplemented.
+use the upgraded protocol. Device shrinking, write-zeroes and snapshots remain
+unimplemented.
 
 The older filesystem-backed disk format is rejected rather than reformatted.
 Export old disks with the previous version and copy into a fresh striped bucket.
@@ -130,3 +182,11 @@ legacy ioctl path for compatibility.
 Run `make -C qemu-plugin-nbd check` for range/sparse/format/NBD tests. The real
 STQR/QEMU integration is `STQR_TEST_NETWORKBOOT=1 go test ./server -run
 '^TestNetworkbootNBDWithQEMU$' -count=1` after `make -C networkboot`.
+
+The dashboard is another client of this format. A connected exporter handles
+opaque management requests on its original lease socket. Without an exporter,
+the browser lists ordinary native objects, reads descriptors and conditionally
+changes their eight-byte size field with ranged CAS. Each CAS compares the old
+descriptor bytes under the volume lock; there are no object content versions.
+A concurrently acquired exclusive lease rejects the offline object request.
+The server never opens a disk catalog or decodes a descriptor for administration.

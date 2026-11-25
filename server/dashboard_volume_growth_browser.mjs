@@ -25,7 +25,7 @@ try{
  if(await size.inputValue()!=='8M')throw Error('Reloaded capacity stale');
  await page.setViewportSize({width:390,height:844});if(await dialog.evaluate(el=>el.getBoundingClientRect().width>innerWidth))throw Error('Growth dialog overflows mobile viewport');
  await dialog.locator('[data-grow-close]').first().click();
- await page.locator('[data-view="buckets"]').click();if(await page.locator('[data-bucket-action="disks"]').count())throw Error('Virtual disk management survived rollback');
+ await page.locator('[data-view="buckets"]').click();await page.locator('#bucket-rows tr').filter({hasText:'storage-growth-data'}).locator('[data-bucket-action="disks"]').waitFor();
  // Exercise the physical-device UI without requiring a privileged loop device.
  await page.evaluate(async()=>{
   const {setupVolumeGrowth}=await import('/assets/volume-growth.js');window.rawCalls=[];
@@ -38,5 +38,5 @@ try{
  const raw=await page.evaluate(()=>({calls:window.rawCalls,refreshed:window.refreshedRaw}));
  if(raw.calls.length!==1||raw.calls[0].id!=='physical-volume'||raw.calls[0].target!=='owner-node'||raw.calls[0].size!=='0'||raw.refreshed!=='owner-node')throw Error('Pending physical resize switched node/volume or sent a partial device size');
  if(errors.length)throw Error(errors.join('\n'));
- console.log('Real remote storage-file and RAM growth, bounds, slider, presets, capacity refresh, mobile dialog and NBD UI rollback passed.');
+ console.log('Real remote storage-file and RAM growth, bounds, slider, presets, capacity refresh, mobile dialog and preserved client-side disk UI passed.');
 }finally{await browser.close()}

@@ -18,7 +18,7 @@ type connectionAuthorization struct {
 	lease                      atomic.Pointer[bucketLease]
 	leaseOwner                 atomic.Bool
 	admin, clusterPeer         bool
-	blockDevice, blockReadOnly atomic.Bool
+	objectLease, leaseReadOnly atomic.Bool
 	offlineCopy                bool // private offline clear/clone owner; never accepted from wire
 	accountID                  string
 	accountRevision            [32]byte
@@ -127,8 +127,8 @@ func (s *Server) authorizeConnection(r *http.Request, p principal) (*connectionA
 				return nil, p, ErrBucketForbidden
 			}
 			auth.lease.Store(l)
-			auth.blockDevice.Store(l.Block)
-			auth.blockReadOnly.Store(l.ReadOnly)
+			auth.objectLease.Store(l.ObjectIO)
+			auth.leaseReadOnly.Store(l.ReadOnly)
 		}
 		if b.underMaintenance() && !b.leaseAllows(auth) {
 			return nil, p, fail(409, "bucket is under exclusive maintenance")
