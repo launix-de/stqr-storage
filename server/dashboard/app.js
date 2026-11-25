@@ -55,7 +55,7 @@ const recoveryView=setupRecovery({connection:()=>node,config:()=>configView,stat
 const forceView=setupForceDisconnect({connection:()=>node,config:()=>configView,states:nodeStates,toast,newID,refresh:()=>refreshConfig()});
 $('add-error').insertAdjacentHTML('beforebegin','<section id="volume-pg-selection" class="bucket-form-section"></section>');
 const pgViews=setupPlacementGroups({connection:()=>node,escape,toast,states:nodeStates});
-const bucketViews=setupBucketViews({connection:()=>node,escape,toast,showView,statsEntries:()=>currentSnapshots(configView,nodeStates)});
+const bucketViews=setupBucketViews({onUsersChanged:()=>userViews.load(true),connection:()=>node,escape,toast,showView,statsEntries:()=>currentSnapshots(configView,nodeStates)});
 const userViews=setupUserViews({connection:()=>node,currentUsername:()=>$('profile-name').textContent,escape,toast,showView,requireLogin,openBucketCreate:options=>bucketViews.openCreate(options),onUserDeleted:()=>bucketViews.load(),statsEntries:()=>currentSnapshots(configView,nodeStates)});
 
 const joinView=setupClusterJoin({connection:()=>node,onJoined:beginSession});

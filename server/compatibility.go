@@ -348,6 +348,7 @@ func currentOperationSemantics() map[string]operationSemantics {
 	for _, op := range []uint16{client.PeerControlReserve, client.PeerControlPrepare, client.PeerControlCommit, client.PeerControlApply, client.PeerControlRelease, client.PeerControlAbort} {
 		result[fmt.Sprintf("%04x", op)] = operationSemantics{Emit: 3, Min: 3, Max: 3}
 	}
+	result[fmt.Sprintf("%04x", client.BucketDelete)] = operationSemantics{Emit: 3, Min: 2, Max: 3}
 	result[fmt.Sprintf("%04x", peerBucketLease)] = operationSemantics{Emit: 3, Min: 3, Max: 3}
 	result[fmt.Sprintf("%04x", peerCowCapture)] = operationSemantics{Emit: 2, Min: 2, Max: 2}
 	for _, op := range []uint16{peerForceReplicaState, clusterJoinStatus, clusterJoinInfo, clusterJoinPrepare} {

@@ -23,7 +23,7 @@ function bucketUsage(b,escape){
  return html;
 }
 const permissions=[[1,'Lesen'],[2,'Schreiben'],[4,'Anhängen'],[8,'Löschen']];
-export function setupBucketViews({connection,escape,toast,showView,statsEntries=()=>[]}){
+export function setupBucketViews({connection,escape,toast,showView,onUsersChanged=()=>{},statsEntries=()=>[]}){
  const seenStats=new Set(),checkedCatalog=new Set(),pendingCatalog=new Set();let syncingCatalog=false;
  const disks=setupBlockDevices({connection,escape,toast});
  let groups=[],buckets=[],users=[],epoch=0,poll,editor,createProgress,access,grantRetry,action,actionRetry,editorPending=false;
@@ -32,6 +32,7 @@ export function setupBucketViews({connection,escape,toast,showView,statsEntries=
  async function fetchGroups(){const out=[];let after='';const seen=new Set;for(;;){const page=await connection().listPlacementGroups(after);out.push(...page.groups);if(!page.next)return out;if(seen.has(page.next))throw Error('Ungültige PG-Folgeseite.');seen.add(page.next);after=page.next}}
  function applyGroup(){const g=groups.find(g=>g.id===$('bucket-pg').value);if(!g)return;const p=(g.desired??g.effective).storage;$('bucket-storage').value=p.storage_strategy;$('bucket-compression').value=p.compression;$('bucket-placement').value=p.placement_mode;$('bucket-replicas').value=p.redundancy.replicas||1;updateFields()}
  $('bucket-pg').onchange=()=>{applyGroup();refreshQuota()};
+ const deletionJobs=new Map();
  const pager=new EndlessList({container:$('bucket-rows').closest('.storage-panel'),visible:()=>!$('buckets-view').hidden,fetchPage:(after,limit,query)=>connection().listBucketsPage(after,limit,query),entries:page=>page.buckets,onUpdate:(items,state)=>{buckets=items;pageMeta=state.meta;render(state);schedulePoll();syncStats()},onError:e=>{$('buckets-error').textContent=e.message},onLoading:busy=>{$('refresh-buckets').disabled=busy}});
  async function load(){checkedCatalog.clear();const seq=++epoch;clearTimeout(poll);$('buckets-error').textContent='';try{groups=await fetchGroups();if(seq!==epoch)return;await pager.reset($('bucket-search').value.trim())}catch(e){if(seq===epoch)$('buckets-error').textContent=e.message}}
  function schedulePoll(){clearTimeout(poll);if(!$('buckets-view').hidden&&buckets.some(b=>!b.policy.limits.absolute_unlimited||BigInt(b.policy.limits.guaranteed_quota_bytes)>0n||b.desired_policy||b.state==='deleting'))poll=setTimeout(refreshVisible,3000)}
@@ -57,9 +58,9 @@ export function setupBucketViews({connection,escape,toast,showView,statsEntries=
   }bindRows();
  }
  function rowHTML(b){
-   const p=b.policy,system=b.id===SYSTEM,busy=b.state==='deleting',locked=b.state==='locked';
+   const p=b.policy,system=b.id===SYSTEM,job=deletionJobs.get(b.id),pending=job?.state==='pending',failed=job?.state==='failed',busy=b.state==='deleting'||pending,locked=b.state==='locked';
    const disabled=system||busy?'disabled':'',changing=!!b.desired_policy;
-   return `<tr data-bucket="${b.id}"><td><div class="user-cell"><span class="bucket-avatar">▱</span><div><div class="volume-name"><button type="button" class="bucket-open" data-bucket-edit="${b.id}" ${disabled||changing?'disabled':''}>${escape(b.name)}</button>${system?'<span class="system-label">SYSTEM</span>':''}</div><div class="volume-path">${escape(b.id)}</div></div></div></td><td><span class="class-badge ${p.storage_strategy}">${p.storage_strategy.toUpperCase()}</span><div class="bucket-sub">${escape(groups.find(g=>g.id===p.placement_group)?.name??'PG')} · v${p.placement_mask_version??'—'}</div><div class="bucket-sub">${p.placement_mode==='everywhere'?'Jede Node':p.redundancy.replicas+' Kopie'+(p.redundancy.replicas===1?'':'n')}</div></td><td><span class="class-badge">${escape(p.compression.toUpperCase())}</span></td><td>${bucketUsage(b,escape)}</td><td data-bucket-throughput="${b.id}">${bucketThroughput(statsEntries(),b.id)}</td><td>${system?'Alle Admins':(b.grants??[]).length+' User'}</td><td><span class="state-badge ${busy?'draining':locked?'detached':''}"><i></i>${busy?'Wird gelöscht':changing?'Wird umgestellt · PG v'+(b.desired_policy.placement_mask_version??'—'):locked?'Gesperrt':'Aktiv'}</span></td><td><div class="row-actions bucket-actions"><button class="row-action" data-bucket-action="disks" data-id="${b.id}" ${disabled||locked?'disabled':''}>Disks</button><button class="row-action" data-bucket-action="clone" data-id="${b.id}" ${disabled}>Kopieren</button><button class="row-action" data-bucket-action="rename" data-id="${b.id}" ${disabled}>Umbenennen</button><button class="row-action danger-action" data-bucket-action="delete" data-id="${b.id}" ${disabled}>Löschen</button></div></td></tr>`;
+   return `<tr data-bucket="${b.id}"><td><div class="user-cell"><span class="bucket-avatar">▱</span><div><div class="volume-name"><button type="button" class="bucket-open" data-bucket-edit="${b.id}" ${disabled||changing?'disabled':''}>${escape(b.name)}</button>${system?'<span class="system-label">SYSTEM</span>':''}</div><div class="volume-path">${escape(b.id)}</div></div></div></td><td><span class="class-badge ${p.storage_strategy}">${p.storage_strategy.toUpperCase()}</span><div class="bucket-sub">${escape(groups.find(g=>g.id===p.placement_group)?.name??'PG')} · v${p.placement_mask_version??'—'}</div><div class="bucket-sub">${p.placement_mode==='everywhere'?'Jede Node':p.redundancy.replicas+' Kopie'+(p.redundancy.replicas===1?'':'n')}</div></td><td><span class="class-badge">${escape(p.compression.toUpperCase())}</span></td><td>${bucketUsage(b,escape)}</td><td data-bucket-throughput="${b.id}">${bucketThroughput(statsEntries(),b.id)}</td><td>${system?'Alle Admins':(b.grants??[]).length+' User'}</td><td><span class="state-badge ${failed?'failed':busy?'draining':locked?'detached':''}"><i></i>${pending?'Löschung ausstehend':failed?'Löschung fehlgeschlagen':busy?'Wird gelöscht':changing?'Wird umgestellt · PG v'+(b.desired_policy.placement_mask_version??'—'):locked?'Gesperrt':'Aktiv'}</span>${failed?'<div class="error deletion-error">'+escape(job.error)+'</div>':''}</td><td><div class="row-actions bucket-actions"><button class="row-action" data-bucket-action="disks" data-id="${b.id}" ${disabled||locked?'disabled':''}>Disks</button><button class="row-action" data-bucket-action="clone" data-id="${b.id}" ${disabled}>Kopieren</button><button class="row-action" data-bucket-action="rename" data-id="${b.id}" ${disabled}>Umbenennen</button><button class="row-action danger-action" data-bucket-action="delete" data-id="${b.id}" ${disabled}>${failed?'Erneut versuchen':'Löschen'}</button></div></td></tr>`;
  }
  function bindRows(){
   for(const bar of $('bucket-rows').querySelectorAll('[data-percent]'))bar.style.width=bar.dataset.percent+'%';
@@ -207,17 +208,25 @@ export function setupBucketViews({connection,escape,toast,showView,statsEntries=
  }
  function openAction(id,kind){
   if(kind==='disks'){const bucket=buckets.find(b=>b.id===id);if(bucket)disks.open(bucket);return}
-  const b=buckets.find(b=>b.id===id);if(!b||b.id===SYSTEM||b.state==='deleting')return;action={bucket:b,kind};actionRetry=null;
+  const b=buckets.find(b=>b.id===id);if(!b||b.id===SYSTEM||b.state==='deleting'||deletionJobs.get(b.id)?.state==='pending')return;action={bucket:b,kind};actionRetry=kind==='delete'?deletionJobs.get(b.id)??null:null;
   const locked=b.state==='locked',title=kind==='clone'?'Bucket kopieren':kind==='rename'?'Bucket umbenennen':kind==='delete'?'Bucket löschen':locked?'Bucket entsperren':'Bucket sperren';
   $('bucket-action-title').textContent=title;$('bucket-action-submit').textContent=title;$('bucket-action-submit').classList.toggle('danger-button',kind==='delete');$('bucket-action-description').textContent=`„${b.name}“`;$('bucket-action-error').textContent='';
+  $('bucket-delete-users-option').hidden=kind!=='delete';$('bucket-delete-users').checked=actionRetry?.deleteUsers??true;
   $('bucket-rename-field').hidden=!['rename','clone'].includes(kind);$('bucket-new-name').required=['rename','clone'].includes(kind);$('bucket-new-name').disabled=false;$('bucket-new-name').value=kind==='clone'?b.name+'-copy':b.name;
   $('bucket-action-note').hidden=kind==='rename';$('bucket-action-note').textContent=kind==='clone'?'Erstellt einen neuen Bucket mit denselben Speichereinstellungen. Benutzerfreigaben werden separat vergeben.':kind==='delete'?'Der Bucket und alle darin gespeicherten Objekte werden gelöscht.':locked?'Schreibzugriffe werden wieder freigegeben.':'Objekte bleiben lesbar. Schreibzugriffe werden gesperrt.';$('bucket-action-dialog').showModal();
  }
  $('bucket-action-form').addEventListener('submit',async e=>{
   e.preventDefault();e.submitter.disabled=true;$('bucket-action-error').textContent='';
-  const {bucket:b,kind}=action,name=$('bucket-new-name').value,signature=`${b.id}:${kind}:${['rename','clone'].includes(kind)?name:b.state}`;if(actionRetry?.signature!==signature)actionRetry={signature,id:newID(),createID:newID(),destination:newID(),created:false};
-  try{if(kind==='clone'){if(!actionRetry.created){const destination={...b,id:actionRetry.destination,name,state:'active',policy:structuredClone(b.policy),grants:[]};await connection().createBucket(destination,actionRetry.createID);actionRetry.created=true;$('bucket-new-name').disabled=true}await connection().cloneBucket(b.id,actionRetry.destination,actionRetry.id)}else if(kind==='rename')await connection().renameBucket(b.id,name,actionRetry.id);else if(kind==='delete')await connection().deleteBucket(b.id,actionRetry.id);else await connection().lockBucket(b.id,b.state!=='locked',actionRetry.id);
-   $('bucket-action-dialog').close();toast(kind==='clone'?'Bucket wurde kopiert. Benutzerfreigaben können jetzt eingerichtet werden.':kind==='delete'?'Bucket wird gelöscht.':kind==='rename'?'Bucket wurde umbenannt.':b.state==='locked'?'Bucket wurde entsperrt.':'Bucket wurde gesperrt.');await load();
+  const {bucket:b,kind}=action,name=$('bucket-new-name').value,deleteUsers=$('bucket-delete-users').checked,signature=JSON.stringify([b.id,kind,['rename','clone'].includes(kind)?name:kind==='delete'?deleteUsers:b.state]);if(actionRetry?.signature!==signature)actionRetry={signature,id:newID(),createID:newID(),destination:newID(),created:false};
+  if(kind==='delete'){
+   if(deletionJobs.get(b.id)?.state==='pending'){e.submitter.disabled=false;return}
+   const owner=connection(),job={...actionRetry,deleteUsers,state:'pending'};deletionJobs.set(b.id,job);
+   $('bucket-action-dialog').close();e.submitter.disabled=false;render();
+   try{await owner.deleteBucket(b.id,job.id,deleteUsers)}catch(err){if(connection()!==owner)return;if(err.status!==404){job.state='failed';job.error=err.message;render();toast(`Bucket „${b.name}“ konnte nicht gelöscht werden: ${err.message}`,true);return}}
+   if(connection()!==owner)return;deletionJobs.delete(b.id);toast('Bucket wird gelöscht.');await Promise.allSettled([load(),onUsersChanged()]);return;
+  }
+  try{if(kind==='clone'){if(!actionRetry.created){const destination={...b,id:actionRetry.destination,name,state:'active',policy:structuredClone(b.policy),grants:[]};await connection().createBucket(destination,actionRetry.createID);actionRetry.created=true;$('bucket-new-name').disabled=true}await connection().cloneBucket(b.id,actionRetry.destination,actionRetry.id)}else if(kind==='rename')await connection().renameBucket(b.id,name,actionRetry.id);else await connection().lockBucket(b.id,b.state!=='locked',actionRetry.id);
+   $('bucket-action-dialog').close();toast(kind==='clone'?'Bucket wurde kopiert. Benutzerfreigaben können jetzt eingerichtet werden.':kind==='rename'?'Bucket wurde umbenannt.':b.state==='locked'?'Bucket wurde entsperrt.':'Bucket wurde gesperrt.');await load();
   }catch(err){$('bucket-action-error').textContent=kind==='clone'&&actionRetry.created?'Der Zielbucket ist angelegt. Kopieren erneut versuchen: '+err.message:err.message;if(kind==='clone'&&actionRetry.created)e.submitter.textContent='Kopieren erneut versuchen'}finally{e.submitter.disabled=false}
  });
 
@@ -244,5 +253,5 @@ export function setupBucketViews({connection,escape,toast,showView,statsEntries=
   }catch(e){if(seq===epoch)$('buckets-error').textContent=e.message}finally{syncingCatalog=false;if(pendingCatalog.size)void fetchNewBuckets()}
  }
  function refreshThroughput(){for(const cell of $('bucket-rows').querySelectorAll('[data-bucket-throughput]'))cell.innerHTML=bucketThroughput(statsEntries(),cell.dataset.bucketThroughput)}
- return {load,openCreate,refreshThroughput,syncStats,clear(){disks.clear();epoch++;seenStats.clear();checkedCatalog.clear();pendingCatalog.clear();clearTimeout(poll);clearTimeout(searchTimer);pager.clear();pageMeta={};userSearchEpoch++;clearTimeout(userSearchTimer);userChoices=[];buckets=[];users=[];render()}};
+ return {load,openCreate,refreshThroughput,syncStats,clear(){deletionJobs.clear();disks.clear();epoch++;seenStats.clear();checkedCatalog.clear();pendingCatalog.clear();clearTimeout(poll);clearTimeout(searchTimer);pager.clear();pageMeta={};userSearchEpoch++;clearTimeout(userSearchTimer);userChoices=[];buckets=[];users=[];render()}};
 }
