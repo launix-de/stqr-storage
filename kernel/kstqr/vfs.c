@@ -1116,7 +1116,9 @@ void ks_queue_invalidation(struct ks_fs *f, const stqr_object_id *id)
 	} else if (!f->invalidate_all)
 		f->invalidations[f->invalidation_count++] = *id;
 	spin_unlock(&f->inode_lock);
-	schedule_work(&f->invalidation_work);
+	/* Cache-pressure invalidation can scan many inodes and wait for folios.
+	 * Keep it off the CPU-bound shared queue used by unrelated kernel work. */
+	queue_work(system_unbound_wq, &f->invalidation_work);
 }
 static void ks_invalidate_one(struct inode *i)
 {
