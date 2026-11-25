@@ -595,7 +595,8 @@ budget but must still fit the target. This bounds copying before a waiting write
 can resume without repeatedly moving empty hash leaves.
 
 Finite logical quotas now use durable per-node growth credits. Grant requests
-obtain reusable budgets of at least 4 MiB where the donor has unused credits;
+obtain reusable budgets up to 4 MiB where the donor has unused credits, scaled
+down for small quotas shared across members;
 the donor caps every grant at that unused allowance. This amortizes durable
 credit exchanges without increasing the bucket's hard quota. Credit transfers
 flush the donor debit before transmission, then flush the recipient credit before

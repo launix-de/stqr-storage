@@ -288,7 +288,7 @@ func TestDaemonQuotaNewOwnerReceivesReusableBlockBudget(t *testing.T) {
 	target.node.opMu.Lock()
 	allowance, err := target.node.quotaAllowance(client.ID(draft.ID()))
 	target.node.opMu.Unlock()
-	if err != nil || allowance < 4<<20 || allowance > draft.description.Policy.Limits.Absolute {
+	if err != nil || allowance < 1<<20 || allowance > draft.description.Policy.Limits.Absolute {
 		t.Fatal("new owner lacks reusable block credits", allowance, err)
 	}
 	source.node.opMu.Lock()

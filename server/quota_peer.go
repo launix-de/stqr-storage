@@ -270,7 +270,10 @@ func (s *Server) fulfillQuotaDemand(h quotaDemand) {
 		// blocks. A 64-KiB budget throttles a new owner to one small write per
 		// worker/ledger round trip after a handoff. The donor still caps this
 		// request at its unused allowance, preserving the global hard quota.
-		asked := max(needed, uint64(4<<20))
+		// Small quotas shared by replica owners need smaller reusable shares:
+		// do not drain the donor's entire remaining budget after one write.
+		reusable := min(uint64(4<<20), max(uint64(64<<10), a.Limit/uint64(4*len(view.manifest.Membership.Members))))
+		asked := max(needed, reusable)
 		e.U64(asked)
 		ctx, cancel := context.WithTimeout(s.ctx, 3*time.Second)
 		body, err := (peerControlParticipants{runtime: s.control}).call(ctx, member.ID, peerQuotaRequest, e.B)
