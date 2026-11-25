@@ -104,15 +104,20 @@ func (r *rangeManager) pressurePlan(hint rangePressure) (rangePlan, bool) {
 		if destination.free < hint.needed {
 			continue
 		}
+		// Capacity pressure blocks the foreground writer. An otherwise huge
+		// destination must not make that writer wait for a whole bucket copy.
+		// Reclaim a useful bounded batch; one indivisible object may exceed
+		// this soft bound, but must still fit the destination's hard capacity.
+		budget := min(destination.free-hint.needed, max(hint.needed, uint64(4<<20)))
 		moving := old
 		cost, count, err := costOf(moving, nil)
 		if err != nil {
 			continue
 		}
 		// Keep updates to existing objects narrow. For new objects, move the
-		// largest containing range that fits: repeatedly isolating empty leaves
+		// largest containing range within the batch budget: isolating empty leaves
 		// never frees the full source and creates a handoff for every new ID.
-		for moving.PrefixBits < 256 && count > 0 && !(existing && count == 1) && (existing || cost > destination.free-hint.needed) {
+		for moving.PrefixBits < 256 && count > 0 && !(existing && count == 1) && (existing || cost > budget) && (count > 1 || cost > destination.free-hint.needed) {
 			left, right, e := client.SplitRange(moving)
 			if e != nil {
 				break

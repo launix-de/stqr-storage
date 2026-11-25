@@ -92,7 +92,10 @@ per-local-user STQR login.
 
 The kernel socket adapter supports numeric IPv4/IPv6 endpoints in the host network
 namespace. The helper resolves hostnames at mount time; reconnect uses that same
-resolved address. Object operations follow validated range-owner redirects;
+resolved address. Socket allocation and connect run in a kernel worker, so a
+service's cgroup IP filter cannot capture a shared storage connection during a
+redirect/reconnect. The service's own sockets remain filtered. Object operations
+follow validated range-owner redirects;
 cluster nodes must advertise numeric addresses usable by the kernel. Before a
 serial RPC connection changes owner, it synchronizes accepted writes to its old
 node. Each RPC slot and the subscription connection has its own durability

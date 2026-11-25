@@ -84,6 +84,7 @@ func TestKSTQRVirtualMachine(t *testing.T) {
 	copyFile(module, "kstqr.ko", 0600)
 	run("cc", "-static", "-std=c11", "-Wall", "-Wextra", "-Werror", "-O2", "-o", filepath.Join(initrdRoot, "mount.kstqr"), filepath.Join(root, "mount.c"))
 	run("cc", "-static", "-std=c11", "-Wall", "-Wextra", "-Werror", "-O2", "-o", filepath.Join(initrdRoot, "smoke"), filepath.Join(root, "tests/smoke.c"))
+	run("cc", "-static", "-std=c11", "-Wall", "-Wextra", "-Werror", "-O2", "-o", filepath.Join(initrdRoot, "sandbox"), filepath.Join(root, "tests/sandbox.c"))
 	run("cc", "-static", "-std=c11", "-Wall", "-Wextra", "-Werror", "-O2", "-o", filepath.Join(initrdRoot, "coherence"), filepath.Join(root, "tests/coherence.c"))
 	run("cc", "-static", "-std=c11", "-Wall", "-Wextra", "-Werror", "-O2", "-o", filepath.Join(initrdRoot, "cache-capacity"), filepath.Join(root, "tests/cache_capacity.c"))
 	run("cc", "-static", "-std=c11", "-Wall", "-Wextra", "-Werror", "-O2", "-o", filepath.Join(initrdRoot, "throughput"), filepath.Join(root, "tests/throughput.c"))
@@ -173,12 +174,14 @@ func TestKSTQRVirtualMachine(t *testing.T) {
 				path := v.Name()
 				h, err := v.Open(false)
 				if err != nil {
+					t.Logf("checkpoint handler %s failed: %v", r.URL.Path, err)
 					http.Error(w, err.Error(), 500)
 					return
 				}
 				data, err := os.ReadFile(path)
 				h.Close()
 				if err != nil {
+					t.Logf("checkpoint handler %s failed: %v", r.URL.Path, err)
 					http.Error(w, err.Error(), 500)
 					return
 				}
@@ -195,6 +198,7 @@ func TestKSTQRVirtualMachine(t *testing.T) {
 				return
 			}
 			if err := s.Close(); err != nil {
+				t.Logf("checkpoint handler %s failed: %v", r.URL.Path, err)
 				http.Error(w, err.Error(), 500)
 				return
 			}
@@ -203,12 +207,14 @@ func TestKSTQRVirtualMachine(t *testing.T) {
 			// recovery. Only this test's closed, disposable data files are touched.
 			for path, data := range checkpointImages {
 				if err := os.WriteFile(path, data, 0600); err != nil {
+					t.Logf("checkpoint handler %s failed: %v", r.URL.Path, err)
 					http.Error(w, err.Error(), 500)
 					return
 				}
 			}
 			restarted, err := openTransportTestNode(Options{ConfigPath: s.configPath})
 			if err != nil {
+				t.Logf("checkpoint handler %s failed: %v", r.URL.Path, err)
 				http.Error(w, err.Error(), 500)
 				return
 			}
@@ -476,6 +482,7 @@ umount /fresh
 /mount.kstqr --uri @@URL@@ --bucket @@BUCKET@@ --credentials /readonly-credentials --readonly --metadata-cache-bytes 0 /fresh
 test "$(cat /fresh/go.txt)" = 'Hello from Go'
 umount /fresh
+/sandbox @@URL@@ @@BUCKET@@
 cat /proc/self/mountstats
 /crash-reconnect @@URL@@
 ls -l /mnt

@@ -211,8 +211,28 @@ func (c *clusterController) patches(membership client.Membership, descriptions [
 		}
 		if patch.Bucket == (client.ID{}) {
 			patch = client.MapPatch{Bucket: client.ID(id), ToEnd: true, Entries: []client.RangeEntry{{PolicyVersion: description.Policy.Version, OwnerEpoch: 1, Locations: []client.Location{{Node: c.coordinator.ledger.node, Class: uint8(bucketClass(description.Policy))}}}}}
-			if c.server.scopes != nil && description.Policy.Redundancy.Mode == "replication" {
+			if c.server.scopes != nil {
 				destinations, _ := c.server.scopes.destinations(description)
+				// A new empty bucket need not enter an already pressured volume
+				// only to block its first writes on a capacity handoff. Keep the
+				// ordinary coordinator placement when it has healthy headroom.
+				if description.Policy.StorageStrategy != "ram" && c.server.requiredReplicas(description.Policy, membership) == 1 {
+					foundLocal, healthyLocal := false, false
+					for _, target := range destinations {
+						if target.node == c.coordinator.ledger.node {
+							foundLocal = true
+							healthyLocal = healthyLocal || target.free >= min(target.capacity/10, uint64(4<<20))
+						}
+					}
+					if foundLocal && !healthyLocal {
+						for _, target := range destinations {
+							if target.free >= min(target.capacity/10, uint64(4<<20)) && hasControlNode(membershipIDs(membership), target.node) {
+								patch.Entries[0].Locations = []client.Location{{Node: target.node, Volume: target.volume.ID, Class: target.volume.Class}}
+								break
+							}
+						}
+					}
+				}
 				need := c.server.requiredReplicas(description.Policy, membership)
 				var copies []client.Location
 				seen := map[client.ID]bool{}
