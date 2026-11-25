@@ -16,15 +16,30 @@ func TestTicket32FilesystemPhysicalReclamation(t *testing.T) {
 	s := testServer(t)
 	addTestVolume(t, s, "filesystem-reclamation", "hdd", 32<<20)
 	b, _ := createProtocolBucket(t, s, "filesystem-reclamation")
+	// Exercise real upgrades, authorization and offline collection as a normal
+	// bucket user. The standard MinCost fixture keeps repeated authentication
+	// fast enough to measure all 100 storage lifecycle cycles under -race.
+	user := bucketProtocolUser(t, s)
+	description := b.Describe()
+	description.Grants = []BucketGrant{{UserID: user.ID, Permissions: BucketAllPermissions}}
+	if _, err := s.buckets.Save(description, description.Revision); err != nil {
+		t.Fatal(err)
+	}
 	host := httptest.NewServer(s.Handler())
 	defer host.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
-	admin := s.cfg.Auth.BootstrapAdmin
+	started := time.Now()
+	var dialTime time.Duration
+	dialCount := 0
 	dial := func() *client.Client {
-		c, err := client.Dial(ctx, host.URL, admin.Username, admin.Password, client.BucketID(b.ID()))
+		t.Helper()
+		begin := time.Now()
+		c, err := client.Dial(ctx, host.URL, user.Name, "bucket-test-password", client.BucketID(b.ID()))
+		dialTime += time.Since(begin)
+		dialCount++
 		if err != nil {
-			t.Fatal(err)
+			t.Fatalf("native connection %d after %s (cumulative dial time %s, context: %v): %v", dialCount, time.Since(started), dialTime, ctx.Err(), err)
 		}
 		return c
 	}
@@ -92,6 +107,9 @@ func TestTicket32FilesystemPhysicalReclamation(t *testing.T) {
 		}
 		if stats.Objects != baseline.Objects || stats.DataPhysical != baseline.DataPhysical || stats.LogicalBytes != baseline.LogicalBytes {
 			t.Fatalf("iteration %d retained filesystem payload: baseline=%+v now=%+v", i, baseline, stats)
+		}
+		if (i+1)%25 == 0 {
+			t.Logf("overwrite/collection cycles completed: %d/100 in %s; %d native connections took %s", i+1, time.Since(started), dialCount, dialTime)
 		}
 	}
 	c = dial()
