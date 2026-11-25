@@ -2,6 +2,7 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"github.com/launix-de/stqr-storage/volume"
 	"net/http"
@@ -53,6 +54,81 @@ func TestCClient(t *testing.T) {
 		admin := s.cfg.Auth.BootstrapAdmin
 		run(t, host.URL, admin.Username, admin.Password, client.ID(b.ID()).String(), "")
 	})
+	for _, mode := range []string{"transient", "unavailable"} {
+		t.Run(mode, func(t *testing.T) {
+			upgrade := websocket.Upgrader{Subprotocols: []string{"stqr.v2"}}
+			var requests int
+			done := make(chan struct{})
+			var first client.Message
+			host := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				defer close(done)
+				c, err := upgrade.Upgrade(w, r, nil)
+				if err != nil {
+					return
+				}
+				defer c.Close()
+				_, raw, err := c.ReadMessage()
+				if err != nil {
+					return
+				}
+				m, err := client.DecodeMessage(raw)
+				if err != nil {
+					return
+				}
+				hello := client.Encoder{}
+				hello.U16(2)
+				hello.U64(0)
+				hello.ID(client.ID{})
+				hello.ID(client.ID{})
+				hello.U64(0)
+				hello.U64(0)
+				c.WriteMessage(websocket.BinaryMessage, client.EncodeMessage(client.Message{Kind: client.Response, Opcode: m.Opcode, ID: m.ID, Body: client.ResponseBody(200, hello.B, "")}))
+				for {
+					_, raw, err = c.ReadMessage()
+					if err != nil {
+						return
+					}
+					m, err = client.DecodeMessage(raw)
+					if err != nil {
+						return
+					}
+					if requests == 0 {
+						first = m
+					} else if m.ID != first.ID || m.Opcode != first.Opcode || !bytes.Equal(m.Body, first.Body) {
+						t.Error("retry changed operation or identity")
+						return
+					}
+					requests++
+					status := 503
+					var result []byte
+					if mode == "transient" && requests == 4 {
+						status = 200
+						e := client.Encoder{}
+						e.U64(5)
+						e.Bool(false)
+						e.U32(0)
+						e.ID(client.ID{})
+						e.U8(0)
+						e.U16(5)
+						result = e.B
+					}
+					if err = c.WriteMessage(websocket.BinaryMessage, client.EncodeMessage(client.Message{Kind: client.Response, Opcode: m.Opcode, ID: m.ID, Body: client.ResponseBody(status, result, "waiting for bucket growth credits")})); err != nil {
+						return
+					}
+				}
+			}))
+			defer host.Close()
+			start := time.Now()
+			run(t, host.URL, "user", "password", client.ID{1}.String(), mode)
+			<-done
+			if mode == "transient" && requests != 4 {
+				t.Fatalf("requests=%d", requests)
+			}
+			if mode == "unavailable" && (requests < 2 || time.Since(start) < 3*time.Second || time.Since(start) > 6*time.Second) {
+				t.Fatalf("unbounded/busy retry: requests=%d elapsed=%s", requests, time.Since(start))
+			}
+		})
+	}
 	t.Run("cluster-routing", func(t *testing.T) {
 		source, target := startAutomaticDaemonPair(t, false)
 		addTestVolume(t, source.node, "c-routing", "hdd", 16<<20)

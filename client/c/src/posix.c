@@ -7,6 +7,7 @@
 #include <sys/socket.h>
 #include <sys/time.h>
 #include <poll.h>
+#include <time.h>
 #include <fcntl.h>
 #include <openssl/evp.h>
 #include <openssl/rand.h>
@@ -85,3 +86,6 @@ int sq_wait(struct stqr_socket *s, unsigned ms) {
     do { n = poll(&p, 1, (int)ms); } while (n < 0 && errno == EINTR);
     return n < 0 ? -errno : n ? 1 : 0;
 }
+
+stqr_u64 sq_now_ms(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return (stqr_u64)t.tv_sec*1000+t.tv_nsec/1000000; }
+int sq_pause(unsigned ms) { struct timespec t = {ms/1000, (long)(ms%1000)*1000000}; return nanosleep(&t, NULL) ? -errno : 0; }

@@ -5,7 +5,10 @@
 #include <linux/hashtable.h>
 #include <linux/kthread.h>
 #include <linux/slab.h>
-#define KS_CACHE_ENTRIES 512
+// Match the current server per-session subscription ceiling. Payload and entry
+// descriptors both consume metadata_cache_bytes; tiny inode sets must not thrash
+// merely because they exceed the old unrelated 512-entry cap.
+#define KS_CACHE_ENTRIES 2048
 struct cached_inode {
 	struct hlist_node hash;
 	struct list_head lru;
@@ -101,6 +104,7 @@ static void remove_entry(struct ks_cache *c, struct cached_inode *e)
 	hash_del(&e->hash);
 	list_del(&e->lru);
 	c->count--;
+	c->bytes -= sizeof(*e);
 	mutex_unlock(&c->lock);
 	kfree(e);
 	ks_queue_invalidation(c->fs, &id);
@@ -134,6 +138,45 @@ static int copy_entry(struct ks_cache *c, struct cached_inode *e, void **p, size
 	info->proof.cursor = e->cursor;
 	list_move_tail(&e->lru, &c->lru);
 	return 0;
+}
+/* Certify only the bytes actually observed by the caller. Taking a newer stamp
+ * after an update would incorrectly certify an old directory snapshot. */
+bool ks_cache_stamp(struct ks_fs *f, stqr_object_id id, const stqr_info *observed,
+		    struct ks_cache_stamp *out)
+{
+	struct ks_cache *c = f->cache;
+	struct cached_inode *e;
+	bool valid = false;
+	if (!c)
+		return false;
+	mutex_lock(&c->lock);
+	e = find(c, id);
+	if (c->available && e && e->valid && e->ready &&
+	    (e->cursor == observed->proof.cursor &&
+	     !memcmp(e->subscription.bytes, observed->proof.subscription.bytes, 16))) {
+		out->subscription = e->subscription;
+		out->cursor = e->cursor;
+		list_move_tail(&e->lru, &c->lru);
+		valid = true;
+	}
+	mutex_unlock(&c->lock);
+	return valid;
+}
+bool ks_cache_stamp_current(struct ks_fs *f, stqr_object_id id, const struct ks_cache_stamp *stamp)
+{
+	struct ks_cache *c = f->cache;
+	struct cached_inode *e;
+	bool valid = false;
+	if (!c)
+		return false;
+	mutex_lock(&c->lock);
+	e = find(c, id);
+	valid = c->available && e && e->valid && e->ready && e->cursor == stamp->cursor &&
+		!memcmp(e->subscription.bytes, stamp->subscription.bytes, 16);
+	if (valid)
+		list_move_tail(&e->lru, &c->lru);
+	mutex_unlock(&c->lock);
+	return valid;
 }
 int ks_cache_peek(struct ks_fs *f, stqr_object_id id, void **p, size_t *n, stqr_info *info)
 {
@@ -196,9 +239,13 @@ int ks_cache_get(struct ks_fs *f, stqr_object_id id, void **p, size_t *n, stqr_i
 	}
 	if (e)
 		remove_entry(c, e);
+	if (c->fs->cache_budget < sizeof(*e)) {
+		err = -ENODATA;
+		goto out;
+	}
 	for (;;) {
 		mutex_lock(&c->lock);
-		e = (c->count >= KS_CACHE_ENTRIES || c->bytes >= c->fs->cache_budget)
+		e = (c->count >= KS_CACHE_ENTRIES || sizeof(*e) > c->fs->cache_budget - c->bytes)
 			? list_first_entry(&c->lru, struct cached_inode, lru)
 			: NULL;
 		mutex_unlock(&c->lock);
@@ -221,6 +268,7 @@ int ks_cache_get(struct ks_fs *f, stqr_object_id id, void **p, size_t *n, stqr_i
 	list_add_tail(&e->lru, &c->lru);
 	hash_add(c->objects, &e->hash, object_hash(id));
 	c->count++;
+	c->bytes += sizeof(*e);
 	mutex_unlock(&c->lock);
 	err = stqr_subscribe(c->client, id, e->subscription, 0, 0, 0, NULL, &raw, &size, &meta,
 			     &cursor);

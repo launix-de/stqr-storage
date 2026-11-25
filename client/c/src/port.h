@@ -25,5 +25,8 @@ int sq_send(struct stqr_socket *, const void *, size_t);
 int sq_recv(struct stqr_socket *, void *, size_t);
 /* Wait for readable bytes or disconnect: 0 timeout, 1 ready, negative errno. */
 int sq_wait(struct stqr_socket *, unsigned ms);
+/* Monotonic retry budget and interruptible backoff; neither touches framing. */
+stqr_u64 sq_now_ms(void);
+int sq_pause(unsigned ms);
 void sq_disconnect(struct stqr_socket *);
 #endif
