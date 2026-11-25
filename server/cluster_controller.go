@@ -513,7 +513,7 @@ func (c *clusterController) finishReservedChange(ctx context.Context, claim cont
 				return nil, 0, err
 			}
 		}
-		if err := c.markExcludedRangesLost(patches, descriptions, exclusion, membership); err != nil {
+		if err := c.markExcludedRangesLost(ctx, patches, descriptions, claim, membership); err != nil {
 			return nil, 0, err
 		}
 	}

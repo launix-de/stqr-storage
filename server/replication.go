@@ -345,6 +345,9 @@ func (b *Bucket) prepareReplicated(ctx context.Context, v *volume.Volume, key vo
 
 func (r *replicaManager) validate(header replicaHeader, actor client.ID) (*volume.Volume, error) {
 	s := r.server
+	if s.forceFrozen() {
+		return nil, fail(503, "replica mutations are frozen for explicit exclusion")
+	}
 	entry, ok := s.placement.Load().lookup(client.ID(header.Request.Key.Bucket), client.ObjectID(header.Request.Key.Object))
 	if !ok || len(entry.Locations) < 2 || entry.State == 4 || entry.State == 5 || entry.Locations[0].Node != actor || header.Binding.Epoch != entry.OwnerEpoch || header.Binding.SetHash != replicaSetHash(header.Request.Key.Bucket, entry) {
 		return nil, fail(409, "replica authority changed")
@@ -637,6 +640,10 @@ func (r *replicaManager) decisionPeers(ctx context.Context, entry client.RangeEn
 func (r *replicaManager) abortPrepared(ctx context.Context, v *volume.Volume, entry client.RangeEntry, record volume.ReplicaRecord, status uint16) error {
 	s := r.server
 	s.opMu.Lock()
+	if s.forceFrozen() {
+		s.opMu.Unlock()
+		return fail(503, "replica abort is frozen for explicit exclusion")
+	}
 	h, err := v.Open(true)
 	if err == nil {
 		err = h.AbortReplicaPending(record.Request.ID, record.Binding, status)
@@ -692,6 +699,9 @@ func (r *replicaManager) start() {
 				}
 			}
 			r.mu.Unlock()
+			if s.forceFrozen() {
+				continue
+			}
 			for _, v := range s.quotaVolumes() {
 				var pending []volume.ReplicaRecord
 				h, err := v.Open(false)
@@ -722,6 +732,10 @@ func (r *replicaManager) start() {
 						continue
 					}
 					s.opMu.Lock()
+					if s.forceFrozen() {
+						s.opMu.Unlock()
+						continue
+					}
 					h, err := v.Open(true)
 					if err == nil {
 						published := false

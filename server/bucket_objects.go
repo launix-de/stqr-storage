@@ -164,6 +164,11 @@ func (b *Bucket) selectVolume(d BucketDescription, key volume.Key, request volum
 	var latest volume.Info
 	found := false
 	class := bucketClass(d.Policy)
+	if b.server.controller != nil {
+		if entry, known := b.server.placement.Load().lookup(client.ID(key.Bucket), client.ObjectID(key.Object)); known {
+			class = b.server.rangeClass(d.Policy, entry)
+		}
+	}
 	for _, v := range b.volumesFor(d) {
 		if !class.Allows(v.Identity().Class) {
 			continue
@@ -766,6 +771,10 @@ func (b *Bucket) mutateUnmetered(ctx context.Context, p principal, id volume.Obj
 				return result, fail(503, "waiting for required replicas: "+e.Error())
 			}
 			s.lockUserObjectIO()
+			if s.forceFrozen() {
+				s.unlockUserObjectIO()
+				return result, fail(503, "replica decision is frozen for explicit exclusion")
+			}
 			h, e = v.Open(true)
 			if e == nil {
 				e = h.DecideReplica(opt.RequestID, record.Binding)
@@ -781,6 +790,9 @@ func (b *Bucket) mutateUnmetered(ctx context.Context, p principal, id volume.Obj
 		}
 		s.lockUserObjectIO()
 		opLocked = true
+		if s.forceFrozen() {
+			return result, fail(503, "replica publication is frozen for explicit exclusion")
+		}
 		h, e = v.Open(true)
 		if e != nil {
 			return result, e

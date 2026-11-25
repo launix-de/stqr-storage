@@ -199,6 +199,9 @@ func (r *rangeManager) planNextGroup(group string, descriptions []BucketDescript
 
 		}
 	}
+	if !balancing {
+		return r.planPrimaryBalance()
+	}
 	return balance.plan, balancing
 }
 

@@ -36,7 +36,7 @@ func (s *Server) requiredReplicas(p BucketPolicy, membership client.Membership) 
 // on every required copy under the bucket's control fence; no data handoff is
 // needed merely because the central mask/version number changed.
 func (s *Server) replicaPolicyInPlace(d BucketDescription) bool {
-	if d.DesiredPolicy == nil || d.Policy.StorageStrategy != d.DesiredPolicy.StorageStrategy || d.Policy.ReadAcceleration != d.DesiredPolicy.ReadAcceleration {
+	if d.DesiredPolicy == nil || d.Policy.ReadAcceleration != d.DesiredPolicy.ReadAcceleration {
 		return false
 	}
 	view := s.currentSystem.Load()
@@ -60,29 +60,8 @@ func (s *Server) replicaPolicyInPlace(d BucketDescription) bool {
 		if entry.State != 0 || len(entry.Locations) != need {
 			return false
 		}
-		for _, loc := range entry.Locations {
-			if loc.Role > 1 {
-				return false
-			}
-			if loc.Volume != (client.ID{}) {
-				if !s.placementGroups.Load().allowsVersion(goal.PlacementGroup, goal.PlacementMaskVersion, loc.Node.String(), loc.Volume.String()) {
-					return false
-				}
-			} else {
-				mask, ok := s.placementGroups.Load().mask(goal.PlacementGroup, goal.PlacementMaskVersion)
-				if !ok {
-					return false
-				}
-				allowed := mask.NodeSelection == "all"
-				for _, node := range mask.Nodes {
-					if node.NodeID == loc.Node.String() && node.Mode == VolumesAll {
-						allowed = true
-					}
-				}
-				if !allowed {
-					return false
-				}
-			}
+		if !s.replicaSetSatisfies(goal, entry.Locations) {
+			return false
 		}
 	}
 	return true
@@ -96,7 +75,7 @@ func (r *rangeManager) planReplicaAdd(d BucketDescription) (rangePlan, bool) {
 	if d.DesiredPolicy != nil {
 		goal = *d.DesiredPolicy
 	}
-	if goal.Redundancy.Mode != "replication" || goal.StorageStrategy == "ram" || goal.StorageStrategy != d.Policy.StorageStrategy {
+	if goal.Redundancy.Mode != "replication" || goal.StorageStrategy == "ram" || d.Policy.StorageStrategy == "ram" {
 		return rangePlan{}, false
 	}
 	need := r.server.requiredReplicas(goal, r.server.currentSystem.Load().manifest.Membership)
