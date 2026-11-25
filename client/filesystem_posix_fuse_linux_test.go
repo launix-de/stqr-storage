@@ -7,13 +7,13 @@ import (
 	"bytes"
 	"context"
 	"golang.org/x/sys/unix"
-	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 )
 
 func TestFilesystemPOSIXKernelMount(t *testing.T) {
@@ -101,29 +101,35 @@ func TestFilesystemPOSIXKernelMount(t *testing.T) {
 	if n, err := fifo.Read(pipe); err != nil || n != 4 || string(pipe) != "pipe" {
 		t.Fatal(n, string(pipe), err)
 	}
-	listener, err := net.Listen("unix", path("socket"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer listener.Close()
-	listener.(*net.UnixListener).SetUnlinkOnClose(false)
-	connection, err := net.Dial("unix", path("socket"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer connection.Close()
-	peer, err := listener.Accept()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer peer.Close()
-	if _, err = connection.Write([]byte("unix")); err != nil {
-		t.Fatal(err)
-	}
-	data := make([]byte, 4)
-	if n, err := peer.Read(data); err != nil || n != 4 || string(data) != "unix" {
-		t.Fatal(n, string(data), err)
-	}
+	t.Run("unix-socket", func(t *testing.T) {
+		python, err := exec.LookPath("python3")
+		if err != nil {
+			t.Skip("python3 is not installed")
+		}
+		// A signal-interrupted AF_UNIX connect can leave Go's dialer waiting
+		// for writability indefinitely on a self-served FUSE path. Exercise
+		// socket bind/connect/accept from a separate process instead, with
+		// explicit timeouts and without the server's runtime preemption signals.
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		cmd := exec.CommandContext(ctx, python, "-c", `
+import socket, sys
+with socket.socket(socket.AF_UNIX) as listener, socket.socket(socket.AF_UNIX) as connection:
+    listener.settimeout(5)
+    connection.settimeout(5)
+    listener.bind(sys.argv[1])
+    listener.listen(1)
+    connection.connect(sys.argv[1])
+    peer, _ = listener.accept()
+    with peer:
+        peer.settimeout(5)
+        connection.sendall(b'unix')
+        assert peer.recv(4, socket.MSG_WAITALL) == b'unix'
+`, path("socket"))
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("unix socket: %v\n%s", err, out)
+		}
+	})
 	t.Run("git", func(t *testing.T) {
 		git, err := exec.LookPath("git")
 		if err != nil {

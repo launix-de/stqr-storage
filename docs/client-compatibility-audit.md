@@ -40,7 +40,10 @@ durable ACK behavior is unchanged.
 The first PR CI run also exposed an EINTR-sensitive FIFO test: a raw `open(2)`
 could be interrupted while FUSE resolved its path. The test now uses `os.File`,
 which retries signal interruptions for open/read/write, like normal Go callers.
-The FIFO assertions remain enabled; no driver error or test is suppressed.
+The FIFO assertions remain enabled. Repeated mount runs also exposed an
+indefinite wait in Go's Unix socket dialer on the self-served FUSE path after a
+signal interruption. The socket roundtrip now runs in a separate Python process
+with explicit timeouts; CI installs Python and executes the complete check.
 
 ## Validation
 
