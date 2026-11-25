@@ -478,8 +478,9 @@ Disjoint scopes may proceed without an unrelated offline member. A plan claims
 its complete old parent, splits only the selected path, bulk copies data, fences
 source mutations, catches up canonical contents and retry receipts, then commits
 ownership. Old physical records are purged only after target commit. Cleanup
-never invents a higher-version tombstone. Global admin checkpoints collect
-committed scoped archives under ALL reservations before capturing the map.
+never invents a content-version tombstone. Ordinary global admin checkpoints
+collect only NULL-scope range history; explicit membership/shutdown/exclusion
+barriers reconcile all affected scope histories before changing membership.
 
 The automatic planner uses class, PG masks, active physical capacity and local
 node/volume drain intent. It prefers cheaper, including empty, halves and reacts
@@ -1106,3 +1107,47 @@ owner is reported without opening a disk catalog. The browser handles offline
 descriptors using delegated native GET/STAT/inventory/ranged-CAS operations.
 Delegation requires an administrator and retains ordinary bucket authorization,
 lease exclusion, owner routing and traffic accounting.
+
+
+## PG-local rebuild cycles
+
+Buckets assigned to a placement group are planned only by that PG's worker.
+The NULL worker handles unassigned buckets and node-wide housekeeping. Shared
+catalog and telemetry collection run once per node tick; a blocked PG has no
+network wait in another PG's dispatcher or peer request queue.
+
+Each PG persists a separate generation counter, parent round ID, immutable plan,
+membership epoch, mask version and sorted participants. ALL applies to those
+participants, with the lowest admitted ID coordinating. Source intent is durable
+before the first remote reservation. Completion releases the source last and is
+repeatable after lost replies or restart. Placement rounds are not object content
+versions; native mutations still use in-place volume-locked operations.
+
+PG masks confined to different sides of a network partition can rebalance
+independently. A spanning PG, including an unrestricted `all` mask, still waits
+for its required members. New quota credits and maintenance leases are scoped to
+the PG. Reconnection automatically imports completed PG chains and range history;
+causal replay accepts delayed child-before-parent arrival without losing updates.
+Global account/catalog authority is unchanged: new global administrative decisions
+still require the committed cluster participants. Membership and cluster shutdown
+explicitly interlock with every PG.
+
+Peer messages `0x10a0`–`0x10a4` carry bounded JSON requests for PG begin/finish/cancel,
+participant reserve/start/complete, completed-round archive, replicated codec
+conversion and scope-filtered range archive. The filtered archive returns the
+existing binary range-archive page. New operations require advertised semantics
+revision 2; global control and bucket-lease operations use revision 3. Control
+claim schema 7 wraps the previous claim with an explicit all-scope barrier; range
+plan schema 7 describes an in-place replica codec conversion. Existing journal
+records remain readable; appended PG records require the updated implementation.
+Upgrade all required participants before starting the new operations.
+
+`TestPGRebuildDisjointNetworkSplit` uses four real daemons, two disconnected PGs,
+multiple local generations, finite quota writes, scoped leases, owner restart and
+automatic reconnect convergence. `TestPGWorkerDoesNotWaitForUnrelatedPG` exercises
+one shared source/coordinator with one fenced unavailable PG and one progressing
+PG. `TestPGRebuildHistoryOutOfOrder` checks causal archive replay.
+
+The separate [priority audit](rebuild-priority-audit.md) records the remaining
+foreground-admission and optional-work scheduling gaps; split independence does
+not imply those guarantees.

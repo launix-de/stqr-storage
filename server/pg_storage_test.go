@@ -63,7 +63,30 @@ func awaitPGVersion(t *testing.T, s *Server, id volume.ID, version uint64) {
 		if ok && g.Version == version {
 			return
 		}
+		// These fixtures deliberately disable the range scheduler so they
+		// can select relocation plans. Codec changes now belong to that same
+		// PG path, rather than a global admin bulk-copy callback.
+		if s.scopes != nil {
+			for _, d := range s.bucketSnapshots() {
+				if d.Policy.PlacementGroup != id.String() {
+					continue
+				}
+				if p, ok := s.scopes.planPGReplicaCodec(d); ok {
+					ctx, cancel := context.WithTimeout(s.ctx, time.Second)
+					err := s.scopes.move(ctx, p)
+					cancel()
+					if err != nil && statusOf(err) != 503 {
+						t.Fatal("PG codec step", err)
+					}
+				}
+			}
+		}
 		time.Sleep(10 * time.Millisecond)
+	}
+	for _, d := range s.bucketSnapshots() {
+		if d.Policy.PlacementGroup == id.String() {
+			t.Logf("pending PG bucket=%s policy=%+v desired=%+v inplace=%v ranges=%+v", d.Name, d.Policy, d.DesiredPolicy, s.replicaPolicyInPlace(d), s.placement.Load().bucketEntries(client.ID(newVolumeID(d.ID))))
+		}
 	}
 	t.Fatalf("PG version %d not reached: %+v", version, s.placementGroups.Load().object.Groups)
 }

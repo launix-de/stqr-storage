@@ -22,6 +22,9 @@ func (r *rangeManager) cancelBeforeFence(ctx context.Context, p rangePlan, cause
 	if err := r.abort(p); err != nil {
 		return err
 	}
+	if err := r.abortPG(ctx, p); err != nil {
+		return err
+	}
 	return cause
 }
 func (r *rangeManager) abort(p rangePlan) error {

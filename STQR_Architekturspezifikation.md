@@ -101,8 +101,8 @@
 ### 2.2 Verteilung von Zuständigkeiten
 
 - Alle Nodes sind gleichberechtigt. Ein temporärer Generationskoordinator plant außerhalb des normalen Objekt-I/O-Pfads.
-- **ENTWURFSFESTLEGUNG: kooperatives ALL-Protokoll**, kein Raft mit zeitgetriebener Leader-Neuwahl. Für einen Rebuild umfasst ALL die fest gebundene Online-Teilnehmermenge der Runde (§4.3); globale Membership-/Admin-Entscheidungen benötigen weiterhin alle erforderlichen Mitglieder (§4.5). Es handelt sich nicht um eine wechselnde Mehrheit. Der konkrete Race-Algorithmus der Koordinatorwahl einschließlich sicherer Teilnehmerbindung ist ausdrücklich bis nach Stresstests zurückgestellt (§4.2, §20.5). Statistik-Snapshots, Plan-Freigaben und Ownership-Entscheidungen sind wiederaufnehmbar.
-- Ein Node genügt. Bereits vor einer Rebuild-Runde fehlende Mitglieder blockieren das Rebalancing unabhängiger Online-Ranges nicht; ihr Placement wird unverändert übernommen. Ein fehlender erforderlicher Teilnehmer einer bereits gebundenen Runde oder einer globalen Kontrollentscheidung blockiert dagegen deren Abschluss. Objekt-I/O kann auf unveränderten erreichbaren Replica-Sets weiterlaufen; abhängige Operationen warten.
+- **ENTWURFSFESTLEGUNG: kooperatives ALL-Protokoll**, kein Raft mit zeitgetriebener Leader-Neuwahl. Für einen PG-Rebuild umfasst ALL die fest gebundene PG-Teilnehmermenge (§4.1/§4.3); globale Membership-/Admin-Entscheidungen benötigen weiterhin alle erforderlichen Mitglieder (§4.5). Es handelt sich nicht um eine wechselnde Mehrheit. Der konkrete Race-Algorithmus der Koordinatorwahl einschließlich sicherer Teilnehmerbindung ist ausdrücklich bis nach Stresstests zurückgestellt (§4.2, §20.5). Statistik-Snapshots, Plan-Freigaben und Ownership-Entscheidungen sind wiederaufnehmbar.
+- Ein Node genügt. Fehlende Mitglieder anderer PGs blockieren das Rebalancing einer vollständig erreichbaren PG nicht; ihr Placement wird unverändert übernommen. Ein fehlender erforderlicher Teilnehmer einer bereits gebundenen Runde oder einer globalen Kontrollentscheidung blockiert dagegen deren Abschluss. Objekt-I/O kann auf unveränderten erreichbaren Replica-Sets weiterlaufen; abhängige Operationen warten.
 - Nichterreichbarkeit entzieht niemals selbsttätig Mitgliedschaft, Ownership oder einen Koordinatorstatus. Es gibt keinen Failure-Timeout mit automatischem Ausschluss. Verbindungsfehler, Reconnect-Backoff und anwendungsseitige Cancellation sind zulässig und ändern diesen Vertrag nicht.
 - Join, geplanter Leave und Forceful Disconnect wechseln die Membership-Epoch nach §4.5. Ein ausgeschlossener Node darf mit alter Epoch nicht wieder als gültiges Mitglied auftreten.
 
@@ -192,9 +192,53 @@ Ein SHORT/CLUSTER-Shutdown kann bei ausstehenden Commits oder fehlenden Mitglied
 
 ### 4.1 Persistenter Kontrollstand
 
-**Scope-Regel:** Globale Membership-/Admin-Entscheidungen besitzen weiterhin eine gemeinsame Sequenz-/Hashkette und ihre ALL-Barriere. Rebuilds sind dagegen **an betroffene Range-Groups gebunden**. Disjunkte Scopes dürfen parallel auch verschiedene Koordinatoren haben; überlappende Scopes müssen sich ausschließen. Jeder Rebuild-Beleg bindet Scope-ID, RoundID, die vollständigen bisherigen Range-Grenzen/Owner-Epochs und die feste Teilnehmermenge. Seine Sequenz/Vorgängerkette gilt innerhalb dieses Scopes und darf nicht mit der globalen Admin-Sequenz verwechselt werden. Ein fehlender globaler Initiator oder Koordinationszeuge blockiert keinen sonst unabhängigen Online-Scope.
+**Scope-Regel:** Jeder Daten-Bucket gehört genau einem Rebuild-Zuständigkeitsbereich:
+bei gesetzter PG ausschließlich dieser PG, andernfalls dem globalen `NULL`-Scope.
+Der globale Rebuild plant und migriert keine PG-Buckets. Die reservierte System-PG
+bleibt Teil der globalen Membership-/Metadatenverwaltung. Globale
+Membership-/Admin-Entscheidungen besitzen weiterhin eine gemeinsame Sequenz-/Hashkette;
+sie sind von den unabhängig fortschreitenden PG-Rebuilds getrennt.
 
-Die Vereinigung bestätigter disjunkter Patches ergibt die gemeinsame Placement-Map. Generation/Map-Revision sind dabei keine globale Totalordnung gleichzeitig laufender disjunkter Rebuilds; Schreibautorität folgt den bestätigten Übergaben und Owner-Epochs der jeweiligen Range. Ein Merge darf eine neuere Übergabe nie durch einen alten Gesamt-Snapshot überschreiben. Split/Merge beansprucht sämtliche betroffenen bisherigen Range-Groups einschließlich ihrer Grenzen, nicht bloß schon vorausgesetzte neue Teilbereiche. Die reservierten Rebuild-Wirelayouts erhalten bei Umsetzung einen explizit gebundenen Scope; die vorhandene globale Membership-/Admin-Decision bleibt davon getrennt.
+Jede PG besitzt CURRENT/NEXT, eine eigene persistente Generationsfolge, Vorgänger-ID,
+RoundID, feste Teilnehmermenge und einen eigenen Worker. Ein Generationszähler allein
+identifiziert keine Runde: Belege binden zusätzlich PG-ID, Membership-Epoch,
+Maskenversion, Plan-Digest sowie vollständige bisherige Range-Grenzen/Owner-Epochs.
+Gleiche Zähler verschiedener PGs stehen in keiner Ordnung zueinander und werden nach
+einem Netzwerksplit weder addiert noch durch ein globales Maximum ersetzt. Dies sind
+Placement-Runden, keine Objekt-Inhaltsversionen. Ein Lauf kann begrenzte Teilpläne
+umsetzen; die noch offenen Gründe bleiben persistent für Folgerunden erhalten.
+
+ALL bedeutet im PG-Lauf die fest gebundenen zugelassenen Mitglieder dieser PG, nicht
+alle Cluster-Mitglieder. Die Teilnehmer werden aus committed Membership und PG-Maske
+bestimmt; während freigegebener Maskenwechsel müssen alte und neue Teilnehmer gemeinsam
+gebunden bleiben. Nichterreichbarkeit verkleinert diese Menge nicht. Zwei vollständig
+innerhalb ihrer jeweiligen Netzwerkfraktion liegende PGs dürfen daher unabhängig
+Rebuilds ausführen, obwohl die andere Fraktion offline ist. Eine PG mit erforderlichen
+Teilnehmern auf beiden Seiten wartet. `node_selection=all` umfasst sämtliche Mitglieder;
+für unabhängige Teilcluster sind entsprechend beschränkte PG-Masken erforderlich.
+
+Disjunkte PGs benötigen getrennte Koordinator-Slots, Peer-Verarbeitung und Worker,
+auch wenn sie dieselbe Node nutzen. Reguläre globale Katalogänderungen sperren nur
+ihre ausdrücklich betroffenen Buckets und den NULL-Scope. Die unveränderten
+Quota-Basen und Journal-Watermarks anderer PGs bleiben erhalten, sodass deren Credits
+und Range-Übergaben weiterlaufen können. Membership-Wechsel, Cluster-Shutdown und
+autorisierte Ausschlüsse sind dagegen ausdrücklich globale Barrieren; ein Drain-Wunsch
+allein verlangt keine globale Daten-I/O-Sperre.
+
+Nach Reconnect werden persistierte PG-Runden und bestätigte Range-Übergaben automatisch
+seitenweise abgeglichen. Jede PG übernimmt ausschließlich eine lückenlose Vorgängerkette.
+Widersprüchliche Belege derselben PG werden abgewiesen. Die Vereinigung bestätigter
+disjunkter Range-Patches ergibt die gemeinsame Placement-Map; verspätete Kind-/Eltern-
+Belege müssen unabhängig von ihrer Ankunftsreihenfolge kausal angewendet werden.
+Ein alter Gesamt-Snapshot darf eine neuere Übergabe nicht zurückrollen.
+
+Die Implementierung verwendet derzeit die niedrigste zugelassene PG-Node-ID als
+stabile Anlaufstelle für ihre Runde. Ein persistiertes Quellangebot geht dem ersten
+entfernten Reservieren voraus; alle PG-Teilnehmer bestätigen Vorbereitung und Start.
+Der Quellnode wird beim Abschluss zuletzt freigegeben. Verlorene Antworten werden
+mit demselben Plan wiederholt, auch wenn der Koordinator bereits lokal abgeschlossen
+hat. Es gibt keine zeitgetriebene Neuwahl. Das spätere allgemeinere Push-Wahlmodell in
+§4.2 ersetzt diese Bindung erst nach eigener Verifikation.
 
 ```go
 type RoundID struct { MembershipEpoch, Generation uint64; Initiator [16]byte; Attempt uint64 }
@@ -225,7 +269,7 @@ Der eigene **Auftrag als Koordinator** wird getrennt vom eigenen Teilnehmer-Slot
 
 **Erster Messbaustein:** `server/rebuild_race_test.go` simuliert Angebote, Präferenzwechsel, Statistikfragmente, Duplikate und Pause/Wiederkehr mit reproduzierbaren Seeds und den Codecs aus `client/rebuild.go`. Er zählt mögliche konkurrierende Bindungen, ohne einer Kandidatin tatsächlich Autorität zu geben. Die Scheduler-Ticks sind virtuelle Zeit; echte Peer-/Netzwerk-/Crash-Messungen stehen noch aus. Der Harness legt ausdrücklich noch keinen Bindungs-/Wahlalgorithmus fest. Messaufruf und Baseline-Befunde stehen in `docs/server.md`.
 
-Broadcast ist Fan-out über Peer-Verbindungen, kein Netzwerk-Broadcast. Die unten reservierten Wahl-/Konfliktnachrichten sind vorläufige Katalogeinträge; ihre Feldfolgen können nach der Messphase geändert oder entfernt werden. ALL-Plan-/Cutover-Barrieren beziehen sich auf die gebundene Online-Teilnehmermenge aus §4.3; deren sichere Bindung gehört zum noch zu entwerfenden Wahlprotokoll.
+Broadcast ist Fan-out über Peer-Verbindungen, kein Netzwerk-Broadcast. Die unten reservierten Wahl-/Konfliktnachrichten sind vorläufige Katalogeinträge; ihre Feldfolgen können nach der Messphase geändert oder entfernt werden. ALL-Plan-/Cutover-Barrieren beziehen sich auf die gebundene Teilnehmermenge aus §4.1/§4.3. Eine spätere Online-Teilmengenauswahl darf die bestehende sichere PG-Bindung nicht durch eine Zeitüberschreitung ersetzen.
 
 ### 4.3 Plan, Migration und Folgegründe
 
@@ -237,7 +281,7 @@ IDLE -> OFFER/COLLECT -> SEALED -> PLAN -> PREPARE_ALL
      -> ausführbarer Rebuild-Grund ? nächste Runde beim bisherigen Koordinator : IDLE
 ```
 
-- **Online-Teilnehmer und eingefrorenes Placement:** Eine Rebuild-Runde bindet vor dem Versiegeln des Snapshots eine explizite Menge erreichbarer, synchronisierter und teilnahmebereiter Nodes. `PAUSED`-/Offline-Nodes gehören nicht dazu. ALL bei Statistikaufnahme, Plan, Cutover und Finalize bedeutet alle Teilnehmer dieser gebundenen Runde. Die Cluster-Membership bleibt unverändert. Die Teilnehmermenge darf nach Bindung nicht aufgrund eines Verbindungsfehlers verkleinert werden; fällt ein Teilnehmer danach aus, wartet die Runde auf dessen Wiederkehr (§4.4).
+- **Teilnehmer und eingefrorenes Placement:** Ein PG-Lauf bindet die zugelassenen Mitglieder nach §4.1. Fehlt eines davon, wartet diese PG; andere PGs planen unabhängig weiter. Der NULL-Bereich bindet seine expliziten Quell-/Zielteilnehmer ohne PG-Buckets einzubeziehen. ALL bei Plan, Cutover und Finalize bedeutet sämtliche Teilnehmer der jeweiligen Runde. Die Cluster-Membership bleibt unverändert. Eine gebundene Teilnehmermenge darf nicht aufgrund eines Verbindungsfehlers verkleinert werden (§4.4). Eine spätere Optimierung auf kleinere Online-Teilmengen innerhalb einer PG braucht einen eigenen verifizierten Bindungs-/Recovery-Vertrag und ist keine zeitgetriebene Ausfallentscheidung.
 - Der Koordinator plant deterministisch aus den vollständig eingesandten Snapshots der Teilnehmer. **Jede Range-Group mit einer Location auf einer nicht teilnehmenden Node wird vollständig unverändert von CURRENT nach NEXT übernommen**, einschließlich Range-Grenzen, Locations, Rollen, Layout und Ownership-Epoch. Das gilt auch für READ_CACHE-Locations. Keine Evakuierung, Ersatzplatzierung, Replica-Reduktion, Split-/Merge- oder Ownership-Änderung dieser Gruppen. Unabhängige, vollständig online befindliche Range-Groups dürfen umverteilt werden; Ziele müssen Teilnehmer sein und geeignete Online-Volumes besitzen. Offline-Volumes teilnehmender Nodes werden ebenfalls nicht umplatziert; betroffene Range-Groups bleiben eingefroren. Veraltete Kapazitätsbilder sind keine Quelle freier Zielkapazität.
 - Physische Reservierungen werden beim PREPARE auf den Zielvolumes erneut geprüft, da Statistikwerte keine Kapazitätslocks sind. Der Plan soll **so wenig Nutzdaten wie möglich bewegen, idealerweise null**. Bestehende zulässige Zuordnungen bleiben erhalten; Splits/Merges dürfen rein logisch sein. Redundanz, garantierte Reserven und erforderliche Drain-Vorgaben sind harte Constraints. Nicht online ausführbare Drain-/Policy-Anpassungen bleiben ausstehend; eine teilweise Umsetzung darf nicht als vollständig erfüllt gemeldet werden.
 - `PLAN_PREPARE` enthält vollständige NEXT-Map, bereits verbindlich freigegebene Zielpolicies, Teilnehmermenge, unverändert übernommene Bereiche, Reservierungen und Planhash. Jeder Teilnehmer validiert und persistiert diese, bevor er `PLAN_READY` pusht. Erst nach ALL-READY persistiert/verteilt der Koordinator `PLAN_COMMIT` samt Belegen; jeder Teilnehmer pusht `PLAN_APPLIED`. Bulk-Copy startet erst nach ALL-APPLIED. Der Rebuild ersetzt keine global erforderliche Policy-/Membership-Freigabe nach §4.5.
@@ -1150,7 +1194,7 @@ STABLE -> PREPARED -> COPYING -> CATCHING_UP -> CUTOVER -> CLEANUP -> STABLE
 - Logischer Split kann die bisherigen Replica-Locations für beide Kinder übernehmen: **0 Byte Migration**.
 - Beim Merge kompatibler Ranges mit identischem Replica-Set: meist nur Map-/Index-Änderung.
 - Bei unterschiedlichen Sets: Planner wählt Ziel-Location-Set unter Wahrung der Failure Domains; Byte-Kosten, Kapazität und Read-/Write-Last entscheiden; in NEXT werden Source und Target getrennt modelliert.
-- Globale Generationen können viele unabhängige Ranges parallel migrieren, mit I/O-Limits und Recovery-Priorität.
+- PG-lokale Generationen und der getrennte NULL-Scope können unabhängige Ranges parallel migrieren, mit I/O-Limits und Recovery-Priorität.
 
 ### 12.4 Crash-/Failure-Fälle
 
@@ -2632,8 +2676,14 @@ Objektversionsnummern. Das integrierte S3-Frontend verwendet dieselben Objektmet
 Allgemeine exklusive Objekt-Leases sind unabhängig vom Nutzdatenformat. Für TRIM
 wählt allein der NBD-Client DELETE oder bei WRITE-only das Leeren des Stripe-Payloads.
 
-Priorität 1 gilt ausführbaren Benutzer-I/Os, Priorität 2 Umschichtungen laut
-Rebuild-Map und Priorität 3 physischer Bucket-Bereinigung. Ein atomarer Speicherschritt
+Priorität 1 gilt direkt bedienbaren Benutzer-Reads/Writes einschließlich ihrer
+benötigten Replica-I/Os. Auf eine fehlende Node oder eine Migration wartende Requests
+zählen nicht als ausführbares lokales I/O und dürfen ihre eigene Abhängigkeit nicht
+blockieren. Priorität 2 gilt Pflichtmigrationen der aktuellen Rebuild-Map.
+Priorität 3 gilt fortsetzbarer Hintergrundarbeit wie Node-/Volume-Drain,
+physischer Bucket-Bereinigung und anderen Langläufern. Bereits verbindlich
+übernommene Ownership-/Replica-Pflichten werden auch bei einem ursprünglich optionalen
+Auftrag sicher beendet; eine Pause darf keine Schreibautorität verlieren. Ein atomarer Speicherschritt
 wird fertiggestellt; vor dem nächsten begrenzten Schritt wird die Priorität erneut
 geprüft. Auf entfernte Peers wartende RPCs halten keine lokale I/O-Priorität fest.
 Die bestätigte Löschvormerkung macht den Bucket sofort unerreichbar und wird in
@@ -2641,6 +2691,20 @@ nachfolgende Generationen übernommen. Physische Bereinigung ist kein Abschlussk
 der ankündigenden Generation. Jede Node arbeitet in kleinen Idle-Portionen weiter,
 überspringt belegte Sperren und meldet ihren lokalen Abschluss. Erst danach kann eine
 kurze spätere Kontrollentscheidung die verbleibenden Verwaltungsreste abschließen.
+
+Sind alle Pflichtbestandteile der Runde erfüllt und bestätigen deren Teilnehmer
+die Abschlussbereitschaft, werden optionale Langläufer an sicheren begrenzten
+Schrittgrenzen angehalten. Ihr Auftrag und Fortschritt werden persistent in die
+Folgerunde übernommen; ihr Gesamtabschluss ist kein Abschlusskriterium der laufenden
+Generation. Insbesondere bedeutet ein Node-Drain nicht, dass alle Daten in einer
+einzigen Runde evakuiert werden müssen. Die endgültige Membership-Entfernung benötigt
+weiterhin die sichere Übergabe sämtlicher erforderlicher Daten.
+
+**Implementierungslücke:** Der Audit [Rebuild and I/O priority audit](docs/rebuild-priority-audit.md)
+dokumentiert noch fehlende durchgängige I/O-Zulassung, die gesonderte Drain-Klasse
+und die gemeinsame Unterbrechungs-/Fortsetzungsphase optionaler Arbeiten. Die
+bestehende seitenweise Bucket-Bereinigung erfüllt bereits die Entkopplung vom
+Generationsabschluss; daraus folgt noch keine vollständige Erfüllung dieses Vertrags.
 
 Das NBD-Dashboard ist ebenfalls ein Client des Objektprotokolls. Der Browser
 interpretiert STNBD001, adressiert Descriptoren nach dem NBD-Clientformat und

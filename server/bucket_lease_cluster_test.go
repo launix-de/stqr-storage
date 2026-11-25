@@ -352,3 +352,28 @@ func TestDaemonBucketCopyReceiptSurvivesRestart(t *testing.T) {
 		t.Fatal("clear replay after restart removed new bytes", e)
 	}
 }
+
+// Installer preflight must work before its first image bucket is created.
+func TestClusterMaintenanceCapabilityProbeBeforeBucketCreation(t *testing.T) {
+	source, target := startAutomaticDaemonPair(t, false)
+	// This public probe fans out to both members, including the joined node
+	// whose bootstrap credentials are intentionally absent from its config.
+	_, status, reply := adminBucketMessage(t, source.node, client.BucketMaintenanceStatus, nil)
+	if status != 200 {
+		t.Fatalf("maintenance capability before bucket creation: %d %v", status, reply)
+	}
+	s := source.node
+	l := bucketLease{Epoch: s.currentSystem.Load().manifest.Membership.Epoch, Token: client.NewRequestID()}
+	wire, err := json.Marshal(leaseRequest{Action: 4, Lease: l})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = s.receiveBucketLease(context.Background(), wire, client.ID{0xff}); err == nil {
+		t.Fatal("capability probe accepted a nonmember")
+	}
+	l.Epoch++
+	wire, _ = json.Marshal(leaseRequest{Action: 4, Lease: l})
+	if _, err = s.receiveBucketLease(context.Background(), wire, target.node.control.ledger.node); err == nil {
+		t.Fatal("capability probe accepted a stale membership binding")
+	}
+}

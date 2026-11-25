@@ -531,6 +531,9 @@ func (b *Bucket) mutateUnmetered(ctx context.Context, p principal, id volume.Obj
 	if err := s.checkObjectBinding(ctx, b.ID(), id); err != nil {
 		return volume.Result{}, err
 	}
+	if s.scopes != nil && s.scopes.codecFence(b.ID(), id) {
+		return volume.Result{}, fail(503, "PG codec generation is committing")
+	}
 	if s.bucketFrozen(b.ID()) {
 		return volume.Result{}, fail(503, "bucket quota/policy change is in progress")
 	}

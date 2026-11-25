@@ -293,6 +293,15 @@ func (ws *wsSession) requestLoop() {
 				}
 				continue
 			}
+			if ws.server.launchPGRequest(ws.ctx, m, p, func(body []byte) {
+				wire := client.EncodeMessage(client.Message{Kind: client.Response, Opcode: m.Opcode, ID: m.ID, Body: body})
+				select {
+				case ws.responses <- wire:
+				case <-ws.done:
+				}
+			}) {
+				continue
+			}
 			body, status := ws.server.dispatchAs(m, ws, p)
 			if status == 0 {
 				continue
@@ -401,6 +410,15 @@ func (ws *wsSession) auxiliaryRequestLoop(queue <-chan client.Message) {
 			p, ok := ws.principalNow()
 			if !ok {
 				return
+			}
+			if ws.server.launchPGRequest(ws.ctx, m, p, func(body []byte) {
+				wire := client.EncodeMessage(client.Message{Kind: client.Response, Opcode: m.Opcode, ID: m.ID, Body: body})
+				select {
+				case ws.responses <- wire:
+				case <-ws.done:
+				}
+			}) {
+				continue
 			}
 			body, status := ws.server.dispatchAs(m, ws, p)
 			if status != 0 && m.Kind == client.Request {

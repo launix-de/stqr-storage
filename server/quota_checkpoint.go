@@ -71,8 +71,15 @@ func (s *Server) quotaCheckpoint(body []byte, actor client.ID) ([]byte, error) {
 	l.mu.Lock()
 	valid := l.slot != nil && equalControlClaim(l.slot.Claim, claim)
 	l.mu.Unlock()
-	if !valid || claim.Exclusion == nil && len(s.pendingQuotaGrants()) != 0 {
+	if !valid {
 		return nil, errControlConflict
+	}
+	if claim.Exclusion == nil {
+		for _, grant := range s.pendingQuotaGrants() {
+			if hasControlNode(buckets, grant.Bucket) {
+				return nil, errControlConflict
+			}
+		}
 	}
 	var plannedView *systemView
 	if planned != (volume.ObjectID{}) {
@@ -142,9 +149,10 @@ func (s *Server) quotaCheckpoint(body []byte, actor client.ID) ([]byte, error) {
 // ALL reservations exclude both scoped handoffs and incomplete grants. The
 // resulting balances and per-node journal watermarks therefore describe the
 // same map checkpoint. Ordinary writes can continue unless a limit changes.
-func (c *clusterController) captureQuotaAllocations(ctx context.Context, claim controlClaim, membership client.Membership, descriptions []BucketDescription, planned ...volume.ObjectID) ([]quotaAllocation, error) {
+func (c *clusterController) captureQuotaAllocations(ctx context.Context, claim controlClaim, membership client.Membership, descriptions []BucketDescription, groups *placementGroupImage, planned ...volume.ObjectID) ([]quotaAllocation, error) {
 	view := c.server.currentSystem.Load()
 	var allocations []quotaAllocation
+	var preserved []quotaAllocation
 	var measure []bool
 	for _, description := range descriptions {
 		p := quotaPolicy(description)
@@ -160,11 +168,18 @@ func (c *clusterController) captureQuotaAllocations(ctx context.Context, claim c
 		changed := claim.Exclusion != nil || old == nil || old.Limit != a.Limit || quotaAccounting(old.Accounting) != p.Limits.Accounting
 		if view != nil {
 			for _, before := range view.descriptions {
-				if before.ID == description.ID && !slices.Equal(before.ClonePeers, description.ClonePeers) {
+				if before.ID == description.ID && (!slices.Equal(before.ClonePeers, description.ClonePeers) || quotaPolicy(before).PlacementGroup != p.PlacementGroup || quotaPolicy(before).PlacementMaskVersion != p.PlacementMaskVersion) {
 					changed = true
 					break
 				}
 			}
+		}
+		// Unrelated metadata must not checkpoint a moving PG's balances.
+		// Keep its exact prior base and watermarks; subsequent grant/range
+		// deltas remain authoritative, even while this global slot waits.
+		if !changed && description.Policy.PlacementGroup != "" && !claim.GlobalBarrier && claim.Exclusion == nil && !hasControlNode(claim.FrozenBuckets, a.Bucket) && reflect.DeepEqual(membership, view.manifest.Membership) {
+			preserved = append(preserved, *old)
+			continue
 		}
 		if p.Limits.Accounting == "physical" {
 			a.Accounting = "physical"
@@ -178,7 +193,7 @@ func (c *clusterController) captureQuotaAllocations(ctx context.Context, claim c
 		measure = append(measure, changed)
 	}
 	if len(allocations) == 0 {
-		return nil, nil
+		return preserved, nil
 	}
 	claimWire, err := marshalControlClaim(claim)
 	if err != nil {
@@ -264,9 +279,36 @@ func (c *clusterController) captureQuotaAllocations(ctx context.Context, claim c
 		}
 		// Retired-node unused credits and newly granted headroom go to an
 		// admitted node. Lending subsequently moves them to actual writers.
-		a.Nodes[0].Bytes += a.Limit - retained
+		destination := 0
+		if description := func() BucketDescription {
+			for _, d := range descriptions {
+				if d.ID == a.Bucket.String() {
+					d.Policy = quotaPolicy(d)
+					d.DesiredPolicy = nil
+					return d
+				}
+			}
+			return BucketDescription{}
+		}(); description.Policy.PlacementGroup != "" {
+			members, _, err := pgMembersFrom(description, view, groups)
+			if err != nil {
+				return nil, err
+			}
+			destination = -1
+			for i, node := range a.Nodes {
+				if hasControlNode(members, node.Node) {
+					destination = i
+					break
+				}
+			}
+			if destination < 0 {
+				return nil, volume.ErrFull
+			}
+		}
+		a.Nodes[destination].Bytes += a.Limit - retained
 		sortQuotaNodes(a.Nodes)
 	}
+	allocations = append(allocations, preserved...)
 	sort.Slice(allocations, func(i, j int) bool { return allocations[i].Bucket.String() < allocations[j].Bucket.String() })
 	return allocations, nil
 }

@@ -40,11 +40,13 @@ func decodeQuotaGrant(body []byte) (quotaGrant, error) {
 	return g, nil
 }
 
-func (s *Server) quotaControlBusy() bool {
+func (s *Server) quotaControlBusy(bucket client.ID) bool {
+	b, err := s.Bucket(volume.ID(bucket))
+	global := err != nil || b.Describe().Policy.PlacementGroup == ""
 	l := s.control.ledger
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	return l.slot != nil
+	return l.slot != nil && (global || l.slot.Claim.GlobalBarrier || l.slot.Claim.Exclusion != nil || hasControlNode(l.slot.Claim.FrozenBuckets, bucket))
 }
 
 func (s *Server) quotaPeerMessage(m client.Message, actor client.ID) ([]byte, error) {
@@ -95,7 +97,7 @@ func (s *Server) quotaPeerMessage(m client.Message, actor client.ID) ([]byte, er
 			e.Blob(wire)
 			return e.B, nil
 		}
-		if s.quotaControlBusy() || s.shortStopping.Load() {
+		if s.quotaControlBusy(bucket) || s.shortStopping.Load() {
 			return nil, fail(503, "quota grants are paused")
 		}
 		b, err := s.Bucket(volume.ID(bucket))
@@ -146,7 +148,7 @@ func (s *Server) quotaPeerMessage(m client.Message, actor client.ID) ([]byte, er
 		q.ledger.mu.Lock()
 		prior := q.ledger.incoming[g.ID]
 		q.ledger.mu.Unlock()
-		if prior == nil && s.quotaControlBusy() {
+		if prior == nil && s.quotaControlBusy(g.Bucket) {
 			return nil, fail(503, "quota checkpoint is pending")
 		}
 		proof, err := q.ledger.receive(g, actor, a.Epoch)
@@ -217,7 +219,7 @@ func (s *Server) fulfillQuotaDemand(h quotaDemand) {
 	s.opMu.Lock()
 	view := s.currentSystem.Load()
 	a := findQuota(view, client.ID(h.bucket))
-	if a == nil || s.quotaControlBusy() || s.shortStopping.Load() {
+	if a == nil || s.quotaControlBusy(client.ID(h.bucket)) || s.shortStopping.Load() {
 		s.opMu.Unlock()
 		return
 	}
@@ -257,7 +259,17 @@ func (s *Server) fulfillQuotaDemand(h quotaDemand) {
 		needed = h.growth - allowance
 	}
 	allAnswered := true
+	eligible := membershipIDs(view.manifest.Membership)
+	if b.Describe().Policy.PlacementGroup != "" {
+		eligible, _, err = s.pgMembers(b.Describe())
+		if err != nil {
+			return
+		}
+	}
 	for _, member := range view.manifest.Membership.Members {
+		if !hasControlNode(eligible, member.ID) {
+			continue
+		}
 		if member.ID == q.ledger.node {
 			continue
 		}

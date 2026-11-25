@@ -87,7 +87,7 @@ func (r *rangeManager) pressurePlan(hint rangePressure) (rangePlan, bool) {
 	if err != nil {
 		return rangePlan{}, false
 	}
-	destinations, _ := r.destinations(b.Describe())
+	destinations, _ := r.destinations(b.Describe(), true)
 	old := before.Entries[0]
 	failed := hint.failed
 	selected, _, found, selectErr := b.selectVolume(b.Describe(), volume.Key{Bucket: hint.bucket, Object: hint.object}, volume.ID{}, true)
@@ -154,7 +154,7 @@ func (r *rangeManager) awaitPressureStats(hint rangePressure) bool {
 	if err != nil {
 		return false
 	}
-	destinations, _ := r.destinations(b.Describe())
+	destinations, _ := r.destinations(b.Describe(), true)
 	old := before.Entries[0]
 	for _, destination := range destinations {
 		if destination.node == r.node && (old.Locations[0].Volume == destination.volume.ID || hint.failed == volume.ID(destination.volume.ID)) {
@@ -166,11 +166,18 @@ func (r *rangeManager) awaitPressureStats(hint rangePressure) bool {
 	}
 	return false
 }
-func (r *rangeManager) nextPressure() (rangePlan, bool) {
+func (r *rangeManager) nextPressure() (rangePlan, bool) { return r.nextPressureGroup("*") }
+func (r *rangeManager) nextPressureGroup(group string) (rangePlan, bool) {
 	r.mu.Lock()
 	hints := append([]rangePressure(nil), r.pressures...)
 	r.mu.Unlock()
 	for _, hint := range hints {
+		if group != "*" {
+			b, err := r.server.Bucket(hint.bucket)
+			if err != nil || b.Describe().Policy.PlacementGroup != group {
+				continue
+			}
+		}
 		plan, ok := r.pressurePlan(hint)
 		if !ok {
 			continue

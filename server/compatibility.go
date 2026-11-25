@@ -339,12 +339,16 @@ func currentOperationSemantics() map[string]operationSemantics {
 	for op := uint16(0x1050); op <= 0x105f; op++ {
 		result[fmt.Sprintf("%04x", op)] = operationSemantics{Emit: 2, Min: 2, Max: 2}
 	}
-	for _, op := range []uint16{peerBucketPurge, peerBucketCodec, peerBucketInventory, peerReplicaTopologyReady, peerReplicaTopologyCleanup, peerReplicaAbortHistory, peerBucketLease, peerForceAdmin, peerForceScopeEnvelope, peerForceScopes, peerForceControlState, peerForceConstruction, peerForceAdoptCommit, peerRecoveryReady} {
+	for _, op := range []uint16{peerPGRebuildRequest, peerPGRebuildState, peerPGRebuildArchive, peerPGRebuildCodec, peerPGRebuildRanges, peerBucketPurge, peerBucketCodec, peerBucketInventory, peerReplicaTopologyReady, peerReplicaTopologyCleanup, peerReplicaAbortHistory, peerBucketLease, peerForceAdmin, peerForceScopeEnvelope, peerForceScopes, peerForceControlState, peerForceConstruction, peerForceAdoptCommit, peerRecoveryReady} {
 		result[fmt.Sprintf("%04x", op)] = operationSemantics{Emit: 2, Min: 2, Max: 2}
 	}
 	for op := peerCowCapture; op <= peerCowSync; op++ {
 		result[fmt.Sprintf("%04x", op)] = operationSemantics{Emit: 1, Min: 1, Max: 1}
 	}
+	for _, op := range []uint16{client.PeerControlReserve, client.PeerControlPrepare, client.PeerControlCommit, client.PeerControlApply, client.PeerControlRelease, client.PeerControlAbort} {
+		result[fmt.Sprintf("%04x", op)] = operationSemantics{Emit: 3, Min: 3, Max: 3}
+	}
+	result[fmt.Sprintf("%04x", peerBucketLease)] = operationSemantics{Emit: 3, Min: 3, Max: 3}
 	result[fmt.Sprintf("%04x", peerCowCapture)] = operationSemantics{Emit: 2, Min: 2, Max: 2}
 	for _, op := range []uint16{clusterJoinStatus, clusterJoinInfo, clusterJoinPrepare} {
 		result[fmt.Sprintf("%04x", op)] = operationSemantics{Emit: 1, Min: 1, Max: 1}
