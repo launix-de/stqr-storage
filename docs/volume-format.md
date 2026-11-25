@@ -31,11 +31,16 @@ operations on different volumes, callers must establish a consistent lock order.
 The server is responsible for cluster ownership, replication, bucket access and
 quotas across volumes. `Bind` persists/checks the node/cluster identity.
 
-`PrepareMutation` is the deliberate exception to the write handle's read
-exclusion: private payload staging admits readers of the previous committed
-index. Other mutations remain excluded until staging finishes, and local WAL
-application/publication reacquires the write lock. Closing waits for this
-private staging phase before releasing the device.
+Private payload staging and pinned checkpoints are deliberate exceptions to
+the write handle's read exclusion. `PrepareMutation` admits readers of the
+previous committed index while staging private payloads. Checkpoint I/O pins the
+existing accepted-write buffer, releases the metadata lock and admits readers
+of those same visible bytes. Subsequent in-place writers wait without excluding
+readers until the WAL is reusable; completion and failure are published under
+the metadata lock. Closing waits for either phase before releasing the device.
+The server drops its node admission locks before waiting, then rechecks
+authorization, placement and quotas before consuming the incoming payload.
+This does not introduce object revisions or parallel in-place writers.
 
 `Volume.Stat` is an independent general metadata query. All other object access
 is exclusively through a handle from `Volume.Open(write bool)`; there is no
