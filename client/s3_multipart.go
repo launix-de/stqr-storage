@@ -652,43 +652,73 @@ func (s *S3) AbortMultipart(ctx context.Context, id string) error {
 	}
 	return ErrPrecondition
 }
+
+// MultipartUploadsPage inspects one bounded native inventory page. byteBudget
+// estimates checksum-block reads (at most 1 MiB per object); zero removes that
+// additional budget. At least one candidate is inspected to guarantee progress.
+// The cursor advances only past inspected records, including non-S3 objects.
+func (s *S3) MultipartUploadsPage(ctx context.Context, after *ObjectID, limit uint32, byteBudget uint64) ([]S3Upload, *ObjectID, error) {
+	if limit == 0 || limit > 1000 {
+		return nil, nil, ErrRange
+	}
+	records, next, e := s.store.ScanObjects(ctx, after, limit)
+	if e != nil {
+		return nil, nil, e
+	}
+	out := []S3Upload{}
+	var spent uint64
+	for i, r := range records {
+		if r.Info.Length < s3UploadHeader+33 {
+			continue
+		}
+		// A short ranged read can verify an entire native checksum block.
+		// Budget that work rather than counting just the returned prefix bytes.
+		cost := min(r.Info.Length, uint64(1<<20))
+		if byteBudget != 0 && cost > byteBudget-min(spent, byteBudget) && i > 0 {
+			cursor := records[i-1].ID
+			next = &cursor
+			break
+		}
+		spent += cost
+		raw, _, e := s.store.GetRange(ctx, r.ID, 0, s3UploadHeader+33)
+		if errors.Is(e, ErrNotFound) {
+			continue
+		}
+		if e != nil {
+			return nil, nil, e
+		}
+		if len(raw) < s3UploadHeader+33 || string(raw[:4]) != "STMU" {
+			continue
+		}
+		identity := Decoder{B: raw[s3UploadHeader:]}
+		candidate, e := s3UploadID(identity.Text())
+		if identity.Err != nil || e != nil || candidate != r.ID {
+			continue
+		}
+		u, e := s.readUpload(ctx, r.ID)
+		if errors.Is(e, ErrS3Upload) {
+			continue
+		}
+		if e != nil {
+			return nil, nil, e
+		}
+		id, _ := s3UploadID(u.ID)
+		if id != r.ID {
+			return nil, nil, ErrS3Format
+		}
+		out = append(out, u)
+	}
+	return out, next, nil
+}
 func (s *S3) MultipartUploads(ctx context.Context) ([]S3Upload, error) {
 	out := []S3Upload{}
 	var after *ObjectID
 	for {
-		records, next, e := s.store.ScanObjects(ctx, after, 512)
+		page, next, e := s.MultipartUploadsPage(ctx, after, 512, 0)
 		if e != nil {
 			return nil, e
 		}
-		for _, r := range records {
-			raw, _, e := s.store.GetRange(ctx, r.ID, 0, s3UploadHeader+33)
-			if errors.Is(e, ErrNotFound) {
-				continue
-			}
-			if e != nil {
-				return nil, e
-			}
-			if len(raw) < s3UploadHeader+33 || string(raw[:4]) != "STMU" {
-				continue
-			}
-			identity := Decoder{B: raw[s3UploadHeader:]}
-			candidate, e := s3UploadID(identity.Text())
-			if identity.Err != nil || e != nil || candidate != r.ID {
-				continue
-			}
-			u, e := s.readUpload(ctx, r.ID)
-			if errors.Is(e, ErrS3Upload) {
-				continue
-			}
-			if e != nil {
-				return nil, e
-			}
-			id, _ := s3UploadID(u.ID)
-			if id != r.ID {
-				return nil, ErrS3Format
-			}
-			out = append(out, u)
-		}
+		out = append(out, page...)
 		if next == nil {
 			break
 		}
@@ -731,20 +761,34 @@ func (s *S3) maintainMultipart(ctx context.Context, now time.Time, idle, receipt
 			}
 			continue
 		}
-		age := idle
-		if u.State == S3UploadDone || u.State == S3UploadFailed {
-			age = receipts
-		}
-		if now.Sub(u.Updated) < age {
-			continue
-		}
-		oid, _ := s3UploadID(u.ID)
-		e = s.store.Delete(ctx, oid, DeleteOptions{RequestID: NewRequestID(), ExpectedLength: uint64Pointer(u.PayloadOffset + u.PayloadSize), Compare: u.header})
-		if e != nil && !errors.Is(e, ErrPrecondition) && !errors.Is(e, ErrNotFound) {
+		if e = s.ExpireMultipartUpload(ctx, u, now, idle, receipts); e != nil {
 			failures = errors.Join(failures, e)
 		}
 	}
 	return failures
+}
+
+// ExpireMultipartUpload conditionally reclaims one previously discovered idle
+// upload or completion receipt. Concurrent part updates are fenced by the exact
+// same native preconditions as a full maintenance pass. Publishing is handled by
+// the owner-authorized recovery path, never by this administrative expiry helper.
+func (s *S3) ExpireMultipartUpload(ctx context.Context, u S3Upload, now time.Time, idle, receipts time.Duration) error {
+	if u.State == S3UploadPublishing {
+		return nil
+	}
+	age := idle
+	if u.State == S3UploadDone || u.State == S3UploadFailed {
+		age = receipts
+	}
+	if now.Sub(u.Updated) < age {
+		return nil
+	}
+	oid, _ := s3UploadID(u.ID)
+	e := s.store.Delete(ctx, oid, DeleteOptions{RequestID: NewRequestID(), ExpectedLength: uint64Pointer(u.PayloadOffset + u.PayloadSize), Compare: u.header})
+	if errors.Is(e, ErrPrecondition) || errors.Is(e, ErrNotFound) {
+		return nil
+	}
+	return e
 }
 
 func (s *S3) restoreMultipartOpen(ctx context.Context, u S3Upload, _ *os.File, reason error) error {

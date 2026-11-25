@@ -354,7 +354,11 @@ func Open(opts Options) (s *Server, err error) {
 	s.startLeaseRecovery()
 	s.startAcceptedCheckpoints()
 	s.startBucketReclaimer()
-	s.startS3Maintenance()
+	// Transport fixtures drive recovery explicitly; autonomous housekeeping
+	// belongs to the production daemon lifecycle, including startup recovery.
+	if !opts.transportOnly {
+		s.startS3Maintenance()
+	}
 	s.workers.Add(1)
 	go s.statsLoop()
 	for _, d := range s.bucketSnapshots() {
