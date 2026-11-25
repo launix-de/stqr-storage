@@ -21,6 +21,18 @@ func controlMembershipWire(m client.Membership) ([]byte, error) {
 }
 
 func marshalControlClaim(c controlClaim) ([]byte, error) {
+	if c.GlobalBarrier {
+		c.GlobalBarrier = false
+		wire, err := marshalControlClaim(c)
+		if err != nil {
+			return nil, err
+		}
+		e := client.Encoder{}
+		e.U16(7)
+		e.Blob(wire)
+		return e.B, nil
+	}
+
 	membership, err := controlMembershipWire(c.Base.Membership)
 	if err != nil {
 		return nil, err
@@ -75,6 +87,15 @@ func marshalControlClaim(c controlClaim) ([]byte, error) {
 func decodeControlClaim(body []byte) (controlClaim, error) {
 	d := client.Decoder{B: body}
 	schema := d.U16()
+	if schema == 7 {
+		wire := d.Blob()
+		if d.Done() != nil || len(wire) < 2 || wire[0] == 7 && wire[1] == 0 {
+			return controlClaim{}, client.ErrProtocol
+		}
+		c, err := decodeControlClaim(wire)
+		c.GlobalBarrier = true
+		return c, err
+	}
 	membership, err := client.DecodeNodeHelloAck(d.Blob())
 	c := controlClaim{Base: controlBase{Membership: membership.Membership, Sequence: d.U64()}}
 	copy(c.Base.Head[:], d.Take(32))

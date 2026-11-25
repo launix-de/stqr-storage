@@ -41,8 +41,12 @@ func (c *clusterController) finishBucketPolicies(ctx context.Context) {
 		if !countsReady {
 			continue
 		}
-		if !samePlacementPolicy(description.Policy, *description.DesiredPolicy) && !s.replicaPolicyInPlace(description) {
-			if err := s.scopes.syncArchives(ctx); err != nil {
+		if description.Policy.PlacementGroup != "" {
+			if !s.policyRangesReady(id, description.DesiredPolicy.Version) {
+				continue
+			}
+		} else if !samePlacementPolicy(description.Policy, *description.DesiredPolicy) && !s.replicaPolicyInPlace(description) {
+			if err := s.scopes.syncGlobalArchives(ctx); err != nil {
 				return
 			}
 			id, err := bucketID(description.ID)
@@ -74,7 +78,7 @@ func (c *clusterController) finishBucketPolicies(ctx context.Context) {
 			if err != nil {
 				return nil, err
 			}
-			if samePlacementPolicy(expected.Policy, *expected.DesiredPolicy) || s.replicaPolicyInPlace(expected) {
+			if expected.Policy.PlacementGroup == "" && (samePlacementPolicy(expected.Policy, *expected.DesiredPolicy) || s.replicaPolicyInPlace(expected)) {
 				for _, node := range request.Claim.Required {
 					e := client.Encoder{}
 					e.Blob(claim)

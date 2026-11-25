@@ -50,6 +50,9 @@ func (s *Server) executeMaintenance(ctx context.Context, op *objectMutation, d *
 			return nil, 0, ErrBucketForbidden
 		}
 		ids, _, err := s.leaseMembers()
+		if l := ws.authorization.lease.Load(); l != nil && l.Group != (client.ID{}) {
+			ids = append([]client.ID(nil), l.Members...)
+		}
 		if err != nil {
 			return nil, 0, err
 		}

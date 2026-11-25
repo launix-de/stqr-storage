@@ -192,9 +192,53 @@ Ein SHORT/CLUSTER-Shutdown kann bei ausstehenden Commits oder fehlenden Mitglied
 
 ### 4.1 Persistenter Kontrollstand
 
-**Scope-Regel:** Globale Membership-/Admin-Entscheidungen besitzen weiterhin eine gemeinsame Sequenz-/Hashkette und ihre ALL-Barriere. Rebuilds sind dagegen **an betroffene Range-Groups gebunden**. Disjunkte Scopes dürfen parallel auch verschiedene Koordinatoren haben; überlappende Scopes müssen sich ausschließen. Jeder Rebuild-Beleg bindet Scope-ID, RoundID, die vollständigen bisherigen Range-Grenzen/Owner-Epochs und die feste Teilnehmermenge. Seine Sequenz/Vorgängerkette gilt innerhalb dieses Scopes und darf nicht mit der globalen Admin-Sequenz verwechselt werden. Ein fehlender globaler Initiator oder Koordinationszeuge blockiert keinen sonst unabhängigen Online-Scope.
+**Scope-Regel:** Jeder Daten-Bucket gehört genau einem Rebuild-Zuständigkeitsbereich:
+bei gesetzter PG ausschließlich dieser PG, andernfalls dem globalen `NULL`-Scope.
+Der globale Rebuild plant und migriert keine PG-Buckets. Die reservierte System-PG
+bleibt Teil der globalen Membership-/Metadatenverwaltung. Globale
+Membership-/Admin-Entscheidungen besitzen weiterhin eine gemeinsame Sequenz-/Hashkette;
+sie sind von den unabhängig fortschreitenden PG-Rebuilds getrennt.
 
-Die Vereinigung bestätigter disjunkter Patches ergibt die gemeinsame Placement-Map. Generation/Map-Revision sind dabei keine globale Totalordnung gleichzeitig laufender disjunkter Rebuilds; Schreibautorität folgt den bestätigten Übergaben und Owner-Epochs der jeweiligen Range. Ein Merge darf eine neuere Übergabe nie durch einen alten Gesamt-Snapshot überschreiben. Split/Merge beansprucht sämtliche betroffenen bisherigen Range-Groups einschließlich ihrer Grenzen, nicht bloß schon vorausgesetzte neue Teilbereiche. Die reservierten Rebuild-Wirelayouts erhalten bei Umsetzung einen explizit gebundenen Scope; die vorhandene globale Membership-/Admin-Decision bleibt davon getrennt.
+Jede PG besitzt CURRENT/NEXT, eine eigene persistente Generationsfolge, Vorgänger-ID,
+RoundID, feste Teilnehmermenge und einen eigenen Worker. Ein Generationszähler allein
+identifiziert keine Runde: Belege binden zusätzlich PG-ID, Membership-Epoch,
+Maskenversion, Plan-Digest sowie vollständige bisherige Range-Grenzen/Owner-Epochs.
+Gleiche Zähler verschiedener PGs stehen in keiner Ordnung zueinander und werden nach
+einem Netzwerksplit weder addiert noch durch ein globales Maximum ersetzt. Dies sind
+Placement-Runden, keine Objekt-Inhaltsversionen. Ein Lauf kann begrenzte Teilpläne
+umsetzen; die noch offenen Gründe bleiben persistent für Folgerunden erhalten.
+
+ALL bedeutet im PG-Lauf die fest gebundenen zugelassenen Mitglieder dieser PG, nicht
+alle Cluster-Mitglieder. Die Teilnehmer werden aus committed Membership und PG-Maske
+bestimmt; während freigegebener Maskenwechsel müssen alte und neue Teilnehmer gemeinsam
+gebunden bleiben. Nichterreichbarkeit verkleinert diese Menge nicht. Zwei vollständig
+innerhalb ihrer jeweiligen Netzwerkfraktion liegende PGs dürfen daher unabhängig
+Rebuilds ausführen, obwohl die andere Fraktion offline ist. Eine PG mit erforderlichen
+Teilnehmern auf beiden Seiten wartet. `node_selection=all` umfasst sämtliche Mitglieder;
+für unabhängige Teilcluster sind entsprechend beschränkte PG-Masken erforderlich.
+
+Disjunkte PGs benötigen getrennte Koordinator-Slots, Peer-Verarbeitung und Worker,
+auch wenn sie dieselbe Node nutzen. Reguläre globale Katalogänderungen sperren nur
+ihre ausdrücklich betroffenen Buckets und den NULL-Scope. Die unveränderten
+Quota-Basen und Journal-Watermarks anderer PGs bleiben erhalten, sodass deren Credits
+und Range-Übergaben weiterlaufen können. Membership-Wechsel, Cluster-Shutdown und
+autorisierte Ausschlüsse sind dagegen ausdrücklich globale Barrieren; ein Drain-Wunsch
+allein verlangt keine globale Daten-I/O-Sperre.
+
+Nach Reconnect werden persistierte PG-Runden und bestätigte Range-Übergaben automatisch
+seitenweise abgeglichen. Jede PG übernimmt ausschließlich eine lückenlose Vorgängerkette.
+Widersprüchliche Belege derselben PG werden abgewiesen. Die Vereinigung bestätigter
+disjunkter Range-Patches ergibt die gemeinsame Placement-Map; verspätete Kind-/Eltern-
+Belege müssen unabhängig von ihrer Ankunftsreihenfolge kausal angewendet werden.
+Ein alter Gesamt-Snapshot darf eine neuere Übergabe nicht zurückrollen.
+
+Die Implementierung verwendet derzeit die niedrigste zugelassene PG-Node-ID als
+stabile Anlaufstelle für ihre Runde. Ein persistiertes Quellangebot geht dem ersten
+entfernten Reservieren voraus; alle PG-Teilnehmer bestätigen Vorbereitung und Start.
+Der Quellnode wird beim Abschluss zuletzt freigegeben. Verlorene Antworten werden
+mit demselben Plan wiederholt, auch wenn der Koordinator bereits lokal abgeschlossen
+hat. Es gibt keine zeitgetriebene Neuwahl. Das spätere allgemeinere Push-Wahlmodell in
+§4.2 ersetzt diese Bindung erst nach eigener Verifikation.
 
 ```go
 type RoundID struct { MembershipEpoch, Generation uint64; Initiator [16]byte; Attempt uint64 }
@@ -1150,7 +1194,7 @@ STABLE -> PREPARED -> COPYING -> CATCHING_UP -> CUTOVER -> CLEANUP -> STABLE
 - Logischer Split kann die bisherigen Replica-Locations für beide Kinder übernehmen: **0 Byte Migration**.
 - Beim Merge kompatibler Ranges mit identischem Replica-Set: meist nur Map-/Index-Änderung.
 - Bei unterschiedlichen Sets: Planner wählt Ziel-Location-Set unter Wahrung der Failure Domains; Byte-Kosten, Kapazität und Read-/Write-Last entscheiden; in NEXT werden Source und Target getrennt modelliert.
-- Globale Generationen können viele unabhängige Ranges parallel migrieren, mit I/O-Limits und Recovery-Priorität.
+- PG-lokale Generationen und der getrennte NULL-Scope können unabhängige Ranges parallel migrieren, mit I/O-Limits und Recovery-Priorität.
 
 ### 12.4 Crash-/Failure-Fälle
 
@@ -2631,8 +2675,14 @@ Objektversionsnummern. Das integrierte S3-Frontend verwendet dieselben Objektmet
 Allgemeine exklusive Objekt-Leases sind unabhängig vom Nutzdatenformat. Für TRIM
 wählt allein der NBD-Client DELETE oder bei WRITE-only das Leeren des Stripe-Payloads.
 
-Priorität 1 gilt ausführbaren Benutzer-I/Os, Priorität 2 Umschichtungen laut
-Rebuild-Map und Priorität 3 physischer Bucket-Bereinigung. Ein atomarer Speicherschritt
+Priorität 1 gilt direkt bedienbaren Benutzer-Reads/Writes einschließlich ihrer
+benötigten Replica-I/Os. Auf eine fehlende Node oder eine Migration wartende Requests
+zählen nicht als ausführbares lokales I/O und dürfen ihre eigene Abhängigkeit nicht
+blockieren. Priorität 2 gilt Pflichtmigrationen der aktuellen Rebuild-Map.
+Priorität 3 gilt fortsetzbarer Hintergrundarbeit wie Node-/Volume-Drain,
+physischer Bucket-Bereinigung und anderen Langläufern. Bereits verbindlich
+übernommene Ownership-/Replica-Pflichten werden auch bei einem ursprünglich optionalen
+Auftrag sicher beendet; eine Pause darf keine Schreibautorität verlieren. Ein atomarer Speicherschritt
 wird fertiggestellt; vor dem nächsten begrenzten Schritt wird die Priorität erneut
 geprüft. Auf entfernte Peers wartende RPCs halten keine lokale I/O-Priorität fest.
 Die bestätigte Löschvormerkung macht den Bucket sofort unerreichbar und wird in
@@ -2640,6 +2690,20 @@ nachfolgende Generationen übernommen. Physische Bereinigung ist kein Abschlussk
 der ankündigenden Generation. Jede Node arbeitet in kleinen Idle-Portionen weiter,
 überspringt belegte Sperren und meldet ihren lokalen Abschluss. Erst danach kann eine
 kurze spätere Kontrollentscheidung die verbleibenden Verwaltungsreste abschließen.
+
+Sind alle Pflichtbestandteile der Runde erfüllt und bestätigen deren Teilnehmer
+die Abschlussbereitschaft, werden optionale Langläufer an sicheren begrenzten
+Schrittgrenzen angehalten. Ihr Auftrag und Fortschritt werden persistent in die
+Folgerunde übernommen; ihr Gesamtabschluss ist kein Abschlusskriterium der laufenden
+Generation. Insbesondere bedeutet ein Node-Drain nicht, dass alle Daten in einer
+einzigen Runde evakuiert werden müssen. Die endgültige Membership-Entfernung benötigt
+weiterhin die sichere Übergabe sämtlicher erforderlicher Daten.
+
+**Implementierungslücke:** Der Audit [Rebuild and I/O priority audit](docs/rebuild-priority-audit.md)
+dokumentiert noch fehlende durchgängige I/O-Zulassung, die gesonderte Drain-Klasse
+und die gemeinsame Unterbrechungs-/Fortsetzungsphase optionaler Arbeiten. Die
+bestehende seitenweise Bucket-Bereinigung erfüllt bereits die Entkopplung vom
+Generationsabschluss; daraus folgt noch keine vollständige Erfüllung dieses Vertrags.
 
 Das NBD-Dashboard ist ebenfalls ein Client des Objektprotokolls. Der Browser
 interpretiert STNBD001, adressiert Descriptoren nach dem NBD-Clientformat und

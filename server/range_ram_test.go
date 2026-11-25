@@ -111,7 +111,9 @@ func TestDaemonRAMHandoffCrashRecovery(t *testing.T) {
 				}
 				time.Sleep(25 * time.Millisecond)
 			}
-			err = r.move(ctx, p)
+			// PG activation also needs the reverse participant path after
+			// reconnect. Retry availability errors, retaining the exact plan.
+			err = retryQuotaCall(func() error { return r.move(ctx, p) })
 			if phase == "unsealed-source" {
 				if err == nil {
 					t.Fatal("unsealed RAM shadow promoted after source loss")
@@ -122,7 +124,7 @@ func TestDaemonRAMHandoffCrashRecovery(t *testing.T) {
 					closed := txn != nil && txn.aborted && !n.node.scopes.active(txn)
 					n.node.scopes.mu.Unlock()
 					if !closed {
-						t.Fatal("lost unsealed offer was not closed")
+						t.Fatalf("lost unsealed offer was not closed: resume=%v node=%s", err, n.node.control.ledger.node)
 					}
 				}
 				return

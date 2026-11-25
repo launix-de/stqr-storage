@@ -6,12 +6,24 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"time"
 
 	"github.com/launix-de/stqr-storage/client"
 	"github.com/launix-de/stqr-storage/volume"
 )
 
 func (r *rangeManager) move(ctx context.Context, p rangePlan) (retErr error) {
+	defer func() {
+		if retErr != nil {
+			cleanup, cancel := context.WithTimeout(r.server.ctx, 3*time.Second)
+			defer cancel()
+			_ = r.abortPG(cleanup, p)
+		}
+	}()
+
+	if err := r.beginPG(ctx, p); err != nil {
+		return err
+	}
 	if err := r.server.waitForUserIO(ctx); err != nil {
 		return err
 	}
@@ -36,7 +48,10 @@ func (r *rangeManager) move(ctx context.Context, p rangePlan) (retErr error) {
 	finished := t.sourceDone.RecordSequence != 0
 	r.mu.Unlock()
 	if finished {
-		return nil
+		return r.finishPG(ctx, p)
+	}
+	if p.CodecOnly {
+		return r.movePGCodec(ctx, p)
 	}
 	stage = "history transfer"
 	if err := r.sendHistory(ctx, p.Target, id); err != nil {
@@ -194,7 +209,7 @@ func (r *rangeManager) move(ctx context.Context, p rangePlan) (retErr error) {
 		return err
 	}
 	r.announce(p, decision)
-	return nil
+	return r.finishPG(ctx, p)
 }
 
 func (r *rangeManager) sendHistory(ctx context.Context, node client.ID, skip [32]byte) error {

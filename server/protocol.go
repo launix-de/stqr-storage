@@ -177,9 +177,30 @@ func (s *Server) dispatchAs(m client.Message, ws *wsSession, p principal) ([]byt
 			}
 			return client.ResponseBody(200, result, ""), 200
 		}
+		if m.Opcode >= peerPGRebuildRequest && m.Opcode <= peerPGRebuildRanges {
+			actor, _ := parseID(p.User.ID)
+			ctx := s.ctx
+			if p.requestContext != nil {
+				ctx = p.requestContext
+			} else if ws != nil {
+				ctx = ws.ctx
+			}
+			result, err := s.pgRebuildPeer(ctx, m, client.ID(actor))
+			if err != nil {
+				status := statusOf(err)
+				return client.ResponseBody(status, nil, err.Error()), status
+			}
+			return client.ResponseBody(200, result, ""), 200
+		}
 		if m.Opcode == peerBucketLease {
 			actor, _ := parseID(p.User.ID)
-			result, err := s.receiveBucketLease(s.ctx, m.Body, client.ID(actor))
+			ctx := s.ctx
+			if p.requestContext != nil {
+				ctx = p.requestContext
+			} else if ws != nil {
+				ctx = ws.ctx
+			}
+			result, err := s.receiveBucketLease(ctx, m.Body, client.ID(actor))
 			if err != nil {
 				status := statusOf(err)
 				return client.ResponseBody(status, nil, err.Error()), status

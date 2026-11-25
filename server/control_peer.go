@@ -87,7 +87,7 @@ func (r *controlRuntime) execute(op uint16, body []byte, actor client.ID) ([]byt
 			if scopes := r.server.scopes; scopes != nil {
 				scopes.mu.Lock()
 				defer scopes.mu.Unlock()
-				if scopes.busyLocked() && claim.Exclusion == nil {
+				if scopes.blocksGlobalLocked(claim) && claim.Exclusion == nil {
 					return nil, fail(503, "range handoff must finish before global control")
 				}
 			}
@@ -284,6 +284,9 @@ func (p peerControlParticipants) call(ctx context.Context, node client.ID, opcod
 		}
 		if opcode == peerBucketCopy {
 			return p.runtime.server.receiveBucketCopy(ctx, body, node)
+		}
+		if opcode >= peerPGRebuildRequest && opcode <= peerPGRebuildRanges {
+			return p.runtime.server.pgRebuildPeer(ctx, client.Message{Kind: client.Request, Opcode: opcode, Body: body}, node)
 		}
 		if opcode == peerBucketLease {
 			return p.runtime.server.receiveBucketLease(ctx, body, node)

@@ -604,7 +604,9 @@ func TestDaemonPhysicalQuotaLocalVolumeHandoffDoesNotChargeShadows(t *testing.T)
 	if err != nil || got[0] != 4 {
 		t.Fatal("write incorrectly chose import shadow", err)
 	}
-	if err = r.move(ctx, plan); err != nil {
+	// Restart reopens the listener before peer handshakes finish. PG rounds
+	// now require the fixed PG participants even for a local volume handoff.
+	if err = retryQuotaCall(func() error { return r.move(ctx, plan) }); err != nil {
 		t.Fatal("local handoff", err)
 	}
 	used, err = b.physicalUsage()
