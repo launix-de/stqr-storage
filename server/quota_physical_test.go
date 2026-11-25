@@ -329,6 +329,16 @@ func TestDaemonPhysicalQuotaParallelOwners(t *testing.T) {
 		}
 	}
 	if success != 15 {
+		for _, n := range []*daemonTestNode{source, target} {
+			n.node.opMu.Lock()
+			local, _ := n.node.Bucket(b.ID())
+			used, _ := local.physicalUsage()
+			allowance, _ := n.node.quotaAllowance(client.ID(b.ID()))
+			n.node.quotas.mu.Lock()
+			t.Logf("quota node=%s used=%d allowance=%d demands=%+v", n.node.cfg.Node.ID, used, allowance, n.node.quotas.demands)
+			n.node.quotas.mu.Unlock()
+			n.node.opMu.Unlock()
+		}
 		t.Fatal("physical metadata not counted exactly", success)
 	}
 	var total uint64

@@ -2,6 +2,7 @@
 package server
 
 import (
+	"bytes"
 	"math/big"
 	"path/filepath"
 	"sort"
@@ -160,7 +161,7 @@ func (q *quotaManager) reserveHints(bucket volume.ID, except *volume.ObjectID, u
 	defer q.mu.Unlock()
 	var total uint64
 	for _, h := range q.demands {
-		if h.bucket == bucket && (except == nil || h.object != *except) && time.Now().Before(h.until) {
+		if h.bucket == bucket && !h.exhausted && (except == nil || h.object != *except) && time.Now().Before(h.until) {
 			growth := h.growth
 			if h.activation && len(used) > 0 {
 				growth = subtractCapacity(growth, used[0])
@@ -171,14 +172,18 @@ func (q *quotaManager) reserveHints(bucket volume.ID, except *volume.ObjectID, u
 	return total
 }
 func (q *quotaManager) request(bucket volume.ID, object volume.ObjectID, growth uint64) bool {
+	return q.requestDemand(quotaDemand{bucket: bucket, object: object, growth: growth})
+}
+func (q *quotaManager) requestDemand(next quotaDemand) bool {
 	q.mu.Lock()
 	defer q.mu.Unlock()
+	next.until = time.Now().Add(10 * time.Second)
 	for i, h := range q.demands {
-		if h.bucket == bucket && h.object == object {
-			if h.exhausted && time.Now().Before(h.until) && h.growth == growth {
+		if h.bucket == next.bucket && h.object == next.object {
+			if h.exhausted && time.Now().Before(h.until) && h.growth == next.growth && h.activation == next.activation {
 				return false
 			}
-			q.demands[i] = quotaDemand{bucket: bucket, object: object, growth: growth, until: time.Now().Add(10 * time.Second)}
+			q.demands[i] = next
 			select {
 			case q.wake <- struct{}{}:
 			default:
@@ -189,7 +194,7 @@ func (q *quotaManager) request(bucket volume.ID, object volume.ObjectID, growth 
 	if len(q.demands) >= 128 {
 		q.demands = q.demands[1:]
 	}
-	q.demands = append(q.demands, quotaDemand{bucket: bucket, object: object, growth: growth, until: time.Now().Add(10 * time.Second)})
+	q.demands = append(q.demands, next)
 	select {
 	case q.wake <- struct{}{}:
 	default:
@@ -212,15 +217,20 @@ func sortQuotaNodes(nodes []quotaNodeAllocation) {
 }
 
 func (q *quotaManager) requestActivation(bucket volume.ID, object volume.ObjectID, allowance uint64) bool {
-	if !q.request(bucket, object, allowance) {
-		return false
+	// Publish the kind together with its value before waking the worker. An
+	// activation value is a total allowance, not incremental object growth.
+	return q.requestDemand(quotaDemand{bucket: bucket, object: object, growth: allowance, activation: true})
+}
+
+// Hints are temporary preferences, never spent quota. A total node order breaks
+// circular waits when two owners each have less free credit than one write but
+// their combined headroom suffices. The lower ID may borrow unused credits even
+// against a donor's hints; the higher ID preserves the lower donor's preference.
+// Durable debit/receive still transfer authority before any credit is spent.
+func (q *quotaManager) lendable(bucket volume.ID, peer client.ID, allowance, used uint64) uint64 {
+	free := subtractCapacity(allowance, used)
+	if bytes.Compare(peer[:], q.ledger.node[:]) >= 0 {
+		free = subtractCapacity(free, q.reserveHints(bucket, nil, used))
 	}
-	q.mu.Lock()
-	defer q.mu.Unlock()
-	for i, h := range q.demands {
-		if h.bucket == bucket && h.object == object {
-			q.demands[i].activation = true
-		}
-	}
-	return true
+	return free
 }
