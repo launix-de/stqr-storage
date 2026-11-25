@@ -79,7 +79,7 @@ int save_settings(const char *url, const char *user, const char *password,
   DNS resolution uses the system resolver. There is no asynchronous cancellation
   or background heartbeat/reconnect thread.
 - Runtime IDs are retained across reconnect; an observed RAM-runtime change is
-  reported as `-ESTALE`. Inline operations follow validated owner redirects as described below.
+  reported as `-ESTALE`. Reads and mutations follow validated owner redirects as described below.
 
 ## Kernel reuse
 
@@ -140,8 +140,8 @@ durable notifications are routed to the known origin of the mark.
 
 ## Cluster routing
 
-Reads and inline mutations (up to 1 MiB per payload, including native filesystem
-segments) follow authoritative range-owner redirects. The client validates the
+Reads and mutations, including chunked payloads above 1 MiB, follow authoritative
+range-owner redirects. The client validates the
 bucket/range and primary node in the returned map patch, flushes accepted writes
 before switching owners and retries with the same request ID. Up to 32
 authenticated endpoint sessions are retained per logical bucket connection;
@@ -149,15 +149,16 @@ switching owners preserves existing subscriptions. Poll visits every live sessio
 and unsubscribe uses the session which owns that subscription. A transport loss,
 explicit reconnect or bounded-pool eviction invalidates subscription coverage;
 ordinary routing does not. Eviction confirms outstanding writes before closing a
-session. There is no automatic alternate-address failover. Chunked
-mutations larger than 1 MiB still require connecting to their correct owner; use
-bounded ranged writes for the native filesystem path.
+session. There is no automatic alternate-address failover. A rejected chunked
+mutation replays its complete payload with the original logical request ID; a
+transport failure with an uncertain outcome is never replayed automatically.
 
 The unversioned object schema uses WebSocket subprotocol `stqr.v2` and HELLO
-version 2. Upgrade all native clients and nodes together; v1 messages are rejected.
+version 2; v1 native object messages are rejected. PG-local rebuild coordination
+is internal to nodes and does not require another native client wire version.
 
 Temporary `503` replies are retried on the existing connection, with the same
-request ID and body, for at most the connection's configured timeout. Backoff is
+request ID, body and any chunked payload, for at most the connection's configured timeout. Backoff is
 interruptible and does not consume the redirect budget. Transport failures with
 an uncertain mutation outcome still return `-EINPROGRESS`; callers must preserve
 the original request ID when reconnecting. Permanent errors are returned directly.
