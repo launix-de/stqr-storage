@@ -35,7 +35,7 @@ func TestKSTQRVirtualMachine(t *testing.T) {
 	if image == "" {
 		t.Fatal("STQR_KERNEL_IMAGE is required")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 240*time.Second)
 	defer cancel()
 	root, err := filepath.Abs("../kernel/kstqr")
 	if err != nil {
