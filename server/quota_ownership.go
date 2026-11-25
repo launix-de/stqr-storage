@@ -10,11 +10,12 @@ import (
 )
 
 type quotaOwnershipStamp struct {
-	placement  *placementImage
-	view       *systemView
-	legacy     uint64
-	general    bool
-	standalone bool
+	node, volume volume.ID
+	placement    *placementImage
+	view         *systemView
+	legacy       uint64
+	general      bool
+	standalone   bool
 }
 
 // System image and placement pointers change for account edits, receipts and
@@ -23,7 +24,7 @@ type quotaOwnershipStamp struct {
 // totals when changed buckets have no records on that volume.
 func (stamp quotaOwnershipStamp) ChangedOwnershipBuckets(previous any) ([]volume.ID, bool) {
 	before, ok := previous.(quotaOwnershipStamp)
-	if !ok || stamp.general != before.general || stamp.standalone != before.standalone {
+	if !ok || stamp.general != before.general || stamp.standalone != before.standalone || stamp.node != before.node || stamp.volume != before.volume {
 		return nil, false
 	}
 	if stamp.standalone {
@@ -63,6 +64,45 @@ func (stamp quotaOwnershipStamp) ChangedOwnershipBuckets(previous any) ([]volume
 	return changed, true
 }
 
+// A pinned whole-bucket owner has exactly the volume's maintained bucket
+// totals. Owner epochs and other buckets' handoffs do not require rereading its
+// objects. Unbound/import-dependent and mixed-owner ranges remain conservative.
+func (stamp quotaOwnershipStamp) OwnershipForEntireBucket(bucket volume.ID) (bool, bool) {
+	if stamp.standalone {
+		return true, true
+	}
+	if stamp.placement == nil {
+		return false, true
+	}
+	if stamp.node == (volume.ID{}) || stamp.volume == (volume.ID{}) {
+		return false, false
+	}
+	entries := stamp.placement.bucketEntries(client.ID(bucket))
+	var result bool
+	for i, entry := range entries {
+		own := false
+		if entry.State != 4 && entry.State != 5 {
+			for _, loc := range entry.Locations {
+				if loc.Node != client.ID(stamp.node) || len(entry.Locations) > 1 && loc.Role > 1 {
+					continue
+				}
+				if loc.Volume == (client.ID{}) {
+					return false, false
+				}
+				own = loc.Volume == client.ID(stamp.volume)
+				if own {
+					break
+				}
+			}
+		}
+		if i > 0 && own != result {
+			return false, false
+		}
+		result = own
+	}
+	return result, true
+}
+
 func (s *Server) refreshQuotaOwnership(v *volume.Volume) error {
 	image := s.placement.Load()
 	view := s.currentSystem.Load()
@@ -72,7 +112,7 @@ func (s *Server) refreshQuotaOwnership(v *volume.Volume) error {
 	managed := s.volumes[id.String()]
 	general := managed != nil && !managed.config.RecoveryOnly
 	s.mu.RUnlock()
-	stamp := quotaOwnershipStamp{placement: image, view: view, general: general, standalone: s.controller == nil}
+	stamp := quotaOwnershipStamp{node: node, volume: id, placement: image, view: view, general: general, standalone: s.controller == nil}
 	if s.controller == nil {
 		s.mu.RLock()
 		stamp.legacy = s.cfg.Generation
