@@ -123,6 +123,7 @@ func (s *Server) executeUsers(m client.Message, p principal) ([]byte, int, error
 	var name, password, accessID, accessSecret string
 	var role uint8
 	var disabled bool
+	var deleteBuckets bool
 	if m.Opcode == client.UserCreate || m.Opcode == client.UserUpdate {
 		name = d.Text()
 		role = d.U8()
@@ -130,6 +131,8 @@ func (s *Server) executeUsers(m client.Message, p principal) ([]byte, int, error
 		if m.Opcode == client.UserCreate {
 			password = d.Text()
 		}
+	} else if m.Opcode == client.UserDelete && len(m.Body) > 16 {
+		deleteBuckets = d.Bool()
 	} else if m.Opcode == client.UserSetPassword {
 		password = d.Text()
 	} else if m.Opcode == client.UserS3KeySet || m.Opcode == client.UserS3KeyDelete {
@@ -258,6 +261,11 @@ func (s *Server) executeUsers(m client.Message, p principal) ([]byte, int, error
 			}
 		}
 	case client.UserDelete:
+		if deleteBuckets {
+			if err := s.deleteExclusiveUserBuckets(target.String()); err != nil {
+				return nil, 0, err
+			}
+		}
 		for i := range image.Users {
 			if image.Users[i].ID == target.String() {
 				image.Users = append(image.Users[:i], image.Users[i+1:]...)

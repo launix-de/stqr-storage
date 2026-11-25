@@ -230,6 +230,16 @@ credentials/sessions, including the administrator's own session when applicable.
 Account updates and retry receipts commit atomically to the admin volume; only
 bcrypt verifiers and keyed request digests are stored, never plaintext passwords.
 
+The user-deletion dialog defaults to **Buckets löschen, die nur diesem User gehören**.
+The backend selects buckets with a nonzero grant for that user and no nonzero
+grant for another identity; implicit administrator access does not count. System,
+shared and unassigned buckets remain. Disabled users still count as other grantees.
+Unchecking the option preserves all buckets. `USER_DELETE` accepts `user:ID`
+followed by an optional `delete_exclusive_buckets:Bool`; the legacy ID-only body
+preserves buckets. Account removal and bucket deletion intents share the global
+ALL administrative commit. Physical deletion follows the existing resumable
+cleanup/COW path. A retry retains its original selection and result.
+
 Browser sessions are process-local. After a WebSocket disconnect the dashboard
 checks HTTP session validity: expired/revoked sessions return to login, while a
 new session cookie refreshes the CSRF binding. Temporary network failures keep
