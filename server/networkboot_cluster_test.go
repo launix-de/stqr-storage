@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -24,11 +25,13 @@ func TestClusterNetworkbootNBDWithQEMU(t *testing.T) {
 	source, target := startAutomaticDaemonPair(t, false)
 	addTestVolume(t, source.node, "images", "hdd", 32<<20)
 	addTestVolume(t, target.node, "images", "hdd", 32<<20)
-	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	dir := t.TempDir()
 	binary := filepath.Join(dir, "bootctl")
-	build := exec.CommandContext(ctx, "go", "build", "-buildvcs=false", "-race", "-o", binary, "./cmd/stqr-bootctl")
+	buildCtx, cancelBuild := context.WithTimeout(ctx, 2*time.Minute)
+	defer cancelBuild()
+	build := exec.CommandContext(buildCtx, "go", "build", "-buildvcs=false", "-race", "-o", binary, "./cmd/stqr-bootctl")
 	build.Dir = "../networkboot"
 	if out, e := build.CombinedOutput(); e != nil {
 		t.Fatalf("build: %v %s", e, out)
@@ -39,9 +42,23 @@ func TestClusterNetworkbootNBDWithQEMU(t *testing.T) {
 	if e := os.WriteFile(cfg, raw, 0600); e != nil {
 		t.Fatal(e)
 	}
+	// Bound each operation independently. Compilation, race-runtime shutdowns
+	// and preceding commands must not consume a later command's deadline.
+	invoke := func(args ...string) ([]byte, error) {
+		t.Helper()
+		commandCtx, cancelCommand := context.WithTimeout(ctx, 15*time.Second)
+		defer cancelCommand()
+		started := time.Now()
+		out, err := exec.CommandContext(commandCtx, binary, append([]string{"--config", cfg}, args...)...).CombinedOutput()
+		t.Logf("bootctl %v finished in %s", args, time.Since(started))
+		if commandCtx.Err() != nil {
+			t.Fatalf("%v: %v: %s", args, commandCtx.Err(), out)
+		}
+		return out, err
+	}
 	run := func(args ...string) {
 		t.Helper()
-		out, e := exec.CommandContext(ctx, binary, append([]string{"--config", cfg}, args...)...).CombinedOutput()
+		out, e := invoke(args...)
 		if e != nil {
 			t.Fatalf("%v: %v %s", args, e, out)
 		}
@@ -50,7 +67,7 @@ func TestClusterNetworkbootNBDWithQEMU(t *testing.T) {
 	run("create", "image")
 	run("--size", "4194304", "init-disk", "image")
 	run("--size", "4194304", "check-install-disk", "image")
-	if out, e := exec.CommandContext(ctx, binary, "--config", cfg, "--size", "8388608", "check-install-disk", "image").CombinedOutput(); e == nil || !bytes.Contains(out, []byte("requested")) {
+	if out, e := invoke("--size", "8388608", "check-install-disk", "image"); e == nil || !bytes.Contains(out, []byte("requested")) {
 		t.Fatal("resume must reject a different disk size", e, string(out))
 	}
 	socket := filepath.Join(dir, "disk.sock")
@@ -63,19 +80,24 @@ func TestClusterNetworkbootNBDWithQEMU(t *testing.T) {
 	}
 	done := make(chan error, 1)
 	go func() { done <- cmd.Wait() }()
+	// Only this goroutine owns running. ProcessState is written by Wait and
+	// cannot be inspected concurrently, including on an early test failure.
+	running := true
 	defer func() {
-		if cmd.ProcessState == nil {
+		if running {
 			cmd.Process.Kill()
 			<-done
 		}
 	}()
 	deadline := time.Now().Add(10 * time.Second)
 	for {
-		if _, e := os.Stat(socket); e == nil {
+		if probe, e := net.DialTimeout("unix", socket, 100*time.Millisecond); e == nil {
+			probe.Close()
 			break
 		}
 		select {
 		case e := <-done:
+			running = false
 			t.Fatalf("NBD start: %v %s", e, logs.String())
 		default:
 		}
@@ -85,17 +107,22 @@ func TestClusterNetworkbootNBDWithQEMU(t *testing.T) {
 		time.Sleep(20 * time.Millisecond)
 	}
 	args := []string{"-f", "raw", "-d", "unmap", "-c", "write -P 0x5a 1048064 4096", "-c", "flush", "-c", "read -P 0x5a 1048064 4096", "-c", "write -P 0x77 2097152 1048576", "-c", "discard 2097152 1048576", "-c", "discard 1048576 512", "-c", "flush", "-c", "read -P 0 2097152 1048576", "-c", "read -P 0 1048576 512", "-c", "read -P 0x5a 1048064 512", "nbd+unix:///?socket=" + socket}
-	if out, e := exec.CommandContext(ctx, "qemu-io", args...).CombinedOutput(); e != nil {
+	ioCtx, cancelIO := context.WithTimeout(ctx, 15*time.Second)
+	defer cancelIO()
+	if out, e := exec.CommandContext(ioCtx, "qemu-io", args...).CombinedOutput(); e != nil {
 		t.Fatalf("QEMU: %v %s", e, out)
 	}
 	cmd.Process.Signal(syscall.SIGTERM)
+	stop := time.NewTimer(10 * time.Second)
+	defer stop.Stop()
 	select {
 	case e := <-done:
+		running = false
 		if e != nil {
 			t.Fatalf("NBD stop: %v %s", e, logs.String())
 		}
-	case <-ctx.Done():
-		t.Fatal(ctx.Err())
+	case <-stop.C:
+		t.Fatal("NBD shutdown did not complete")
 	}
 	artifacts := filepath.Join(dir, "artifacts")
 	os.Mkdir(artifacts, 0700)
@@ -119,7 +146,7 @@ func TestClusterNetworkbootNBDWithQEMU(t *testing.T) {
 		t.Fatal(e)
 	}
 	run("publish", "image", artifacts)
-	if out, e := exec.CommandContext(ctx, binary, "--config", cfg, "--size", "4194304", "check-install-disk", "image").CombinedOutput(); e == nil || !bytes.Contains(out, []byte("already published")) {
+	if out, e := invoke("--size", "4194304", "check-install-disk", "image"); e == nil || !bytes.Contains(out, []byte("already published")) {
 		t.Fatal("resume must reject a published image", e, string(out))
 	}
 	run("gc", "image")
