@@ -151,13 +151,18 @@ dirty data before resizing; access to pages beyond the new EOF raises `SIGBUS`.
 `O_DIRECT` is unsupported. Locks are local kernel locks, not distributed locks.
 
 Ordinary reads validate their inode through a live object subscription. Inode
-snapshots are retained in a bounded LRU: 8 MiB of raw snapshots and at most 512
-entries per mount, plus bounded bookkeeping. Configure it with
+snapshots are retained in a bounded LRU: 8 MiB for snapshots and their entry descriptors, with at most 2048
+entries per mount (the current server subscription ceiling). Configure it with
 `--metadata-cache-bytes N` or `-o metadata_cache_bytes=N`; zero disables it and
 the maximum is 64 MiB. Warm positive and negative dentries reuse their lookup
 only while the parent subscription ID and stream cursor match; positive dentries also require
 a current subscribed child. There is no metadata TTL. Pending namespace intents
 are resolved through the existing recovery path and cannot prove cached lookups.
+Overlay name bindings and virtual directory attributes additionally track both
+the upper root and the lower directory subscription identities. A changed cursor,
+eviction or disconnect forces a fresh lookup; unchanged directories are not
+repeatedly merged and sorted during stat calls. These proofs live only in RAM
+and do not change the object format.
 
 The protocol validates update hashes. Cursor gaps, multipart or unsupported
 changes and socket loss invalidate cached snapshots. Eviction unsubscribes; unmount
