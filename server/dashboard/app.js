@@ -130,7 +130,7 @@ function renderVolumes(){
  for(const b of document.querySelectorAll('[data-recovery-volumes]'))b.onclick=()=>recoveryView.openVolumes(b.dataset.recoveryVolumes);
  for(const b of document.querySelectorAll('[data-add-node]'))b.onclick=()=>openAdd(b.dataset.addNode);
  for(const b of document.querySelectorAll('[data-finish-pg]'))b.onclick=async()=>{b.disabled=true;const target=b.dataset.node,id=b.dataset.finishPg,groups=nodeStates.get(target)?.config?.config.volumes.find(v=>v.id===id)?.placement_groups_pending??[];try{await pgViews.finishVolume(target,id,groups);await refreshConfig(target);toast('Volume für Placement freigegeben.')}catch(e){toast(e.message,true)}finally{b.disabled=false}};
- for(const [attr,fn]of [['detail',openDetail],['grow',openGrow],['drain',openDrain]])for(const b of document.querySelectorAll(`[data-${attr}]`))b.onclick=()=>fn(b.dataset[attr],b.dataset.node);
+ for(const [attr,fn]of [['detail',openDetail],['grow',openGrow],['drain',openDrain]])for(const b of $('volume-rows').querySelectorAll(`[data-${attr}]`))b.onclick=()=>fn(b.dataset[attr],b.dataset.node);
 }
 $('volume-search').addEventListener('input',renderVolumes);$('refresh').onclick=async()=>{try{onStats(await node.getStats());toast('Statistik aktualisiert.')}catch(e){toast(e.message,true)}};
 for(const b of document.querySelectorAll('[data-close]'))b.addEventListener('click',()=>$(b.dataset.close).close());
