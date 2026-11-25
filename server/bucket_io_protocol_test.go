@@ -44,7 +44,10 @@ func TestBucketTrafficIncludesStreamingAcceptedObjectProtocol(t *testing.T) {
 		t.Fatal("complete readback", len(data), err)
 	}
 	traffic := b.ioSnapshot()
-	if traffic.LogicalReadBytes != 8<<20 || traffic.LogicalWriteBytes != (9<<20)+4096 {
+// Bucket counters aggregate concurrent operations. Housekeeping may read
+	// the object prefix while this test performs its exact eight MiB readback.
+	// It never writes this non-S3 payload, so write accounting stays exact.
+	if traffic.LogicalReadBytes < 8<<20 || traffic.LogicalWriteBytes != (9<<20)+4096 {
 		t.Fatal("streaming/accepted protocol escaped metering", traffic)
 	}
 }
