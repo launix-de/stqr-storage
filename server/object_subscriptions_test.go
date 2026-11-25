@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"net/http/httptest"
+	"path/filepath"
 	"runtime"
 	"testing"
 	"time"
@@ -592,5 +593,121 @@ func TestSubscriptionStorePausedOwnerDoesNotBlockIndependentRange(t *testing.T) 
 	}
 	if readErr != nil || string(data) != "independent" {
 		t.Fatal("paused owner blocked another transport", string(data), readErr)
+	}
+}
+
+// A read-only subscription must not create a spool file or checkpoint storage.
+// Exercise both inline and streamed snapshots with TMPDIR deliberately unusable.
+func TestObjectSubscriptionRAMOnlySnapshot(t *testing.T) {
+	s, reader, writer, ctx := subscriptionClients(t)
+	payloads := [][]byte{nil, []byte("inode"), bytes.Repeat([]byte("x"), 2<<20)}
+	for i, payload := range payloads {
+		if _, err := writer.Put(ctx, client.ObjectID{byte(i + 1)}, payload, client.PutOptions{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("TMPDIR", filepath.Join(t.TempDir(), "does-not-exist"))
+	before := map[*volume.Volume]volume.IOStats{}
+	s.mu.RLock()
+	for _, v := range s.volumes {
+		before[v.store] = v.store.IOStats()
+	}
+	s.mu.RUnlock()
+	for i, payload := range payloads {
+		sub, err := reader.Subscribe(ctx, client.ObjectID{byte(i + 1)}, client.SubscribeOptions{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, _, _, err := sub.Snapshot()
+		if err != nil || !bytes.Equal(got, payload) {
+			t.Fatalf("snapshot %d: len=%d err=%v", i, len(got), err)
+		}
+		if err = sub.Close(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for v, old := range before {
+		now := v.IOStats()
+		if now.WriteOps != old.WriteOps || now.SyncOps != old.SyncOps {
+			t.Fatalf("subscription wrote/checkpointed volume: before=%+v after=%+v", old, now)
+		}
+	}
+	s.objectSubscriptions.mu.Lock()
+	defer s.objectSubscriptions.mu.Unlock()
+	if s.objectSubscriptions.count != 0 || s.objectSubscriptions.snapshotBytes != 0 {
+		t.Fatal("subscription RAM reservation leaked")
+	}
+}
+
+func TestObjectSubscriptionSnapshotRAMBudget(t *testing.T) {
+	var r objectSubscriptionRegistry
+	if err := r.reserveSnapshot(maxObjectStagingBytes); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.reserveSnapshot(1); statusOf(err) != 507 {
+		t.Fatalf("unbounded subscription RAM: %v", err)
+	}
+	r.releaseSnapshot(maxObjectStagingBytes)
+	if err := r.reserveSnapshot(1); err != nil {
+		t.Fatal("released RAM could not be reused", err)
+	}
+	r.releaseSnapshot(1)
+}
+
+func TestDaemonSubscriptionRegistersOnlyAtWriteOwner(t *testing.T) {
+	source, target := startAutomaticDaemonPair(t, false)
+	addTestVolume(t, source.node, "sub-owner", "hdd", 16<<20)
+	addTestVolume(t, target.node, "sub-owner", "hdd", 16<<20)
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		dest, _ := source.node.scopes.destinations(BucketDescription{Policy: DefaultBucketPolicy()})
+		if len(dest) >= 2 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("peer volume statistics missing")
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	group := volume.ID(client.NewRequestID())
+	storage := storagePolicy(DefaultBucketPolicy())
+	storage.Redundancy = BucketRedundancy{Mode: "replication", Replicas: 2, ACK: "all"}
+	centralPGRequest(t, source.node, group, 0, PlacementMask{NodeSelection: "all", Storage: &storage})
+	b := replicaTestBucket(t, source.node, group, "sub-owner")
+	entry, ok := source.node.placement.Load().lookup(client.ID(b.ID()), client.ObjectID{})
+	if !ok || len(entry.Locations) != 2 {
+		t.Fatalf("replica placement: %+v", entry)
+	}
+	owner, replica := source.node, target.node
+	if entry.Locations[0].Node != owner.control.ledger.node {
+		owner, replica = replica, owner
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	admin := source.node.cfg.Auth.BootstrapAdmin
+	reader, err := client.Dial(ctx, replica.cfg.Node.Advertise, admin.Username, admin.Password, client.BucketID(b.ID()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reader.Close()
+	oid := client.ObjectID{3}
+	if _, err = reader.Put(ctx, oid, []byte("before"), client.PutOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	sub, err := reader.Subscribe(ctx, oid, client.SubscribeOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sub.Close(ctx)
+	key := volume.Key{Bucket: b.ID(), Object: volume.ObjectID(oid)}
+	if !owner.objectSubscriptions.watched(key) || replica.objectSubscriptions.watched(key) {
+		t.Fatal("subscription was registered at a replica or broadcast")
+	}
+	if _, err = reader.Put(ctx, oid, []byte("after"), client.PutOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	_, _, err = waitSubscription(t, ctx, sub, "after")
+	if err != nil {
+		t.Fatal(err)
 	}
 }
