@@ -4,6 +4,7 @@ package server
 import (
 	"bytes"
 	"sort"
+	"time"
 
 	"github.com/launix-de/stqr-storage/client"
 	"github.com/launix-de/stqr-storage/volume"
@@ -23,10 +24,11 @@ type placementTarget struct {
 	locations   []client.Location
 }
 type placementTargetMap struct {
-	membership uint64
-	targets    []placementTarget
-	cursor     int
-	pending    int
+	membership  uint64
+	targets     []placementTarget
+	cursor      int
+	pending     int
+	improvement placementImproveResult
 }
 
 func (r *rangeManager) placementShapes(group string, descriptions []BucketDescription, image *placementImage) ([]placementShape, []client.RangeEntry, map[client.ID]BucketDescription) {
@@ -38,34 +40,39 @@ func (r *rangeManager) placementShapes(group string, descriptions []BucketDescri
 	}
 	var shapes []placementShape
 	var current []client.RangeEntry
-	// One traversal of the immutable map, independent of the bucket count.
-	for i := 0; i < image.count; i++ {
-		bucket, entry := image.entry(i)
-		d, ok := byBucket[bucket]
-		if !ok || entry.State != 0 || entry.Runtime != (client.ID{}) || len(entry.Locations) == 0 || entry.Locations[0].Node != r.node {
-			continue
+	// Visit only this PG's indexed bucket spans, not the global map per worker.
+	buckets := make([]client.ID, 0, len(byBucket))
+	for bucket := range byBucket {
+		buckets = append(buckets, bucket)
+	}
+	sort.Slice(buckets, func(i, j int) bool { return bytes.Compare(buckets[i][:], buckets[j][:]) < 0 })
+	for _, bucket := range buckets {
+		span := image.bounds[bucket]
+		for i := span[0]; i < span[1]; i++ {
+			_, entry := image.entry(i)
+			d := byBucket[bucket]
+			if entry.State != 0 || entry.Runtime != (client.ID{}) || len(entry.Locations) == 0 || entry.Locations[0].Node != r.node {
+				continue
+			}
+			goal := d.Policy
+			if d.DesiredPolicy != nil {
+				goal = *d.DesiredPolicy
+			}
+			if goal.StorageStrategy == "ram" || goal.Redundancy.Mode == "erasure" {
+				continue
+			}
+			copies := r.replicaRemovalCount(goal)
+			if copies < 1 {
+				continue
+			}
+			// Temporary offline copies remain untouched. Explicit exclusion first
+			// commits a smaller surviving set; that set can then be repaired here.
+			if entry.Locations[0].Volume != (client.ID{}) && !r.replicaSetOnline(entry) {
+				continue
+			}
+			shapes = append(shapes, placementShape{bucket, entry.Start, entry.PrefixBits, copies})
+			current = append(current, entry)
 		}
-		goal := d.Policy
-		if d.DesiredPolicy != nil {
-			goal = *d.DesiredPolicy
-		}
-		if goal.StorageStrategy == "ram" || goal.Redundancy.Mode == "erasure" {
-			continue
-		}
-		copies := r.replicaRemovalCount(goal)
-		if copies < 1 {
-			continue
-		}
-		if len(entry.Locations) == 1 && entry.Locations[0].Volume == (client.ID{}) && d.DesiredPolicy == nil && copies == 1 {
-			continue
-		}
-		// Temporary offline copies remain untouched. Explicit exclusion first
-		// commits a smaller surviving set; that set can then be repaired here.
-		if entry.Locations[0].Volume != (client.ID{}) && !r.replicaSetOnline(entry) {
-			continue
-		}
-		shapes = append(shapes, placementShape{bucket, entry.Start, entry.PrefixBits, copies})
-		current = append(current, entry)
 	}
 	return shapes, current, byBucket
 }
@@ -196,7 +203,19 @@ func (r *rangeManager) buildPlacementTargets(group string, descriptions []Bucket
 		budgets[bucket] = subtractCapacity(goal.Limits.Absolute, totalUsage[bucket])
 	}
 	demands := make([]placementDemand, len(shapes))
+	required := make([]bool, len(shapes))
 	var options []placementOption
+	input := placementImproveInput{Work: make([]placementWorkload, len(shapes)), Horizon: 30, Cohorts: make(map[int][]placementCohort), Unbound: make([]bool, len(shapes))}
+	input.PrimaryLoads = make(map[client.ID]float64)
+	for node, count := range image.primaries {
+		input.PrimaryLoads[node] = float64(count) * (1 << 20)
+	}
+	seed := r.improveSequence.Add(1)
+	mixed := seed * 0x9e3779b97f4a7c15
+	mixed ^= mixed >> 29
+	mixed *= 0xbf58476d1ce4e5b9
+	mixed ^= mixed >> 31
+	measurementSelected := r.placementSamples(shapes, input.Work, mixed)
 	for i, shape := range shapes {
 		d, entry := byBucket[shape.bucket], current[i]
 		goal := d.Policy
@@ -205,18 +224,45 @@ func (r *rangeManager) buildPlacementTargets(group string, descriptions []Bucket
 		}
 		demands[i] = placementDemand{Bucket: shape.bucket, Copies: shape.copies}
 		valid := len(entry.Locations) == shape.copies && s.replicaSetSatisfies(goal, entry.Locations)
+		unbound := len(entry.Locations) == 1 && entry.Locations[0].Volume == (client.ID{})
+		input.Unbound[i] = unbound
+		if unbound && d.DesiredPolicy == nil && shape.copies == 1 {
+			valid = true
+		}
 		for _, loc := range entry.Locations {
-			if pressured[loc.Volume] || !eligibleVolumes[shape.bucket][loc.Volume] {
+			if pressured[loc.Volume] || loc.Volume != (client.ID{}) && !eligibleVolumes[shape.bucket][loc.Volume] {
 				valid = false
 			}
 		}
-		// Existing valid copies need no payload measurements. For a required
-		// move, measure once, shared by every candidate destination.
+		required[i] = !valid || d.DesiredPolicy != nil && entry.PolicyVersion != goal.Version
+		// Cold healthy ranges are sampled in rotating windows. Measurement is
+		// metadata-only and cached; the 100-ms improvement itself never does I/O.
 		var cost uint64
 		var soleSource volume.ID
 		var retained map[volume.ID]uint64
-		if !valid {
-			retained = make(map[volume.ID]uint64)
+		allowance := 0
+		if measurementSelected[i] {
+			allowance = 1
+		}
+		measurement, measured := r.measuredPlacement(shape, entry, d, !valid, &allowance)
+		if measured {
+			cost, retained = measurement.cost, measurement.retained
+		} else if !valid {
+			continue
+		}
+		if unbound && valid && measured {
+			for id, n := range retained {
+				if n > 0 {
+					if _, ok := resourceIDs[volumeKey{r.node, client.ID(id)}]; !ok {
+						measured = false
+						cost = 0
+						retained = nil
+						break
+					}
+				}
+			}
+		}
+		if !valid && entry.Locations[0].Volume == (client.ID{}) {
 			before, ok := s.routingPatch(volume.ID(shape.bucket), volume.ObjectID(shape.start))
 			if !ok {
 				continue
@@ -227,16 +273,35 @@ func (r *rangeManager) buildPlacementTargets(group string, descriptions []Bucket
 					soleSource = stores[0].Identity().VolumeID
 				}
 			}
-			var err error
-			cost, _, err = r.policyPlacementCost(before, entry, client.ID{}, volume.ID{}, bucketCodec(d.Policy), retained)
-			if err != nil {
-				continue
-			}
 		}
 		demands[i].Bytes = cost
 		var movement uint64
 		for _, n := range retained {
 			movement = addCapacity(movement, n)
+		}
+		read, write := input.Work[i].Read, input.Work[i].Write
+		input.Work[i] = placementWorkload{Physical: float64(movement), Read: read, Write: write, Growth: measurement.growth, Primary: entry.Locations[0].Node, Replicated: len(entry.Locations) > 1}
+		if unbound && valid {
+			key := volumeKey{r.node, client.ID{}}
+			virtual, exists := resourceIDs[key]
+			if !exists {
+				virtual = len(resources)
+				resourceIDs[key] = virtual
+				resources = append(resources, placementResource{Node: r.node})
+				destinations = append(destinations, rangeDestination{node: r.node, volume: client.VolumeStats{Class: entry.Locations[0].Class}})
+			}
+			option := len(options)
+			options = append(options, placementOption{Range: i, Volume: virtual, Existing: true, Current: true})
+			input.Network = append(input.Network, 0)
+			input.Held = append(input.Held, 0)
+			input.Cohorts[option] = nil
+			for id, n := range retained {
+				if n > 0 {
+					resource := resourceIDs[volumeKey{r.node, client.ID(id)}]
+					input.Cohorts[option] = append(input.Cohorts[option], placementCohort{resource, n})
+				}
+			}
+			sort.Slice(input.Cohorts[option], func(a, b int) bool { return input.Cohorts[option][a].volume < input.Cohorts[option][b].volume })
 		}
 		for _, id := range eligible[shape.bucket] {
 			destination := destinations[id]
@@ -253,7 +318,7 @@ func (r *rangeManager) buildPlacementTargets(group string, descriptions []Bucket
 			if stays && pressured[destination.volume.ID] {
 				continue
 			}
-			if valid && !stays {
+			if valid && !measured && !stays {
 				continue
 			}
 			// The shared index reserve is admission headroom, not copied bytes.
@@ -279,92 +344,60 @@ func (r *rangeManager) buildPlacementTargets(group string, descriptions []Bucket
 					charge = 0
 				}
 			}
-			options = append(options, placementOption{Range: i, Volume: id, Allocate: allocate, Move: move, Quota: charge, Existing: existing})
+			options = append(options, placementOption{Range: i, Volume: id, Allocate: allocate, Move: move, Quota: charge, Existing: existing, Current: stays})
+			held := uint64(0)
+			if existing {
+				held = movement
+				if destination.node == r.node {
+					if n, ok := retained[volume.ID(destination.volume.ID)]; ok {
+						held = n
+					}
+				}
+			}
+			input.Held = append(input.Held, held)
+			network := uint64(0)
+			if destination.node != r.node {
+				network = move
+			}
+			input.Network = append(input.Network, network)
 		}
 	}
 	solution := solvePlacement(demands, resources, options, budgets)
+	// Slot zero is the primary in the transformation graph. Preserve current
+	// authority in the seed whenever that copy still satisfies the new policy.
+	for i, ids := range solution.Assignments {
+		for slot, id := range ids {
+			if resources[options[id].Volume].Node == current[i].Locations[0].Node {
+				ids[0], ids[slot] = ids[slot], ids[0]
+				break
+			}
+		}
+	}
+	input.BackgroundRead, input.BackgroundWrite = r.placementBackground(destinations)
+	budget := placementImproveBudget
+	if s.ioPriority.users.Load() > 0 {
+		budget = 5 * time.Millisecond
+	}
+	result.improvement = improvePlacement(s.ctx, demands, resources, options, budgets, &solution, input, budget, mixed)
 	result.pending = len(solution.Pending)
-	for _, i := range solution.Order {
-		shape := shapes[i]
-		target := placementTarget{shape: shape, description: byBucket[shape.bucket]}
-		for _, option := range solution.Assignments[i] {
-			destination := destinations[options[option].Volume]
-			target.locations = append(target.locations, client.Location{Node: destination.node, Volume: destination.volume.ID, Class: destination.volume.Class, Role: 1})
-		}
-		// Preserve the current primary whenever it is still a chosen copy.
-		// Capacity-weighted role balancing is a separate metadata-only diff.
-		sort.SliceStable(target.locations, func(a, b int) bool {
-			x, y := target.locations[a], target.locations[b]
-			primary := current[i].Locations[0].Node
-			if (x.Node == primary) != (y.Node == primary) {
-				return x.Node == primary
+	for _, mandatory := range []bool{true, false} {
+		for _, i := range solution.Order {
+			if required[i] != mandatory {
+				continue
 			}
-			return bytes.Compare(x.Node[:], y.Node[:]) < 0
-		})
-		if len(target.locations) != 0 {
-			target.locations[0].Role = 0
+			shape := shapes[i]
+			target := placementTarget{shape: shape, description: byBucket[shape.bucket]}
+			for _, option := range solution.Assignments[i] {
+				destination := destinations[options[option].Volume]
+				target.locations = append(target.locations, client.Location{Node: destination.node, Volume: destination.volume.ID, Class: destination.volume.Class, Role: 1})
+			}
+			if len(target.locations) != 0 {
+				target.locations[0].Role = 0
+			}
+			result.targets = append(result.targets, target)
 		}
-		result.targets = append(result.targets, target)
 	}
-	r.balancePlacementTargets(result, image, eligible, resources)
 	return result
-}
-
-// Role decisions share the solved map's lifetime. Update aggregate work after
-// each decision instead of rescanning every range after every promotion.
-func (r *rangeManager) balancePlacementTargets(m *placementTargetMap, image *placementImage, eligible map[client.ID][]int, resources []placementResource) {
-	assigned := make(map[client.ID]float64)
-	const weight = float64(1 << 20)
-	for i := 0; i < image.count; i++ {
-		bucket, entry := image.entry(i)
-		if _, included := eligible[bucket]; included && entry.State == 0 && len(entry.Locations) > 1 {
-			assigned[entry.Locations[0].Node] += weight
-		}
-	}
-	capacities := make(map[client.ID]map[client.ID]uint64)
-	for bucket, ids := range eligible {
-		capacity := make(map[client.ID]uint64)
-		for _, id := range ids {
-			resource := resources[id]
-			capacity[resource.Node] = addCapacity(capacity[resource.Node], resource.Capacity)
-		}
-		capacities[bucket] = capacity
-	}
-	for i := range m.targets {
-		target := &m.targets[i]
-		if len(target.locations) < 2 {
-			continue
-		}
-		old, ok := image.lookup(target.shape.bucket, target.shape.start)
-		if !ok || len(old.Locations) < 2 {
-			continue
-		}
-		from := old.Locations[0].Node
-		capacity := capacities[target.shape.bucket]
-		best, gain := -1, float64(0)
-		for j, loc := range target.locations {
-			if loc.Node == from || capacity[loc.Node] == 0 {
-				continue
-			}
-			if capacity[from] == 0 {
-				if best < 0 || (assigned[loc.Node]+weight)/float64(capacity[loc.Node]) < (assigned[target.locations[best].Node]+weight)/float64(capacity[target.locations[best].Node]) {
-					best = j
-				}
-				continue
-			}
-			improvement := weight * ((2*assigned[from]-weight)/float64(capacity[from]) - (2*assigned[loc.Node]+weight)/float64(capacity[loc.Node]))
-			if improvement > gain {
-				best, gain = j, improvement
-			}
-		}
-		if best < 0 {
-			continue
-		}
-		target.locations[0], target.locations[best] = target.locations[best], target.locations[0]
-		target.locations[0].Role, target.locations[best].Role = 0, 1
-		assigned[from] -= weight
-		assigned[target.locations[0].Node] += weight
-	}
 }
 
 // Advance an already solved map without rebuilding or rescoring all ranges
@@ -438,6 +471,9 @@ func placementTargetSatisfied(target placementTarget, entry client.RangeEntry) b
 // handoff operations. New copies precede removals; role swaps never copy bytes.
 func (r *rangeManager) diffPlacementTarget(target placementTarget, before client.MapPatch) (rangePlan, bool) {
 	entry, d := before.Entries[0], target.description
+	if placementTargetSatisfied(target, entry) {
+		return rangePlan{}, false
+	}
 	if len(target.locations) == 0 {
 		return rangePlan{}, false
 	}

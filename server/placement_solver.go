@@ -27,6 +27,7 @@ type placementOption struct {
 	Allocate, Move uint64 // staying costs zero payload movement
 	Quota          uint64 // final additional bucket charge; replacement staging is not growth
 	Existing       bool   // prefer retaining a copy when payload movement ties
+	Current        bool   // preserve the exact existing map, including unpinned cohorts
 }
 type placementSolution struct {
 	Assignments                [][]int // option indices, one distinct node per required copy
@@ -248,6 +249,9 @@ func solvePlacement(demands []placementDemand, resources []placementResource, op
 			a, b := options[choices[i]], options[choices[j]]
 			if a.Move != b.Move {
 				return a.Move < b.Move
+			}
+			if a.Current != b.Current {
+				return a.Current
 			}
 			if a.Existing != b.Existing {
 				return a.Existing

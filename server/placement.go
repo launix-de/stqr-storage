@@ -19,12 +19,14 @@ type placementImage struct {
 	data                             []byte
 	count                            int
 	pins                             map[placementNodeKey][]client.ID
+	bounds                           map[client.ID][2]int
+	primaries                        map[client.ID]uint64
 }
 
 type placementNodeKey struct{ bucket, node client.ID }
 
 func buildPlacement(patches []client.MapPatch) (*placementImage, error) {
-	image := &placementImage{pins: make(map[placementNodeKey][]client.ID)}
+	image := &placementImage{pins: make(map[placementNodeKey][]client.ID), bounds: make(map[client.ID][2]int), primaries: make(map[client.ID]uint64)}
 	pinned := make(map[placementNodeKey]map[client.ID]bool)
 	type item struct {
 		bucket client.ID
@@ -84,6 +86,15 @@ func buildPlacement(patches []client.MapPatch) (*placementImage, error) {
 	at := len(entries) * placementHeaderBytes
 	for i, item := range entries {
 		r := item.entry
+		span, exists := image.bounds[item.bucket]
+		if !exists {
+			span[0] = i
+		}
+		span[1] = i + 1
+		image.bounds[item.bucket] = span
+		if r.State == 0 && len(r.Locations) > 1 {
+			image.primaries[r.Locations[0].Node]++
+		}
 		b := image.data[i*placementHeaderBytes : (i+1)*placementHeaderBytes]
 		copy(b, item.bucket[:])
 		copy(b[16:], r.Start[:])
@@ -129,9 +140,9 @@ func (p *placementImage) entry(i int) (client.ID, client.RangeEntry) {
 	}
 	return bucket, r
 }
-func (p *placementImage) lookup(bucket client.ID, hash client.ObjectID) (client.RangeEntry, bool) {
+func (p *placementImage) position(bucket client.ID, hash client.ObjectID) int {
 	if p == nil {
-		return client.RangeEntry{}, false
+		return -1
 	}
 	i := sort.Search(p.count, func(i int) bool {
 		b := p.data[i*placementHeaderBytes:]
@@ -141,10 +152,33 @@ func (p *placementImage) lookup(bucket client.ID, hash client.ObjectID) (client.
 		return bytes.Compare(b[16:48], hash[:]) > 0
 	}) - 1
 	if i < 0 {
+		return -1
+	}
+	if !bytes.Equal(p.data[i*placementHeaderBytes:i*placementHeaderBytes+16], bucket[:]) {
+		return -1
+	}
+	return i
+}
+func (p *placementImage) lookup(bucket client.ID, hash client.ObjectID) (client.RangeEntry, bool) {
+	i := p.position(bucket, hash)
+	if i < 0 {
 		return client.RangeEntry{}, false
 	}
-	bid, r := p.entry(i)
-	return r, bid == bucket
+	_, entry := p.entry(i)
+	return entry, true
+}
+func (p *placementImage) metricKey(bucket client.ID, hash client.ObjectID) (rangeMetricKey, bool) {
+	i := p.position(bucket, hash)
+	if i < 0 {
+		return rangeMetricKey{}, false
+	}
+	header := p.data[i*placementHeaderBytes:]
+	if header[50] != 0 {
+		return rangeMetricKey{}, false
+	}
+	key := rangeMetricKey{bucket: bucket, bits: binary.LittleEndian.Uint16(header[48:])}
+	copy(key.start[:], header[16:48])
+	return key, true
 }
 func (p *placementImage) bucketEntries(bucket client.ID) []client.RangeEntry {
 	if p == nil {

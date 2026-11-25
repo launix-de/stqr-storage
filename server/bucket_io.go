@@ -21,17 +21,20 @@ func (b *Bucket) ioSnapshot() client.IOStats {
 func (b *Bucket) GetRange(ctx context.Context, p principal, id volume.ObjectID, offset, length uint64) ([]byte, volume.Info, error) {
 	data, info, err := b.getRange(ctx, p, id, offset, length)
 	b.recordTraffic(p, uint64(len(data)), 0)
+	b.recordRangeTraffic(p, id, uint64(len(data)), 0)
 	return data, info, err
 }
 func (b *Bucket) copyToChecked(ctx context.Context, p principal, id volume.ObjectID, offset, length uint64, dst io.Writer, condition *volume.Options) (volume.Info, uint64, error) {
 	info, n, err := b.copyToCheckedUnmetered(ctx, p, id, offset, length, dst, condition)
 	b.recordTraffic(p, n, 0)
+	b.recordRangeTraffic(p, id, n, 0)
 	return info, n, err
 }
 func (b *Bucket) mutate(ctx context.Context, p principal, id volume.ObjectID, opcode uint16, offset, length uint64, src io.Reader, expected []byte, opt volume.Options) (volume.Result, error) {
 	result, err := b.mutateUnmetered(ctx, p, id, opcode, offset, length, src, expected, opt)
 	if err == nil && (opcode == 0x0102 || opcode == 0x0103 || opcode == 0x0104 || opcode == 0x0108) {
 		b.recordTraffic(p, 0, length)
+		b.recordRangeTraffic(p, id, 0, length)
 	}
 	return result, err
 }
