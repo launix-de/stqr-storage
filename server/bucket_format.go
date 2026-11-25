@@ -208,7 +208,7 @@ func (s *Server) openSocketBucketFormat(m client.Message, ws *wsSession, p princ
 	return client.ResponseBody(200, nil, ""), 200
 }
 func socketFormatRequired(op uint16) bool {
-	return op >= 0x0100 && op <= 0x0108 || op == client.ObjectAccepted || op == client.BucketObjectList || op == client.BucketScan || op == client.BucketMaintenance || op == client.BucketObjectLease || op == client.ObjectSubscribe
+	return op >= 0x0100 && op <= 0x0108 || op == client.ObjectAccepted || op == client.BucketObjectList || op == client.BucketScan || op == client.BucketMaintenance || op == client.BucketObjectLease || op == client.ObjectSubscribe || op == client.ObjectReference
 }
 func checkSocketBucketFormat(m client.Message, p principal) error {
 	if p.connection == nil || p.connection.bucket != nil || p.isPeer() || !socketFormatRequired(m.Opcode) {

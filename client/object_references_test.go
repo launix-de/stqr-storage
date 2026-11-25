@@ -23,7 +23,7 @@ func TestObjectReferenceCapabilityNegotiation(t *testing.T) {
 			peer.helloCaps.Store(tc.advertised)
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
-			c, err := Dial(ctx, host.URL, "user", "credential", peer.bucket)
+			c, err := Dial(ctx, host.URL, "user", "credential", peer.bucket, "fs")
 			if err != nil {
 				t.Fatal(err)
 			}

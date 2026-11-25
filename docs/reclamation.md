@@ -20,7 +20,10 @@ single-object operations in clients; ordinary reads need no permanent receipt.
 
 ## Cooperative open and orphan lifetime
 
-Reference-aware clients negotiate capability bit 18 and use opcode 0x0121. The
+Reference-aware clients first open the bucket with its explicit opaque format
+(`fs` for the supplied filesystem clients, `bd` for block clients). Reference
+coordination negotiates capability bit 18 and uses opcode 0x0121, independently
+of format binding at opcode 0x0120 / capability bit 17. The
 bucket-local coordination root stores caller-owned tokens, bound to their account
 and target object. A pin survives reconnect, node restart and ownership transfer;
 it is not released by a socket timeout. An exclusive retirement claim succeeds

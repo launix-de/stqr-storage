@@ -31,7 +31,7 @@ func TestTicket32JavaScriptNativeCASReuse(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), budget)
 	defer cancel()
 	admin := s.cfg.Auth.BootstrapAdmin
-	c, err := client.Dial(ctx, host.URL, admin.Username, admin.Password, client.BucketID(b.ID()))
+	c, err := client.Dial(ctx, host.URL, admin.Username, admin.Password, client.BucketID(b.ID()), "fs")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -42,7 +42,7 @@ func TestTicket32JavaScriptNativeCASReuse(t *testing.T) {
 	}
 	v := b.allVolumes()[0]
 	before := v.Stats()
-	input, err := json.Marshal(map[string]string{"url": host.URL, "username": admin.Username, "password": admin.Password, "bucket": b.ID().String(), "node": s.cfg.Node.ID, "object": hex.EncodeToString(id[:])})
+	input, err := json.Marshal(map[string]string{"url": host.URL, "username": admin.Username, "password": admin.Password, "bucket": b.ID().String(), "node": s.cfg.Node.ID, "object": hex.EncodeToString(id[:]), "format": "fs"})
 	if err != nil {
 		t.Fatal(err)
 	}

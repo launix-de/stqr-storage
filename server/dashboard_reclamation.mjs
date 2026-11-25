@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 import assert from 'node:assert/strict';
-import {ObjectClient} from './dashboard/object-client.js';
+import {ObjectClient} from './testdata/object-client.js';
 import {Reader, envelope} from './dashboard/protocol.js';
 
 let input='';
@@ -16,7 +16,7 @@ const cookie=login.headers.get('set-cookie')?.split(';',1)[0];
 assert.ok(cookie?.startsWith('stqr_session='));
 const connection={forNode:()=>({request:async(op,body,id)=>{
  const message=envelope(op,body,id);
- const response=await fetch(cfg.url+'/api/message',{method:'POST',headers:{Cookie:cookie,'X-CSRF-Token':session.csrf_token},body:message.bytes});
+ const response=await fetch(cfg.url+'/api/message',{method:'POST',headers:{Cookie:cookie,'X-CSRF-Token':session.csrf_token,'X-STQR-Format':cfg.format},body:message.bytes});
  const r=new Reader(await response.arrayBuffer());
  assert.equal(r.u8(),1);assert.equal(r.u8(),2);assert.equal(r.u16(),op);assert.equal(r.id(),message.id);
  const status=Number(r.v());r.blob();
@@ -25,6 +25,11 @@ const connection={forNode:()=>({request:async(op,body,id)=>{
  return r.take(r.b.length-r.at);
 }})};
 const objects=new ObjectClient(connection,cfg.bucket,cfg.node);
+// Format admission is real: an authenticated untagged object request is rejected.
+const untagged=envelope(0x107,objects.ref(cfg.object).bytes());
+const rejected=await fetch(cfg.url+'/api/message',{method:'POST',headers:{Cookie:cookie,'X-CSRF-Token':session.csrf_token},body:untagged.bytes});
+assert.equal(rejected.status,400);
+
 const started=performance.now();
 let data=await objects.get(cfg.object);
 assert.equal(data.length,8192);

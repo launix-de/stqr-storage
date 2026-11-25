@@ -34,7 +34,7 @@ func TestTicket32ReplicatedOverwriteResultReclamation(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
 	admin := source.node.cfg.Auth.BootstrapAdmin
-	c, err := client.Dial(ctx, source.node.cfg.Node.Advertise, admin.Username, admin.Password, client.BucketID(b.ID()))
+	c, err := client.Dial(ctx, source.node.cfg.Node.Advertise, admin.Username, admin.Password, client.BucketID(b.ID()), "fs")
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -56,7 +56,7 @@ func (s *Server) dispatchAs(m client.Message, ws *wsSession, p principal) ([]byt
 				return client.ResponseBody(426, nil, err.Error()), 426
 			}
 		}
-		if p.connection.bucket != nil && m.Opcode != client.Hello && m.Opcode != client.Ping && !(m.Opcode >= 0x0100 && m.Opcode <= client.BucketObjectList || m.Opcode == client.ObjectAccepted || m.Opcode == client.BucketObjectLease || m.Opcode == client.BucketLeaseControlRegister || m.Opcode == client.BucketMaintenanceEnd || m.Opcode == client.BucketStatFS || m.Opcode == client.BucketSync || m.Opcode == client.ObjectReference) {
+		if p.connection.bucket != nil && m.Opcode != client.Hello && m.Opcode != client.Ping && !(m.Opcode >= 0x0100 && m.Opcode <= client.BucketObjectList || m.Opcode == client.ObjectAccepted || m.Opcode == client.BucketObjectLease || m.Opcode == client.BucketMaintenanceEnd || m.Opcode == client.BucketStatFS || m.Opcode == client.BucketSync || m.Opcode == client.ObjectReference) {
 			return client.ResponseBody(403, nil, "bucket connection has no administrative privileges"), 403
 		}
 	}
@@ -420,7 +420,7 @@ func (s *Server) dispatchAs(m client.Message, ws *wsSession, p principal) ([]byt
 		return client.ResponseBody(403, nil, "cluster peer operation required"), 403
 	}
 
-	if !p.isAdmin() && m.Opcode != client.Hello && m.Opcode != client.Ping && !(m.Opcode >= 0x0100 && m.Opcode <= client.BucketObjectList || m.Opcode == client.ObjectAccepted || m.Opcode == client.BucketObjectLease || m.Opcode == client.BucketLeaseControlRegister || m.Opcode == client.BucketMaintenanceEnd || m.Opcode == client.BucketStatFS || m.Opcode == client.BucketSync || m.Opcode == client.ObjectReference) {
+	if !p.isAdmin() && m.Opcode != client.Hello && m.Opcode != client.Ping && !(m.Opcode >= 0x0100 && m.Opcode <= client.BucketObjectList || m.Opcode == client.ObjectAccepted || m.Opcode == client.BucketObjectLease || m.Opcode == client.BucketMaintenanceEnd || m.Opcode == client.BucketStatFS || m.Opcode == client.BucketSync || m.Opcode == client.ObjectReference) {
 		return client.ResponseBody(403, nil, "administrator required"), 403
 	}
 
@@ -697,7 +697,7 @@ func (s *Server) execute(m client.Message, ws *wsSession) ([]byte, int, error) {
 		} else {
 			e.U16(1)
 		}
-		caps, membership, revision := client.CapabilityBucketFormat|client.CapabilityObjectReferences|client.CapabilityBlockControl|client.CapabilityPeerTransport|client.CapabilityNodeAdmin|client.CapabilityObjectSubscriptions|client.CapabilityDurability, uint64(1), c.Generation
+		caps, membership, revision := client.CapabilityBucketFormat|client.CapabilityObjectReferences|client.CapabilityPeerTransport|client.CapabilityNodeAdmin|client.CapabilityObjectSubscriptions|client.CapabilityDurability, uint64(1), c.Generation
 		if s.control != nil {
 			caps |= client.CapabilityClusterControl
 			s.control.ledger.mu.Lock()

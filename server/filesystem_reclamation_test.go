@@ -35,7 +35,7 @@ func TestTicket32FilesystemPhysicalReclamation(t *testing.T) {
 	dial := func() *client.Client {
 		t.Helper()
 		begin := time.Now()
-		c, err := client.Dial(ctx, host.URL, user.Name, "bucket-test-password", client.BucketID(b.ID()))
+		c, err := client.Dial(ctx, host.URL, user.Name, "bucket-test-password", client.BucketID(b.ID()), "fs")
 		dialTime += time.Since(begin)
 		dialCount++
 		if err != nil {

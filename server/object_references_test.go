@@ -26,7 +26,7 @@ func TestTicket32ObjectReferencesReadonlyAndReconnect(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	dial := func() *client.Client {
-		c, err := client.Dial(ctx, host.URL, user.Name, "bucket-test-password", client.BucketID(b.ID()))
+		c, err := client.Dial(ctx, host.URL, user.Name, "bucket-test-password", client.BucketID(b.ID()), "fs")
 		if err != nil {
 			t.Fatal(err)
 		}

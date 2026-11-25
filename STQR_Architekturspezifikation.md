@@ -341,6 +341,12 @@ die autorisierte Erstbindung im globalen Metadaten-Commit. Sie ist von den
 COW-Transferbefehlen ab 0x1090 getrennt. Bei fehlenden Pflichtteilnehmern bleibt
 das Format ungesetzt und der Aufbau ist mit 503 wiederholbar.
 
+Die generische Referenzkoordination `OBJECT_REFERENCE` nutzt getrennt davon
+Opcode 0x0121 und Capability-Bit 18 (262144); die Formatbindung nutzt Bit 17
+(131072). Auch Referenzzugriffe benötigen den explizit geöffneten Bucket.
+Diese Koordination legt kein Anwendungsformat fest und führt keine entfernte
+Dashboard-Diskverwaltung wieder ein.
+
 ### 5.2 Bucket-Konfiguration und zentrale PG-Storage-Policy
 
 ```yaml
