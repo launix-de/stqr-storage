@@ -37,6 +37,13 @@ int main(void) {
     CHECK(!stqr_parse_id(getenv("STQR_TEST_BUCKET"), &bucket));
     CHECK(!stqr_parse_object_id("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", &id));
     CHECK(!stqr_dial(&c, url, getenv("STQR_TEST_USER"), getenv("STQR_TEST_PASSWORD"), bucket, 3000));
+    if (mode && (!strcmp(mode,"transient") || !strcmp(mode,"unavailable"))) {
+        o=fresh();
+        int err=stqr_put(c,id,"retry",5,&o,&info);
+        if (!strcmp(mode,"transient")) { CHECK(!err && info.length==5); }
+        else { CHECK(err==-EHOSTUNREACH && stqr_status(c)==503); }
+        stqr_close(c); puts("transient retry test passed"); return 0;
+    }
     if (mode && !strcmp(mode,"routing")) {
         for (unsigned step=0;step<8;step++) {
             memset(&id,0,sizeof(id)); id.bytes[0]=(step&1)?0x81:1;

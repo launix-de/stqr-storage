@@ -66,6 +66,10 @@ static umode_t node_mode(const struct ks_node *n)
 static void update_inode(struct inode *i, const struct ks_node *n, stqr_proof proof)
 {
 	mutex_lock(&KS_I(i)->metadata_lock);
+	if (n->directory_proof)
+		KS_I(i)->directory_proof = *n->directory_proof;
+	else
+		memset(&KS_I(i)->directory_proof, 0, sizeof(KS_I(i)->directory_proof));
 	/* Only a live subscription proves cached contents across calls. */
 	if (!proof.cursor || memcmp(&KS_I(i)->proof, &proof, sizeof(proof)))
 		WRITE_ONCE(KS_I(i)->invalidate, true);
@@ -122,8 +126,24 @@ static struct inode *get_inode(struct super_block *sb, stqr_object_id id, const 
 		update_inode(i, n, proof);
 	return i;
 }
+/* Both namespace layers must still have uninterrupted subscription coverage. */
+static bool overlay_proof_current(struct ks_fs *f, const struct ks_directory_proof *p)
+{
+	return p->valid && ks_cache_stamp_current(f, ks_root_id, &p->root) &&
+	       (!p->has_lower || ks_cache_stamp_current(f->lower, p->lower_id, &p->lower));
+}
 static int refresh_inode(struct inode *i)
 {
+	struct ks_fs *f = i->i_sb->s_fs_info;
+	bool attrs_current = false;
+	if (f->lower && S_ISDIR(i->i_mode)) {
+		struct ks_directory_proof *p = &KS_I(i)->directory_proof;
+		mutex_lock(&KS_I(i)->metadata_lock);
+		attrs_current = overlay_proof_current(f, p);
+		mutex_unlock(&KS_I(i)->metadata_lock);
+		if (attrs_current)
+			return 0;
+	}
 	struct ks_snapshot s;
 	int err = ks_snapshot(i->i_sb->s_fs_info, KS_I(i)->id, &s);
 	if (!err) {
@@ -133,21 +153,41 @@ static int refresh_inode(struct inode *i)
 	return err;
 }
 struct ks_dentry {
+	struct ks_directory_proof overlay;
 	stqr_proof parent_proof;
 };
 static struct dentry *ks_lookup(struct inode *parent, struct dentry *d, unsigned flags)
 {
 	struct ks_fs *f = parent->i_sb->s_fs_info;
 	struct ks_snapshot s = {0}, child = {0};
+	struct ks_directory_proof lookup_proof = {0};
 	struct ks_entry *entries = NULL;
 	struct inode *i = NULL;
 	size_t n, k;
 	unsigned saved = enter_fs(f);
 	int err;
 	(void)flags;
-	err = ks_snapshot(f, KS_I(parent)->id, &s);
-	if (!err)
-		err = ks_directory(f, &s.node, &entries, &n);
+	if (f->lower) {
+		stqr_object_id id;
+		err = ks_overlay_lookup(f, KS_I(parent)->id, d->d_name.name, &id, &lookup_proof);
+		if (err == -ENOENT) {
+			err = 0;
+			n = 0;
+		} else if (!err) {
+			entries = sq_alloc(sizeof(*entries));
+			if (!entries)
+				err = -ENOMEM;
+			else {
+				strscpy(entries[0].name, d->d_name.name, 256);
+				entries[0].id = id;
+				n = 1;
+			}
+		}
+	} else {
+		err = ks_snapshot(f, KS_I(parent)->id, &s);
+		if (!err)
+			err = ks_directory(f, &s.node, &entries, &n);
+	}
 	if (!err)
 		for (k = 0; k < n; k++)
 			if (!strcmp(entries[k].name, d->d_name.name)) {
@@ -167,6 +207,7 @@ static struct dentry *ks_lookup(struct inode *parent, struct dentry *d, unsigned
 	if (!err) {
 		struct ks_dentry *proof = kmalloc(sizeof(*proof), GFP_NOFS);
 		if (proof) {
+			proof->overlay = lookup_proof;
 			proof->parent_proof = s.info.proof;
 			d->d_fsdata = proof;
 		}
@@ -189,30 +230,30 @@ static int ks_revalidate(struct inode *parent, const struct qstr *name, struct d
 	if (flags & LOOKUP_RCU)
 		return -ECHILD;
 	if (f->lower) {
-		struct ks_snapshot node;
-		int err = ks_snapshot(f, KS_I(parent)->id, &node);
-		if (err)
+		struct ks_directory_proof binding = {0}, observed = {0};
+		stqr_object_id id;
+		int err;
+		spin_lock(&d->d_lock);
+		if (d->d_fsdata)
+			binding = ((struct ks_dentry *)d->d_fsdata)->overlay;
+		spin_unlock(&d->d_lock);
+		if (overlay_proof_current(f, &binding))
+			return d_inode(d) ? (refresh_inode(d_inode(d)) ? 0 : 1) : 1;
+		/* A stale proof requires a fresh name check, not invalidation of an
+		 * unchanged directory alias. Spliced aliases can retain the old proof. */
+		err = ks_overlay_lookup(f, KS_I(parent)->id, d->d_name.name, &id, &observed);
+		if (err && err != -ENOENT)
 			return err;
-		struct ks_entry *entries = NULL;
-		size_t count;
-		err = ks_directory(f, &node.node, &entries, &count);
-		ks_snapshot_free(&node);
-		if (err)
-			return err;
-		bool found = false;
-		stqr_object_id id = {{0}};
-		for (size_t j = 0; j < count; j++)
-			if (!strcmp(entries[j].name, d->d_name.name)) {
-				found = true;
-				id = entries[j].id;
-				break;
-			}
-		sq_free(entries);
-		if (!d_inode(d))
-			return !found;
-		if (!found || memcmp(id.bytes, KS_I(d_inode(d))->id.bytes, 32))
+		if (d_inode(d) &&
+		    (err == -ENOENT || memcmp(id.bytes, KS_I(d_inode(d))->id.bytes, 32)))
 			return 0;
-		return refresh_inode(d_inode(d)) ? 0 : 1;
+		if (!d_inode(d) && err != -ENOENT)
+			return 0;
+		spin_lock(&d->d_lock);
+		if (d->d_fsdata)
+			((struct ks_dentry *)d->d_fsdata)->overlay = observed;
+		spin_unlock(&d->d_lock);
+		return d_inode(d) ? (refresh_inode(d_inode(d)) ? 0 : 1) : 1;
 	}
 
 	proof = d->d_fsdata;
