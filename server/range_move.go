@@ -4,8 +4,6 @@ package server
 import (
 	"context"
 	"fmt"
-	"io"
-	"os"
 	"time"
 
 	"github.com/launix-de/stqr-storage/client"
@@ -299,88 +297,82 @@ func (r *rangeManager) cleanup(ctx context.Context, p rangePlan) error {
 			if len(records) == 0 {
 				break
 			}
+			var obsolete []volume.ObjectRecord
 			for _, record := range records {
-				if !p.contains(record.Key.Object) {
-					continue
+				if p.contains(record.Key.Object) {
+					obsolete = append(obsolete, record)
 				}
-				if err := r.server.waitForUserIO(ctx); err != nil {
+			}
+			for len(obsolete) > 0 {
+				n := min(len(obsolete), 32)
+				if err := r.cleanupBatch(ctx, p, v, func(h *volume.Handle) error {
+					return h.PurgeBatch(obsolete[:n])
+				}); err != nil {
 					return err
 				}
-				r.server.opMu.Lock()
-				if err := r.cleanupAllowed(p); err != nil {
-					r.server.opMu.Unlock()
-					return err
-				}
-				h, err := v.Open(true)
-				if err == nil {
-					err = h.Purge(record.Key)
-					h.Close()
-				}
-				r.server.opMu.Unlock()
-				if err != nil {
-					return err
-				}
+				obsolete = obsolete[n:]
 			}
 			last := records[len(records)-1].Key.Object
 			after = &last
 		}
-		file, err := os.CreateTemp("", "stqr-range-cleanup-*")
-		if err != nil {
-			return err
-		}
-		err = func() error {
-			defer func() { file.Close(); os.Remove(file.Name()) }()
+		// Page retry IDs directly from the B-tree. No full-volume read lock or
+		// temporary file is needed, and settled receipts share one commit.
+		var cursor *volume.ID
+		for {
+			if err := r.server.waitForUserIO(ctx); err != nil {
+				return err
+			}
 			h, err := v.Open(false)
 			if err != nil {
 				return err
 			}
-			err = h.ScanRequests(func(record volume.RequestRecord) error {
-				if record.Key.Bucket != volume.ID(p.Before.Bucket) || !p.contains(record.Key.Object) {
-					return nil
-				}
-				_, err := file.Write(record.ID[:])
-				return err
-			})
+			records, err := h.ScanRequestRecords(cursor, 128)
 			h.Close()
 			if err != nil {
 				return err
 			}
-			if _, err := file.Seek(0, io.SeekStart); err != nil {
-				return err
+			if len(records) == 0 {
+				break
 			}
-			for {
-				var id volume.ID
-				_, err := io.ReadFull(file, id[:])
-				if err == io.EOF {
-					return nil
-				}
-				if err != nil {
-					return err
-				}
-				if err := ctx.Err(); err != nil {
-					return err
-				}
-				r.server.opMu.Lock()
-				if err := r.cleanupAllowed(p); err != nil {
-					r.server.opMu.Unlock()
-					return err
-				}
-				h, err := v.Open(true)
-				if err == nil {
-					err = h.ForgetRequest(id)
-					h.Close()
-				}
-				r.server.opMu.Unlock()
-				if err != nil {
-					return err
+			var obsolete []volume.ID
+			for _, record := range records {
+				if record.Key.Bucket == volume.ID(p.Before.Bucket) && p.contains(record.Key.Object) {
+					obsolete = append(obsolete, record.ID)
 				}
 			}
-		}()
-		if err != nil {
-			return err
+			for len(obsolete) > 0 {
+				n := min(len(obsolete), 32)
+				if err := r.cleanupBatch(ctx, p, v, func(h *volume.Handle) error {
+					return h.ForgetRequests(obsolete[:n])
+				}); err != nil {
+					return err
+				}
+				obsolete = obsolete[n:]
+			}
+			last := records[len(records)-1].ID
+			cursor = &last
 		}
 	}
 	return nil
+}
+
+// Each bounded cleanup batch rechecks the committed fence under opMu, and
+// releases all locks before yielding to foreground requests or scanning again.
+func (r *rangeManager) cleanupBatch(ctx context.Context, p rangePlan, v *volume.Volume, fn func(*volume.Handle) error) error {
+	if err := r.server.waitForUserIO(ctx); err != nil {
+		return err
+	}
+	r.server.opMu.Lock()
+	defer r.server.opMu.Unlock()
+	if err := r.cleanupAllowed(p); err != nil {
+		return err
+	}
+	h, err := v.Open(true)
+	if err != nil {
+		return err
+	}
+	defer h.Close()
+	return fn(h)
 }
 
 // The scan is advisory. Recheck authority under opMu immediately before each

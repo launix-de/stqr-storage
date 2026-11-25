@@ -228,7 +228,9 @@ func TestTicket32ManagedAppendLostAckNeverDuplicates(t *testing.T) {
 			ctx := context.Background()
 			f, store := newTestFS(t)
 			file := createTestFile(t, f, "append")
-			if _, err := f.WriteAt(ctx, file.ID, []byte("initial"), 0); err != nil {
+			// External block edits still exercise every recoverable intent phase.
+			initial := bytes.Repeat([]byte("initial"), 1024)
+			if _, err := f.WriteAt(ctx, file.ID, initial, 0); err != nil {
 				t.Fatal(err)
 			}
 			fault := &ticket32LostAckStore{MemoryFilesystemStore: store, phase: phase}
@@ -243,10 +245,10 @@ func TestTicket32ManagedAppendLostAckNeverDuplicates(t *testing.T) {
 			}
 			got := readTestFile(t, reopened, file.ID)
 			if appendErr == nil {
-				if string(got) != "initial-once" {
+				if !bytes.Equal(got, append(bytes.Clone(initial), []byte("-once")...)) {
 					t.Fatalf("successful append duplicated or lost: %q", got)
 				}
-			} else if string(got) != "initial" && string(got) != "initial-once" {
+			} else if !bytes.Equal(got, initial) && !bytes.Equal(got, append(bytes.Clone(initial), []byte("-once")...)) {
 				t.Fatalf("uncertain append duplicated: %q %v", got, appendErr)
 			}
 		})

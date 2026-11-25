@@ -20,6 +20,10 @@ const (
 	fsTxAborted
 )
 
+// fsAtomicCASKey disables transparent native replay: after a lost reply an
+// atomic inode update must report uncertainty, never re-evaluate an append.
+type fsAtomicCASKey struct{}
+
 type fsSnapshot struct {
 	id   ObjectID
 	node fsNode
@@ -232,6 +236,29 @@ func (f *Filesystem) transact(ctx context.Context, members []fsTxMember) (bool, 
 	raw := encodeFSTransaction(fsTransaction{members: members})
 	if len(raw) > fsMaxIntentBytes {
 		return false, syscall.E2BIG
+	}
+	if len(members) == 1 && len(members[0].writes) == 0 {
+		// A whole-object CAS is already atomic and durable. With no external
+		// block edits there is no cross-object recovery obligation, even when
+		// the store supports cooperative references. Keep the same inode ID;
+		// do not allocate/pin a descriptor just to replace this one image.
+		if _, err := decodeFSTransaction(raw, ObjectID{}); err != nil {
+			return false, err
+		}
+		m := members[0]
+		_, err := f.store.CAS(context.WithValue(ctx, fsAtomicCASKey{}, true), m.id, 0, m.before, m.after, CASOptions{
+			Scope: CASObject, MutationOptions: MutationOptions{RequestID: NewRequestID()},
+		})
+		if errors.Is(err, ErrPrecondition) {
+			// A byte-comparing adapter may expose its replay's failed CAS.
+			// Recognize the exact after-image without repeating the append.
+			current, _, readErr := f.store.Get(ctx, m.id)
+			if readErr == nil && bytes.Equal(current, m.after) {
+				return true, nil
+			}
+			return false, nil
+		}
+		return err == nil, err
 	}
 	if refs, ok := f.managedReferences(); ok {
 		id, pin := newFSID(), NewRequestID()

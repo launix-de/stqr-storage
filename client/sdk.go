@@ -414,6 +414,15 @@ func (c *Client) do(ctx context.Context, opcode uint16, body []byte, id RequestI
 				return wireReply{}, e
 			}
 		}
+		// Pure inode CAS has no recovery descriptor. An uncertain native
+		// response must not be transparently replayed into a 412, which an
+		// append caller would mistake for a fresh concurrency conflict.
+		if opcode == 0x0108 && ctx.Value(fsAtomicCASKey{}) == true {
+			var unknown *UnknownOutcomeError
+			if errors.As(e, &unknown) {
+				return wireReply{}, e
+			}
+		}
 		if ctx.Err() != nil {
 			if mutation {
 				return wireReply{}, &UnknownOutcomeError{RequestID: id, Cause: ctx.Err()}

@@ -1113,7 +1113,9 @@ static int node_cas(struct ks_fs *f, struct ks_snapshot *old, struct ks_node *ne
 
 	struct buf b = {0};
 	int err;
-	if (next->edits || f->references) {
+	/* One inode with no external edits is one atomic CAS. Reference support
+	 * alone does not justify a separately persisted recovery descriptor. */
+	if (next->edits) {
 		struct member m = {0};
 		err = member_set(&m, old, next);
 		if (!err)

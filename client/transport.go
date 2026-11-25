@@ -3,6 +3,7 @@ package client
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -212,6 +213,17 @@ func (t *objectTransport) roundTrip(ctx context.Context, m Message, mutation boo
 	select {
 	case r := <-p.reply:
 		if r.err != nil {
+			if mutation && ctx.Value(fsAtomicCASKey{}) == true {
+				var status *StatusError
+				if !errors.As(r.err, &status) {
+					t.mu.Lock()
+					sent := p.sent
+					t.mu.Unlock()
+					if sent {
+						return wireReply{}, &UnknownOutcomeError{RequestID: m.ID, Cause: r.err}
+					}
+				}
+			}
 			return wireReply{}, r.err
 		}
 		return r, nil
