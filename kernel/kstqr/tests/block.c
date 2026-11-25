@@ -59,6 +59,19 @@ int main(int argc, char **argv)
 	CHECK(pread(fd, p, 1024, M - 512) == 1024);
 	for (int j = 0; j < 1024; j++)
 		CHECK(p[j] == 'X');
+	/* The two existing stripe addresses are overwritten repeatedly rather than
+	 * replaced by new object identities. The host inspects the same NBD format. */
+	for (unsigned step = 0; step < 100; step++) {
+		memset(p, (int)step, 1024);
+		CHECK(pwrite(fd, p, 1024, M - 512) == 1024);
+		CHECK(!fsync(fd));
+		memset(p, 0xff, 1024);
+		CHECK(pread(fd, p, 1024, M - 512) == 1024);
+		for (unsigned j = 0; j < 1024; j++)
+			CHECK(p[j] == step);
+	}
+	memset(p, 'X', 1024);
+	CHECK(pwrite(fd, p, 1024, M - 512) == 1024 && !fsync(fd));
 	memset(p, 'D', M);
 	CHECK(pwrite(fd, p, M, 2 * M) == M);
 	CHECK(!fsync(fd));

@@ -163,11 +163,21 @@ func (f *Filesystem) unlinkNode(ctx context.Context, parent ObjectID, name strin
 		next := child.node
 		setFSLinks(&next, count-1)
 		next.ctime = uint64(time.Now().UnixNano())
-		committed, err := f.transact(ctx, []fsTxMember{fsMember(p, nextP), fsMember(child, next)})
+		members := []fsTxMember{fsMember(p, nextP), fsMember(child, next)}
+		if count == 1 {
+			members, err = f.withOrphan(ctx, members, child.id)
+			if err != nil {
+				return err
+			}
+		}
+		committed, err := f.transact(ctx, members)
 		if err != nil {
 			return err
 		}
 		if committed {
+			if err := f.CollectOrphans(ctx); err != nil && !errors.Is(err, ErrUnauthorized) {
+				return err
+			}
 			return nil
 		}
 	}

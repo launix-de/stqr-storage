@@ -2,11 +2,201 @@
 package client
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
+	"sort"
 	"syscall"
+	"time"
 )
+
+var filesystemLowerAnchorsID = ObjectID(sha256.Sum256([]byte("STQR filesystem lower anchors v1")))
+
+type fsLowerAnchor struct {
+	owner, target ObjectID
+	token         ID
+}
+
+func encodeFSLowerAnchors(entries []fsLowerAnchor) []byte {
+	e := Encoder{B: []byte("STLA")}
+	e.U16(1)
+	e.U32(uint32(len(entries)))
+	for _, entry := range entries {
+		e.B = append(e.B, entry.owner[:]...)
+		e.B = append(e.B, entry.target[:]...)
+		e.ID(entry.token)
+	}
+	return e.B
+}
+func compareFSLowerAnchor(a, b fsLowerAnchor) int {
+	if c := bytes.Compare(a.owner[:], b.owner[:]); c != 0 {
+		return c
+	}
+	return bytes.Compare(a.target[:], b.target[:])
+}
+
+func (f *Filesystem) lowerAnchorsSnapshot(ctx context.Context, create bool) (fsSnapshot, []fsLowerAnchor, error) {
+	ctx = context.WithValue(ctx, fsDurableKey{}, true)
+	for attempt := 0; attempt < 128; attempt++ {
+		s, err := f.snapshot(ctx, filesystemLowerAnchorsID)
+		if errors.Is(err, ErrNotFound) && create {
+			body := encodeFSLowerAnchors(nil)
+			node := fsNode{kind: fsFile, extended: true, links: 1, mode: 0600, blob: fsBlob{length: uint64(len(body)), inline: body, digest: sha256.Sum256(body)}}
+			_, err = f.store.CAS(ctx, filesystemLowerAnchorsID, 0, nil, encodeFSNode(node), CASOptions{Scope: CASObject, MutationOptions: MutationOptions{RequestID: NewRequestID(), Absent: true}})
+			if err == nil || errors.Is(err, ErrPrecondition) {
+				continue
+			}
+		}
+		if err != nil {
+			return s, nil, err
+		}
+		if s.node.kind != fsFile || s.node.blob.length > f.directoryMemoryLimit || s.node.blob.length > uint64(int(^uint(0)>>1)) {
+			return s, nil, ErrFSFormat
+		}
+		body := make([]byte, int(s.node.blob.length))
+		if _, err = f.readBlob(ctx, s.node.blob, body, 0); err != nil {
+			return s, nil, err
+		}
+		if err = f.checkNodeView(ctx, s.node); errors.Is(err, ErrPrecondition) {
+			continue
+		} else if err != nil {
+			return s, nil, err
+		}
+		d := Decoder{B: body}
+		if string(d.Take(4)) != "STLA" || d.U16() != 1 {
+			return s, nil, ErrFSFormat
+		}
+		count := d.U32()
+		if uint64(count)*80 != uint64(len(d.B)) {
+			return s, nil, ErrFSFormat
+		}
+		entries := make([]fsLowerAnchor, count)
+		for i := range entries {
+			entry := &entries[i]
+			copy(entry.owner[:], d.Take(32))
+			copy(entry.target[:], d.Take(32))
+			entry.token = d.ID()
+			if entry.owner == (ObjectID{}) || entry.target == (ObjectID{}) || entry.token == (ID{}) || i > 0 && compareFSLowerAnchor(entries[i-1], *entry) >= 0 {
+				return s, nil, ErrFSFormat
+			}
+		}
+		return s, entries, d.Done()
+	}
+	return fsSnapshot{}, nil, ErrWouldBlock
+}
+
+func (f *Filesystem) saveLowerAnchors(ctx context.Context, s fsSnapshot, entries []fsLowerAnchor) (bool, error) {
+	n := s.node
+	body := encodeFSLowerAnchors(entries)
+	if err := f.stableBody(ctx, &n, body); err != nil {
+		return false, err
+	}
+	n.blob.digest = sha256.Sum256(body)
+	n.mtime = uint64(time.Now().UnixNano())
+	n.ctime = n.mtime
+	return f.transact(ctx, []fsTxMember{fsMember(s, n)})
+}
+
+// Persist the token before acquiring the lower pin. An interrupted copy-up can
+// then be reconciled by an offline collector even after its upper inode is gone.
+func (f *Filesystem) reserveLowerAnchor(ctx context.Context, owner, target ObjectID) (ID, error) {
+	for attempt := 0; attempt < 128; attempt++ {
+		s, entries, err := f.lowerAnchorsSnapshot(ctx, true)
+		if err != nil {
+			return ID{}, err
+		}
+		for _, entry := range entries {
+			if entry.owner == owner && entry.target == target {
+				return entry.token, nil
+			}
+		}
+		entry := fsLowerAnchor{owner: owner, target: target, token: NewRequestID()}
+		entries = append(entries, entry)
+		sort.Slice(entries, func(i, j int) bool { return compareFSLowerAnchor(entries[i], entries[j]) < 0 })
+		committed, err := f.saveLowerAnchors(ctx, s, entries)
+		if err != nil {
+			return ID{}, err
+		}
+		if committed {
+			return entry.token, nil
+		}
+	}
+	return ID{}, ErrWouldBlock
+}
+
+func reconcileFSLowerAnchors(ctx context.Context, o *OverlayFilesystem, store fsCheckStore, mark *fsCheckMarker, dirs map[ObjectID]bool) (bool, error) {
+	s, entries, err := o.upper.lowerAnchorsSnapshot(ctx, false)
+	if errors.Is(err, ErrNotFound) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	// A server lineage proof is mandatory: raw COW snapshots can inherit the
+	// same token even after their live ClonePeers edge has been detached.
+	proof, ok := store.(interface {
+		CanReclaimDependencies(context.Context) (bool, error)
+	})
+	allowed := false
+	if ok {
+		allowed, err = proof.CanReclaimDependencies(ctx)
+		if err != nil {
+			return false, err
+		}
+	}
+	if !allowed {
+		return false, nil
+	}
+	lower, ok := o.lower.store.(fsDependencyStore)
+	if !ok {
+		return false, nil
+	}
+	state, _, _, err := o.state(ctx)
+	if err != nil {
+		return false, err
+	}
+	kept := make([]fsLowerAnchor, 0, len(entries))
+	for _, entry := range entries {
+		referenced := false
+		if dir := state.dirs[entry.owner]; dir != nil && dirs[entry.owner] && !dir.node.removed && !dir.opaque && dir.lower == entry.target {
+			referenced = true
+		}
+		if mark.roles[entry.owner] == fsCheckInode {
+			n, _, readErr := o.upper.load(ctx, entry.owner)
+			if readErr != nil {
+				return false, readErr
+			}
+			referenced = referenced || n.blob.lower || n.blob.lowerOwner != (ObjectID{}) || n.blob.source != (ObjectID{})
+		}
+		if referenced {
+			kept = append(kept, entry)
+			continue
+		}
+		if err := lower.UnpinObjectDependency(ctx, entry.target, entry.token); err != nil {
+			return false, err
+		}
+	}
+	if len(kept) == len(entries) {
+		return false, nil
+	}
+	committed, err := o.upper.saveLowerAnchors(ctx, s, kept)
+	if err != nil {
+		return false, err
+	}
+	if !committed {
+		return false, ErrPrecondition
+	}
+	return true, nil
+}
+
+func markFSLowerAnchorLedger(ctx context.Context, mark *fsCheckMarker) error {
+	if _, ok := mark.inventory[filesystemLowerAnchorsID]; !ok {
+		return nil
+	}
+	return mark.inode(ctx, filesystemLowerAnchorsID, false)
+}
 
 type fsCheckLower struct {
 	length uint64
@@ -62,13 +252,25 @@ func (c *Client) CheckOverlayFilesystem(ctx context.Context, lower FilesystemSto
 	if err := c.beginMaintenance(ctx); err != nil {
 		return FSCheckResult{}, err
 	}
+	if err := c.ResetAbandonedObjectReferences(ctx); err != nil {
+		return FSCheckResult{}, err
+	}
 	o, err := OpenOverlayFilesystem(ctx, lower, c, OverlayOptions{LowerBucketID: lowerID})
 	if err != nil {
 		return FSCheckResult{}, err
 	}
-	return checkOverlayFilesystem(ctx, o, c)
+	result, err := checkOverlayFilesystem(ctx, o, c)
+	if err == nil {
+		err = c.ReclaimBucketMetadata(ctx)
+	}
+	return result, err
 }
 func checkOverlayFilesystem(ctx context.Context, o *OverlayFilesystem, store fsCheckStore) (FSCheckResult, error) {
+	if reset, ok := store.(interface{ ResetAbandonedObjectReferences(context.Context) error }); ok {
+		if err := reset.ResetAbandonedObjectReferences(ctx); err != nil {
+			return FSCheckResult{}, err
+		}
+	}
 	s, _, blob, err := o.state(ctx)
 	if err == nil {
 		s = cloneOverlayState(s)
@@ -83,6 +285,9 @@ func checkOverlayFilesystem(ctx context.Context, o *OverlayFilesystem, store fsC
 	mark, dirs, err := markOverlay(ctx, o, store, s, string(s.rootRaw), blob, inventory)
 	if err != nil {
 		return FSCheckResult{Scanned: uint64(len(inventory))}, fmt.Errorf("overlay fsck validation; nothing deleted: %w", err)
+	}
+	if err := protectFilesystemDependencies(ctx, store, inventory, mark); err != nil {
+		return FSCheckResult{}, fmt.Errorf("overlay dependency validation; nothing deleted: %w", err)
 	}
 	whiteouts, pruned, err := pruneOverlayMetadata(ctx, o, s, dirs)
 	if err != nil {
@@ -102,10 +307,33 @@ func checkOverlayFilesystem(ctx context.Context, o *OverlayFilesystem, store fsC
 		if err != nil {
 			return confirmed, err
 		}
+		mark, dirs, err = markOverlay(ctx, o, store, s, string(s.rootRaw), blob, inventory)
+		if err != nil {
+			return confirmed, err
+		}
+		if err := protectFilesystemDependencies(ctx, store, inventory, mark); err != nil {
+			return confirmed, err
+		}
+	}
+	anchorsChanged, err := reconcileFSLowerAnchors(ctx, o, store, mark, dirs)
+	if err != nil {
+		return confirmed, fmt.Errorf("overlay anchor reconciliation; nothing swept: %w", err)
+	}
+	if anchorsChanged {
+		inventory, err = filesystemInventory(ctx, store)
+		if err != nil {
+			return confirmed, err
+		}
 		mark, _, err = markOverlay(ctx, o, store, s, string(s.rootRaw), blob, inventory)
 		if err != nil {
 			return confirmed, err
 		}
+		if err := protectFilesystemDependencies(ctx, store, inventory, mark); err != nil {
+			return confirmed, err
+		}
+	}
+	if err := markFSLowerAnchorLedger(ctx, mark); err != nil {
+		return confirmed, err
 	}
 	result, err := filesystemSweep(ctx, store, inventory, mark.roles)
 	result.WhiteoutsRemoved, result.DirectoriesPruned = confirmed.WhiteoutsRemoved, confirmed.DirectoriesPruned

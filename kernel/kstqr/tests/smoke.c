@@ -114,6 +114,58 @@ int main(void)
     REQUIRE(!rename("/mnt/moving", "/mnt/destination/moved"));
     REQUIRE(!rmdir("/mnt/destination/moved"));
     REQUIRE(!rmdir("/mnt/destination"));
+    puts("kstqr: repeated overwrite, truncation and open-unlink lifetime");
+    {
+        unsigned char before[8192], after[8192];
+        struct stat first, current;
+        fd = open("/mnt/reuse-lifetime", O_CREAT | O_EXCL | O_RDWR, 0600);
+        REQUIRE(fd >= 0);
+        memset(before, 'a', sizeof(before));
+        REQUIRE(pwrite(fd, before, sizeof(before), 0) == sizeof(before));
+        REQUIRE(!fsync(fd) && !fstat(fd, &first));
+        for (unsigned step = 0; step < 100; step++) {
+            memset(before, (int)step, sizeof(before));
+            REQUIRE(pwrite(fd, before, sizeof(before), 0) == sizeof(before));
+            REQUIRE(!fsync(fd));
+            REQUIRE(pread(fd, after, sizeof(after), 0) == sizeof(after));
+            REQUIRE(!memcmp(before, after, sizeof(before)));
+            REQUIRE(!fstat(fd, &current));
+            REQUIRE(current.st_ino == first.st_ino && current.st_size == sizeof(before));
+        }
+        REQUIRE(!ftruncate(fd, 1024) && !fsync(fd));
+        REQUIRE(!ftruncate(fd, sizeof(before)) && !fsync(fd));
+        REQUIRE(pread(fd, after, sizeof(after), 0) == sizeof(after));
+        REQUIRE(!memcmp(before, after, 1024));
+        for (size_t at = 1024; at < sizeof(after); at++)
+            REQUIRE(after[at] == 0);
+        REQUIRE(!unlink("/mnt/reuse-lifetime"));
+        REQUIRE(pread(fd, after, 1024, 0) == 1024 && !memcmp(before, after, 1024));
+        REQUIRE(pwrite(fd, "still-open", 10, 0) == 10 && !fsync(fd));
+        REQUIRE(!close(fd));
+        REQUIRE(open("/mnt/reuse-lifetime", O_RDONLY) < 0 && errno == ENOENT);
+    }
+    puts("kstqr: readonly cross-mount open survives final namespace unlink");
+    {
+        unsigned char expected[8192], actual[8192];
+        int reader = -1;
+        memset(expected, 'r', sizeof(expected));
+        fd = open("/mnt/readonly-orphan", O_CREAT | O_EXCL | O_RDWR, 0600);
+        REQUIRE(fd >= 0);
+        REQUIRE(write(fd, expected, sizeof(expected)) == sizeof(expected) && !fsync(fd));
+        for (unsigned attempt = 0; attempt < 100 && reader < 0; attempt++) {
+            reader = open("/readonly/readonly-orphan", O_RDONLY);
+            if (reader < 0) {
+                REQUIRE(errno == ENOENT);
+                usleep(10000);
+            }
+        }
+        REQUIRE(reader >= 0);
+        REQUIRE(!unlink("/mnt/readonly-orphan"));
+        REQUIRE(!close(fd));
+        REQUIRE(pread(reader, actual, sizeof(actual), 0) == sizeof(actual));
+        REQUIRE(!memcmp(expected, actual, sizeof(expected)));
+        REQUIRE(!close(reader));
+    }
     REQUIRE(!mkdir("/mnt/gone", 0755));
     parent = open("/mnt/gone", O_RDONLY | O_DIRECTORY);
     REQUIRE(parent >= 0);

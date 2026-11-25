@@ -92,7 +92,23 @@ int stqr_cas(stqr_client *, stqr_object_id, unsigned scope, stqr_u64 offset,
              const void *expected, size_t expected_len,
              const void *replacement, size_t replacement_len,
              const stqr_options *, stqr_info *);
+/* Durable, bucket-local object references. Generate a nonzero token with
+ * stqr_request_id and preserve it through retries, reconnect and restart.
+ * All four coordination actions need READ. Claims do not grant WRITE/DELETE;
+ * subsequent object operations retain their own permission checks. Busy is -EBUSY.
+ * Pins may name absent objects and survive connection close; abandoned pins
+ * require exclusive offline collection, never an expiry-based unsafe reclaim.
+ */
+int stqr_object_pin(stqr_client *, stqr_object_id, stqr_id token);
+int stqr_object_unpin(stqr_client *, stqr_object_id, stqr_id token);
+int stqr_object_claim(stqr_client *, stqr_object_id, stqr_id token);
+int stqr_object_release_claim(stqr_client *, stqr_object_id, stqr_id token);
+/* Persistent dependency pins are distinct from open-handle pins. Offline
+ * filesystem recovery must preserve their target graphs, including snapshots. */
+int stqr_object_pin_dependency(stqr_client *, stqr_object_id, stqr_id token);
+int stqr_object_unpin_dependency(stqr_client *, stqr_object_id, stqr_id token);
 #define STQR_CAP_DURABILITY 8192U
+#define STQR_CAP_OBJECT_REFERENCES 131072U
 typedef struct { stqr_id boot; stqr_u64 sequence; } stqr_commit_mark;
 /* Mark observation includes reads and subscription updates, preserving causal
  * dependencies. Close is not a durability barrier. Marks survive reconnect;

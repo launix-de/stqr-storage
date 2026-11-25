@@ -241,21 +241,12 @@ func (f *Filesystem) finishStableBlob(ctx context.Context, n *fsNode, old fsBlob
 	}
 	// Only truly retired pages/blocks are reclaimed. Untouched blocks keep their
 	// ID and version even when another part of the inode changes.
-	oldData, e := f.segmentsReadOnly(ctx, old)
-	if e != nil {
-		return e
-	}
-	oldIndex, e := f.indexIDs(ctx, old)
+	owned, e := f.ownedBlockIDs(ctx, n.identity, old)
 	if e != nil {
 		return e
 	}
 	retired := map[ObjectID]bool{}
-	for _, s := range oldData {
-		if !s.lower && s.legacyVersion == 0 && s.id != (ObjectID{}) && !keep[s.id] {
-			retired[s.id] = true
-		}
-	}
-	for _, id := range oldIndex {
+	for _, id := range owned {
 		if !keep[id] {
 			retired[id] = true
 		}

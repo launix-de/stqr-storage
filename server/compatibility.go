@@ -333,7 +333,7 @@ func currentOperationSemantics() map[string]operationSemantics {
 		result[fmt.Sprintf("%04x", op)] = operationSemantics{Emit: 2, Min: 2, Max: 2}
 	}
 
-	for _, op := range []uint16{client.BucketClone, client.BucketClear, client.BucketCreate, client.BucketCreateInGroup, client.BucketSetPolicy, client.BucketDelete, client.PeerControlReserve, client.PeerControlPrepare, client.PeerControlCommit, client.PeerControlApply, client.PeerControlRelease, client.PeerControlAbort, peerControlInfo, peerSystemChunk, peerRangeObject, peerRangeProbe, peerRangeReceipts, peerReplicaPrepare, peerReplicaReady, peerReplicaCommit, peerReplicaCommitted, peerReplicaAbort, peerReplicaChunk} {
+	for _, op := range []uint16{client.BucketClone, client.BucketClear, client.BucketCreate, client.BucketCreateInGroup, client.BucketSetPolicy, client.BucketDelete, client.PeerControlReserve, client.PeerControlPrepare, client.PeerControlCommit, client.PeerControlApply, client.PeerControlRelease, client.PeerControlAbort, peerControlInfo, peerSystemChunk, peerRangeObject, peerRangeProbe, peerRangeReceipts, peerReplicaPrepare, peerReplicaReady, peerReplicaCommit, peerReplicaCommitted, peerReplicaAbort, peerReplicaChunk, peerReplicaForget, client.ObjectReference} {
 		result[fmt.Sprintf("%04x", op)] = operationSemantics{Emit: 2, Min: 2, Max: 2}
 	}
 	for op := uint16(0x1050); op <= 0x105f; op++ {
@@ -345,6 +345,7 @@ func currentOperationSemantics() map[string]operationSemantics {
 	for op := peerCowCapture; op <= peerCowSync; op++ {
 		result[fmt.Sprintf("%04x", op)] = operationSemantics{Emit: 1, Min: 1, Max: 1}
 	}
+	result[fmt.Sprintf("%04x", client.BucketClone)] = operationSemantics{Emit: 3, Min: 3, Max: 3}
 	for _, op := range []uint16{client.PeerControlReserve, client.PeerControlPrepare, client.PeerControlCommit, client.PeerControlApply, client.PeerControlRelease, client.PeerControlAbort} {
 		result[fmt.Sprintf("%04x", op)] = operationSemantics{Emit: 3, Min: 3, Max: 3}
 	}

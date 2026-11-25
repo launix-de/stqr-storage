@@ -15,6 +15,7 @@ import (
 // Roles, bucket pointer and permissions are immutable; administrative changes
 // revoke the capability instead of making data requests reread account/ACL data.
 type connectionAuthorization struct {
+	objectReferences           atomic.Bool // client participates in cooperative reference/intent lifetime
 	lease                      atomic.Pointer[bucketLease]
 	leaseOwner                 atomic.Bool
 	admin, clusterPeer         bool

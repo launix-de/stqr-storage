@@ -92,7 +92,9 @@ struct ks_fs {
 	u64 invalidation_generation;
 	char *url;
 	stqr_id bucket;
-	bool readonly, failed, stopping;
+	bool readonly, failed, stopping, references;
+	struct delayed_work orphan_work;
+	unsigned orphan_cursor;
 	atomic64_t cache_hits, cache_misses, rpc_gets, rpc_ranges, rpc_cas, read_windows;
 	atomic64_t read_bytes, read_ns, read_queue_ns;
 	atomic64_t writeback_batches, writeback_folios, writeback_bytes, writeback_errors,
@@ -166,5 +168,8 @@ int ks_remove(struct ks_fs *, stqr_object_id, const char *, bool);
 int ks_rename(struct ks_fs *, stqr_object_id, const char *, stqr_object_id, const char *, unsigned,
 	      const stqr_object_id *, size_t, const stqr_object_id *, size_t);
 int ks_write(struct ks_fs *, stqr_object_id, u64 *, const void *, size_t, bool);
+int ks_object_reference(struct ks_fs *, stqr_object_id, stqr_id, unsigned);
+int ks_collect_orphans(struct ks_fs *, bool *);
+void ks_schedule_orphans(struct ks_fs *);
 int ks_setattr(struct ks_fs *, stqr_object_id, struct iattr *);
 #endif

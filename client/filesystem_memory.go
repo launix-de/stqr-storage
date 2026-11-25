@@ -4,7 +4,6 @@ package client
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
 	"errors"
 	"sync"
 )
@@ -12,22 +11,134 @@ import (
 // MemoryFilesystemStore is an explicitly volatile backend for dry filesystem
 // development. It implements local object access, not a network connection.
 // All handles sharing this instance share atomic byte comparisons and object data.
-// It retains immutable/orphan objects and is not intended for unbounded workloads.
+// Ordinary CAS/PUT_RANGE always inspect and update the current bytes. Reference
+// state is bounded by open holders and outstanding claims, with no retry history.
 type MemoryFilesystemStore struct {
-	mu       sync.RWMutex
-	objects  map[ObjectID]fsMemoryObject
-	requests map[RequestID]fsMemoryRequest
+	mu           sync.RWMutex
+	objects      map[ObjectID]fsMemoryObject
+	references   map[ObjectID]map[ID]bool
+	claims       map[ObjectID]ID
+	dependencies map[ObjectID]map[ID]bool
 }
+
+func (m *MemoryFilesystemStore) PinObject(ctx context.Context, id ObjectID, token ID) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if token == (ID{}) {
+		return ErrRange
+	}
+	if m.claims[id] != (ID{}) {
+		return ErrWouldBlock
+	}
+	if m.references == nil {
+		m.references = make(map[ObjectID]map[ID]bool)
+	}
+	if m.references[id] == nil {
+		m.references[id] = make(map[ID]bool)
+	}
+	m.references[id][token] = true
+	return nil
+}
+
+func (m *MemoryFilesystemStore) UnpinObject(ctx context.Context, id ObjectID, token ID) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.references[id], token)
+	if len(m.references[id]) == 0 {
+		delete(m.references, id)
+	}
+	return nil
+}
+
+func (m *MemoryFilesystemStore) ClaimObjectRetirement(ctx context.Context, id ObjectID, token ID) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if token == (ID{}) {
+		return ErrRange
+	}
+	if prior := m.claims[id]; prior != (ID{}) && prior != token || len(m.references[id]) != 0 || len(m.dependencies[id]) != 0 {
+		return ErrWouldBlock
+	}
+	if m.claims == nil {
+		m.claims = make(map[ObjectID]ID)
+	}
+	m.claims[id] = token
+	return nil
+}
+
+func (m *MemoryFilesystemStore) PinObjectDependency(ctx context.Context, id ObjectID, token ID) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if token == (ID{}) {
+		return ErrRange
+	}
+	if m.claims[id] != (ID{}) {
+		return ErrWouldBlock
+	}
+	if m.dependencies == nil {
+		m.dependencies = map[ObjectID]map[ID]bool{}
+	}
+	if m.dependencies[id] == nil {
+		m.dependencies[id] = map[ID]bool{}
+	}
+	m.dependencies[id][token] = true
+	return nil
+}
+func (m *MemoryFilesystemStore) UnpinObjectDependency(ctx context.Context, id ObjectID, token ID) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.dependencies[id], token)
+	if len(m.dependencies[id]) == 0 {
+		delete(m.dependencies, id)
+	}
+	return nil
+}
+func (m *MemoryFilesystemStore) ReadObjectDependencies(ctx context.Context) ([]ObjectID, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	out := make([]ObjectID, 0, len(m.dependencies))
+	for id := range m.dependencies {
+		out = append(out, id)
+	}
+	return out, nil
+}
+
+func (m *MemoryFilesystemStore) ReleaseObjectRetirement(ctx context.Context, id ObjectID, token ID) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.claims[id] == token {
+		delete(m.claims, id)
+	}
+	return nil
+}
+
 type fsMemoryObject struct {
 	data []byte
 }
-type fsMemoryRequest struct {
-	digest [32]byte
-	info   ObjectInfo
-}
 
 func NewMemoryFilesystemStore() *MemoryFilesystemStore {
-	return &MemoryFilesystemStore{objects: make(map[ObjectID]fsMemoryObject), requests: make(map[RequestID]fsMemoryRequest)}
+	return &MemoryFilesystemStore{objects: make(map[ObjectID]fsMemoryObject)}
 }
 func (m *MemoryFilesystemStore) Get(ctx context.Context, id ObjectID) ([]byte, ObjectInfo, error) {
 	if err := ctx.Err(); err != nil {
@@ -65,29 +176,10 @@ func (m *MemoryFilesystemStore) CAS(ctx context.Context, id ObjectID, offset uin
 	if opt.Scope != CASObject || offset != 0 || len(replacement) > FSObjectSize {
 		return ObjectInfo{}, errors.New("client: unsupported dry filesystem CAS")
 	}
-	e := Encoder{B: append([]byte(nil), id[:]...)}
-	e.Bool(opt.Absent)
-	for _, v := range []*uint64{opt.ExpectedLength} {
-		e.Bool(v != nil)
-		if v != nil {
-			e.U64(*v)
-		}
-	}
-	e.Blob(expected)
-	e.Blob(replacement)
-	digest := sha256.Sum256(e.B)
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if err := ctx.Err(); err != nil {
 		return ObjectInfo{}, err
-	}
-	if opt.RequestID != (RequestID{}) {
-		if r, ok := m.requests[opt.RequestID]; ok {
-			if r.digest != digest {
-				return ObjectInfo{}, errors.New("client: request ID reused")
-			}
-			return r.info, nil
-		}
 	}
 	old, exists := m.objects[id]
 	if (opt.Absent && exists) || (!exists && !opt.Absent) || (opt.ExpectedLength != nil && *opt.ExpectedLength != uint64(len(old.data))) {
@@ -99,9 +191,6 @@ func (m *MemoryFilesystemStore) CAS(ctx context.Context, id ObjectID, offset uin
 	o := fsMemoryObject{data: append([]byte(nil), replacement...)}
 	m.objects[id] = o
 	info := ObjectInfo{Length: uint64(len(o.data))}
-	if opt.RequestID != (RequestID{}) {
-		m.requests[opt.RequestID] = fsMemoryRequest{digest: digest, info: info}
-	}
 	return info, nil
 }
 
@@ -123,29 +212,10 @@ func (m *MemoryFilesystemStore) PutRange(ctx context.Context, id ObjectID, offse
 	if offset > FSObjectSize || uint64(len(data)) > FSObjectSize-offset {
 		return ObjectInfo{}, ErrRange
 	}
-	// This helper uses one CAS image but retains the caller's logical request
-	// fingerprint through a separate operation namespace, just like native PUT_RANGE.
-	e := Encoder{B: append([]byte("range"), id[:]...)}
-	e.U64(offset)
-	e.Blob(data)
-	e.Bool(opt.Absent)
-	e.Bool(opt.ExpectedLength != nil)
-	if opt.ExpectedLength != nil {
-		e.U64(*opt.ExpectedLength)
-	}
-	e.U64(opt.CompareOffset)
-	e.Blob(opt.Compare)
-	digest := sha256.Sum256(e.B)
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if err := ctx.Err(); err != nil {
 		return ObjectInfo{}, err
-	}
-	if prior, ok := m.requests[opt.RequestID]; opt.RequestID != (RequestID{}) && ok {
-		if prior.digest != digest {
-			return ObjectInfo{}, errors.New("client: reused request ID")
-		}
-		return prior.info, nil
 	}
 	old, exists := m.objects[id]
 	if opt.Absent && exists || opt.ExpectedLength != nil && (!exists || uint64(len(old.data)) != *opt.ExpectedLength) {
@@ -163,8 +233,25 @@ func (m *MemoryFilesystemStore) PutRange(ctx context.Context, id ObjectID, offse
 	next := fsMemoryObject{data: body}
 	m.objects[id] = next
 	info := ObjectInfo{Length: uint64(len(body))}
-	if opt.RequestID != (RequestID{}) {
-		m.requests[opt.RequestID] = fsMemoryRequest{digest: digest, info: info}
-	}
 	return info, nil
+}
+
+func (m *MemoryFilesystemStore) ObjectReferencesSupported() bool { return true }
+
+// The volatile memory backend has no bucket-COW clone operation.
+func (m *MemoryFilesystemStore) CanReclaimDependencies(ctx context.Context) (bool, error) {
+	return true, ctx.Err()
+}
+
+func (m *MemoryFilesystemStore) Delete(ctx context.Context, id ObjectID, opt DeleteOptions) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, ok := m.objects[id]; !ok {
+		return ErrNotFound
+	}
+	delete(m.objects, id)
+	return nil
 }

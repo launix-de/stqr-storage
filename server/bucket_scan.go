@@ -104,6 +104,11 @@ func (s *Server) executeMaintenance(ctx context.Context, op *objectMutation, d *
 	if description.State != BucketActive || description.DesiredPolicy != nil {
 		return nil, 0, fail(409, "bucket lifecycle transition in progress")
 	}
+	if op.message.Opcode == client.BucketMaintenance {
+		if err := s.checkReferenceAwareMaintenance(b, ws.authorization.objectReferences.Load()); err != nil {
+			return nil, 0, err
+		}
+	}
 	if op.message.Opcode == client.BucketMaintenance || op.message.Opcode == client.BucketObjectLease {
 		objectIO := op.message.Opcode == client.BucketObjectLease
 		if s.control != nil {

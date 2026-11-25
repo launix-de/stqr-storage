@@ -23,6 +23,8 @@ type handle struct {
 	id      client.ObjectID
 	options OpenOptions
 	entries []Entry
+	active  *sync.RWMutex
+	token   client.RequestID
 }
 type Filesystem struct {
 	Context  context.Context
@@ -122,6 +124,16 @@ func (f *Filesystem) Open(p string, o OpenOptions, mode uint32) (uint64, error) 
 	if !info.Directory && info.Kind != client.FSRegular {
 		return 0, syscall.EOPNOTSUPP
 	}
+	token, e := f.Volume.Retain(f.Context, info.ID)
+	if e != nil {
+		return 0, e
+	}
+	registered := false
+	defer func() {
+		if !registered {
+			_ = f.Volume.Release(f.Context, info.ID, token)
+		}
+	}()
 	if o.Truncate {
 		if !o.Write {
 			return 0, syscall.EACCES
@@ -130,7 +142,7 @@ func (f *Filesystem) Open(p string, o OpenOptions, mode uint32) (uint64, error) 
 			return 0, e
 		}
 	}
-	h := handle{path: path.Clean(p), id: info.ID, options: o}
+	h := handle{path: path.Clean(p), id: info.ID, options: o, active: &sync.RWMutex{}, token: token}
 	if o.Directory {
 		h.entries = []Entry{{".", info}}
 		parent, err := f.Lookup(path.Dir(p))
@@ -160,6 +172,7 @@ func (f *Filesystem) Open(p string, o OpenOptions, mode uint32) (uint64, error) 
 	if o.Directory {
 		f.rememberDirectoryLocked(h.path, h.entries)
 	}
+	registered = true
 	return f.next, nil
 }
 func (f *Filesystem) get(h uint64) (handle, error) {
@@ -171,30 +184,50 @@ func (f *Filesystem) get(h uint64) (handle, error) {
 	}
 	return v, nil
 }
-func (f *Filesystem) Close(h uint64) error {
+
+// acquire keeps a registered handle alive for an operation. Close first removes
+// it from the table, then waits for these readers before releasing its inode.
+func (f *Filesystem) acquire(h uint64) (handle, func(), error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if _, ok := f.handles[h]; !ok {
+	v, ok := f.handles[h]
+	if !ok {
+		return handle{}, nil, syscall.EBADF
+	}
+	v.active.RLock()
+	return v, v.active.RUnlock, nil
+}
+
+func (f *Filesystem) Close(h uint64) error {
+	f.mu.Lock()
+	v, ok := f.handles[h]
+	if !ok {
+		f.mu.Unlock()
 		return syscall.EBADF
 	}
 	delete(f.handles, h)
-	return nil
+	f.mu.Unlock()
+	v.active.Lock()
+	defer v.active.Unlock()
+	return f.Volume.Release(f.Context, v.id, v.token)
 }
 func (f *Filesystem) Stat(p string, h uint64) (client.FSInfo, error) {
 	if h == 0 || h == ^uint64(0) {
 		return f.Lookup(p)
 	}
-	v, e := f.get(h)
+	v, release, e := f.acquire(h)
 	if e != nil {
 		return client.FSInfo{}, e
 	}
+	defer release()
 	return f.Volume.Stat(f.Context, v.id)
 }
 func (f *Filesystem) Read(h uint64, data []byte, off int64) (int, error) {
-	v, e := f.get(h)
+	v, release, e := f.acquire(h)
 	if e != nil {
 		return 0, e
 	}
+	defer release()
 	if !v.options.Read {
 		return 0, syscall.EBADF
 	}
@@ -204,10 +237,11 @@ func (f *Filesystem) Write(h uint64, data []byte, off int64) (int, error) {
 	if e := f.writable(); e != nil {
 		return 0, e
 	}
-	v, e := f.get(h)
+	v, release, e := f.acquire(h)
 	if e != nil {
 		return 0, e
 	}
+	defer release()
 	if !v.options.Write {
 		return 0, syscall.EBADF
 	}
@@ -220,14 +254,17 @@ func (f *Filesystem) Setattr(p string, h uint64, a client.FSAttributes) error {
 	if e := f.writable(); e != nil {
 		return e
 	}
-	if a.Size != nil && h != 0 && h != ^uint64(0) {
-		v, e := f.get(h)
+	if h != 0 && h != ^uint64(0) {
+		v, release, e := f.acquire(h)
 		if e != nil {
 			return e
 		}
-		if !v.options.Write {
+		defer release()
+		if a.Size != nil && !v.options.Write {
 			return syscall.EBADF
 		}
+		_, e = f.Volume.SetAttributes(f.Context, v.id, a)
+		return e
 	}
 	info, e := f.Stat(p, h)
 	if e != nil {
@@ -237,16 +274,25 @@ func (f *Filesystem) Setattr(p string, h uint64, a client.FSAttributes) error {
 	return e
 }
 func (f *Filesystem) Entries(h uint64) ([]Entry, error) {
-	v, e := f.get(h)
+	v, release, e := f.acquire(h)
 	if e != nil {
 		return nil, e
 	}
+	defer release()
 	if !v.options.Directory {
 		return nil, syscall.ENOTDIR
 	}
 	return v.entries, nil
 }
 func (f *Filesystem) Sync(p string, h uint64) error {
+	if h != 0 && h != ^uint64(0) {
+		v, release, e := f.acquire(h)
+		if e != nil {
+			return e
+		}
+		defer release()
+		return f.Volume.Sync(f.Context, v.id)
+	}
 	info, e := f.Stat(p, h)
 	if e != nil {
 		return e

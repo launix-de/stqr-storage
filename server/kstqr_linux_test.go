@@ -6,7 +6,10 @@ package server
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -35,7 +38,9 @@ func TestKSTQRVirtualMachine(t *testing.T) {
 	if image == "" {
 		t.Fatal("STQR_KERNEL_IMAGE is required")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 240*time.Second)
+	// Durable reference coordination and repeated overwrite probes add RPCs to
+	// the complete VM suite; keep a bounded budget for loaded CI hosts.
+	ctx, cancel := context.WithTimeout(context.Background(), 480*time.Second)
 	defer cancel()
 	root, err := filepath.Abs("../kernel/kstqr")
 	if err != nil {
@@ -113,8 +118,39 @@ func TestKSTQRVirtualMachine(t *testing.T) {
 	checkpointImages := map[string][]byte{}
 	var checkpointMu sync.Mutex
 	var subscriptionFS *client.Filesystem
+	var onlineObjects []client.ObjectID
+	var onlineGet func(context.Context, client.ObjectID) error
 	var nativeOverlay atomic.Pointer[client.OverlayFilesystem]
 	host := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/__kstqr_test/online-retained" || r.URL.Path == "/__kstqr_test/online-reclaimed" {
+			if onlineGet == nil || len(onlineObjects) != 3 {
+				http.Error(w, "reclamation fixture missing", 500)
+				return
+			}
+			retained := strings.HasSuffix(r.URL.Path, "retained")
+			if retained {
+				time.Sleep(1200 * time.Millisecond) // Let the writer's collector observe the readonly pin.
+			}
+			deadline := time.Now().Add(5 * time.Second)
+			for {
+				matched := true
+				for _, id := range onlineObjects {
+					err := onlineGet(r.Context(), id)
+					if retained && err != nil || !retained && !errors.Is(err, client.ErrNotFound) {
+						matched = false
+					}
+				}
+				if matched {
+					w.WriteHeader(200)
+					return
+				}
+				if retained || time.Now().After(deadline) {
+					http.Error(w, "online inode/data/index lifetime mismatch", 500)
+					return
+				}
+				time.Sleep(20 * time.Millisecond)
+			}
+		}
 		if r.URL.Path == "/__kstqr_test/native-directory" {
 			dir, err := subscriptionFS.Lookup(r.Context(), client.FilesystemRootID(), "live-directory")
 			mode := uint32(0700)
@@ -390,6 +426,33 @@ func TestKSTQRVirtualMachine(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !benchmark && os.Getenv("STQR_KERNEL_OVERLAY") != "1" {
+		orphan, e := fs.Create(ctx, client.FilesystemRootID(), "online-orphan", 0600, 0, 0, false)
+		if e != nil {
+			t.Fatal(e)
+		}
+		if _, e = fs.WriteAt(ctx, orphan.ID, bytes.Repeat([]byte("R"), 8192), 0); e != nil {
+			t.Fatal(e)
+		}
+		stable := func(kind byte) client.ObjectID {
+			body := append([]byte("STQR mutable filesystem block v1\x00"), orphan.ID[:]...)
+			level := byte(0)
+			if kind == 1 {
+				level = 1
+			}
+			body = append(body, kind, level)
+			body = binary.LittleEndian.AppendUint64(body, 0)
+			return client.ObjectID(sha256.Sum256(body))
+		}
+		onlineObjects = []client.ObjectID{orphan.ID, stable(0), stable(1)}
+		onlineGet = func(ctx context.Context, id client.ObjectID) error {
+			_, _, e := conn.Get(ctx, id)
+			return e
+		}
+		for _, id := range onlineObjects {
+			if e := onlineGet(ctx, id); e != nil {
+				t.Fatal("online reclamation positive control", id, e)
+			}
+		}
 		// Leave a valid interrupted multi-inode operation for the kernel to read
 		// without writes on the RO mount, and then finish on the RW mount.
 		type participant struct {
@@ -479,14 +542,20 @@ if pidof mount.kstqr; then exit 1; fi
 /writeback
 /mount.kstqr --uri @@URL@@ --bucket @@EMPTY@@ --credentials /credentials --metadata-cache-bytes 2048 /fresh
 /coherence @@URL@@
+echo KSTQR_CACHE_CAPACITY_BEGIN
 /cache-capacity
+echo KSTQR_CACHE_CAPACITY_END
 umount /fresh
 /mount.kstqr --uri @@URL@@ --bucket @@BUCKET@@ --credentials /readonly-credentials --readonly --metadata-cache-bytes 0 /fresh
 test "$(cat /fresh/go.txt)" = 'Hello from Go'
 umount /fresh
+echo KSTQR_SANDBOX_BEGIN
 /sandbox @@URL@@ @@BUCKET@@
+echo KSTQR_SANDBOX_END
 cat /proc/self/mountstats
+echo KSTQR_CRASH_RECONNECT_BEGIN
 /crash-reconnect @@URL@@
+echo KSTQR_CRASH_RECONNECT_END
 ls -l /mnt
 if grep 'password=' /proc/mounts; then exit 1; fi
 umount /readonly
@@ -609,8 +678,8 @@ rmmod kstqr
 		}))
 		defer control.Close()
 		controlURL, _ := url.Parse(control.URL)
-		copyFile("../networkboot/bin/stqr-boot-root", "bin/stqr-boot-root", 0755)
-		copyFile("../networkboot/bin/mount.kstqr", "bin/mount.kstqr", 0755)
+		run("cc", "-static", "-std=c11", "-Wall", "-Wextra", "-Werror", "-O2", "-o", filepath.Join(initrdRoot, "bin/stqr-boot-root"), filepath.Join(root, "../../networkboot/linux-client/boot-root.c"))
+		copyFile(filepath.Join(initrdRoot, "mount.kstqr"), "bin/mount.kstqr", 0755)
 		run("cc", "-static", "-O2", "-Wall", "-Wextra", "-Werror", "-o", filepath.Join(initrdRoot, "overlay-test"), filepath.Join(root, "tests/overlay.c"))
 		run("cc", "-static", "-O2", "-Wall", "-Wextra", "-Werror", "-o", filepath.Join(initrdRoot, "overlay-cache-quiet"), filepath.Join(root, "tests/overlay_cache_quiet.c"))
 
@@ -800,10 +869,19 @@ poweroff -f
 		args = append(args, "-enable-kvm", "-cpu", "host")
 	}
 	vm := exec.CommandContext(ctx, "qemu-system-x86_64", args...)
-	output, err := vm.CombinedOutput()
+	var captured bytes.Buffer
+	var writer io.Writer = &captured
 	if logPath := os.Getenv("STQR_KERNEL_LOG"); logPath != "" {
-		os.WriteFile(logPath, output, 0600)
+		log, e := os.OpenFile(logPath, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0600)
+		if e != nil {
+			t.Fatal(e)
+		}
+		defer log.Close()
+		writer = io.MultiWriter(writer, log)
 	}
+	vm.Stdout, vm.Stderr = writer, writer
+	err = vm.Run()
+	output := captured.Bytes()
 	if os.Getenv("STQR_KERNEL_CACHE_RETENTION") == "1" && !strings.Contains(string(output), "KSTQR_CACHE_RETENTION_PASS") {
 		t.Fatalf("cache retention test did not pass: %v\n%s", err, output)
 	}

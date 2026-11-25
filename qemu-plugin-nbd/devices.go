@@ -113,9 +113,12 @@ type Catalog struct {
 	store   Store
 	mu      sync.Mutex
 	writers map[client.ID]bool
+	readers map[client.ID]uint64
 }
 
-func NewCatalog(s Store) *Catalog { return &Catalog{store: s, writers: map[client.ID]bool{}} }
+func NewCatalog(s Store) *Catalog {
+	return &Catalog{store: s, writers: map[client.ID]bool{}, readers: map[client.ID]uint64{}}
+}
 func (c *Catalog) CheckFormat(ctx context.Context) error {
 	_, e := c.store.Stat(ctx, client.FilesystemRootID())
 	if e == nil {
@@ -232,16 +235,28 @@ func (c *Catalog) List(ctx context.Context) ([]Metadata, error) {
 	}
 }
 func (c *Catalog) claim(id client.ID, readonly bool) (func(), error) {
-	if readonly {
-		return func() {}, nil
-	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	var once sync.Once
+	if readonly {
+		c.readers[id]++
+		return func() {
+			once.Do(func() {
+				c.mu.Lock()
+				defer c.mu.Unlock()
+				if c.readers[id] <= 1 {
+					delete(c.readers, id)
+				} else {
+					c.readers[id]--
+				}
+			})
+		}, nil
+	}
 	if c.writers[id] {
 		return nil, ErrBusy
 	}
 	c.writers[id] = true
-	return func() { c.mu.Lock(); delete(c.writers, id); c.mu.Unlock() }, nil
+	return func() { once.Do(func() { c.mu.Lock(); delete(c.writers, id); c.mu.Unlock() }) }, nil
 }
 func (c *Catalog) ReadAt(ctx context.Context, m Metadata, dst []byte, off uint64) error {
 	if off > m.Size || uint64(len(dst)) > m.Size-off {
@@ -366,6 +381,14 @@ func (c *Catalog) Trim(ctx context.Context, m Metadata, off, length uint64) erro
 // opaque roots. Acquire maintenance and read the application manifest first.
 // Memory is bounded by device metadata and one native scan page, not disk size.
 func (c *Catalog) Collect(ctx context.Context, opaque []client.ObjectID) (uint64, error) {
+	// Local exports, including read-only ones, can still address a generation
+	// whose descriptor was removed. Keep their stripes until the last export
+	// releases it and exclude new claims for the complete inventory/sweep.
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if len(c.writers) != 0 || len(c.readers) != 0 {
+		return 0, ErrBusy
+	}
 	if e := c.CheckFormat(ctx); e != nil {
 		return 0, e
 	}
