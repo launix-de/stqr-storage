@@ -37,7 +37,7 @@ class Workflows(unittest.TestCase):
             @contextlib.contextmanager
             def disk(*args):
                 yield Path(directory) / 'disk.sock'
-            def extract(socket, work, version):
+            def extract(socket, work, version, config):
                 for name in ('rootfs.tar', 'vmlinuz', 'initrd.img', 'release.json'):
                     Path(work, name).write_bytes(b'prepared')
             def fail_publish(config, op, *args):
@@ -313,8 +313,8 @@ class Workflows(unittest.TestCase):
         def guest(socket, command=None, *args, **kwargs):
             output = 'vmlinuz-7.0.0-44-generic\ninitrd.img-7.0.0-44-generic\n' if command == 'ls' else 'true\n'
             return SimpleNamespace(stdout=output)
-        with tempfile.TemporaryDirectory() as work, patch.object(common, 'guest', side_effect=guest), patch.object(common, 'install_native_kernel'), patch.object(common, 'run', return_value=SimpleNamespace(stdout='etc/dracut\n')), contextlib.redirect_stdout(io.StringIO()), self.assertRaisesRegex(RuntimeError, 'missing the STQR boot script'):
-            common.extract('/private/disk.sock', work)
+        with tempfile.TemporaryDirectory() as work, patch.object(common, 'guest', side_effect=guest), patch.object(common, 'install_native_kernel'), patch.object(common, 'install_logins'), patch.object(common, 'run', return_value=SimpleNamespace(stdout='etc/dracut\n')), contextlib.redirect_stdout(io.StringIO()), self.assertRaisesRegex(RuntimeError, 'missing the STQR boot script'):
+            common.extract('/private/disk.sock', work, config='private-config')
 
     def test_help_has_no_side_effects(self):
         for script in ['prepare-system', 'edit-image', 'serve', 'test-boot', 'pam/stqr-home']:

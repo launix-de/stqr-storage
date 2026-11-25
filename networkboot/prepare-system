@@ -53,7 +53,7 @@ def main():
                 if not args.publish_only:
                     qemu(socket, args, args.install_image)
                 print('Preparing networkboot release from the installed disk...', flush=True)
-                extract(socket, work, args.kernel_version)
+                extract(socket, work, args.kernel_version, args.config)
             remember_preparation(args.config, args.bucket, work)
         else:
             print('Resuming prepared image', args.bucket, flush=True)

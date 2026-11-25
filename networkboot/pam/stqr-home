@@ -103,6 +103,9 @@ def main():
             result = subprocess.run([str(ctl), '--config', str(cfg), 'resolve', args.username + '_home'],
                                     check=True, capture_output=True, text=True)
             bucket = result.stdout.strip()
+            expected = config.get('accounts', {}).get(args.username)
+            if config.get('accounts') is not None and (not expected or expected['bucket'] != bucket):
+                raise RuntimeError('home bucket differs from prepared identity')
             if not re.fullmatch('[0-9a-f]{32}', bucket):
                 raise RuntimeError('invalid home bucket identifier')
             if args.action == 'check':

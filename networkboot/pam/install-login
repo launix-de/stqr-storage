@@ -1,0 +1,141 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-3.0-only
+"""Install a credential-free login plan into an offline Debian/Ubuntu root."""
+import argparse
+import json
+import os
+from pathlib import Path
+import re
+import secrets
+import tempfile
+from urllib.parse import urlsplit, urlunsplit
+
+START = '# BEGIN STQR managed login'
+END = '# END STQR managed login'
+GROUP = 'stqr-login'
+
+
+def write(path, text, mode):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix='.stqr-', dir=path.parent)
+    try:
+        with os.fdopen(fd, 'w') as out:
+            out.write(text)
+            out.flush()
+            os.fsync(out.fileno())
+        os.chmod(tmp, mode)
+        if path.exists():
+            previous = path.stat()
+            os.chown(tmp, previous.st_uid, previous.st_gid)
+        os.replace(tmp, path)
+    finally:
+        Path(tmp).unlink(missing_ok=True)
+
+
+def managed(text, lines):
+    text = re.sub(r'(?ms)^' + re.escape(START) + r'\n.*?^' + re.escape(END) + r'\n?', '', text)
+    return START + '\n' + '\n'.join(lines) + '\n' + END + '\n' + text
+
+
+def install(root, plan, server=None):
+    # Called offline or before PID1: no competing passwd/group/PAM writers.
+    # Root is a mounted guest, never the machine running the preparation tools.
+    root = Path(root)
+    if plan.get('schema') != 1:
+        raise ValueError('unsupported login plan')
+    uri = urlsplit(plan['uri'])
+    if uri.scheme != 'http' or not uri.hostname or uri.username or uri.password:
+        raise ValueError('login URI must be credential-free HTTP')
+    if uri.hostname in ('localhost', '127.0.0.1', '::1'):
+        if not server:
+            # Preparation preserves loopback for the initramfs hook to resolve
+            # against stqr.server when the image is actually network-booted.
+            pass
+        else:
+            host = '[' + server + ']' if ':' in server else server
+            uri = uri._replace(netloc=host + (':' + str(uri.port) if uri.port else ''))
+    files = {n: (root / 'etc' / n).read_text().splitlines() for n in ('passwd', 'group', 'shadow', 'gshadow')}
+    table = {n: {line.split(':')[0]: line.split(':') for line in rows} for n, rows in files.items()}
+    statepath = root / 'etc/security/stqr-login.json'
+    previous = json.loads(statepath.read_text()) if statepath.exists() else {'accounts': []}
+    old = {a['name']: a for a in previous['accounts']}
+    names, uids = set(), set()
+    for a in plan['accounts']:
+        name, uid = a['name'], a['uid']
+        if not re.fullmatch(r'[a-zA-Z_][a-zA-Z0-9_.-]{0,31}', name) or name == 'root':
+            raise ValueError('invalid login name')
+        if not re.fullmatch('[0-9a-f]{32}', a['id']) or not re.fullmatch('[0-9a-f]{32}', a['bucket']):
+            raise ValueError('invalid login identity')
+        expected = 0x40000000 | (int(a['id'][:8], 16) & 0x3fffffff)
+        if uid != expected or name in names or uid in uids:
+            raise ValueError('invalid or colliding Unix identity')
+        names.add(name); uids.add(uid)
+        if name in table['passwd'] and (old.get(name, {}).get('id') != a['id'] or
+                table['passwd'][name][2:4] != [str(uid), str(uid)]):
+            raise ValueError('refusing to replace existing Unix account: ' + name)
+        for other, row in table['passwd'].items():
+            if other != name and int(row[2]) == uid:
+                raise ValueError('Unix UID collision: ' + name)
+        for other, row in table['group'].items():
+            if (other != name and int(row[2]) == uid) or (other == name and int(row[2]) != uid):
+                raise ValueError('Unix GID collision: ' + name)
+        home = root / 'home' / name
+        if home.is_symlink() or home.exists() and any(home.iterdir()):
+            raise ValueError('refusing nonempty or symlink home: ' + name)
+    # Validate supported PAM layout before modifying any identities.
+    auth = root / 'etc/pam.d/common-auth'
+    session = root / 'etc/pam.d/common-session'
+    if 'pam_unix.so' not in auth.read_text() or 'pam_systemd.so' not in session.read_text():
+        raise ValueError('unsupported PAM layout: common-auth/common-session required')
+    for a in plan['accounts']:
+        name, uid = a['name'], str(a['uid'])
+        table['passwd'][name] = [name, 'x', uid, uid, name, '/home/' + name, '/bin/bash']
+        table['group'][name] = [name, 'x', uid, '']
+        table['gshadow'][name] = [name, '!', '', '']
+        if name not in table['shadow']:
+            # An unguessable, discarded hash keeps AccountsService from marking
+            # the account locked. STQR accounts cannot fall back to pam_unix.
+            alphabet = './0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz'
+            hashed = '$6$' + secrets.token_hex(8) + '$' + ''.join(secrets.choice(alphabet) for _ in range(86))
+            table['shadow'][name] = [name, hashed, '20000', '0', '99999', '7', '', '', '']
+        home = root / 'home' / name
+        home.mkdir(mode=0o000, parents=True, exist_ok=True)
+        write(root / 'var/lib/AccountsService/users' / name, '[User]\nSystemAccount=false\n', 0o600)
+    # Stale managed identities stay non-reusable and cannot authenticate locally.
+    members = sorted(set(old) | names)
+    for name in set(old) - names:
+        if name in table['shadow']:
+            table['shadow'][name][1] = '!'
+        write(root / 'var/lib/AccountsService/users' / name, '[User]\nSystemAccount=true\n', 0o600)
+    if GROUP not in table['group']:
+        occupied = {int(r[2]) for r in table['group'].values()}
+        gid = next(n for n in range(60000, 65534) if n not in occupied)
+        table['group'][GROUP] = [GROUP, 'x', str(gid), '']
+    table['group'][GROUP][3] = ','.join(members)
+    table['gshadow'][GROUP] = [GROUP, '!', '', ','.join(members)]
+    for name, row in table['passwd'].items():
+        if name not in names and 1000 <= int(row[2]) < 65534:
+            # Preserve template rescue users, but show STQR identities in GDM.
+            write(root / 'var/lib/AccountsService/users' / name, '[User]\nSystemAccount=true\n', 0o600)
+    for name in files:
+        write(root / 'etc' / name, ''.join(':'.join(r) + '\n' for r in table[name].values()),
+              (root / 'etc' / name).stat().st_mode & 0o777)
+    write(auth, managed(auth.read_text(), [
+        'auth [success=1 default=ignore] pam_succeed_if.so quiet user notingroup ' + GROUP,
+        'auth [success=done default=die] /usr/lib/stqr-networkboot/pam_stqr.so']), 0o644)
+    write(session, managed(session.read_text(), [
+        'session [success=1 default=ignore] pam_succeed_if.so quiet user notingroup ' + GROUP,
+        'session required /usr/lib/stqr-networkboot/pam_stqr.so']), 0o644)
+    config = {'uri': urlunsplit(uri), 'accounts': {a['name']: {'id': a['id'], 'bucket': a['bucket']} for a in plan['accounts']}}
+    write(root / 'etc/security/stqr-home.json', json.dumps(config) + '\n', 0o600)
+    write(statepath, json.dumps(plan) + '\n', 0o600)
+
+
+if __name__ == '__main__':
+    p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument('plan', type=Path)
+    p.add_argument('--server')
+    a = p.parse_args()
+    if os.geteuid() != 0:
+        p.error('run inside the offline guest or boot upper as root')
+    install('/', json.loads(a.plan.read_text()), a.server)

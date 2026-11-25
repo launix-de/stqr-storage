@@ -6,7 +6,7 @@ PREFIX ?= /usr
 PAM_MODULE_DIR ?= $(PREFIX)/lib/$(shell $(CC) -dumpmachine)/security
 DESTDIR ?=
 .PHONY: all pam check clean install
-all:
+all: pam
 	mkdir -p bin
 	CGO_ENABLED=0 go build -buildvcs=false -o bin/stqr-bootctl ./cmd/stqr-bootctl
 	CGO_ENABLED=0 go build -buildvcs=false -o bin/stqr-boot-nfs ./cmd/stqr-boot-nfs
@@ -31,6 +31,9 @@ install: all pam
 	install -m 0755 prepare-system edit-image serve test-boot $(DESTDIR)$(PREFIX)/libexec/stqr-networkboot/
 	install -m 0644 common.py sessions.py native_sessions.py $(DESTDIR)$(PREFIX)/libexec/stqr-networkboot/
 	cp -R initramfs $(DESTDIR)$(PREFIX)/libexec/stqr-networkboot/
+	install -d $(DESTDIR)$(PREFIX)/libexec/stqr-networkboot/pam
+	install -m 0755 pam/stqr-home pam/install-login $(DESTDIR)$(PREFIX)/libexec/stqr-networkboot/pam/
+	install -m 0644 bin/pam_stqr.so $(DESTDIR)$(PREFIX)/libexec/stqr-networkboot/bin/
 	install -m 0755 bin/stqr-bootctl bin/stqr-boot-nfs bin/stqr-nbd-client bin/stqr-boot-root bin/mount.kstqr $(DESTDIR)$(PREFIX)/libexec/stqr-networkboot/bin/
 	install -m 0644 bin/kstqr-source.tar $(DESTDIR)$(PREFIX)/libexec/stqr-networkboot/bin/
 	ln -sf ../libexec/stqr-networkboot/prepare-system $(DESTDIR)$(PREFIX)/sbin/stqr-prepare-system

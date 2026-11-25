@@ -141,7 +141,7 @@ jobs:
       - name: Native test dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential libssl-dev fuse3 rsync php-cli qemu-utils
+          sudo apt-get install -y build-essential libssl-dev libpam0g-dev fuse3 rsync php-cli qemu-utils
           sudo modprobe fuse
           sudo chmod a+rw /dev/fuse
           test -r /dev/fuse -a -w /dev/fuse

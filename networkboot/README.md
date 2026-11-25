@@ -39,7 +39,7 @@ These are distinct storage roles:
 | Template bucket (`ubuntu`) | Persistent installer disk (`disk.raw`) plus boot artifacts and the current release manifest. This is what `edit-image` boots read/write. |
 | Native release bucket | Automatically created, read-only STFS root filesystem. Each publication creates a new release; existing clients keep their old release. |
 | Per-boot upper bucket | Automatically created STOR/STOM overlay for one boot session. Root writes are temporary and the upper is scheduled for deletion when the client disconnects. |
-| Personal home (`alice_home`) | Separately provisioned persistent filesystem bucket, mounted at login by PAM once that integration is configured. |
+| Personal home (`alice_home`) | Automatically provisioned persistent filesystem bucket, mounted at login by PAM. |
 
 Changing files on a PXE client's temporary root does **not** update the template.
 Use `edit-image` for persistent system changes. Logging out does not reset a
@@ -59,7 +59,7 @@ On the build/gateway host, install:
 - QEMU (`qemu-system-x86_64`, `qemu-io`) and libguestfs (`guestfish`);
 - GNU tar, `sort`, `lsinitramfs` and `ip` from iproute2;
 - dnsmasq and standalone iPXE loaders for physical LAN boot;
-- PAM development headers if building the optional login module.
+- PAM development headers (`libpam0g-dev`) for automatic guest logins.
 
 Build from the repository root:
 
@@ -358,73 +358,41 @@ for administrative cleanup; their IDs are diagnostics, not normal CLI inputs.
 
 ## 7. Configure STQR logins and persistent homes in the template
 
-The builder installs native root-boot support. It does **not** enable PAM homes,
-create Unix accounts or provision personal buckets. Configure these in the
-writable template before expecting an STQR login to work on a PXE client.
+`prepare-system` and `edit-image` automatically configure STQR logins in the
+prepared Debian/Ubuntu image. They query the STQR user list with the host's admin
+configuration, skip disabled and temporary boot-session accounts, provision a
+`username_home` bucket and grant its user filesystem access. Existing homes must
+already grant the current stable user ID full access; preparation refuses to
+transfer an old user's files merely because a username was reused.
 
-### Install the login support inside the writable VM
+The image receives Unix accounts with stable UID/GID values derived from their
+STQR account IDs. Identity collisions and existing template-account conflicts
+fail preparation instead of silently taking over local accounts. Usernames must
+fit the supported Unix name syntax (32 characters); other STQR names and `root`
+are reported and skipped. Template users remain available for local rescue but
+are hidden from the graphical account list. STQR administrator status does not
+grant Unix root/sudo access.
 
-Open the template using `./networkboot/edit-image ubuntu`. Make the login-support
-files from the same STQR revision available **inside that VM**, either as
-packages/binaries built for its architecture and libc/PAM ABI or from a fresh
-source checkout. Do not copy a host checkout containing the administrator's
-`stqr.yaml`. The following commands run inside the VM from such a checkout,
-with its `networkboot/bin/stqr-bootctl` and `pam_stqr.so` already built:
+The builder installs `pam_stqr`, `stqr-home`, the compatible boot client and a
+credential-free login manifest. The module is enabled in `common-auth` and before
+`pam_systemd` in `common-session`. Managed users must authenticate against STQR;
+they cannot fall back to a local password. Existing local accounts retain their
+usual authentication. No host PAM files are changed. The target needs Python 3,
+libpam, `pam_succeed_if`, the Debian/Ubuntu common PAM layout, and a compatible
+architecture/libc ABI for the host-built helpers.
 
-```sh
-sudo install -d -m 0755 /usr/libexec /etc/security \
-  /usr/lib/x86_64-linux-gnu/security
-sudo install -m 0755 networkboot/bin/stqr-bootctl /usr/libexec/stqr-bootctl
-sudo install -m 0755 networkboot/pam/stqr-home /usr/libexec/stqr-home
-sudo install -m 0755 networkboot/bin/pam_stqr.so \
-  /usr/lib/x86_64-linux-gnu/security/pam_stqr.so
-sudo install -m 0600 networkboot/pam/stqr-home.example.json \
-  /etc/security/stqr-home.json
-sudoedit /etc/security/stqr-home.json
-```
+At PXE boot, the same installer applies the payload to the private upper before
+PID1 starts. This also permits an initrd-only login hotpatch while retaining an
+existing immutable lower. A loopback daemon address in the build configuration
+is replaced with `stqr.server`; explicitly configured remote addresses are kept.
+No administrator credentials or user passwords enter the image or initrd. Home
+bucket IDs are pinned in root-owned configuration, preventing a renamed/replaced
+bucket from silently becoming a different home.
 
-The module path above is for Debian/Ubuntu x86-64; use the target
-distribution's PAM module directory elsewhere. If the login files were packaged
-outside a checkout, install those same files at the same destinations. The image
-builder installs the matching module and `/sbin/mount.kstqr` on publication.
-
-### Configure accounts, buckets and PAM
-
-Set the JSON `uri` to a storage address reachable **from the diskless clients**,
-for example `http://192.0.2.10:7419`, not `127.0.0.1` (unless each client really
-runs a local STQR node). Keep `bootctl=/usr/libexec/stqr-bootctl` and
-`mount_helper=/sbin/mount.kstqr`. This file contains endpoint/helper settings,
-not an administrator password.
-
-In the STQR dashboard, create each login user, create its `username_home` bucket
-and grant that user read/write access. For example, `alice` uses `alice_home`.
-Inside the template, configure a corresponding local/NSS Unix account with
-consistent UID/GID across clients. Check `getent passwd alice` and `id alice`;
-its home must be `/home/alice`. Leave the underlying directory empty. The helper
-initializes a fresh home filesystem and sets ownership on its first mount.
-
-Merge [`pam/pam.example`](pam/pam.example) into the **actual login service** you
-intend to use, such as console login, SSH password login or the desktop display
-manager. These are integration rules, not a replacement PAM configuration:
-
-```text
-auth required pam_stqr.so
-session required pam_stqr.so
-```
-
-The auth rule must execute before a preceding `sufficient` rule can bypass it;
-the session rule must run before `pam_systemd` starts services needing the home.
-Retain appropriate account checks. Existing `pam_unix` authentication rules can
-still require a local password in addition to STQR authentication; they must be
-adapted to your intended authentication policy rather than blindly appended.
-There is no automatic distribution-independent PAM/NSS setup or account creation.
-A key-only SSH login cannot provide the STQR password required by this flow.
-
-Shut down the editing VM cleanly, wait for publication and reload the gateway.
-Then test the chosen login path in a disposable PXE client: successful and failed
-STQR passwords, writable home, a second login sharing the mount, last-session
-logout, and persistence after a client reboot. Complete this desktop/PAM
-deployment acceptance test before rolling the configured image out to users.
+Prepare/publish the image again to synchronize newly created users. Password
+changes and disabling/deleting users take effect during STQR authentication;
+there is no password copy in the template. Key-only SSH cannot supply the STQR
+password needed to mount a home.
 
 ### Home mount lifetime
 
@@ -599,7 +567,7 @@ existing published release remain available.
 | Legacy boot release/schema error | Run `prepare-system ubuntu` with current tools to publish a native release, then restart an old gateway process with the new code. |
 | iPXE download fails or `test-boot` keeps waiting | Check the gateway terminal/service journal for `PXE ready`, its selected address and HTTP port. Verify client routing/firewall access. |
 | Physical firmware never finds the boot offer | Check NIC PXE settings, broadcast/VLAN layout, standalone loader files, competing PXE services and Proxy-DHCP/TFTP traffic. A QEMU HTTP-only success does not test these. |
-| STQR login works but the desktop/home does not | Check the Unix/NSS account, numeric ownership, bucket grant, client-reachable URI and actual service's PAM ordering. The builder does not configure these automatically. |
+| STQR login works but the desktop/home does not | Check the Unix/NSS account, numeric ownership, bucket grant, client-reachable URI and actual service's PAM ordering. Reprepare the image to synchronize accounts; inspect the guest PAM/helper errors if a home mount fails. |
 
 ## Validation
 

@@ -34,7 +34,7 @@ def main():
         with nbd(args.config, target, work) as socket:
             forget_preparation(args.config, target)
             qemu(socket, args)
-            extract(socket, work, args.kernel_version)
+            extract(socket, work, args.kernel_version, args.config)
         remember_preparation(args.config, target, work)
         ctl(args.config, 'publish', target, work)
         remember_preparation(args.config, target, work, 'published')

@@ -8,3 +8,10 @@ manual_add_modules kstqr
 copy_exec /usr/lib/stqr-networkboot/boot-root /bin/stqr-boot-root
 copy_exec /sbin/mount.kstqr /bin/mount.kstqr
 # MODULES=most includes network drivers for physical boot clients.
+
+# Login support is copied verbatim, without a credential-bearing host config.
+mkdir -p "$DESTDIR/usr/lib/stqr-networkboot" "$DESTDIR/usr/libexec"
+for stqr_file in login.json install-login pam_stqr.so; do
+    cp -p "/usr/lib/stqr-networkboot/$stqr_file" "$DESTDIR/usr/lib/stqr-networkboot/" || exit 1
+done
+cp -p /usr/libexec/stqr-home /usr/libexec/stqr-bootctl "$DESTDIR/usr/libexec/" || exit 1
