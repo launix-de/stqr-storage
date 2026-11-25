@@ -83,6 +83,57 @@ class Workflows(unittest.TestCase):
             (work / '.stqr-preparation.json').unlink()
             self.assertIsNone(common.prepared_release('stqr.yaml', 'ubuntu'))
             self.assertTrue((work / 'rootfs.tar').exists())
+    def test_malformed_http_is_rejected_without_logging_claim_tokens(self):
+        import http.server
+        import socket
+        import threading
+        serve = load('serve')
+        failures = []
+        class Server(http.server.HTTPServer):
+            def handle_error(self, request, address):
+                failures.append(sys.exc_info()[1])
+        class Handler(serve.BootHTTPHandler):
+            protocol_version = 'HTTP/1.1'
+            def do_GET(self):
+                self.send_response(200)
+                self.send_header('Content-Length', '2')
+                self.end_headers()
+                self.wfile.write(b'ok')
+        server = Server(('127.0.0.1', 0), Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        token = b'private-claim-capability'
+        logs = io.StringIO()
+        with contextlib.redirect_stderr(logs):
+            thread.start()
+            try:
+                for request, expected in ((b'GET /claim/'+token+b' HTTP/9.9\r\n\r\n', b'505'),
+                                          (b'POST /claim/'+token+b'\r\n\r\n', b'400'),
+                                          (b'GET /claim/'+token+b' HTTP/1.0\r\n\r\n', b'200'),
+                                          (b'GET /healthy HTTP/1.0\r\n\r\n', b'200')):
+                    with socket.create_connection(server.server_address, timeout=3) as wire:
+                        wire.sendall(request)
+                        response = b''
+                        while data := wire.recv(4096):
+                            response += data
+                        self.assertIn(expected, response)
+                with socket.create_connection(server.server_address, timeout=3) as wire:
+                    source = wire.makefile('rb')
+                    wire.sendall(b'GET /healthy HTTP/1.1\r\nHost: localhost\r\n\r\n')
+                    self.assertIn(b'200', source.readline())
+                    while source.readline() != b'\r\n':
+                        pass
+                    self.assertEqual(source.read(2), b'ok')
+                    wire.sendall(b'GET /claim/'+token+b' HTTP/9.9\r\n\r\n')
+                    self.assertIn(b'505', source.read())
+                    source.close()
+                self.assertEqual(failures, [])
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join()
+        self.assertIn('Malformed HTTP request rejected', logs.getvalue())
+        self.assertNotIn(token.decode(), logs.getvalue())
+
     def test_aborted_artifact_download_does_not_report_server_failure(self):
         import http.server
         import socket
