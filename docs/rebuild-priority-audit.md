@@ -8,6 +8,10 @@ migration, drain and deletion paths. The required order is:
 2. Mandatory migrations in the active rebuild round.
 3. Resumable background work such as draining, deletion and reclamation.
 
+The current base uses the constrained greedy target planner. The unbounded
+exact A* extension is excluded; see the [bounded improvement plan and archived
+project review](placement-improvement-plan.md) for the separate follow-up.
+
 A request waiting for migration or an unavailable owner must not count as
 runnable foreground work and thereby prevent its own dependency from running.
 An atomic storage transaction already in progress must finish safely before
