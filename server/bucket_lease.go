@@ -179,6 +179,18 @@ func (s *Server) receiveBucketLease(ctx context.Context, body []byte, actor clie
 		return nil, fmt.Errorf("invalid lease request JSON")
 	}
 	l := req.Lease
+	// Action 4 probes the cluster lease capability before a bucket exists.
+	// It binds only membership and authenticates the peer; it acquires no lease.
+	if req.Action == 4 {
+		ids, epoch, err := s.leaseMembers()
+		if err != nil {
+			return nil, err
+		}
+		if !hasControlNode(ids, actor) || l.Token == (client.ID{}) || l.Epoch != epoch || l.Bucket != (volume.ID{}) || l.Group != (client.ID{}) || l.Mask != 0 || len(l.Members) != 0 {
+			return nil, ErrBucketForbidden
+		}
+		return json.Marshal(l)
+	}
 	b, e := s.Bucket(l.Bucket)
 	if e != nil {
 		return nil, e
@@ -217,9 +229,6 @@ func (s *Server) receiveBucketLease(ctx context.Context, body []byte, actor clie
 	}
 	if !hasControlNode(ids, actor) || l.Bucket == systemBucket || l.Token == (client.ID{}) || l.Epoch != epoch {
 		return nil, ErrBucketForbidden
-	}
-	if req.Action == 4 {
-		return json.Marshal(l)
 	}
 	if req.Action == 0 || req.Action == 2 {
 		var cancel context.CancelFunc
