@@ -2,6 +2,7 @@
 package client
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"errors"
@@ -17,6 +18,7 @@ var errEarlyReply = errors.New("client: upload stopped by terminal reply")
 
 type incomingTransfer struct {
 	file               *os.File
+	memory             *bytes.Buffer
 	length, next, part uint64
 	digest             [32]byte
 	hash               hash.Hash
@@ -24,6 +26,7 @@ type incomingTransfer struct {
 }
 
 func (t *incomingTransfer) close() {
+	t.memory = nil
 	if t.file != nil {
 		name := t.file.Name()
 		t.file.Close()
@@ -70,11 +73,22 @@ func (t *objectTransport) streamMessage(m Message) error {
 		if d.Done() != nil || total > math.MaxInt64 {
 			return ErrProtocol
 		}
-		f, e := os.CreateTemp("", "stqr-client-transfer-*")
-		if e != nil {
-			return e
+		s := &incomingTransfer{length: total, digest: digest, hash: sha256.New()}
+		if p.opcode == ObjectSubscribe {
+			// The buffered subscription API already has a 16-MiB limit. Its
+			// snapshot is cache state, so never spill it into a filesystem.
+			if total > 16<<20 {
+				return ErrRange
+			}
+			s.memory = bytes.NewBuffer(make([]byte, 0, int(total)))
+		} else {
+			f, e := os.CreateTemp("", "stqr-client-transfer-*")
+			if e != nil {
+				return e
+			}
+			s.file = f
 		}
-		p.transfer = &incomingTransfer{file: f, length: total, digest: digest, hash: sha256.New()}
+		p.transfer = s
 	case 5:
 		part, offset := d.U64(), d.U64()
 		data := d.Blob()
@@ -82,7 +96,11 @@ func (t *objectTransport) streamMessage(m Message) error {
 		if d.Done() != nil || s == nil || s.ended || len(data) > transferChunk || part != s.part || offset != s.next || uint64(len(data)) > s.length-s.next {
 			return ErrProtocol
 		}
-		if _, e := s.file.Write(data); e != nil {
+		var dst io.Writer = s.file
+		if s.memory != nil {
+			dst = s.memory
+		}
+		if _, e := dst.Write(data); e != nil {
 			return e
 		}
 		s.hash.Write(data)
@@ -95,8 +113,10 @@ func (t *objectTransport) streamMessage(m Message) error {
 		if d.Done() != nil || s == nil || s.ended || length != s.length || s.next != s.length || !equalBytes(digest, s.digest[:]) || !equalBytes(s.hash.Sum(nil), s.digest[:]) {
 			return ErrProtocol
 		}
-		if _, e := s.file.Seek(0, io.SeekStart); e != nil {
-			return e
+		if s.file != nil {
+			if _, e := s.file.Seek(0, io.SeekStart); e != nil {
+				return e
+			}
 		}
 		s.ended = true
 	default:

@@ -10,7 +10,7 @@
 // merely because they exceed the old unrelated 512-entry cap.
 #define KS_CACHE_ENTRIES 2048
 struct cached_inode {
-	struct hlist_node hash;
+	struct hlist_node hash, subscription_hash;
 	struct list_head lru;
 	stqr_object_id id;
 	stqr_id subscription;
@@ -24,6 +24,7 @@ struct ks_cache {
 	struct ks_fs *fs;
 	struct mutex lock, wire;
 	DECLARE_HASHTABLE(objects, 8);
+	DECLARE_HASHTABLE(subscriptions, 8);
 	struct list_head lru;
 	stqr_client *client;
 	struct task_struct *reader;
@@ -35,6 +36,11 @@ static u32 object_hash(stqr_object_id id)
 {
 	return (u32)id.bytes[0] | (u32)id.bytes[9] << 8 | (u32)id.bytes[18] << 16 |
 	       (u32)id.bytes[31] << 24;
+}
+static u32 subscription_hash(stqr_id id)
+{
+	return (u32)id.bytes[0] | (u32)id.bytes[5] << 8 | (u32)id.bytes[10] << 16 |
+	       (u32)id.bytes[15] << 24;
 }
 static struct cached_inode *find(struct ks_cache *c, stqr_object_id id)
 {
@@ -64,8 +70,9 @@ static void update(void *arg, const stqr_update *u)
 		ks_queue_invalidation(c->fs, NULL);
 		goto out;
 	}
-	list_for_each_entry(e, &c->lru,
-			    lru) if (!memcmp(e->subscription.bytes, u->subscription.bytes, 16))
+	hash_for_each_possible(c->subscriptions, e, subscription_hash,
+			       subscription_hash(u->subscription))
+		if (!memcmp(e->subscription.bytes, u->subscription.bytes, 16))
 	{
 		void *raw = NULL;
 		if (!e->ready) {
@@ -102,6 +109,7 @@ static void remove_entry(struct ks_cache *c, struct cached_inode *e)
 	mutex_lock(&c->lock);
 	discard_data(c, e);
 	hash_del(&e->hash);
+	hash_del(&e->subscription_hash);
 	list_del(&e->lru);
 	c->count--;
 	c->bytes -= sizeof(*e);
@@ -267,6 +275,7 @@ int ks_cache_get(struct ks_fs *f, stqr_object_id id, void **p, size_t *n, stqr_i
 	mutex_lock(&c->lock);
 	list_add_tail(&e->lru, &c->lru);
 	hash_add(c->objects, &e->hash, object_hash(id));
+	hash_add(c->subscriptions, &e->subscription_hash, subscription_hash(e->subscription));
 	c->count++;
 	c->bytes += sizeof(*e);
 	mutex_unlock(&c->lock);
@@ -343,6 +352,7 @@ int ks_cache_start(struct ks_fs *f, const char *user, const char *password, unsi
 	mutex_init(&c->lock);
 	mutex_init(&c->wire);
 	hash_init(c->objects);
+	hash_init(c->subscriptions);
 	INIT_LIST_HEAD(&c->lru);
 	err = stqr_dial(&c->client, f->url, user, password, f->bucket, "fs", timeout);
 	if (err) {

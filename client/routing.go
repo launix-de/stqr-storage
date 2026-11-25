@@ -51,7 +51,7 @@ func (c *Client) routeMessage(m *Message) (string, ID, error) {
 	}
 	// A failed primary transport may change a read source, never the write
 	// authority. Select only nodes in this object's committed replica set.
-	read := m.Opcode == 0x0100 || m.Opcode == 0x0101 || m.Opcode == 0x0107 || m.Opcode == ObjectSubscribe
+	read := m.Opcode == 0x0100 || m.Opcode == 0x0101 || m.Opcode == 0x0107
 	c.mu.Lock()
 	if read && c.paused[owner] {
 		for _, loc := range entry.Locations {
