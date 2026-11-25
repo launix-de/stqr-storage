@@ -5,8 +5,8 @@ import {EndlessList} from './endless.js';
 import {newID} from './protocol.js';
 import {setupS3Keys} from './s3-keys.js';
 const $=id=>document.getElementById(id);
-export function setupUserViews({connection,currentUsername,escape,toast,showView,requireLogin,openBucketCreate,statsEntries=()=>[]}){
- let users=[],createRetry,passwordRetry,selected,deleteID,loading=0,pageMeta={},searchTimer;
+export function setupUserViews({connection,currentUsername,escape,toast,showView,requireLogin,openBucketCreate,onUserDeleted=()=>{},statsEntries=()=>[]}){
+ let users=[],createRetry,passwordRetry,selected,deleteRetry,loading=0,pageMeta={},searchTimer;
  const keys=setupS3Keys({connection});
  const traffic=new Map();let trafficPoll;
  const roleRetries=new Map();
@@ -90,7 +90,7 @@ export function setupUserViews({connection,currentUsername,escape,toast,showView
   catch(e){if(user.name===currentUsername()&&!e.status){$('user-password-dialog').close();requireLogin('Verbindung beendet. Bitte mit dem neuen Passwort erneut anmelden; bei unklarem Ausgang das bisherige Passwort versuchen.')}else $('user-password-error').textContent=e.message}
   finally{e.submitter.disabled=false}
  });
- function openDelete(id){selected=users.find(u=>u.id===id);if(!selected||selected.name===currentUsername())return;deleteID=newID();$('user-delete-description').textContent=`Soll „${selected.name}“ wirklich gelöscht werden?`;$('user-delete-error').textContent='';$('user-delete-dialog').showModal()}
- $('user-delete-form').addEventListener('submit',async e=>{e.preventDefault();e.submitter.disabled=true;$('user-delete-error').textContent='';try{await connection().deleteUser(selected.id,deleteID);$('user-delete-dialog').close();toast(`User „${selected.name}“ wurde gelöscht.`);await load()}catch(e){$('user-delete-error').textContent=e.message}finally{e.submitter.disabled=false}});
+ function openDelete(id){selected=users.find(u=>u.id===id);if(!selected||selected.name===currentUsername())return;deleteRetry=null;$('user-delete-buckets').checked=true;$('user-delete-description').textContent=`Soll „${selected.name}“ wirklich gelöscht werden?`;$('user-delete-error').textContent='';$('user-delete-dialog').showModal()}
+ $('user-delete-form').addEventListener('submit',async e=>{e.preventDefault();const user=selected,deleteBuckets=$('user-delete-buckets').checked,signature=JSON.stringify([user.id,deleteBuckets]);if(deleteRetry?.signature!==signature)deleteRetry={signature,id:newID()};e.submitter.disabled=true;$('user-delete-buckets').disabled=true;$('user-delete-error').textContent='';try{await connection().deleteUser(user.id,deleteRetry.id,deleteBuckets);$('user-delete-dialog').close();toast(`User „${user.name}“ wurde gelöscht.`);await Promise.all([load(),onUserDeleted()])}catch(e){$('user-delete-error').textContent=e.message}finally{e.submitter.disabled=false;$('user-delete-buckets').disabled=false}});
  return {load,clear(){keys.clear();loading++;clearTimeout(trafficPoll);traffic.clear();clearTimeout(searchTimer);pager.clear();pageMeta={};roleRetries.clear();users=[];render()}};
 }
