@@ -469,6 +469,12 @@ func (b *Bucket) mutateAttempt(ctx context.Context, p principal, id volume.Objec
 		if _, err := b.authorize(p, permission); err != nil {
 			return volume.Result{}, err
 		}
+		// Check before COW preparation can inspect or materialize the contents.
+		if opcode == 0x0108 {
+			if _, err := b.authorize(p, BucketRead); err != nil {
+				return volume.Result{}, err
+			}
+		}
 	}
 	cowProof, cowLinked, cowErr := s.cowPrepareWrite(ctx, b, id, p)
 	if cowErr != nil {
@@ -523,6 +529,13 @@ func (b *Bucket) mutateAttempt(ctx context.Context, p principal, id volume.Objec
 	d, err := b.authorize(p, permission)
 	if err != nil {
 		return volume.Result{}, err
+	}
+	// Native byte comparisons require READ as well as WRITE. Revalidate after
+	// taking the mutation lock; private frontend grants retain their S3 grant.
+	if opcode == 0x0108 {
+		if _, err := b.authorize(p, BucketRead); err != nil {
+			return volume.Result{}, err
+		}
 	}
 	if !p.cowInternal {
 		if cowLinked {

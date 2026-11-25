@@ -18,6 +18,7 @@ import (
 	"strings"
 
 	"github.com/launix-de/stqr-storage/client"
+	"github.com/launix-de/stqr-storage/volume"
 )
 
 type s3SigningKey struct{}
@@ -178,7 +179,20 @@ func boolInt(v bool) int {
 }
 
 // No backend mutation starts until signatures, trailers and checksums validate.
-func s3StageRequest(r *http.Request, payload string) (*os.File, int64, error) {
+func s3StageRequest(r *http.Request, payload string, limit uint64) (*os.File, int64, error) {
+	limit = min(limit, uint64(maxObjectStagingBytes))
+	streaming := strings.HasPrefix(payload, "STREAMING-")
+	if streaming {
+		n, err := strconv.ParseUint(r.Header.Get("X-Amz-Decoded-Content-Length"), 10, 63)
+		if err != nil {
+			return nil, 0, client.ErrRange
+		}
+		if n > limit {
+			return nil, 0, volume.ErrFull
+		}
+	} else if r.ContentLength >= 0 && uint64(r.ContentLength) > limit {
+		return nil, 0, volume.ErrFull
+	}
 	for name := range r.Header {
 		lower := strings.ToLower(name)
 		if !strings.HasPrefix(lower, "x-amz-checksum-") {
@@ -211,12 +225,13 @@ func s3StageRequest(r *http.Request, payload string) (*os.File, int64, error) {
 		writers = append(writers, h)
 	}
 	var n int64
-	if strings.HasPrefix(payload, "STREAMING-") {
+	dst := &s3StagingWriter{dst: io.MultiWriter(writers...), remaining: limit}
+	if streaming {
 		var size uint64
-		size, e = s3DecodeChunks(r, io.MultiWriter(writers...))
+		size, e = s3DecodeChunks(r, dst)
 		n = int64(size)
 	} else {
-		n, e = io.Copy(io.MultiWriter(writers...), bucketContextReader{ctx: r.Context(), r: r.Body})
+		n, e = io.Copy(dst, io.LimitReader(bucketContextReader{ctx: r.Context(), r: r.Body}, int64(limit)+1))
 		if e == nil && r.ContentLength >= 0 && n != r.ContentLength {
 			e = io.ErrUnexpectedEOF
 		}
@@ -265,4 +280,18 @@ func s3StageRequest(r *http.Request, payload string) (*os.File, int64, error) {
 	}
 	ok = true
 	return f, n, nil
+}
+
+type s3StagingWriter struct {
+	dst       io.Writer
+	remaining uint64
+}
+
+func (w *s3StagingWriter) Write(p []byte) (int, error) {
+	if uint64(len(p)) > w.remaining {
+		return 0, volume.ErrFull
+	}
+	n, err := w.dst.Write(p)
+	w.remaining -= uint64(n)
+	return n, err
 }
