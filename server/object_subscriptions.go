@@ -2,12 +2,12 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"errors"
 	"io"
 	"math"
-	"os"
 	"sync"
 
 	"github.com/launix-de/stqr-storage/client"
@@ -39,10 +39,30 @@ type subscriptionJournalEntry struct {
 	update client.ObjectUpdate
 }
 type objectSubscriptionRegistry struct {
-	mu           sync.Mutex
-	objects      map[volume.Key]map[*objectSubscription]struct{}
-	sessions     map[*wsSession]map[client.ID]*objectSubscription
-	count, bytes int
+	mu            sync.Mutex
+	objects       map[volume.Key]map[*objectSubscription]struct{}
+	sessions      map[*wsSession]map[client.ID]*objectSubscription
+	count, bytes  int
+	snapshotBytes uint64
+}
+
+// Snapshot payloads are transient RAM, never temporary files or durable state.
+// Reserve before allocating so concurrent large subscriptions cannot exhaust RAM.
+// This shares the existing per-transfer staging ceiling across the node; exhaustion
+// is temporary resource pressure (507), not an on-disk object size restriction.
+func (r *objectSubscriptionRegistry) reserveSnapshot(n uint64) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if n > maxObjectStagingBytes-r.snapshotBytes {
+		return fail(507, "subscription snapshot memory budget exhausted")
+	}
+	r.snapshotBytes += n
+	return nil
+}
+func (r *objectSubscriptionRegistry) releaseSnapshot(n uint64) {
+	r.mu.Lock()
+	r.snapshotBytes -= n
+	r.mu.Unlock()
 }
 
 func (r *objectSubscriptionRegistry) removeLocked(sub *objectSubscription) {
@@ -294,7 +314,7 @@ func (s *Server) executeObjectSubscription(m client.Message, ws *wsSession, p pr
 			return nil, 0, err
 		}
 		defer h.Close()
-		if err = s.checkObjectBinding(ctx, key.Bucket, key.Object, true); err != nil {
+		if err = s.checkObjectBinding(ctx, key.Bucket, key.Object); err != nil {
 			return nil, 0, err
 		}
 		info, err = h.Stat(key)
@@ -302,20 +322,24 @@ func (s *Server) executeObjectSubscription(m client.Message, ws *wsSession, p pr
 			return nil, 0, err
 		}
 	}
-	file, err := os.CreateTemp("", "stqr-subscription-snapshot-*")
-	if err != nil {
-		return nil, 0, err
-	}
-	os.Remove(file.Name())
-	defer file.Close()
 	offset, n := uint64(0), info.Length
 	if ranged {
-		offset = off
-		n = length
+		offset, n = off, length
 	}
+	if offset > info.Length {
+		return nil, 0, volume.ErrRange
+	}
+	n = min(n, info.Length-offset)
+	if err = r.reserveSnapshot(n); err != nil {
+		return nil, 0, err
+	}
+	defer r.releaseSnapshot(n)
+	// Preallocate exactly once; the native volume handle still protects snapshot
+	// capture and registration, and is released before any socket output.
+	snapshot := bytes.NewBuffer(make([]byte, 0, int(n)))
 	hash := sha256.New()
 	var copied uint64
-	writer := &objectBudgetWriter{dst: bucketContextWriter{ctx: ctx, w: io.MultiWriter(file, hash)}, remaining: maxObjectStagingBytes}
+	writer := &objectBudgetWriter{dst: bucketContextWriter{ctx: ctx, w: io.MultiWriter(snapshot, hash)}, remaining: maxObjectStagingBytes}
 	if h != nil {
 		copied, err = h.CopyTo(key, offset, n, writer)
 	} else {
@@ -344,7 +368,7 @@ func (s *Server) executeObjectSubscription(m client.Message, ws *wsSession, p pr
 		// namespace's contents. A later materialization preserves these same bytes;
 		// a later logical write is queued after this initial subscription cursor.
 		s.opMu.Lock()
-		if err = s.checkObjectBinding(ctx, key.Bucket, key.Object, true); err == nil {
+		if err = s.checkObjectBinding(ctx, key.Bucket, key.Object); err == nil {
 			_, _, found, e := op.bucket.selectVolume(op.bucket.storageDescription(), key, volume.ID{}, false)
 			if e != nil && !errors.Is(e, volume.ErrNotFound) {
 				err = e
@@ -365,7 +389,7 @@ func (s *Server) executeObjectSubscription(m client.Message, ws *wsSession, p pr
 		}
 		h.Close()
 	}
-	// // Only local snapshot I/O is inside the storage barrier, never network.
+	// Only local snapshot I/O is inside the storage barrier, never network.
 	if release != nil {
 		release()
 		release = nil
@@ -384,21 +408,15 @@ func (s *Server) executeObjectSubscription(m client.Message, ws *wsSession, p pr
 	encodeObjectInfo(&e, info, runtime)
 	var digest [32]byte
 	copy(digest[:], hash.Sum(nil))
-	_, err = file.Seek(0, io.SeekStart)
-	if err == nil {
-		if copied <= maxSubscriptionEntryBytes {
-			var data []byte
-			data, err = io.ReadAll(file)
-			if err == nil {
-				encodeObjectTransfer(&e, 0, copied, digest, data)
-			}
-		} else {
-			err = ws.sendObjectStream(m.ID, file, copied, digest)
-			if err == nil {
-				encodeObjectTransfer(&e, 1, copied, digest, nil)
-			}
+	if copied <= maxSubscriptionEntryBytes {
+		encodeObjectTransfer(&e, 0, copied, digest, snapshot.Bytes())
+	} else {
+		err = ws.sendObjectStream(m.ID, snapshot, copied, digest)
+		if err == nil {
+			encodeObjectTransfer(&e, 1, copied, digest, nil)
 		}
 	}
+
 	if err != nil {
 		r.mu.Lock()
 		r.removeLocked(sub)
