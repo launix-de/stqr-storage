@@ -65,5 +65,6 @@ Homepage: https://github.com/launix-de/stqr-storage
 Description: Distributed object storage node and administrative dashboard
  Native HTTP/WebSocket storage daemon, managed by stqr.service.
 CONTROL
-# SOURCE_DATE_EPOCH also makes repeated builds from the same source reproducible.
-SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH:-$release} dpkg-deb --root-owner-group --build "$stage" "$out/stqr_${version#*:}_${arch}.deb"
+# Archive timestamps are reproducible metadata, independent of protocol identity.
+build_epoch=$(git -C "$root" show -s --format=%ct HEAD)
+SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH:-$build_epoch} dpkg-deb --root-owner-group --build "$stage" "$out/stqr_${version#*:}_${arch}.deb"
