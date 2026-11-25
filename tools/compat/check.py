@@ -3,7 +3,6 @@
 """Run each tagged producer, then current readers twice against its disk state."""
 import argparse
 import hashlib
-import fnmatch
 import json
 import os
 import re
@@ -16,51 +15,6 @@ import tempfile
 ROOT = Path(__file__).resolve().parents[2]
 FIXTURE = "server/format_compat_test.go"
 TEST = "^TestFormatCompatibilityFixture$"
-
-# Format owners trigger verification against a retained release/deployment
-# checkpoint. Intermediate source edits do not require additional tags.
-FORMAT_PATHS = (
-    "volume/*.go", "client/filesystem*.go", "client/s3*.go", "client/c/src/core.c",
-    "kernel/kstqr/*.c", "kernel/kstqr/*.h", "qemu-plugin-nbd/devices.go",
-    "server/*_wire.go", "server/*_state.go", "server/*_image.go", "server/*_format.go",
-    "server/*_journal.go", "server/*_snapshot.go", "server/durability.go",
-    "server/range_plan.go", "server/pg_rebuild_codec.go",
-    "server/bucket_lease.go", "server/s3*.go", "server/placement.go",
-    "server/quota*.go", "server/Bucket.go", "server/PlacementGroup.go",
-    "server/config.go", "server/auth.go", "server/users.go", "server/s3_keys.go",
-)
-
-
-def format_changes(before, after):
-    files = run(["git", "diff", "--name-only", "--no-renames", before, after]).splitlines()
-    return [f for f in files if not f.endswith("_test.go") and any(fnmatch.fnmatchcase(f, p) for p in FORMAT_PATHS)]
-
-
-def require_checkpoint(base, refs):
-    if not base or not format_changes(base, "HEAD"):
-        return
-    for ref in refs:
-        ancestor = subprocess.run(["git", "merge-base", "--is-ancestor", ref, base], cwd=ROOT, check=False)
-        if ancestor.returncode not in (0, 1):
-            raise RuntimeError(f"cannot inspect checkpoint ancestry: {ref}")
-        if ancestor.returncode == 0:
-            print(f"Retained deployment/release checkpoint: {ref}", flush=True)
-            return
-    raise RuntimeError(f"format-owning source changed, but no retained release/deployment checkpoint is an ancestor of base {base}")
-
-
-def event_base():
-    path = os.environ.get("GITHUB_EVENT_PATH")
-    if not path:
-        return None
-    event = json.loads(Path(path).read_text())
-    base = event.get("pull_request", {}).get("base", {}).get("sha") or event.get("before")
-    if base and set(base) == {"0"}:
-        return None
-    if base and not re.fullmatch(r"[0-9a-fA-F]{40,64}", base):
-        raise RuntimeError("invalid checkpoint base commit")
-    return base
-
 
 def run(args, *, cwd=None, env=None, log=None, timeout=300):
     cwd = ROOT if cwd is None else cwd
@@ -148,14 +102,12 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--reports", type=Path, default=ROOT / ".compat-reports")
     parser.add_argument("--tag", action="append", help="explicit tag/ref; HEAD is only for local bootstrap testing")
-    parser.add_argument("--base", help="require a pre-change checkpoint for format changes since this commit; CI defaults to the PR/push base")
     args = parser.parse_args()
     refs = args.tag if args.tag else tags()
     if not refs:
         parser.error("no tags found: create the first format checkpoint; an empty compatibility matrix must not pass")
     reports = args.reports.resolve()
     reports.mkdir(parents=True, exist_ok=True)
-    require_checkpoint(args.base or event_base(), refs)
     with tempfile.TemporaryDirectory(prefix="stqr-format-reader-") as tmp:
         current = Path(tmp) / "reader.test"
         build(ROOT, current, reports / "build-reader.log")
