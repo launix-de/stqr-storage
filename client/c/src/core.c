@@ -3,6 +3,7 @@
 #define SQ_CHUNK (1U << 20)
 #define SQ_WIRE (16U << 20)
 #define SQ_CHANNEL_LIMIT 32
+#define SQ_BINDING_BUCKETS 256
 struct sq_channel {
     struct sq_channel *next;
     struct stqr_socket *socket;
@@ -34,7 +35,7 @@ struct stqr_client {
     stqr_u64 redirect_revision, redirect_epoch;
     stqr_id redirect_runtime;
     struct sq_channel *channels, *active;
-    struct sq_binding *bindings;
+    struct sq_binding *bindings[SQ_BINDING_BUCKETS];
     unsigned channel_count;
     struct sq_channel *lease_owner;
     int lease_taken;
@@ -242,12 +243,26 @@ static int ensure_channel(stqr_client *c) {
     c->channels=c->active=s; c->channel_count=1; save_channel(c);
     s->used=++c->channel_clock; return 0;
 }
+/* Owner channels and subscription descriptors are process-local RAM only.
+ * Hash by subscription ID; list traversal is reserved for channel teardown. */
+static unsigned binding_bucket(stqr_id id) {
+    stqr_u32 h=2166136261U;
+    for (unsigned i=0;i<16;i++) h=(h^id.bytes[i])*16777619U;
+    return h & (SQ_BINDING_BUCKETS-1);
+}
+static struct sq_binding **binding_slot(stqr_client *c,stqr_id id) {
+    struct sq_binding **p=&c->bindings[binding_bucket(id)];
+    while (*p && memcmp((*p)->id.bytes,id.bytes,16)) p=&(*p)->next;
+    return p;
+}
 static void forget_bindings(stqr_client *c,struct sq_channel *channel) {
-    struct sq_binding **p=&c->bindings;
-    while (*p) {
-        struct sq_binding *b=*p;
-        if (!channel || b->channel==channel) { *p=b->next; sq_free(b); }
-        else p=&b->next;
+    for (unsigned i=0;i<SQ_BINDING_BUCKETS;i++) {
+        struct sq_binding **p=&c->bindings[i];
+        while (*p) {
+            struct sq_binding *b=*p;
+            if (!channel || b->channel==channel) { *p=b->next; sq_free(b); }
+            else p=&b->next;
+        }
     }
 }
 static int any_lost(stqr_client *c) {
@@ -644,6 +659,16 @@ static int request_payload(stqr_client *c, unsigned op, struct buf *body, stqr_i
     stqr_u64 started = sq_now_ms();
     if (!c || !c->socket) return -ENOTCONN;
     if (mutation && any_lost(c)) return -ESTALE;
+    /* Reads/subscriptions may change channels without a durability fence.
+     * Fence their retained causal dependencies only when publishing a write
+     * on a different owner, or when the caller explicitly requests SYNC. */
+    if (mutation) {
+        for (struct sq_channel *channel=c->channels;channel;channel=channel->next)
+            if (channel!=c->active && channel->pending.sequence) {
+                err=stqr_sync(c); if (err) return err;
+                break;
+            }
+    }
     if (body->err) return body->err;
     if (zero(id.bytes,16)) { if (mutation) return -EINVAL; if ((err=stqr_request_id(&id))) return err; }
     for (unsigned redirects=0;redirects<16;) {
@@ -679,9 +704,9 @@ static int request_payload(stqr_client *c, unsigned op, struct buf *body, stqr_i
             char endpoint[512]; stqr_u64 revision=c->redirect_revision, epoch=c->redirect_epoch;
             stqr_id runtime=c->redirect_runtime;
             memcpy(endpoint,c->redirect,sizeof(endpoint));
-            /* Accepted writes are node-local. Flush the old node before moving
-             * this serial connection, so a later sync cannot lose its prefix. */
-            err=stqr_sync(c); if (err) return err;
+            /* Accepted writes are node-local. Publications fence before a move;
+             * reads retain marks in their owner channels without forcing I/O. */
+            if (mutation) { err=stqr_sync(c); if (err) return err; }
             err=select_endpoint(c,endpoint); if (err) return err;
             for (unsigned k=0;k<8;k++) { body->p[48+k]=(stqr_u8)(revision>>(k*8)); body->p[56+k]=(stqr_u8)(epoch>>(k*8)); }
             memcpy(body->p+64,runtime.bytes,16);
@@ -968,8 +993,7 @@ int stqr_subscribe(stqr_client *c, stqr_object_id id, stqr_id sid,
     if (!data || !actual || !info || !cursor) return -EINVAL;
     *data = NULL; *actual = 0; *cursor = 0;
     if (!c || zero(sid.bytes, 16) || length > ~(stqr_u64)0-offset) return -EINVAL;
-    for (struct sq_binding *b=c->bindings;b;b=b->next)
-        if (!memcmp(b->id.bytes,sid.bytes,16)) return -EBUSY;
+    if (*binding_slot(c,sid)) return -EBUSY;
     if (!(c->capabilities & STQR_CAP_SUBSCRIPTIONS)) return -EOPNOTSUPP;
     reference(c, &b, id); put(&b, sid.bytes, 16); number(&b, !!ranged, 1);
     number(&b, offset, 8); number(&b, length, 8); number(&b, !!resume, 1);
@@ -997,7 +1021,9 @@ int stqr_subscribe(stqr_client *c, stqr_object_id id, stqr_id sid,
     if (!err) {
         struct sq_binding *binding=sq_alloc(sizeof(*binding));
         if (!binding) err=-ENOMEM;
-        else { binding->id=sid; binding->channel=c->active; binding->next=c->bindings; c->bindings=binding; }
+        else { unsigned slot=binding_bucket(sid);
+            binding->id=sid; binding->channel=c->active;
+            binding->next=c->bindings[slot]; c->bindings[slot]=binding; }
     }
     if (!err) { *data = stream.data.p; *actual = stream.data.n; stream.data.p = NULL; }
 out:
@@ -1008,17 +1034,13 @@ out:
 int stqr_unsubscribe(stqr_client *c, stqr_id sid) {
     struct buf b = {0}, r = {0}; stqr_id rid = {{0}}; int err;
     if (!c || zero(sid.bytes, 16)) return -EINVAL;
-    struct sq_binding *binding;
-    for (binding=c->bindings;binding;binding=binding->next)
-        if (!memcmp(binding->id.bytes,sid.bytes,16)) { save_channel(c); load_channel(c,binding->channel); break; }
+    struct sq_binding *binding=*binding_slot(c,sid);
+    if (binding) { save_channel(c); load_channel(c,binding->channel); }
     put(&b, sid.bytes, 16); err = request(c, 0x111, &b, rid, 0, &r, NULL);
     if (!err) err = done(&r);
     if (!err) {
-        struct sq_binding **at=&c->bindings;
-        while (*at) { struct sq_binding *item=*at;
-            if (!memcmp(item->id.bytes,sid.bytes,16)) { *at=item->next; sq_free(item); break; }
-            at=&item->next;
-        }
+        struct sq_binding **at=binding_slot(c,sid);
+        if (*at) { struct sq_binding *item=*at; *at=item->next; sq_free(item); }
     }
     drop(&b); drop(&r); return err;
 }

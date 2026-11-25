@@ -5,7 +5,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"errors"
-	"io"
 	"runtime"
 	"sync"
 	"weak"
@@ -102,7 +101,12 @@ func (c *Client) Subscribe(ctx context.Context, id ObjectID, opt SubscribeOption
 				data = append([]byte(nil), data...)
 			}
 		} else if mode == 1 && r.transfer != nil && r.transfer.length == total && r.transfer.digest == digest {
-			data, err = io.ReadAll(io.LimitReader(r.transfer.file, 16<<20+1))
+			if r.transfer.memory == nil {
+				err = ErrProtocol
+			} else {
+				data = r.transfer.memory.Bytes()
+				r.transfer.memory = nil
+			}
 		} else {
 			err = ErrProtocol
 		}
