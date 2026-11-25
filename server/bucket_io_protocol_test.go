@@ -5,18 +5,24 @@ import (
 	"bytes"
 	"context"
 	"github.com/launix-de/stqr-storage/client"
+	"net/http/httptest"
 	"testing"
 	"time"
 )
 
 func TestBucketTrafficIncludesStreamingAcceptedObjectProtocol(t *testing.T) {
-	source, _ := startAutomaticDaemonPair(t, false)
-	addReplicaDataVolume(t, source.node, "metered-protocol", "hdd", 32<<20)
-	b, _ := createProtocolBucket(t, source.node, "metered-protocol")
+	// Exact protocol byte counts need an isolated transport fixture. Production
+	// daemons independently read object prefixes during S3 housekeeping; those
+	// reads must not race the assertion about this test's own requests.
+	source := testServer(t)
+	host := httptest.NewServer(source.Handler())
+	defer host.Close()
+	addReplicaDataVolume(t, source, "metered-protocol", "hdd", 32<<20)
+	b, _ := createProtocolBucket(t, source, "metered-protocol")
 	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
 	defer cancel()
-	admin := source.node.cfg.Auth.BootstrapAdmin
-	c, err := client.Dial(ctx, source.node.cfg.Node.Advertise, admin.Username, admin.Password, client.ID(b.ID()))
+	admin := source.cfg.Auth.BootstrapAdmin
+	c, err := client.Dial(ctx, host.URL, admin.Username, admin.Password, client.ID(b.ID()))
 	if err != nil {
 		t.Fatal(err)
 	}
