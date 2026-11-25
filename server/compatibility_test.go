@@ -82,10 +82,11 @@ func TestPeerVersionMixedSemantics(t *testing.T) {
 	source := peerTestNode(t, target.cfg)
 	old := legacyProfile()
 	old.Release = 1
+	old.ProtocolVersion = 1
 	source.compatibility.Store(&old)
 	profile := target.protocolVersion()
 	profile.Version = "new-COW-fixture"
-	profile.Release = source.protocolVersion().Release + 1
+	profile.ProtocolVersion = source.protocolVersion().ProtocolVersion + 1
 	profile.Operations = map[string]operationSemantics{fmt.Sprintf("%04x", peerReplicaPrepare): {Emit: 2, Min: 2, Max: 2}}
 	target.compatibility.Store(&profile)
 	host := httptest.NewServer(target.Handler())
@@ -123,7 +124,7 @@ func TestPeerWireConflictPreservesOwnership(t *testing.T) {
 	source := peerTestNode(t, target.cfg)
 	profile := target.protocolVersion()
 	profile.Version = "wire2-fixture"
-	profile.Release = source.protocolVersion().Release + 1
+	profile.ProtocolVersion = source.protocolVersion().ProtocolVersion + 1
 	profile.WireMin = 2
 	profile.WireMax = 2
 	target.compatibility.Store(&profile)
