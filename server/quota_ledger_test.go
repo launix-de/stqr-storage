@@ -6,10 +6,58 @@ import (
 	"math"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/launix-de/stqr-storage/client"
 	"github.com/launix-de/stqr-storage/volume"
 )
+
+func TestQuotaSplitHeadroomDoesNotDeadlockOnMutualHints(t *testing.T) {
+	cluster, low, high := volume.ID{1}, client.ID{2}, client.ID{3}
+	bucket, epoch := client.ID{4}, client.ID{5}
+	open := func(node client.ID) *quotaLedger {
+		t.Helper()
+		l, err := openQuotaLedger(filepath.Join(t.TempDir(), "quota"), cluster, volume.ID(node), true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { l.journal.close() })
+		return l
+	}
+	a, b := open(low), open(high)
+	// Each owner has one unused unit and needs two for its next operation.
+	// Reserving both soft hints would refuse every loan despite enough total
+	// headroom. Explicit hints make this case independent of thread scheduling.
+	qa := quotaManager{ledger: a, demands: []quotaDemand{{bucket: volume.ID(bucket), growth: 7, activation: true, until: time.Now().Add(time.Hour)}}}
+	qb := quotaManager{ledger: b, demands: []quotaDemand{{bucket: volume.ID(bucket), growth: 11, activation: true, until: time.Now().Add(time.Hour)}}}
+	if n := qa.lendable(volume.ID(bucket), high, 6, 5); n != 0 {
+		t.Fatal("higher-priority donor lost its pending headroom", n)
+	}
+	free := qb.lendable(volume.ID(bucket), low, 10, 9)
+	if free != 1 {
+		t.Fatal("mutual hints stranded usable credits", free)
+	}
+	g, err := b.debit(quotaGrant{ID: client.NewRequestID(), Bucket: bucket, Epoch: epoch, Source: high, Target: low, Bytes: 1}, free)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proof, err := a.receive(g, high, epoch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := b.settle(g.ID, proof, low); err != nil {
+		t.Fatal(err)
+	}
+	left, le := a.balance(bucket, epoch, 1, 6)
+	right, re := b.balance(bucket, epoch, 1, 10)
+	if le != nil || re != nil || left != 7 || right != 9 || left+right != 16 {
+		t.Fatal("loan did not preserve authority and permit the next write", left, right, le, re)
+	}
+	qa.demands[0].exhausted = true
+	if n := qa.lendable(volume.ID(bucket), high, 6, 5); n != 1 {
+		t.Fatal("an exhausted request still blocks unused credits", n)
+	}
+}
 
 func TestQuotaTransferCrashWindowsConserveCredits(t *testing.T) {
 	for _, phase := range []string{"debit", "receive", "settle"} {

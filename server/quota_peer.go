@@ -116,7 +116,7 @@ func (s *Server) quotaPeerMessage(m client.Message, actor client.ID) ([]byte, er
 			return nil, err
 		}
 		used = max(used, s.heldPhysicalQuota(bucket))
-		free := subtractCapacity(subtractCapacity(allowance, used), q.reserveHints(volume.ID(bucket), nil, used))
+		free := q.lendable(volume.ID(bucket), actor, allowance, used)
 		amount := min(needed, free)
 		e := client.Encoder{}
 		e.Bool(amount != 0)

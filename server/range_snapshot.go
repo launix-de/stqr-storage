@@ -298,6 +298,11 @@ func (r *rangeManager) receiveSnapshot(m client.Message, actor client.ID, force 
 		if err != nil {
 			return nil, err
 		}
+		end, err := r.server.beginRebuildIO(r.server.ctx)
+		if err != nil {
+			return nil, err
+		}
+		defer end()
 		r.server.opMu.Lock()
 		reservedBefore := store.Stats().InFlightReservedPhysical
 		allowance, err := r.allowance(t, force)
@@ -721,16 +726,25 @@ func (r *rangeManager) sendSnapshot(ctx context.Context, p rangePlan, final bool
 }
 
 func (r *rangeManager) sendObject(ctx context.Context, p rangePlan, v *volume.Volume, key volume.Key) ([]byte, [32]byte, error) {
-	probeHandle, err := v.Open(false)
-	if err != nil {
-		return nil, [32]byte{}, err
-	}
-	probeInfo, err := probeHandle.RecordInfo(key)
+	var probeInfo volume.Info
 	var sourceDigest [32]byte
-	if err == nil {
-		sourceDigest, err = rangeObjectDigest(ctx, probeHandle, key, probeInfo)
-	}
-	probeHandle.Close()
+	err := func() error {
+		end, err := r.server.beginRebuildIO(ctx)
+		if err != nil {
+			return err
+		}
+		defer end()
+		h, err := v.Open(false)
+		if err != nil {
+			return err
+		}
+		defer h.Close()
+		probeInfo, err = h.RecordInfo(key)
+		if err == nil {
+			sourceDigest, err = rangeObjectDigest(ctx, h, key, probeInfo)
+		}
+		return err
+	}()
 	if err != nil {
 		return nil, [32]byte{}, err
 	}
@@ -768,27 +782,29 @@ func (r *rangeManager) sendObject(ctx context.Context, p rangePlan, v *volume.Vo
 	if have {
 		return probeHeader.B, prior, nil
 	}
-	h, err := v.Open(false)
-	if err != nil {
-		return nil, [32]byte{}, err
-	}
 	data, err := os.CreateTemp("", "stqr-range-source-*")
 	if err != nil {
-		h.Close()
 		return nil, [32]byte{}, err
 	}
 	defer func() { data.Close(); os.Remove(data.Name()) }()
 	meta, err := os.CreateTemp("", "stqr-range-source-extents-*")
 	if err != nil {
-		h.Close()
 		return nil, [32]byte{}, err
 	}
 	defer func() { meta.Close(); os.Remove(meta.Name()) }()
 	var info volume.Info
 	encodedTransfer := false
 	err = func() error {
+		end, err := r.server.beginRebuildIO(ctx)
+		if err != nil {
+			return err
+		}
+		defer end()
+		h, err := v.Open(false)
+		if err != nil {
+			return err
+		}
 		defer h.Close()
-		var err error
 		info, err = h.RecordInfo(key)
 		if err != nil {
 			return err

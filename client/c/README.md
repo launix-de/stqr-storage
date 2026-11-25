@@ -73,8 +73,8 @@ int save_settings(const char *url, const char *user, const char *password,
   Large objects can be accessed using ranged reads/writes; this is not an object
   size restriction. Callback-based, unbounded streaming is not yet exposed.
 - URLs accept `http://host[:port]` or `ws://host[:port]/api/ws`, including bracketed
-  IPv6. DNS resolution is provided by the POSIX adapter. No TLS,
-  compression extensions or implicit credential forwarding are performed.
+  IPv6. DNS resolution is provided by the POSIX adapter. Range-owner redirects
+  are described below. TLS and compression extensions are not implemented.
 - The timeout bounds socket connection and individual blocking socket I/O;
   DNS resolution uses the system resolver. There is no asynchronous cancellation
   or background heartbeat/reconnect thread.

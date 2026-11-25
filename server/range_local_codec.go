@@ -13,6 +13,11 @@ func (r *rangeManager) reencodeLocalDestination(ctx context.Context, p rangePlan
 	if p.Source != p.Target {
 		return nil
 	}
+	end, err := r.server.beginRebuildIO(ctx)
+	if err != nil {
+		return err
+	}
+	defer end()
 	store, err := r.destination(p)
 	if err != nil {
 		return err
@@ -29,7 +34,7 @@ func (r *rangeManager) reencodeLocalDestination(ctx context.Context, p rangePlan
 	}
 	var after *volume.ObjectID
 	for {
-		if err := ctx.Err(); err != nil {
+		if err := r.server.waitForUserIO(ctx); err != nil {
 			return err
 		}
 		done, err := func() (bool, error) {

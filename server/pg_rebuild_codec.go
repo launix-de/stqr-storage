@@ -162,6 +162,11 @@ func (s *Server) applyPGCodec(ctx context.Context, body []byte, actor client.ID)
 			stores = append(stores, v.store)
 		}
 	}
+	end, err := s.beginRebuildIO(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer end()
 	for _, store := range stores {
 		var after *volume.ObjectID
 		for {

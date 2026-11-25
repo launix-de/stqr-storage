@@ -104,6 +104,20 @@ func (s *Server) replicaSetSatisfies(goal BucketPolicy, locations []client.Locat
 	return true
 }
 
+// Required policy changes and physical pressure use the same relocation path.
+func (r *rangeManager) replicaLocationNeedsMove(goal BucketPolicy, loc client.Location, destinations []rangeDestination) bool {
+	_, draining := r.replicaLocationState(loc)
+	if draining || !r.server.replicaLocationAllowed(goal, loc) {
+		return true
+	}
+	for _, destination := range destinations {
+		if destination.node == loc.Node && destination.volume.ID == loc.Volume {
+			return r.capacityNeed(destination, destinations) > 0
+		}
+	}
+	return false
+}
+
 // Offline observations cannot justify a replacement. A handoff already bound
 // while online must resume its exact durable decision after disconnect/restart.
 func (r *rangeManager) replicaLocationState(loc client.Location) (online, draining bool) {
@@ -209,7 +223,7 @@ func (r *rangeManager) planReplicaRelocation(d BucketDescription) (rangePlan, bo
 	if d.DesiredPolicy != nil {
 		goal = *d.DesiredPolicy
 	}
-	if goal.StorageStrategy != d.Policy.StorageStrategy {
+	if goal.StorageStrategy == "ram" || d.Policy.StorageStrategy == "ram" {
 		return rangePlan{}, false
 	}
 	id, err := bucketID(d.ID)
@@ -231,8 +245,7 @@ func (r *rangeManager) planReplicaRelocation(d BucketDescription) (rangePlan, bo
 		bad := make([]bool, len(entry.Locations))
 		firstBad := -1
 		for i, loc := range entry.Locations {
-			_, draining := r.replicaLocationState(loc)
-			bad[i] = draining || !s.replicaLocationAllowed(goal, loc)
+			bad[i] = r.replicaLocationNeedsMove(goal, loc, destinations)
 			if bad[i] && firstBad < 0 {
 				firstBad = i
 			}
