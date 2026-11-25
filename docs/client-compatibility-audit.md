@@ -33,7 +33,14 @@ The fixed path shares redirect/retry handling with small operations, retransmits
 the complete rejected upload under the same request ID, and preserves
 `-EINPROGRESS` for uncertain transport outcomes. Regression tests cover two real
 owners, complete streamed retries after repeated 503 replies, and interrupted
-uploads. Default durable ACK behavior is unchanged.
+uploads. The multi-owner regression also checks streamed ranged writes and
+appends, including preserved prefixes and the returned append offset. Default
+durable ACK behavior is unchanged.
+
+The first PR CI run also exposed an EINTR-sensitive FIFO test: a raw `open(2)`
+could be interrupted while FUSE resolved its path. The test now uses `os.File`,
+which retries signal interruptions for open/read/write, like normal Go callers.
+The FIFO assertions remain enabled; no driver error or test is suppressed.
 
 ## Validation
 

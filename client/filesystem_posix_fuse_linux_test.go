@@ -86,16 +86,19 @@ func TestFilesystemPOSIXKernelMount(t *testing.T) {
 	if err = unix.Mkfifo(path("fifo"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	fd, err := unix.Open(path("fifo"), unix.O_RDWR|unix.O_NONBLOCK, 0)
+	// Go runtime signals can interrupt open(2) while FUSE resolves the FIFO.
+	// os.File retries EINTR, as ordinary Go applications do, and also keeps
+	// subsequent pipe I/O safe from signal interruptions.
+	fifo, err := os.OpenFile(path("fifo"), os.O_RDWR|syscall.O_NONBLOCK, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer unix.Close(fd)
-	if n, err := unix.Write(fd, []byte("pipe")); err != nil || n != 4 {
+	defer fifo.Close()
+	if n, err := fifo.Write([]byte("pipe")); err != nil || n != 4 {
 		t.Fatal(n, err)
 	}
 	pipe := make([]byte, 4)
-	if n, err := unix.Read(fd, pipe); err != nil || n != 4 || string(pipe) != "pipe" {
+	if n, err := fifo.Read(pipe); err != nil || n != 4 || string(pipe) != "pipe" {
 		t.Fatal(n, string(pipe), err)
 	}
 	listener, err := net.Listen("unix", path("socket"))

@@ -110,6 +110,28 @@ int main(void) {
                 CHECK(!stqr_get(c,id,&data,&n,&info));
                 CHECK(n==length && !memcmp(data,payload,n));stqr_free(data);
             }
+            memset(payload,0x37,length);
+            for (unsigned side=0;side<2;side++) {
+                stqr_object_id other={{0}};other.bytes[0]=side?1:0x81;
+                memset(&id,0,sizeof(id));id.bytes[0]=side?0xa1:0x21;
+                /* Force a redirect for both ranged writes and append, too.
+                 * Check the preserved prefix and the returned append offset. */
+                CHECK(!stqr_stat(c,other,&info));
+                o=fresh();CHECK(!stqr_put_range(c,id,17,payload,length-17,&o,&info));
+                CHECK(info.length==length);
+                CHECK(!stqr_get(c,id,&data,&n,&info));
+                CHECK(n==length);
+                for (unsigned j=0;j<17;j++) CHECK(((unsigned char *)data)[j]==0x5a);
+                CHECK(!memcmp((unsigned char *)data+17,payload,n-17));stqr_free(data);
+                CHECK(!stqr_stat(c,other,&info));
+                o=fresh();CHECK(!stqr_append(c,id,payload,length,&o,&info,&offset));
+                CHECK(offset==length && info.length==2*length);
+                CHECK(!stqr_get(c,id,&data,&n,&info));
+                CHECK(n==2*length);
+                for (unsigned j=0;j<17;j++) CHECK(((unsigned char *)data)[j]==0x5a);
+                CHECK(!memcmp((unsigned char *)data+17,payload,length-17));
+                CHECK(!memcmp((unsigned char *)data+length,payload,length));stqr_free(data);
+            }
             free(payload);
         }
         stqr_close(c);puts("cluster routing and independent subscriptions passed");return 0;
