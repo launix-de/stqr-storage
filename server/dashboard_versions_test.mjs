@@ -2,7 +2,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {NodeConnection,Writer,OP,envelope} from './dashboard/protocol.js';
-import {versionWarning,versionLabel} from './dashboard/node-versions.js';
+import {versionWarning,versionLabel,protocolLabel} from './dashboard/node-versions.js';
 const zero='0'.repeat(32);
 test('new version telemetry uses an explicit native subscription and push',async()=>{
  const c=Object.create(NodeConnection.prototype);c.pending=new Map;
@@ -21,7 +21,9 @@ test('new version telemetry uses an explicit native subscription and push',async
 test('older, restricted and wire-incompatible nodes are all red; healthy unknown versions are neutral',()=>{
  for(const v of [{outdated:true},{restricted:true},{incompatible:true}])assert.equal(versionWarning(v),true);
  assert.equal(versionWarning(undefined),false);assert.equal(versionWarning({}),false);
- assert.equal(versionLabel({outdated:true}),'Veraltete Version');
+ assert.equal(versionLabel({outdated:true}),'Veraltetes Protokoll');
  assert.equal(versionLabel({restricted:true,outdated:true}),'Teilweise inkompatibel');
  assert.equal(versionLabel({incompatible:true,restricted:true}),'Version inkompatibel');
 });
+
+test("protocol number is displayed independently of software build",()=>{assert.equal(protocolLabel({profile:{protocol_version:3,version:"dev",revision:"abc"}}),"Protokoll 3");assert.equal(protocolLabel({profile:{release:999999999}}),"Protokoll unbekannt")});

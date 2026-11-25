@@ -5,7 +5,7 @@ umask 022
 root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 version=${1:-}
 if [ -z "$version" ]; then
-    echo "Usage: $0 VERSION [OUTPUT_DIRECTORY] (GO, DEB_ARCH, STQR_RELEASE optional)" >&2
+    echo "Usage: $0 VERSION [OUTPUT_DIRECTORY] (GO, DEB_ARCH optional)" >&2
     exit 2
 fi
 command -v dpkg-deb >/dev/null
@@ -22,11 +22,9 @@ stage=$(mktemp -d)
 chmod 0755 "$stage"
 trap 'rm -rf "$stage"' EXIT HUP INT TERM
 revision=$(git -C "$root" rev-parse HEAD)
-release=${STQR_RELEASE:-$(git -C "$root" show -s --format=%ct HEAD)}
-case "$release" in ''|*[!0-9]*) echo 'STQR_RELEASE must be an increasing integer' >&2; exit 2;; esac
 mkdir -p "$stage/DEBIAN" "$stage/usr/bin" "$stage/usr/lib/systemd/system" "$stage/usr/share/doc/stqr"
 cd "$root"
-CGO_ENABLED=0 GOOS=linux GOARCH="$goarch" "${GO:-go}" build -buildvcs=false -trimpath -ldflags "-s -w -X github.com/launix-de/stqr-storage/server.SoftwareVersion=$version -X github.com/launix-de/stqr-storage/server.SoftwareRevision=$revision -X github.com/launix-de/stqr-storage/server.SoftwareRelease=$release" -o "$stage/usr/bin/stqr" .
+CGO_ENABLED=0 GOOS=linux GOARCH="$goarch" "${GO:-go}" build -buildvcs=false -trimpath -ldflags "-s -w -X github.com/launix-de/stqr-storage/server.SoftwareVersion=$version -X github.com/launix-de/stqr-storage/server.SoftwareRevision=$revision" -o "$stage/usr/bin/stqr" .
 cp packaging/debian/stqr.service "$stage/usr/lib/systemd/system/"
 cp packaging/debian/copyright "$stage/usr/share/doc/stqr/copyright"
 mkdir -p "$stage/usr/share/man/man1" "$stage/usr/share/lintian/overrides"
@@ -67,5 +65,6 @@ Homepage: https://github.com/launix-de/stqr-storage
 Description: Distributed object storage node and administrative dashboard
  Native HTTP/WebSocket storage daemon, managed by stqr.service.
 CONTROL
-# SOURCE_DATE_EPOCH also makes repeated builds from the same source reproducible.
-SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH:-$release} dpkg-deb --root-owner-group --build "$stage" "$out/stqr_${version#*:}_${arch}.deb"
+# Archive timestamps are reproducible metadata, independent of protocol identity.
+build_epoch=$(git -C "$root" show -s --format=%ct HEAD)
+SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH:-$build_epoch} dpkg-deb --root-owner-group --build "$stage" "$out/stqr_${version#*:}_${arch}.deb"

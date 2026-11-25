@@ -297,6 +297,7 @@ remain deducted. Physical accounting uses physical free bytes directly; logical
 accounting applies the selected profile. Values and slider endpoints stay BigInt.
 # Offline filesystem collection
 
+
 The bucket-bound WebSocket supports BUCKET_MAINTENANCE (0x0115) and BUCKET_SCAN
 (0x0116) for `stqr-fuse --fsck`. Maintenance requires read/delete grants, an active
 bucket without pending policy transition, and no other connection to that bucket.
@@ -1158,3 +1159,15 @@ PG. `TestPGRebuildHistoryOutOfOrder` checks causal archive replay.
 The separate [priority audit](rebuild-priority-audit.md) records the remaining
 foreground-admission and optional-work scheduling gaps; split independence does
 not imply those guarantees.
+
+## Manually assigned peer protocol version
+
+Peer profiles carry `protocol_version`, assigned explicitly by
+`server.ProtocolVersion` (currently 3). Increment it for changes to peer protocol
+semantics. Package versions, commit hashes, commit timestamps and commit counts
+never determine whether a node uses an older protocol. The Debian builder only
+sets informational software version/revision fields. `release` remains a wire
+alias for old readers; new comparisons ignore it. A peer without the new field
+has an unknown protocol number. Existing per-opcode and wire-range checks still
+reject unsupported operations before decoding or mutation. The dashboard shows
+the manual protocol number separately from software build information.
