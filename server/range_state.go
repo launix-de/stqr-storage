@@ -151,31 +151,9 @@ func (r *rangeManager) persist(kind uint16, event rangeEvent) (client.Proof, err
 	r.publishQuotaRangesLocked()
 	return proof, nil
 }
-
-// A newer checkpoint producer emitted PGGroup's zero ID on legacy records:
-// encoding/json does not omit a fixed-length zero array with omitempty. Accept
-// only that semantically empty extension. Nonzero PG decisions still require a
-// reader implementing their record kinds; never silently discard their meaning.
-// Try the native schema first so a later PG implementation owns its validation.
-func decodeCompatibleRangeEvent(data []byte, event *rangeEvent) error {
-	if err := decodeControlRecord(data, event); err == nil {
-		return nil
-	}
-	extended := struct {
-		*rangeEvent
-		PGGroup *client.ID
-	}{rangeEvent: event}
-	if err := decodeControlRecord(data, &extended); err != nil {
-		return err
-	}
-	if extended.PGGroup != nil && *extended.PGGroup != (client.ID{}) {
-		return volume.ErrUnsupported
-	}
-	return nil
-}
 func (r *rangeManager) replay(record controlRecord) error {
 	var event rangeEvent
-	if err := decodeCompatibleRangeEvent(record.Data, &event); err != nil {
+	if err := decodeControlRecord(record.Data, &event); err != nil {
 		return err
 	}
 	if record.Kind == rangeGenesis {
