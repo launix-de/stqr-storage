@@ -339,6 +339,14 @@ type OwnershipDelta interface {
 	ChangedOwnershipBuckets(previous any) (buckets []ID, known bool)
 }
 
+// OwnershipBucketTotals can prove that the new predicate includes either all
+// records of a bucket or none, including imported objects and retry receipts.
+// It is evaluated under the volume lock and must not acquire any other locks.
+// Mixed ranges or import-dependent predicates must return known=false.
+type OwnershipBucketTotals interface {
+	OwnershipForEntireBucket(bucket ID) (include bool, known bool)
+}
+
 // SetOwnershipFilter selects records that are authoritative at this owner. An
 // uncommitted incoming copy or retired source copy is operating space, not an
 // additional required replica charged against a bucket's absolute quota.
@@ -370,6 +378,37 @@ func (v *Volume) SetOwnershipFilter(stamp any, include func(Key, bool) bool) err
 				// future writes must use the newly published predicate.
 				v.ownerFilter, v.ownerStamp = include, stamp
 				return nil
+			}
+			if known {
+				if totals, ok := stamp.(OwnershipBucketTotals); ok {
+					selected := make(map[ID]bucketAllocation, len(v.owned))
+					for id, value := range v.owned {
+						selected[id] = value
+					}
+					complete := true
+					for _, id := range changed {
+						if v.accounting[id].records == 0 {
+							continue
+						}
+						own, exact := totals.OwnershipForEntireBucket(id)
+						if !exact {
+							complete = false
+							break
+						}
+						if own {
+							selected[id] = v.accounting[id]
+						} else {
+							delete(selected, id)
+						}
+					}
+					if complete {
+						v.owned, v.ownerFilter, v.ownerStamp = selected, include, stamp
+						if v.observer != nil {
+							v.observer(StorageSnapshot{All: v.usage(v.accounting, v.sb), Owned: v.ownedUsage(v.owned, v.accounting, v.sb)})
+						}
+						return nil
+					}
+				}
 			}
 		}
 	}
