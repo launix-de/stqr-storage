@@ -113,11 +113,10 @@ int ks_object_reference(struct ks_fs *f, stqr_object_id id, stqr_id token, unsig
 	mutex_unlock(&rpc->lock);
 	return err;
 }
-static int get_object(struct ks_fs *f, stqr_object_id id, void **p, size_t *n, stqr_info *info)
+static int get_object_locked(struct ks_fs *f, struct ks_rpc *rpc, stqr_object_id id,
+			     void **p, size_t *n, stqr_info *info)
 {
-	struct ks_rpc *rpc = ks_rpc_lock(f, id);
 	int err;
-	atomic64_inc(&f->rpc_gets);
 	for (;;) {
 		err = stqr_get(rpc->client, id, p, n, info);
 		if (!ks_transport_retryable(rpc->client, err))
@@ -129,6 +128,13 @@ static int get_object(struct ks_fs *f, stqr_object_id id, void **p, size_t *n, s
 		if (err)
 			break;
 	}
+	return err;
+}
+static int get_object(struct ks_fs *f, stqr_object_id id, void **p, size_t *n, stqr_info *info)
+{
+	struct ks_rpc *rpc = ks_rpc_lock(f, id);
+	atomic64_inc(&f->rpc_gets);
+	int err = get_object_locked(f, rpc, id, p, n, info);
 	mutex_unlock(&rpc->lock);
 	return err;
 }
@@ -155,17 +161,13 @@ static int cas_object(struct ks_fs *f, stqr_object_id id, const void *p, size_t 
 		if (replayed && f->references && err == -EAGAIN && stqr_status(rpc->client) == 412) {
 			void *observed = NULL;
 			size_t size = 0;
-			int check = stqr_get(rpc->client, id, &observed, &size, &info);
+			int check = get_object_locked(f, rpc, id, &observed, &size, &info);
 			/* Modern peers need no native CAS history. Resolve an uncertain
 			 * retry only by its exact after-image, never by replaying an entire
 			 * filesystem append against a newer inode snapshot. */
-			if (!ks_transport_retryable(rpc->client, check)) {
-				err = !check && size == n && !memcmp(observed, p, n) ? 0 : -EIO;
-				sq_free(observed);
-				break;
-			}
+			err = !check && size == n && !memcmp(observed, p, n) ? 0 : -EIO;
 			sq_free(observed);
-			err = check;
+			break;
 		}
 		if (err == -EACCES && !auth_retry)
 			auth_retry = true;
