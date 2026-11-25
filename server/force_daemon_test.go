@@ -775,9 +775,13 @@ func TestDaemonForceCompletesCommittedJoinAndDelegatesToNewMember(t *testing.T) 
 	cfg.ControlVersion, cfg.RangeVersion, cfg.QuotaVersion, cfg.PeerDirectoryVersion, cfg.BucketCatalogVersion, cfg.PlacementGroupsVersion = 0, 0, 0, 0, 0, 0
 	cfg.JoinPending = true
 	cfg.Auth.BootstrapAdmin = BootstrapAdmin{}
-	source.node.controller.mu.Lock()
-	source.node.controller.coordinator.participants = &witnessedControlCommit{controlParticipants: source.node.controller.coordinator.participants, witness: candidateID}
-	source.node.controller.mu.Unlock()
+	// Either admitted member may coordinate the discovered candidate's join.
+	// Inject the partial COMMIT at both requesters before discovery starts.
+	for _, node := range []*daemonTestNode{source, survivor} {
+		node.node.controller.mu.Lock()
+		node.node.controller.coordinator.participants = &witnessedControlCommit{controlParticipants: node.node.controller.coordinator.participants, witness: candidateID}
+		node.node.controller.mu.Unlock()
+	}
 	candidate := startDaemonTestNode(t, filepath.Join(t.TempDir(), "join-witness.yaml"), &cfg)
 	ctx, cancel := context.WithTimeout(context.Background(), 35*time.Second)
 	defer cancel()
