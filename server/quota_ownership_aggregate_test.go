@@ -113,3 +113,53 @@ func TestQuotaWholeBucketTransitionKeepsExistingAccounting(t *testing.T) {
 		t.Fatal("mixed ownership did not use exact recount")
 	}
 }
+
+func TestQuotaOwnershipPredicateIgnoresEpochLabelsAndSameOwnerSplits(t *testing.T) {
+	node, disk, bucket := client.ID{1}, client.ID{2}, client.ID{3}
+	entry := client.RangeEntry{OwnerEpoch: 1, PolicyVersion: 1, Locations: []client.Location{{Node: node, Volume: disk}}}
+	patch := client.MapPatch{Membership: 1, Generation: 1, Revision: 1, Bucket: bucket, ToEnd: true, Entries: []client.RangeEntry{entry}, Addresses: []client.NodeAddress{{Node: node, Addresses: []string{"http://one:7419"}}}}
+	stampFor := func(p client.MapPatch) quotaOwnershipStamp {
+		t.Helper()
+		image, err := buildPlacement([]client.MapPatch{p})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return quotaOwnershipStamp{node: volume.ID(node), volume: volume.ID(disk), placement: image, view: &systemView{}, general: true}
+	}
+	assertDelta := func(before, after quotaOwnershipStamp, want bool) {
+		t.Helper()
+		ids, known := after.ChangedOwnershipBuckets(before)
+		if !known || (len(ids) > 0) != want || len(ids) > 1 || len(ids) == 1 && ids[0] != volume.ID(bucket) {
+			t.Fatal("wrong predicate delta", ids, known, want)
+		}
+	}
+	before := stampFor(patch)
+	next := patch
+	next.Revision = 2
+	left, right, err := client.SplitRange(entry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	left.OwnerEpoch, left.PolicyVersion = 2, 3
+	right.OwnerEpoch, right.PolicyVersion = 4, 5
+	next.Entries = []client.RangeEntry{left, right}
+	assertDelta(before, stampFor(next), false)
+	// An unbound ordinary owner can also change labels without changing who
+	// owns its records; imported records remain excluded in both images.
+	entry.Locations = []client.Location{{Node: node}}
+	patch.Entries = []client.RangeEntry{entry}
+	before = stampFor(patch)
+	changed := entry
+	changed.OwnerEpoch, changed.PolicyVersion = 2, 3
+	next.Entries = []client.RangeEntry{changed}
+	after := stampFor(next)
+	assertDelta(before, after, false)
+	// Recovery cohorts really can change this predicate. Evaluate the same
+	// ownership rule instead of blindly discarding the epoch comparison.
+	origin := volumeRecoveryOrigin{Complete: true, Before: patch, After: entry, Volumes: []client.ID{{8}}}
+	recovered := before
+	recovered.view = &systemView{manifest: systemManifest{VolumeRecoveries: []volumeRecoveryOrigin{origin}}}
+	assertDelta(before, recovered, true)
+	after.view = recovered.view
+	assertDelta(recovered, after, true) // old origin no longer matches epoch 2
+}
