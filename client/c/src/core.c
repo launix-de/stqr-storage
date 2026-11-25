@@ -2,6 +2,18 @@
 #include "port.h"
 #define SQ_CHUNK (1U << 20)
 #define SQ_WIRE (16U << 20)
+#define SQ_CHANNEL_LIMIT 32
+struct sq_channel {
+    struct sq_channel *next;
+    struct stqr_socket *socket;
+    char host[256], authority[272];
+    unsigned port;
+    stqr_id runtime;
+    stqr_u64 capabilities, used;
+    stqr_commit_mark pending, synced;
+    int lost;
+};
+struct sq_binding { struct sq_binding *next; stqr_id id; struct sq_channel *channel; };
 struct stqr_client {
     struct stqr_socket *socket;
     char host[256], authority[272];
@@ -20,6 +32,10 @@ struct stqr_client {
     int query_valid;
     stqr_u64 redirect_revision, redirect_epoch;
     stqr_id redirect_runtime;
+    struct sq_channel *channels, *active;
+    struct sq_binding *bindings;
+    unsigned channel_count;
+    stqr_u64 channel_clock;
 };
 struct buf { stqr_u8 *p; size_t n, cap, pos; int err; };
 static int zero(const void *v, size_t n) {
@@ -193,6 +209,91 @@ static int parse_url(stqr_client *c, const char *url) {
         c->port = port;
     }
     return 0;
+}
+/* Logical bucket clients retain authenticated sessions per endpoint. Switching
+ * owners is not a disconnect: subscriptions on the previous owner stay live.
+ * Only real loss/explicit reconnect/eviction invalidates their cache coverage.
+ * All helpers run under the public client's existing serialization contract. */
+static int reconnect_active(stqr_client *);
+static int sync_active(stqr_client *);
+static void broken(stqr_client *);
+static void save_channel(stqr_client *c) {
+    struct sq_channel *s=c->active;
+    if (!s) return;
+    s->socket=c->socket; memcpy(s->host,c->host,sizeof(s->host));
+    memcpy(s->authority,c->authority,sizeof(s->authority)); s->port=c->port;
+    s->runtime=c->runtime; s->capabilities=c->capabilities;
+    s->pending=c->pending_mark; s->synced=c->synced_mark; s->lost=c->durability_lost;
+}
+static void load_channel(stqr_client *c,struct sq_channel *s) {
+    c->active=s; c->socket=s->socket; memcpy(c->host,s->host,sizeof(c->host));
+    memcpy(c->authority,s->authority,sizeof(c->authority)); c->port=s->port;
+    c->runtime=s->runtime; c->capabilities=s->capabilities;
+    c->pending_mark=s->pending; c->synced_mark=s->synced; c->durability_lost=s->lost;
+    s->used=++c->channel_clock;
+}
+static int ensure_channel(stqr_client *c) {
+    struct sq_channel *s;
+    if (c->active) return 0;
+    s=sq_alloc(sizeof(*s)); if (!s) return -ENOMEM;
+    c->channels=c->active=s; c->channel_count=1; save_channel(c);
+    s->used=++c->channel_clock; return 0;
+}
+static void forget_bindings(stqr_client *c,struct sq_channel *channel) {
+    struct sq_binding **p=&c->bindings;
+    while (*p) {
+        struct sq_binding *b=*p;
+        if (!channel || b->channel==channel) { *p=b->next; sq_free(b); }
+        else p=&b->next;
+    }
+}
+static int any_lost(stqr_client *c) {
+    struct sq_channel *s;
+    if (c->durability_lost) return 1;
+    for (s=c->channels;s;s=s->next) if (s!=c->active && s->lost) return 1;
+    return 0;
+}
+static int select_endpoint(stqr_client *c,const char *endpoint) {
+    stqr_client *parsed=sq_alloc(sizeof(*parsed));
+    struct sq_channel *s,*original;
+    int err;
+    if (!parsed) return -ENOMEM;
+    err=parse_url(parsed,endpoint); if (err) goto out;
+    err=ensure_channel(c); if (err) goto out;
+    save_channel(c); original=c->active;
+    for (s=c->channels;s;s=s->next) if (!strcmp(s->authority,parsed->authority)) break;
+    if (!s) {
+        if (c->channel_count>=SQ_CHANNEL_LIMIT) {
+            struct sq_channel *candidate;
+            for (candidate=c->channels;candidate;candidate=candidate->next)
+                if (candidate!=original && (!s || candidate->used<s->used)) s=candidate;
+            if (!s) { err=-ENOSPC; goto out; }
+            load_channel(c,s); err=sync_active(c);
+            if (err) { save_channel(c); load_channel(c,original); goto out; }
+            broken(c); save_channel(c); load_channel(c,original);
+            struct sq_channel *next=s->next; memset(s,0,sizeof(*s)); s->next=next;
+        } else {
+            s=sq_alloc(sizeof(*s)); if (!s) { err=-ENOMEM; goto out; }
+            s->next=c->channels; c->channels=s; c->channel_count++;
+        }
+        memcpy(s->host,parsed->host,sizeof(s->host));
+        memcpy(s->authority,parsed->authority,sizeof(s->authority)); s->port=parsed->port;
+    }
+    load_channel(c,s);
+    err=c->socket?0:reconnect_active(c);
+out:
+    sq_free(parsed); return err;
+}
+static void disconnect_channels(stqr_client *c) {
+    struct sq_channel *s;
+    int notify=0;
+    if (!c->channels) { broken(c); return; }
+    save_channel(c);
+    for (s=c->channels;s;s=s->next) {
+        notify|=s->socket!=NULL; sq_disconnect(s->socket); s->socket=NULL;
+    }
+    c->socket=NULL; forget_bindings(c,NULL);
+    if (notify && c->update) c->update(c->update_arg,NULL);
 }
 static int handshake(stqr_client *c) {
     char key[25], expected[29], combined[61], bucket[33];
@@ -505,14 +606,16 @@ static int reply(stqr_client *c, unsigned op, stqr_id id, struct buf *result, st
     }
 }
 static void broken(stqr_client *c) {
+    int notify=c->socket!=NULL;
     sq_disconnect(c->socket); c->socket = NULL;
-    if (c->update) c->update(c->update_arg, NULL);
+    forget_bindings(c,c->active);
+    if (notify && c->update) c->update(c->update_arg, NULL);
 }
 static int request(stqr_client *c, unsigned op, struct buf *body, stqr_id id, int mutation, struct buf *result, struct download *s) {
     int err;
     stqr_u64 started = sq_now_ms();
     if (!c || !c->socket) return -ENOTCONN;
-    if (mutation && c->durability_lost) return -ESTALE;
+    if (mutation && any_lost(c)) return -ESTALE;
     if (body->err) return body->err;
     if (zero(id.bytes,16)) { if (mutation) return -EINVAL; if ((err=stqr_request_id(&id))) return err; }
     for (unsigned redirects=0;redirects<16;) {
@@ -550,11 +653,7 @@ static int request(stqr_client *c, unsigned op, struct buf *body, stqr_id id, in
             /* Accepted writes are node-local. Flush the old node before moving
              * this serial connection, so a later sync cannot lose its prefix. */
             err=stqr_sync(c); if (err) return err;
-            err=parse_url(c,endpoint); if (err) return err;
-            memset(&c->runtime,0,sizeof(c->runtime));
-            memset(&c->pending_mark,0,sizeof(c->pending_mark));
-            memset(&c->synced_mark,0,sizeof(c->synced_mark));
-            err=stqr_reconnect(c); if (err) return err;
+            err=select_endpoint(c,endpoint); if (err) return err;
             for (unsigned k=0;k<8;k++) { body->p[48+k]=(stqr_u8)(revision>>(k*8)); body->p[56+k]=(stqr_u8)(epoch>>(k*8)); }
             memcpy(body->p+64,runtime.bytes,16);
             drop(result);
@@ -567,7 +666,7 @@ static int request(stqr_client *c, unsigned op, struct buf *body, stqr_id id, in
     }
     return -ELOOP;
 }
-int stqr_reconnect(stqr_client *c) {
+static int reconnect_active(stqr_client *c) {
     struct buf body = {0}, result = {0}; stqr_id id = {{0}}; int err;
     if (!c) return -EINVAL;
     broken(c); c->status = 0;
@@ -584,6 +683,11 @@ int stqr_reconnect(stqr_client *c) {
     drop(&body); drop(&result);
     if (err) broken(c);
     return err;
+}
+int stqr_reconnect(stqr_client *c) {
+    if (!c) return -EINVAL;
+    disconnect_channels(c);
+    return reconnect_active(c);
 }
 int stqr_dial(stqr_client **out, const char *url, const char *user, const char *password, stqr_id bucket, unsigned timeout) {
     stqr_client *c; char *plain; size_t u, p, n; int err;
@@ -606,7 +710,9 @@ int stqr_dial(stqr_client **out, const char *url, const char *user, const char *
 }
 void stqr_close(stqr_client *c) {
     if (!c) return;
-    broken(c); sq_secret_free(c->authorization, c->authorization_len); sq_secret_free(c, sizeof(*c));
+    disconnect_channels(c);
+    while (c->channels) { struct sq_channel *next=c->channels->next; sq_free(c->channels); c->channels=next; }
+    sq_secret_free(c->authorization, c->authorization_len); sq_secret_free(c, sizeof(*c));
 }
 static void reference(stqr_client *c, struct buf *b, stqr_object_id id) {
     put(b, c->bucket.bytes, 16); put(b, id.bytes, 32); number(b, 0, 8); number(b, 0, 8); put(b, c->runtime.bytes, 16);
@@ -742,7 +848,7 @@ void stqr_set_update_handler(stqr_client *c, stqr_update_handler handler, void *
     if (c) { c->update = handler; c->update_arg = arg; }
 }
 stqr_u64 stqr_capabilities(const stqr_client *c) { return c ? c->capabilities : 0; }
-int stqr_poll(stqr_client *c, unsigned ms) {
+static int poll_active(stqr_client *c, unsigned ms) {
     struct buf m = {0}; unsigned opcode, kind; int err;
     if (!c || !c->socket) return -ENOTCONN;
     err = sq_wait(c->socket, ms);
@@ -760,6 +866,28 @@ int stqr_poll(stqr_client *c, unsigned ms) {
     if (err) { broken(c); return err; }
     return 1;
 }
+int stqr_poll(stqr_client *c,unsigned ms) {
+    stqr_u64 start=sq_now_ms();
+    if (!c) return -EINVAL;
+    if (!c->channels) return poll_active(c,ms);
+    for (;;) {
+        struct sq_channel *s,*original=c->active;
+        int result=0,err=0,open=0;
+        save_channel(c);
+        for (s=c->channels;s;s=s->next) {
+            int n;
+            if (!s->socket) continue; /* A failed new owner has no live subscriptions. */
+            open=1;
+            load_channel(c,s); n=poll_active(c,0); save_channel(c);
+            if (n<0) { err=n; break; }
+            result|=n>0;
+        }
+        load_channel(c,original);
+        if (!open) return -ENOTCONN;
+        if (err || result || sq_now_ms()-start>=ms) return err?err:result;
+        err=sq_pause(1); if (err) return err;
+    }
+}
 int stqr_subscribe(stqr_client *c, stqr_object_id id, stqr_id sid,
                    int ranged, stqr_u64 offset, stqr_u64 length,
                    const stqr_u64 *resume, void **data, size_t *actual,
@@ -770,6 +898,8 @@ int stqr_subscribe(stqr_client *c, stqr_object_id id, stqr_id sid,
     if (!data || !actual || !info || !cursor) return -EINVAL;
     *data = NULL; *actual = 0; *cursor = 0;
     if (!c || zero(sid.bytes, 16) || length > ~(stqr_u64)0-offset) return -EINVAL;
+    for (struct sq_binding *b=c->bindings;b;b=b->next)
+        if (!memcmp(b->id.bytes,sid.bytes,16)) return -EBUSY;
     if (!(c->capabilities & STQR_CAP_SUBSCRIPTIONS)) return -EOPNOTSUPP;
     reference(c, &b, id); put(&b, sid.bytes, 16); number(&b, !!ranged, 1);
     number(&b, offset, 8); number(&b, length, 8); number(&b, !!resume, 1);
@@ -793,6 +923,12 @@ int stqr_subscribe(stqr_client *c, stqr_object_id id, stqr_id sid,
         put(&stream.data, payload, n); err = stream.data.err;
     } else if (n || !stream.ended || total != stream.length || memcmp(digest, stream.digest, 32)) err = -EPROTO;
     if (!err) err = accept_info(c, info);
+    if (!err) err=ensure_channel(c);
+    if (!err) {
+        struct sq_binding *binding=sq_alloc(sizeof(*binding));
+        if (!binding) err=-ENOMEM;
+        else { binding->id=sid; binding->channel=c->active; binding->next=c->bindings; c->bindings=binding; }
+    }
     if (!err) { *data = stream.data.p; *actual = stream.data.n; stream.data.p = NULL; }
 out:
     /* An incomplete snapshot must not leave an invisible descriptor behind. */
@@ -802,17 +938,41 @@ out:
 int stqr_unsubscribe(stqr_client *c, stqr_id sid) {
     struct buf b = {0}, r = {0}; stqr_id rid = {{0}}; int err;
     if (!c || zero(sid.bytes, 16)) return -EINVAL;
+    struct sq_binding *binding;
+    for (binding=c->bindings;binding;binding=binding->next)
+        if (!memcmp(binding->id.bytes,sid.bytes,16)) { save_channel(c); load_channel(c,binding->channel); break; }
     put(&b, sid.bytes, 16); err = request(c, 0x111, &b, rid, 0, &r, NULL);
     if (!err) err = done(&r);
+    if (!err) {
+        struct sq_binding **at=&c->bindings;
+        while (*at) { struct sq_binding *item=*at;
+            if (!memcmp(item->id.bytes,sid.bytes,16)) { *at=item->next; sq_free(item); break; }
+            at=&item->next;
+        }
+    }
     drop(&b); drop(&r); return err;
 }
 
-int stqr_pending_mark(stqr_client *c, stqr_commit_mark *out) {
+static int pending_active(stqr_client *c, stqr_commit_mark *out) {
     if (!c || !out) return -EINVAL;
     if (c->durability_lost) return -ESTALE;
     *out = c->pending_mark; return 0;
 }
-int stqr_sync_through(stqr_client *c, const stqr_commit_mark *mark, stqr_commit_mark *durable) {
+int stqr_pending_mark(stqr_client *c,stqr_commit_mark *out) {
+    struct sq_channel *s,*original;
+    int err=0;
+    if (!c || !out) return -EINVAL;
+    if (!c->channels) return pending_active(c,out);
+    save_channel(c); original=c->active;
+    /* A public mark represents the whole logical connection: confirm other
+     * server incarnations before returning the remaining active-node mark. */
+    for (s=c->channels;s;s=s->next) if (s!=original) {
+        load_channel(c,s); err=sync_active(c); save_channel(c); if (err) break;
+    }
+    load_channel(c,original);
+    return err?err:pending_active(c,out);
+}
+static int sync_through_active(stqr_client *c, const stqr_commit_mark *mark, stqr_commit_mark *durable) {
     struct buf b = {0}, r = {0}; stqr_id rid = {{0}}; int err;
     if (!c || !mark || !durable || !mark->sequence || zero(mark->boot.bytes,16)) return -EINVAL;
     if (c->durability_lost) return -ESTALE;
@@ -827,12 +987,34 @@ int stqr_sync_through(stqr_client *c, const stqr_commit_mark *mark, stqr_commit_
     }
     drop(&b); drop(&r); return err;
 }
-int stqr_sync(stqr_client *c) {
-    stqr_commit_mark mark, durable; int err = stqr_pending_mark(c,&mark);
+int stqr_sync_through(stqr_client *c,const stqr_commit_mark *mark,stqr_commit_mark *durable) {
+    struct sq_channel *s,*original;
+    int err;
+    if (!c || !mark || !durable) return -EINVAL;
+    if (!c->channels) return sync_through_active(c,mark,durable);
+    save_channel(c); original=c->active;
+    for (s=c->channels;s;s=s->next)
+        if (!memcmp(s->pending.boot.bytes,mark->boot.bytes,16) || !memcmp(s->synced.boot.bytes,mark->boot.bytes,16)) { load_channel(c,s); break; }
+    err=sync_through_active(c,mark,durable); save_channel(c); load_channel(c,original);
+    return err;
+}
+static int sync_active(stqr_client *c) {
+    stqr_commit_mark mark, durable; int err = pending_active(c,&mark);
     if (err || !mark.sequence) return err;
-    return stqr_sync_through(c,&mark,&durable);
+    return sync_through_active(c,&mark,&durable);
 }
 
+int stqr_sync(stqr_client *c) {
+    struct sq_channel *s,*original;
+    int err=0;
+    if (!c) return -EINVAL;
+    if (!c->channels) return sync_active(c);
+    save_channel(c); original=c->active;
+    for (s=c->channels;s;s=s->next) {
+        load_channel(c,s); err=sync_active(c); save_channel(c); if (err) break;
+    }
+    load_channel(c,original); return err;
+}
 int stqr_bucket_space(stqr_client *c, stqr_space *space) {
     struct buf b = {0}, r = {0}; stqr_id rid; stqr_space out = {0}; int err;
     if (!c || !space) return -EINVAL;
@@ -850,10 +1032,22 @@ int stqr_bucket_space(stqr_client *c, stqr_space *space) {
     if (!err) *space = out;
     return err;
 }
-void stqr_note_durable(stqr_client *c, const stqr_commit_mark *mark) {
+static void note_active(stqr_client *c, const stqr_commit_mark *mark) {
     if (!c || !mark || c->durability_lost) return;
     if (!memcmp(c->pending_mark.boot.bytes,mark->boot.bytes,16) && c->pending_mark.sequence <= mark->sequence)
         memset(&c->pending_mark,0,sizeof(c->pending_mark));
     if (!memcmp(c->synced_mark.boot.bytes,mark->boot.bytes,16) && c->synced_mark.sequence > mark->sequence) return;
     c->synced_mark = *mark;
+}
+
+void stqr_note_durable(stqr_client *c,const stqr_commit_mark *mark) {
+    struct sq_channel *s,*original;
+    if (!c || !mark) return;
+    if (!c->channels) { note_active(c,mark); return; }
+    save_channel(c); original=c->active;
+    for (s=c->channels;s;s=s->next)
+        if (!memcmp(s->pending.boot.bytes,mark->boot.bytes,16) || !memcmp(s->synced.boot.bytes,mark->boot.bytes,16)) {
+            load_channel(c,s); note_active(c,mark); save_channel(c);
+        }
+    load_channel(c,original);
 }

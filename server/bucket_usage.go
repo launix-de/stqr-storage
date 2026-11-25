@@ -2,6 +2,8 @@
 package server
 
 import (
+	"errors"
+	"github.com/launix-de/stqr-storage/volume"
 	"math"
 	"sync"
 )
@@ -58,7 +60,14 @@ func (b *Bucket) logicalUsage() (uint64, error) {
 func (b *Bucket) updateUsage(old, next uint64, repeated bool, err error) {
 	u := &b.usage
 	if err != nil {
-		u.valid = false
+		// Rejected preconditions/capacity do not change logical lengths.
+		// Immutable create-if-absent probes and capacity handoff retries are
+		// common; invalidating here turns each retry into a full bucket scan.
+		// Ambiguous backend errors still invalidate the count conservatively.
+		if !errors.Is(err, volume.ErrPrecondition) &&
+			!(errors.Is(err, volume.ErrFull) && !errors.Is(err, volume.ErrRecovery)) {
+			u.valid = false
+		}
 		return
 	}
 	if repeated || !u.valid {

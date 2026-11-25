@@ -52,7 +52,51 @@ int main(void) {
             CHECK(!stqr_get(c,id,&data,&n,&info));
             CHECK(n==6 && !memcmp(data,"routed",6));stqr_free(data);
         }
-        CHECK(!stqr_sync(c));stqr_close(c);puts("cluster routing passed");return 0;
+        CHECK(!stqr_sync(c));
+        {
+            stqr_object_id left={{1}},right={{0x81}};
+            stqr_commit_mark a,b,durable;
+            o=fresh();o.accepted=1;CHECK(!stqr_put(c,left,"routed",6,&o,&info));
+            CHECK(!stqr_pending_mark(c,&a) && a.sequence);
+            o=fresh();o.accepted=1;CHECK(!stqr_put(c,right,"routed",6,&o,&info));
+            CHECK(!stqr_pending_mark(c,&b) && b.sequence);
+            CHECK(memcmp(a.boot.bytes,b.boot.bytes,16));
+            CHECK(!stqr_sync_through(c,&a,&durable));
+            CHECK(!memcmp(durable.boot.bytes,a.boot.bytes,16) && durable.sequence>=a.sequence);
+            CHECK(!stqr_sync(c));
+        }
+        {
+            stqr_client *writer = NULL;
+            stqr_object_id left = {{1}}, right = {{0x81}};
+            stqr_id a, b; stqr_u64 cursor; struct observer events = {0};
+            stqr_set_update_handler(c,observe,&events);
+            CHECK(!stqr_request_id(&a));CHECK(!stqr_request_id(&b));
+            CHECK(!stqr_subscribe(c,left,a,0,0,0,NULL,&data,&n,&info,&cursor));stqr_free(data);
+            unsigned lost = events.lost;
+            CHECK(!stqr_subscribe(c,right,b,0,0,0,NULL,&data,&n,&info,&cursor));stqr_free(data);
+            CHECK(events.lost == lost); /* Routing must preserve the first subscription. */
+            CHECK(stqr_subscribe(c,right,a,0,0,0,NULL,&data,&n,&info,&cursor)==-EBUSY);
+            CHECK(!stqr_dial(&writer,url,getenv("STQR_TEST_USER"),getenv("STQR_TEST_PASSWORD"),bucket,3000));
+            o=fresh();CHECK(!stqr_put(writer,left,"left",4,&o,&info));
+            wait_change(c,&events,1);CHECK(!memcmp(events.last.subscription.bytes,a.bytes,16));
+            o=fresh();CHECK(!stqr_put(writer,right,"right",5,&o,&info));
+            wait_change(c,&events,2);CHECK(!memcmp(events.last.subscription.bytes,b.bytes,16));
+            CHECK(!stqr_unsubscribe(c,a));
+            o=fresh();CHECK(!stqr_put(writer,left,"again",5,&o,&info));CHECK(stqr_poll(c,20)==0);
+            o=fresh();CHECK(!stqr_put(writer,right,"still",5,&o,&info));
+            wait_change(c,&events,3);CHECK(!memcmp(events.last.subscription.bytes,b.bytes,16));
+            CHECK(!stqr_unsubscribe(c,b));CHECK(events.lost==lost);stqr_close(writer);
+            CHECK(!stqr_request_id(&a));CHECK(!stqr_request_id(&b));
+            CHECK(!stqr_subscribe(c,left,a,0,0,0,NULL,&data,&n,&info,&cursor));stqr_free(data);
+            CHECK(!stqr_subscribe(c,right,b,0,0,0,NULL,&data,&n,&info,&cursor));stqr_free(data);
+            CHECK(!stqr_reconnect(c));CHECK(events.lost==lost+1);
+            CHECK(!stqr_subscribe(c,left,a,0,0,0,NULL,&data,&n,&info,&cursor));stqr_free(data);
+            CHECK(!stqr_subscribe(c,right,b,0,0,0,NULL,&data,&n,&info,&cursor));stqr_free(data);
+            CHECK(events.lost==lost+1);
+            CHECK(!stqr_unsubscribe(c,a));CHECK(!stqr_unsubscribe(c,b));
+            stqr_set_update_handler(c,NULL,NULL);
+        }
+        stqr_close(c);puts("cluster routing and independent subscriptions passed");return 0;
     }
     if (mode) {
         if (!strcmp(mode,"disconnect")) {

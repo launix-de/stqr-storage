@@ -43,6 +43,9 @@ typedef struct {
 } stqr_info;
 /* Return 0 or negative errno. status() preserves the last HTTP/STQR status.
  * Calls on one connection must be serialized; close must not race a call.
+ * Owner redirects reuse bounded per-endpoint sessions, retaining subscriptions.
+ * sync covers all sessions; pending_mark confirms other sessions before returning
+ * one remaining node-local mark. Explicit reconnect invalidates all subscriptions.
  * Dial always takes URL, username, password and bucket. No global credentials.
  * URLs are http:// or ws://; encrypted transport is not currently supported.
  */

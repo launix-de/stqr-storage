@@ -594,6 +594,11 @@ waiting write's larger requirement); one indivisible object can exceed that
 budget but must still fit the target. This bounds copying before a waiting write
 can resume without repeatedly moving empty hash leaves.
 
+Rejected preconditions and capacity checks retain the cached logical usage count:
+no object length changed. Ambiguous backend/recovery errors still invalidate it.
+This avoids full-index scans on content-deduplication probes and capacity retries;
+normal successful mutations still update the count and enforce the hard quota.
+
 Finite logical quotas now use durable per-node growth credits. Grant requests
 obtain reusable budgets up to 4 MiB where the donor has unused credits, scaled
 down for small quotas shared across members;
