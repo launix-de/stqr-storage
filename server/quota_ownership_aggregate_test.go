@@ -163,3 +163,48 @@ func TestQuotaOwnershipPredicateIgnoresEpochLabelsAndSameOwnerSplits(t *testing.
 	after.view = recovered.view
 	assertDelta(recovered, after, true) // old origin no longer matches epoch 2
 }
+
+func TestQuotaOwnershipUnboundEpochChangeDoesNotReadStorage(t *testing.T) {
+	r, v, _, patch, _ := placementInventoryFixture(t)
+	s := r.server
+	s.cfg.Node.ID = r.node.String()
+	s.controller = &clusterController{}
+	patch.Entries[0].Locations = []client.Location{{Node: r.node}}
+	image, err := buildPlacement([]client.MapPatch{patch})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.placement.Store(image)
+	if err = s.refreshQuotaOwnership(v); err != nil {
+		t.Fatal(err)
+	}
+	vid, bid := v.Identity().VolumeID, volume.ID(patch.Bucket)
+	used := storagePhysical(s.quotaUsage.Load().volumes[vid], bid)
+	if used == 0 {
+		t.Fatal("initial unbound ownership missing")
+	}
+	left, right, err := client.SplitRange(patch.Entries[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	left.OwnerEpoch, left.PolicyVersion = 2, 2
+	right.OwnerEpoch, right.PolicyVersion = 3, 3
+	patch.Revision = 2
+	patch.Entries = []client.RangeEntry{left, right}
+	image, err = buildPlacement([]client.MapPatch{patch})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.placement.Store(image)
+	before := v.IOStats()
+	if err = s.refreshQuotaOwnership(v); err != nil {
+		t.Fatal(err)
+	}
+	after := v.IOStats()
+	if after.ReadOps != before.ReadOps || after.WriteOps != before.WriteOps {
+		t.Fatal("unbound metadata change scanned storage", before, after)
+	}
+	if got := storagePhysical(s.quotaUsage.Load().volumes[vid], bid); got != used {
+		t.Fatal("metadata change altered physical quota", used, got)
+	}
+}
