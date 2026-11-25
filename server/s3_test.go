@@ -57,6 +57,11 @@ func s3TestSetup(t *testing.T) (*Server, *Bucket, account) {
 	if _, status := s.dispatchAs(userMessage(client.UserS3KeySet, enc), nil, userPrincipal(t, s)); status != 200 {
 		t.Fatal(status)
 	}
+	_, closeS3, err := s.openS3(context.Background(), b, userPrincipal(t, s))
+	if err != nil {
+		t.Fatal(err)
+	}
+	closeS3()
 	return s, b, user
 }
 func signS3Test(req *http.Request, body []byte, secret string) {
