@@ -37,6 +37,7 @@ type wsSession struct {
 	server          *Server
 	ctx             context.Context
 	cancel          context.CancelFunc
+	uploadMu        sync.Mutex
 	uploads         map[client.ID]*serverObjectUpload
 	stagedBytes     uint64
 	objectMu        sync.Mutex
@@ -274,10 +275,19 @@ func (ws *wsSession) requestLoop() {
 		ws.objectMu.Unlock()
 	}()
 	defer func() {
+		ws.uploadMu.Lock()
+		ids := make([]client.ID, 0, len(ws.uploads))
 		for id := range ws.uploads {
+			ids = append(ids, id)
+		}
+		ws.uploadMu.Unlock()
+		for _, id := range ids {
 			ws.discardUpload(id)
 		}
 	}()
+	slots := make(chan struct{}, receiveQueueCapacity)
+	var calls sync.WaitGroup
+	defer func() { ws.close(); calls.Wait() }()
 	for {
 		select {
 		case <-ws.done:
@@ -302,21 +312,39 @@ func (ws *wsSession) requestLoop() {
 			}) {
 				continue
 			}
-			body, status := ws.server.dispatchAs(m, ws, p)
-			if status == 0 {
+			run := func() { ws.executeRequest(m, p) }
+			parallel := m.Kind == client.Request && (m.Opcode >= 0x0100 && m.Opcode <= 0x0108 || m.Opcode == client.ObjectAccepted || m.Opcode == client.ObjectSubscribe || m.Opcode == client.BucketStatFS || m.Opcode == client.BucketSync || m.Opcode == client.BucketObjectList)
+			if parallel {
+				select {
+				case slots <- struct{}{}:
+					calls.Add(1)
+					go func() { defer calls.Done(); defer func() { <-slots }(); run() }()
+				default:
+					ws.releaseObjectContext(m.ID)
+					if err := ws.sendMessage(client.Message{Kind: client.Response, Opcode: m.Opcode, ID: m.ID, Body: client.ResponseBody(503, nil, "client request concurrency budget exhausted")}); err != nil {
+						return
+					}
+				}
 				continue
 			}
-			if m.Opcode >= 0x0100 && m.Opcode <= 0x0108 || m.Opcode == client.ObjectSubscribe || m.Opcode == client.ObjectAccepted || m.Opcode == client.BucketObjectLease || m.Opcode == client.BucketMaintenanceEnd || m.Opcode == client.BucketStatFS || m.Opcode == client.BucketSync || m.Opcode == client.BucketMaintenance || m.Opcode == client.BucketScan {
-				ws.releaseObjectContext(m.ID)
-			}
-			if m.Kind == client.Request {
-				b := client.EncodeMessage(client.Message{Kind: client.Response, Opcode: m.Opcode, ID: m.ID, Body: body})
-				select {
-				case ws.responses <- b:
-				case <-ws.done:
-					return
-				}
-			}
+			run()
+		}
+	}
+}
+func (ws *wsSession) executeRequest(m client.Message, p principal) {
+	body, status := ws.server.dispatchAs(m, ws, p)
+	if status == 0 {
+		return
+	}
+	if m.Opcode >= 0x0100 && m.Opcode <= 0x0108 || m.Opcode == client.ObjectSubscribe || m.Opcode == client.ObjectAccepted || m.Opcode == client.BucketObjectLease || m.Opcode == client.BucketMaintenanceEnd || m.Opcode == client.BucketStatFS || m.Opcode == client.BucketSync || m.Opcode == client.BucketMaintenance || m.Opcode == client.BucketScan {
+		ws.releaseObjectContext(m.ID)
+	}
+	if m.Kind == client.Request {
+		b := client.EncodeMessage(client.Message{Kind: client.Response, Opcode: m.Opcode, ID: m.ID, Body: body})
+		select {
+		case ws.responses <- b:
+		case <-ws.done:
+			return
 		}
 	}
 }

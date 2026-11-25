@@ -31,6 +31,11 @@ func (u *serverObjectUpload) close() {
 	}
 }
 func (ws *wsSession) beginObjectUpload(op *objectMutation, p principal) error {
+	ws.uploadMu.Lock()
+	defer ws.uploadMu.Unlock()
+	if err := ws.objectContext(op.message.ID).Err(); err != nil {
+		return err
+	}
 	permission := BucketWrite
 	if op.message.Opcode == 0x0104 {
 		permission = BucketAppend
@@ -56,6 +61,8 @@ func (ws *wsSession) beginObjectUpload(op *objectMutation, p principal) error {
 	return nil
 }
 func (ws *wsSession) discardUpload(id client.ID) {
+	ws.uploadMu.Lock()
+	defer ws.uploadMu.Unlock()
 	if u := ws.uploads[id]; u != nil {
 		ws.stagedBytes -= u.op.length
 		u.close()
@@ -93,7 +100,9 @@ func (ws *wsSession) finishUpload(u *serverObjectUpload, result []byte, status i
 func (ws *wsSession) objectTransfer(m client.Message, p principal) error {
 	d := client.Decoder{B: m.Body}
 	id := d.ID()
+	ws.uploadMu.Lock()
 	u := ws.uploads[id]
+	ws.uploadMu.Unlock()
 	if m.Opcode == 7 {
 		if d.Done() != nil {
 			return fail(400, "invalid CANCEL")

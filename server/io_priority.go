@@ -3,6 +3,7 @@ package server
 
 import (
 	"context"
+	"runtime"
 	"sync/atomic"
 	"time"
 )
@@ -12,11 +13,18 @@ import (
 type ioPriorities struct{ users, rebuilds atomic.Int64 }
 
 func (s *Server) waitForUserIO(ctx context.Context) error {
-	for s.ioPriority.users.Load() > 0 {
+	// Yield at each bounded action, without starving a generation under a
+	// continuous stream of requests. A blocked client lending its priority to
+	// this exact handoff bypasses the extra delay.
+	runtime.Gosched()
+	e, _ := ctx.Value(rangeExecutionKey{}).(*rangeExecution)
+	if s.ioPriority.users.Load() > 0 && (e == nil || e.urgent.Load() == 0) {
+		timer := time.NewTimer(time.Millisecond)
+		defer timer.Stop()
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-time.After(time.Millisecond):
+		case <-timer.C:
 		}
 	}
 	return ctx.Err()

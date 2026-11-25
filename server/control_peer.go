@@ -341,6 +341,20 @@ func (p peerControlParticipants) call(ctx context.Context, node client.ID, opcod
 	}
 	s.peerStatsMu.RUnlock()
 	if peer == nil || peer.ctx.Err() != nil {
+		// A reconnect may already have authenticated its incoming duplex
+		// channel before our independently dialled observation is online.
+		s.wsMu.Lock()
+		var incoming *wsSession
+		for ws := range s.sockets {
+			if ws.authorization != nil && ws.authorization.peerVerified.Load() && !ws.authorization.invalid.Load() && ws.principal.User.ID == node.String() && ws.ctx.Err() == nil {
+				incoming = ws
+				break
+			}
+		}
+		s.wsMu.Unlock()
+		if incoming != nil {
+			return incoming.requestPeer(ctx, opcode, body)
+		}
 		return nil, fail(503, "required control participant is offline")
 	}
 	return peer.request(ctx, opcode, body)

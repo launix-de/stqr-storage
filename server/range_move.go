@@ -12,7 +12,11 @@ import (
 	"github.com/launix-de/stqr-storage/volume"
 )
 
-func (r *rangeManager) move(ctx context.Context, p rangePlan) (retErr error) {
+func (r *rangeManager) move(ctx context.Context, p rangePlan) error {
+	return r.executeMove(ctx, p, false)
+}
+
+func (r *rangeManager) moveSerial(ctx context.Context, p rangePlan) (retErr error) {
 	defer func() {
 		if retErr != nil {
 			cleanup, cancel := context.WithTimeout(r.server.ctx, 3*time.Second)

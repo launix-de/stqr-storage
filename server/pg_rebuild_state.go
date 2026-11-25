@@ -58,12 +58,14 @@ type pgRebuildStateRequest struct {
 	Round  pgRebuildRound
 }
 type pgRebuildRuntime struct {
-	rpcOnce    sync.Once
-	rpcSlots   chan struct{}
-	gates      sync.Map // PG ID -> bounded coordinator gate
-	leaseGates sync.Map // bucket ID -> independent maintenance coordinator gate
-	workersMu  sync.Mutex
-	workers    map[string]pgRebuildWorker
+	rpcOnce      sync.Once
+	rpcSlots     chan struct{}
+	gates        sync.Map // PG ID -> bounded coordinator gate
+	leaseGates   sync.Map // bucket ID -> independent maintenance coordinator gate
+	executionsMu sync.Mutex
+	executions   map[[32]byte]*rangeExecution
+	workersMu    sync.Mutex
+	workers      map[string]pgRebuildWorker
 }
 
 type pgRebuildInfo struct {

@@ -10,7 +10,7 @@ import (
 // Every current primary advances only its own groups toward the already
 // committed desired policy. Source/target proofs remain scoped; global metadata
 // activation follows after every group reports that desired policy version.
-func (r *rangeManager) planPolicyPlacement(description BucketDescription, drainingNode bool, draining map[volume.ID]bool) (rangePlan, bool) {
+func (r *rangeManager) planPolicyPlacement(description BucketDescription, drainingNode bool, draining map[volume.ID]bool, requirePin ...bool) (rangePlan, bool) {
 	desired := description.DesiredPolicy
 	if desired == nil || (description.Policy.StorageStrategy == "ram") != (desired.StorageStrategy == "ram") {
 		return rangePlan{}, false
@@ -34,7 +34,7 @@ func (r *rangeManager) planPolicyPlacement(description BucketDescription, draini
 			continue
 		}
 		volumeDrain := r.rangeOnDraining(before, draining)
-		if entry.PolicyVersion == desired.Version && !drainingNode && !volumeDrain {
+		if entry.PolicyVersion == desired.Version && !drainingNode && !volumeDrain && (len(requirePin) == 0 || !requirePin[0] || entry.Locations[0].Volume != (client.ID{})) {
 			continue
 		}
 		type candidate struct {

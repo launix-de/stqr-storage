@@ -93,6 +93,11 @@ func (r *rangeManager) planReplicaAdd(d BucketDescription) (rangePlan, bool) {
 		if entry.State != 0 || len(entry.Locations) == 0 || len(entry.Locations) >= need || entry.Locations[0].Node != r.node {
 			continue
 		}
+		if len(entry.Locations) == 1 && entry.Locations[0].Volume == (client.ID{}) {
+			pinned := d
+			pinned.DesiredPolicy = &pinned.Policy
+			return r.planPolicyPlacement(pinned, false, nil, true)
+		}
 		before, ok := r.server.routingPatch(bucket, volume.ObjectID(entry.Start))
 		if !ok {
 			continue

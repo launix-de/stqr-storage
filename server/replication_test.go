@@ -196,6 +196,15 @@ func TestDaemonReplicaAddPreservesPrimaryDataAndOriginalReceipts(t *testing.T) {
 	if err = source.node.scopes.move(ctx, plan); err != nil {
 		t.Fatal(err)
 	}
+	if !plan.ReplicaAdd {
+		plan, ok := source.node.scopes.planReplicaAdd(b.Describe())
+		if !ok || !plan.ReplicaAdd {
+			t.Fatal("primary pinned but replica not scheduled")
+		}
+		if err := source.node.scopes.move(ctx, plan); err != nil {
+			t.Fatal(err)
+		}
+	}
 	follower, _ := target.node.Bucket(b.ID())
 	for _, copy := range []*Bucket{b, follower} {
 		data, info, err := copy.Get(ctx, actor, id)

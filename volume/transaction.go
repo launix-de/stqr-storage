@@ -509,6 +509,7 @@ func (t *transaction) commitReserved(useGuaranteed bool, allowance, guaranteedAl
 			t.v.deferred.pages[off] = page
 		}
 		t.v.sb = t.sb
+		t.v.publishIdentity()
 		if accounts != nil {
 			t.v.accounting = accounts
 			t.v.owned = owned
@@ -669,6 +670,7 @@ func (t *transaction) commitReserved(useGuaranteed bool, allowance, guaranteedAl
 		return e
 	}
 	t.v.sb = t.sb
+	t.v.publishIdentity()
 	if accounts != nil {
 		t.v.accounting = accounts
 		t.v.owned = owned

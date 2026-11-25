@@ -459,9 +459,14 @@ func (b *Bucket) mutateUnmetered(ctx context.Context, p principal, id volume.Obj
 	if cowErr != nil {
 		return volume.Result{}, cowErr
 	}
+	var replicaRelease func()
 	if s.replicas != nil {
-		release := s.replicas.lock(volume.Key{Bucket: b.ID(), Object: id})
-		defer release()
+		replicaRelease = s.replicas.lock(volume.Key{Bucket: b.ID(), Object: id})
+		defer func() {
+			if replicaRelease != nil {
+				replicaRelease()
+			}
+		}()
 	}
 	s.lockUserObjectIO()
 	opLocked := true
@@ -555,6 +560,26 @@ func (b *Bucket) mutateUnmetered(ctx context.Context, p principal, id volume.Obj
 			}
 		}()
 	}
+	requestSpace := func(needed uint64, failed volume.ID) (bool, error) {
+		// A helper must not wait on its own range lease, object lock, or
+		// foreground I/O counter while executing the already planned move.
+		if mutationRelease != nil {
+			mutationRelease()
+			mutationRelease = nil
+		}
+		if opLocked {
+			s.unlockUserObjectIO()
+			opLocked = false
+		}
+		if replicaRelease != nil {
+			replicaRelease()
+			replicaRelease = nil
+		}
+		if helped, err := s.scopes.stealSpace(ctx, b.ID(), failed); helped {
+			return true, err
+		}
+		return s.scopes.requestSpace(b.ID(), id, needed, failed), nil
+	}
 	if s.controller == nil {
 		err = bucketLocalPolicy(d.Policy)
 		if d.Policy.Redundancy.Mode == "replication" && (d.Policy.PlacementMode == "everywhere" || d.Policy.Redundancy.Replicas > 1) {
@@ -573,8 +598,17 @@ func (b *Bucket) mutateUnmetered(ctx context.Context, p principal, id volume.Obj
 	key := volume.Key{Bucket: b.ID(), Object: id}
 	v, old, exists, err := b.selectVolume(d, key, opt.RequestID, true)
 	if err != nil {
-		if errors.Is(err, volume.ErrFull) && s.scopes != nil && s.scopes.requestSpace(b.ID(), id, addCapacity(length, 64<<10)) {
-			return volume.Result{}, fail(503, "waiting for range capacity handoff")
+		if errors.Is(err, volume.ErrFull) && s.scopes != nil {
+			failed := volume.ID{}
+			if v != nil {
+				failed = v.Identity().VolumeID
+			}
+			if waiting, helpErr := requestSpace(addCapacity(length, 64<<10), failed); waiting {
+				if helpErr != nil {
+					return volume.Result{}, helpErr
+				}
+				return volume.Result{}, fail(503, "retry after range capacity handoff")
+			}
 		}
 		return volume.Result{}, err
 	}
@@ -908,8 +942,11 @@ func (b *Bucket) mutateUnmetered(ctx context.Context, p principal, id volume.Obj
 		if opcode == 0x0105 || opcode == 0x0106 {
 			needed = 64 << 10
 		}
-		if s.scopes.requestSpace(b.ID(), id, needed, v.Identity().VolumeID) {
-			return result, fail(503, "waiting for range capacity handoff")
+		if waiting, helpErr := requestSpace(needed, v.Identity().VolumeID); waiting {
+			if helpErr != nil {
+				return result, helpErr
+			}
+			return result, fail(503, "retry after range capacity handoff")
 		}
 	}
 	return result, err

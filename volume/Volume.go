@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"sync"
+	"sync/atomic"
 	"syscall"
 )
 
@@ -31,6 +32,7 @@ import (
 // Cluster placement, authentication, quotas across volumes, and UI are outside
 // this package. They may reserve physical capacity and manage the lifecycle.
 type Volume struct {
+	identity          atomic.Pointer[Identity]
 	deferred          *deferredGroup
 	staging           map[uint64][]byte
 	durableGeneration uint64
@@ -201,7 +203,9 @@ func newVolume(dev VolumeIO, s Superblock, o OpenOptions) *Volume {
 	if _, ok := dev.(*meteredIO); !ok {
 		dev = &meteredIO{VolumeIO: dev}
 	}
-	return &Volume{dev: dev, sb: s, durableGeneration: s.Generation, limit: s.Identity.Size, cache: newCache(o.CacheEntries, o.CacheBytes), nodes: newNodeCache(o.CacheEntries, o.CacheBytes), state: Active}
+	v := &Volume{dev: dev, sb: s, durableGeneration: s.Generation, limit: s.Identity.Size, cache: newCache(o.CacheEntries, o.CacheBytes), nodes: newNodeCache(o.CacheEntries, o.CacheBytes), state: Active}
+	v.publishIdentity()
+	return v
 }
 func Open(dev VolumeIO, o OpenOptions) (*Volume, error) {
 	if a, ok := dev.(interface{ Alignment() uint32 }); ok {
@@ -435,8 +439,26 @@ func (v *Volume) SetState(s State) error {
 }
 
 // Bind sets/checks the owning node and cluster IDs, without changing payloads.
-func (v *Volume) Name() string       { v.mu.RLock(); defer v.mu.RUnlock(); return v.name }
-func (v *Volume) Identity() Identity { v.mu.RLock(); defer v.mu.RUnlock(); return v.sb.Identity }
+func (v *Volume) Name() string { v.mu.RLock(); defer v.mu.RUnlock(); return v.name }
+
+// Identity is a committed immutable snapshot. Looking up a candidate volume
+// must not wait behind unrelated payload I/O on that volume. Bind/grow/takeover
+// publish a replacement only after their normal durable transaction succeeds.
+func (v *Volume) Identity() Identity {
+	if identity := v.identity.Load(); identity != nil {
+		return *identity
+	}
+	v.mu.RLock()
+	defer v.mu.RUnlock()
+	return v.sb.Identity // private transaction views need no published snapshot
+}
+func (v *Volume) publishIdentity() {
+	if old := v.identity.Load(); old != nil && *old == v.sb.Identity {
+		return
+	}
+	identity := v.sb.Identity
+	v.identity.Store(&identity)
+}
 func (v *Volume) Header() Superblock { v.mu.RLock(); defer v.mu.RUnlock(); return v.sb }
 func (v *Volume) State() State {
 	v.mu.RLock()

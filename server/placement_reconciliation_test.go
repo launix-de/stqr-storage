@@ -136,7 +136,7 @@ func TestDaemonReplicaPrimariesRotateWithoutPayloadCopies(t *testing.T) {
 	for step := 0; step < 9; step++ {
 		moved := false
 		for _, node := range nodes {
-			p, ok := node.node.scopes.planPrimaryBalance()
+			p, ok := node.node.scopes.planPrimaryBalance(group.String(), node.node.bucketSnapshots())
 			if !ok {
 				continue
 			}
@@ -166,7 +166,7 @@ func TestDaemonReplicaPrimariesRotateWithoutPayloadCopies(t *testing.T) {
 		if counts[node.node.control.ledger.node] != 1 {
 			t.Fatalf("primaries did not rotate: %+v", counts)
 		}
-		if _, ok := node.node.scopes.planPrimaryBalance(); ok {
+		if _, ok := node.node.scopes.planPrimaryBalance(group.String(), node.node.bucketSnapshots()); ok {
 			t.Fatal("role assignment does not converge")
 		}
 	}
