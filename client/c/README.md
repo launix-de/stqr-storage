@@ -178,3 +178,10 @@ request ID, body and any chunked payload, for at most the connection's configure
 interruptible and does not consume the redirect budget. Transport failures with
 an uncertain mutation outcome still return `-EINPROGRESS`; callers must preserve
 the original request ID when reconnecting. Permanent errors are returned directly.
+
+`stqr_object_lease(client, readonly)` acquires the server's exclusive opaque-object
+bucket lease on a fresh dedicated connection. Owner redirects carry the returned
+lease authorization and retain the original owning session. `stqr_close` releases
+it; explicit reconnect returns `-ESTALE` because it cannot safely reacquire a lost
+lease. The kernel block-device adapter uses this API; the server still only sees
+ordinary object operations and does not interpret device metadata.

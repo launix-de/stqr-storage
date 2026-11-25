@@ -19,6 +19,7 @@ static void usage(FILE *out)
           "       mount -t kstqr URI MOUNTPOINT -o bucket=ID,credentials=FILE[,init][,ro]\n"
           "Options: --timeout-ms N; --metadata-cache-bytes N (default 8388608, 0 disables).\n"
           "Overlay: --readonly-bucket LOWER_ID [--whitelist paths].\n"
+          "Block devices: --bd [--device NAME], or -o bd[,device=NAME].\n"
           "Credentials file: username=... and password=... on separate lines, mode 0600.\n"
           "This helper exits after mounting; the kernel maintains the connection.\n",
           out);
@@ -115,10 +116,10 @@ static int resolve(const char *url, char out[512])
 int main(int argc, char **argv)
 {
     const char *uri = NULL, *bucket = NULL, *path = NULL, *target = NULL, *timeout = "30000",
-               *cache_bytes = NULL, *lower = NULL, *whitelist = NULL;
+               *cache_bytes = NULL, *lower = NULL, *whitelist = NULL, *device = NULL;
     char *option_text = NULL, resolved[512];
     int lifetime = -1;
-    int create = 0, readonly = 0, opt, fsfd = -1, cred = -1, mountfd = -1, result = 1;
+    int create = 0, readonly = 0, bd = 0, opt, fsfd = -1, cred = -1, mountfd = -1, result = 1;
     unsigned attrs = 0;
     static const struct option opts[] = {{"uri", required_argument, NULL, 'u'},
                                          {"bucket", required_argument, NULL, 'b'},
@@ -130,6 +131,8 @@ int main(int argc, char **argv)
                                          {"boot-lifetime-fd", required_argument, NULL, 1002},
                                          {"timeout-ms", required_argument, NULL, 't'},
                                          {"metadata-cache-bytes", required_argument, NULL, 'm'},
+                                         {"bd", no_argument, NULL, 1003},
+                                         {"device", required_argument, NULL, 1004},
                                          {"help", no_argument, NULL, 'h'},
                                          {NULL, 0, NULL, 0}};
     while ((opt = getopt_long(argc, argv, "o:h", opts, NULL)) != -1) {
@@ -150,6 +153,12 @@ int main(int argc, char **argv)
             lifetime = (int)fd;
             break;
         }
+        case 1003:
+            bd = 1;
+            break;
+        case 1004:
+            device = optarg;
+            break;
         case 'u':
             uri = optarg;
             break;
@@ -204,6 +213,12 @@ int main(int argc, char **argv)
                 timeout = token + 11;
             else if (!strncmp(token, "metadata_cache_bytes=", 21))
                 cache_bytes = token + 21;
+            else if (!strcmp(token, "bd"))
+                bd = 1;
+            else if (!strncmp(token, "device=", 7))
+                device = token + 7;
+            else if (!strcmp(token, "dev"))
+                attrs &= ~MOUNT_ATTR_NODEV;
             else if (!strcmp(token, "init"))
                 create = 1;
             else if (!strcmp(token, "ro"))
@@ -229,7 +244,9 @@ int main(int argc, char **argv)
         target = argv[optind];
     if(lower&&!bucket){bucket=lower;lower=NULL;readonly=1;}
     if (!uri || !bucket || !path || !target || strlen(bucket) != 32 || (create && readonly) ||
-        (lower && strlen(lower) != 32) || (whitelist && !lower)) {
+        (lower && strlen(lower) != 32) || (whitelist && !lower) ||
+        (device && (!bd || !*device)) ||
+        (bd && (create || lower || whitelist || (attrs & MOUNT_ATTR_NODEV)))) {
         usage(stderr);
         goto out;
     }
@@ -257,6 +274,8 @@ int main(int argc, char **argv)
         configure(fsfd, FSCONFIG_SET_STRING, "bucket", bucket, 0) ||
         configure(fsfd, FSCONFIG_SET_STRING, "timeout_ms", timeout, 0) ||
         configure(fsfd, FSCONFIG_SET_FD, "credentials", NULL, cred) ||
+        (bd && configure(fsfd, FSCONFIG_SET_FLAG, "bd", NULL, 0)) ||
+        (device && configure(fsfd, FSCONFIG_SET_STRING, "device", device, 0)) ||
         (create && configure(fsfd, FSCONFIG_SET_FLAG, "init", NULL, 0)) ||
         (readonly && configure(fsfd, FSCONFIG_SET_FLAG, "readonly", NULL, 0)) ||
         (lower && configure(fsfd, FSCONFIG_SET_STRING, "readonly_bucket", lower, 0)) ||

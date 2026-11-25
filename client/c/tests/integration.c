@@ -101,6 +101,18 @@ int main(void) {
         else { CHECK(err==-EHOSTUNREACH && stqr_status(c)==503); }
         free(payload);stqr_close(c); puts("transient retry test passed"); return 0;
     }
+    if (mode && !strcmp(mode,"routing-lease")) {
+        CHECK(!stqr_object_lease(c,0));
+        CHECK(stqr_object_lease(c,0)==-EBUSY);
+        for (unsigned step=0;step<8;step++) {
+            memset(&id,0,sizeof(id));id.bytes[0]=(step&1)?0x81:1;
+            o=fresh();o.accepted=1;CHECK(!stqr_put(c,id,"leased",6,&o,&info));
+            CHECK(!stqr_get(c,id,&data,&n,&info));
+            CHECK(n==6 && !memcmp(data,"leased",6));stqr_free(data);
+        }
+        CHECK(!stqr_sync(c));CHECK(stqr_reconnect(c)==-ESTALE);
+        stqr_close(c);puts("cluster lease owner redirects passed");return 0;
+    }
     if (mode && !strcmp(mode,"routing")) {
         for (unsigned step=0;step<8;step++) {
             memset(&id,0,sizeof(id)); id.bytes[0]=(step&1)?0x81:1;

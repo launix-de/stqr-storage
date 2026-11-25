@@ -373,3 +373,110 @@ node admission and reruns authorization, placement and quota checks before using
 the untouched incoming payload.
 
 Kernel VM regressions set `panic_on_warn=1` and reject every `WARNING:`, including Linux 7 diagnostics of the form `WARNING: kernel/workqueue.c`. A workqueue warning is a failed test even if the VM later reaches its success marker.
+
+## Native block-device buckets (`-o bd`)
+
+The same module can expose existing named STQR block devices as **real Linux
+block devices**. It reads the existing `STNBD001` descriptors and systematically
+addressed 1-MiB stripes used by [QEMU/NBD](../qemu-plugin-nbd/README.md).
+No format conversion, segment list, server-side filesystem/block implementation,
+NBD exporter or resident userspace helper is involved.
+
+Create the bucket, grants and named devices using the dashboard or `stqr-nbd`
+first. `bd` exports existing devices; it does not initialize or format them.
+A bucket containing an STFS root is rejected. Do not combine `bd` with `init`,
+native filesystem overlay options, `whitelist` or `nodev`.
+
+```sh
+sudo mkdir -p /qstr/bucket1 /srv/data
+sudo mount -t kstqr http://127.0.0.1:7419 /qstr/bucket1 \
+  -o bd,bucket=BUCKET_ID,credentials=/etc/stqr/disks.credentials
+```
+
+A bucket containing devices named `system` and `data` then exposes
+`/qstr/bucket1/system` and `/qstr/bucket1/data`. The directory and device nodes
+initially allow root only. The disk also registers with the Linux block layer,
+including sysfs, dynamic `/dev/kstqr*` nodes and partition discovery. Use the
+stable exported names in configuration; dynamically assigned kernel disk numbers
+are not persistent identities. The inventory is fixed for the mount lifetime;
+remount after adding, removing or resizing a device. At most 256 devices are
+exported by one mount. Automatic exports require device names that are valid
+single filenames; use `device=NAME` to select a name containing a slash or a
+reserved directory name and expose it under the safe alias `bd`.
+
+To select one existing device and expose it as a single node named `bd`:
+
+```sh
+sudo mount -t kstqr http://127.0.0.1:7419 /qstr/bucket1 \
+  -o bd,device=system,bucket=BUCKET_ID,credentials=/etc/stqr/disks.credentials
+sudo mount -t ext4 /qstr/bucket1/bd /srv/data
+```
+
+The last command assumes that the selected **whole device already contains an
+ext4 filesystem**. A partitioned disk needs the appropriate discovered partition
+instead. Mounting/exporting does not create an ext4 filesystem. For an explicitly
+readonly export add `ro`; the block layer also enforces readonly access.
+
+For a systemd-based `/etc/fstab`, make the dependency explicit rather than relying
+on the order of lines:
+
+```fstab
+http://127.0.0.1:7419 /qstr/bucket1 kstqr _netdev,bd,device=system,bucket=BUCKET_ID,credentials=/etc/stqr/disks.credentials 0 0
+/qstr/bucket1/bd /srv/data ext4 _netdev,x-systemd.requires-mounts-for=/qstr/bucket1 0 0
+```
+
+The second mount requires the export mount and starts after it; stopping follows
+the reverse ordering. See [systemd.mount](https://www.freedesktop.org/software/systemd/man/latest/systemd.mount.html).
+The example disables automatic boot-time fsck: schedule offline filesystem checks
+only after exporting the device and before mounting its contents. If the STQR
+server runs on this host, add `x-systemd.requires=YOUR-STQR-SERVICE.service` to the
+first line, using the actual local service unit name. Load `kstqr` through the
+normal module installation/modules-load configuration and keep its binary matched
+to the running kernel.
+
+### Sectors, I/O and persistence
+
+- **512-byte logical sectors** preserve compatibility with existing devices,
+  partition tables and small writes. **4-KiB physical/minimum-I/O hints** encourage
+  normal filesystem alignment. These hints do not expand a 512-byte write.
+- **1 MiB is the stripe size and optimal-I/O hint**, not the logical sector size.
+  A request is split at stripe boundaries. Partial reads/writes use ranged object
+  operations; a complete stripe write uses PUT. No read-modify-write of a full
+  stripe is required for a small write.
+- Discard alignment follows 1-MiB allocation units, so Linux splits long trim
+  requests at stripe boundaries. Small trims remain supported and zero bytes.
+- Missing objects and short stripe tails read as zeros. A full-stripe discard
+  deletes the object; boundary discards zero only stored bytes. A WRITE grant
+  without DELETE permission falls back to an empty payload for a full stripe.
+- Writes use the existing accepted-write protocol when supported. PREFLUSH, FLUSH
+  and FUA confirm persistence across all owner sessions. Requests are processed
+  on one ordered queue per exported bucket, with bounded per-request payload
+  buffers and no additional stripe-content cache. Linux and the mounted filesystem
+  retain their usual caching.
+
+The mount acquires the same exclusive opaque-object lease as the NBD exporter,
+including for readonly exports. A second exporter/client is rejected while it is
+held. A routing redirect carries its authorization to the other owner; the
+original lease-owning session is retained. A lost lease/uncertain transport error
+fails I/O rather than silently reacquiring ownership. Unmount the filesystem,
+close device users and remount the export after restoring connectivity.
+
+Unmount the contents before the export:
+
+```sh
+sudo umount /srv/data
+sudo umount /qstr/bucket1
+```
+
+Linux block users do not necessarily retain the pathname mount. If the export
+namespace is detached first, an already-open device pins the backend superblock,
+connection and lease until its last close. Final disk deletion runs outside the
+block open mutex. This keeps mounted filesystems alive and avoids releasing the
+lease while they can still write; it does not permit another exporter to open the
+same bucket early. Lazy namespace detachment is not an I/O cancellation mechanism.
+
+The isolated `TestKSTQRBlockVirtualMachine` verifies Go/NBD-format interoperability,
+512-byte and cross-stripe I/O, sparse tails, full and partial discard, flush,
+lease exclusion, readonly selection, actual filesystem mount/remount, namespace
+detachment while the filesystem is active, and clean module unload. The test does
+not load the module into the host kernel or touch existing buckets.
