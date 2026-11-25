@@ -4,12 +4,14 @@ package server
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"github.com/launix-de/stqr-storage/volume"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -54,7 +56,7 @@ func TestCClient(t *testing.T) {
 		admin := s.cfg.Auth.BootstrapAdmin
 		run(t, host.URL, admin.Username, admin.Password, client.ID(b.ID()).String(), "")
 	})
-	for _, mode := range []string{"transient", "unavailable"} {
+	for _, mode := range []string{"transient", "unavailable", "transient-stream"} {
 		t.Run(mode, func(t *testing.T) {
 			upgrade := websocket.Upgrader{Subprotocols: []string{"stqr.v2"}}
 			var requests int
@@ -92,6 +94,49 @@ func TestCClient(t *testing.T) {
 					if err != nil {
 						return
 					}
+					// Consume and verify the complete streamed body before
+					// rejecting it. A retry must replay the exact payload and ID.
+					if mode == "transient-stream" {
+						hash := sha256.New()
+						var offset, part uint64
+						for {
+							_, raw, err = c.ReadMessage()
+							if err != nil {
+								t.Error(err)
+								return
+							}
+							frame, err := client.DecodeMessage(raw)
+							if err != nil {
+								t.Error(err)
+								return
+							}
+							d := client.Decoder{B: frame.Body}
+							if d.ID() != m.ID {
+								t.Error("upload retry changed parent ID")
+								return
+							}
+							if frame.Opcode == 0x0005 {
+								sequence, at, data := d.U64(), d.U64(), d.Blob()
+								if d.Done() != nil || sequence != part || at != offset || len(data) == 0 {
+									t.Error("invalid replayed chunk")
+									return
+								}
+								hash.Write(data)
+								offset += uint64(len(data))
+								part++
+							} else if frame.Opcode == 0x0006 {
+								size, digest := d.U64(), d.Take(32)
+								if d.Done() != nil || size != offset || size != (2<<20)+17 || !bytes.Equal(digest, hash.Sum(nil)) {
+									t.Error("upload retry lost or changed payload")
+									return
+								}
+								break
+							} else {
+								t.Error("unexpected upload frame", frame.Opcode)
+								return
+							}
+						}
+					}
 					if requests == 0 {
 						first = m
 					} else if m.ID != first.ID || m.Opcode != first.Opcode || !bytes.Equal(m.Body, first.Body) {
@@ -101,10 +146,14 @@ func TestCClient(t *testing.T) {
 					requests++
 					status := 503
 					var result []byte
-					if mode == "transient" && requests == 4 {
+					if strings.HasPrefix(mode, "transient") && requests == 4 {
 						status = 200
 						e := client.Encoder{}
-						e.U64(5)
+						length := uint64(5)
+						if mode == "transient-stream" {
+							length = (2 << 20) + 17
+						}
+						e.U64(length)
 						e.Bool(false)
 						e.U32(0)
 						e.ID(client.ID{})
@@ -121,7 +170,7 @@ func TestCClient(t *testing.T) {
 			start := time.Now()
 			run(t, host.URL, "user", "password", client.ID{1}.String(), mode)
 			<-done
-			if mode == "transient" && requests != 4 {
+			if strings.HasPrefix(mode, "transient") && requests != 4 {
 				t.Fatalf("requests=%d", requests)
 			}
 			if mode == "unavailable" && (requests < 2 || time.Since(start) < 3*time.Second || time.Since(start) > 6*time.Second) {
@@ -162,7 +211,7 @@ func TestCClient(t *testing.T) {
 		}
 		run(t, source.node.cfg.Node.Advertise, admin.Username, admin.Password, client.ID(bucket.ID()).String(), "routing")
 	})
-	for _, mode := range []string{"disconnect", "digest", "malformed", "wrong-id", "varint", "text", "subscription-digest"} {
+	for _, mode := range []string{"disconnect", "disconnect-stream", "digest", "malformed", "wrong-id", "varint", "text", "subscription-digest"} {
 		t.Run(mode, func(t *testing.T) {
 			upgrade := websocket.Upgrader{Subprotocols: []string{"stqr.v2"}}
 			host := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
