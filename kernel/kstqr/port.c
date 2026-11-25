@@ -9,6 +9,7 @@
 #include <linux/net.h>
 #include <linux/random.h>
 #include <linux/sched/signal.h>
+#include <linux/sched/mm.h>
 #include <linux/slab.h>
 #include <linux/vmalloc.h>
 #include <linux/wait.h>
@@ -115,8 +116,11 @@ struct sq_connect_work {
 static void sq_connect_worker(struct work_struct *work)
 {
 	struct sq_connect_work *job = container_of(work, struct sq_connect_work, work);
+	unsigned nofs = memalloc_nofs_save();
 
+	/* Do not re-enter filesystem reclaim while the caller holds RPC locks. */
 	job->result = sq_connect_direct(job->out, job->host, job->port, job->ms);
+	memalloc_nofs_restore(nofs);
 	complete(&job->done);
 }
 int sq_connect(struct stqr_socket **out, const char *host, unsigned port, unsigned ms)
