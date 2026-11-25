@@ -2,6 +2,7 @@
 /* Included after core.c: reuse its checked canonical codec, not another ABI. */
 #include "kstqr.h"
 #include <linux/ktime.h>
+#include <linux/completion.h>
 #include <linux/overflow.h>
 #include <linux/sort.h>
 #include <linux/xattr.h>
@@ -2017,27 +2018,63 @@ static int ks_plain_setxattr(struct ks_fs *f, stqr_object_id id, const char *nam
 	return -EAGAIN;
 }
 
+struct ks_fence_work {
+ struct work_struct work;
+ struct completion done;
+ stqr_fence *fence;
+ unsigned target;
+ int error;
+};
+static void ks_fence_worker(struct work_struct *work)
+{
+ struct ks_fence_work *job = container_of(work, struct ks_fence_work, work);
+ unsigned saved = memalloc_nofs_save();
+ job->error = stqr_fence_wait_one(job->fence, job->target);
+ memalloc_nofs_restore(saved);
+ complete(&job->done);
+}
 int ks_checkpoint(struct ks_fs *f)
 {
-	int err = 0;
-	mutex_lock(&f->sync_lock);
-	for (unsigned n = 0; n < KS_RPC_SLOTS && !err; n++) {
-		mutex_lock(&f->rpc[n].lock);
-		if (f->rpc[n].client) {
-			err = stqr_sync(f->rpc[n].client);
-			if (err == -ENOTCONN || err == -ECONNRESET || err == -EPIPE ||
-			    err == -ETIMEDOUT) {
-				err = stqr_reconnect(f->rpc[n].client);
-				if (!err)
-					err = stqr_sync(f->rpc[n].client);
-			}
-		}
-		mutex_unlock(&f->rpc[n].lock);
-	}
-	if (!err)
-		err = ks_cache_sync(f);
-	mutex_unlock(&f->sync_lock);
-	return err;
+ struct ks_fence_work *jobs = NULL;
+ unsigned count = 0;
+ int err;
+ mutex_lock(&f->sync_lock);
+ err = stqr_fence_reset(&f->fence);
+ // Capture local framing state only; merge marks from all slots and the
+ // subscription reader so each owner receives one barrier, not five.
+ for (unsigned n = 0; n < KS_RPC_SLOTS && !err; n++) {
+  mutex_lock(&f->rpc[n].lock);
+  if (f->rpc[n].client) err = stqr_fence_add(f->rpc[n].client, f->fence);
+  mutex_unlock(&f->rpc[n].lock);
+ }
+ if (!err) err = ks_cache_fence_add(f, f->fence);
+ if (err) goto done;
+ count = stqr_fence_count(f->fence);
+ if (!count) goto done;
+ jobs = kcalloc(count, sizeof(*jobs), GFP_NOFS);
+ if (!jobs) { err = -ENOMEM; goto done; }
+ for (unsigned n = 0; n < count; n++) {
+  jobs[n].fence = f->fence;
+  jobs[n].target = n;
+  INIT_WORK(&jobs[n].work, ks_fence_worker);
+  init_completion(&jobs[n].done);
+  queue_work(system_unbound_wq, &jobs[n].work);
+ }
+ for (unsigned n = 0; n < count; n++) {
+  wait_for_completion(&jobs[n].done);
+  flush_work(&jobs[n].work);
+  if (!err) err = jobs[n].error;
+ }
+ for (unsigned n = 0; n < KS_RPC_SLOTS; n++) {
+  mutex_lock(&f->rpc[n].lock);
+  stqr_fence_apply(f->rpc[n].client, f->fence);
+  mutex_unlock(&f->rpc[n].lock);
+ }
+ ks_cache_fence_apply(f, f->fence);
+done:
+ kfree(jobs);
+ mutex_unlock(&f->sync_lock);
+ return err;
 }
 
 int ks_setattr(struct ks_fs *f, stqr_object_id id, struct iattr *a)

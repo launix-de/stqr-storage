@@ -20,11 +20,15 @@ import (
 //     use its RWMutex: readers may run concurrently; mutation, GC, and close are
 //     exclusive. This is also the contract for parallel server/WebSocket calls.
 //     Open returns a handle retaining that lock across multiple operations until
-//     Handle.Close. Use defer Close; CopyTo does not release the handle. Never
+//     Handle.Close, except that pinned checkpoints admit readers during I/O.
+//     Use defer Close; CopyTo does not release the handle. Never
 //     reenter Volume methods while holding a handle. Neither type may be copied.
 //   - Payloads are accessed in bounded blocks, never through a mandatory mmap.
 //     Metadata uses a bounded RAM cache and page-sized B+-trees. Neither opening nor looking up many objects requires a full RAM
 //     directory. In-flight operations can temporarily hold one object's metadata.
+//   - Checkpoint I/O runs against a pinned, immutable accepted-write buffer
+//     outside the metadata lock. Readers may continue; subsequent in-place
+//     writers wait for the WAL space to be reusable.
 //   - A successful disk mutation has synced payload and redo WAL before updating affected pages. RAM has the same atomicity but no restart durability.
 //   - After an ambiguous I/O/flush failure the instance is fenced until reopened.
 //     A retry with the same nonzero RequestID recovers its original result.
@@ -39,6 +43,7 @@ type Volume struct {
 
 	mu               sync.RWMutex
 	preparing        bool
+	checkpointing    bool
 	prepareCond      *sync.Cond
 	accountMu        sync.Mutex
 	accounting       map[ID]bucketAllocation
@@ -267,6 +272,12 @@ func (v *Volume) publish(s Superblock) error {
 	return t.commit(false)
 }
 func (v *Volume) check(write bool) error {
+	// A checkpoint pins the visible write buffer, not the metadata mutex.
+	// Writers wait without excluding readers until the in-place WAL is safe
+	// to reuse. No second object revision or alternate object ID is created.
+	for write && v.checkpointing {
+		v.prepareCond.Wait()
+	}
 	if write && v.preparing {
 		return ErrBusy
 	}
@@ -304,8 +315,10 @@ func (v *Volume) rawWrite(b []byte, off uint64) error {
 	return nil
 }
 func (v *Volume) sync() error {
-	if err := v.flushDeferred(); err != nil {
-		return err
+	if v.deferred != nil {
+		// The checkpoint already confirms the final header. A fifth Sync
+		// adds no durability and would hold the metadata lock again.
+		return v.flushDeferred()
 	}
 	return v.rawSync()
 }
@@ -343,7 +356,7 @@ func (v *Volume) Sync() error {
 	if e := v.check(false); e != nil {
 		return e
 	}
-	return v.sync()
+	return v.syncVisible()
 }
 func (v *Volume) Close() error {
 	v.mu.Lock()

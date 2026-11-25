@@ -96,6 +96,24 @@ typedef struct { stqr_id boot; stqr_u64 sequence; } stqr_commit_mark;
 int stqr_pending_mark(stqr_client *, stqr_commit_mark *);
 int stqr_sync_through(stqr_client *, const stqr_commit_mark *, stqr_commit_mark *);
 int stqr_sync(stqr_client *);
+/* Split barrier: capture/apply while serializing the original client; wait uses
+ * independent control sockets and may run concurrently with that client's I/O.
+ * A fence may be reused after wait/apply; do not capture/close while it waits.
+ * Successful confirmations never erase later, still-unconfirmed writes.
+ * This confirms storage writes; it does not create versions or transactions. */
+typedef struct stqr_fence stqr_fence;
+int stqr_fence_capture(stqr_client *, stqr_fence **);
+/* Combine captures from multiple serialized clients. Same-owner marks are
+ * merged to their maximum. After capture, distinct targets may wait in parallel.
+ * Only call apply/close/reset after every target has completed. */
+int stqr_fence_reset(stqr_fence **);
+int stqr_fence_add(stqr_client *, stqr_fence *);
+unsigned stqr_fence_count(const stqr_fence *);
+int stqr_fence_wait_one(stqr_fence *, unsigned target);
+int stqr_fence_wait(stqr_fence *);
+void stqr_fence_apply(stqr_client *, const stqr_fence *);
+void stqr_fence_close(stqr_fence *);
+
 /* Propagate a real successful SYNC response across connections to this bucket. */
 void stqr_note_durable(stqr_client *, const stqr_commit_mark *);
 /* Subscriptions use the same wire protocol as the Go SDK. Calls, polling and

@@ -7,6 +7,7 @@
 #include <linux/in6.h>
 #include <linux/inet.h>
 #include <linux/net.h>
+#include <linux/tcp.h>
 #include <linux/random.h>
 #include <linux/sched/signal.h>
 #include <linux/sched/mm.h>
@@ -88,6 +89,8 @@ static int sq_connect_direct(struct stqr_socket **out, const char *host, unsigne
 	s->sock->sk->sk_rcvtimeo = msecs_to_jiffies(ms);
 	s->sock->sk->sk_sndtimeo = msecs_to_jiffies(ms);
 	sk_set_memalloc(s->sock->sk);
+	/* Push ACKs and the next small request independently of delayed ACKs. */
+	tcp_sock_set_nodelay(s->sock->sk);
 	err = kernel_connect(s->sock, (struct sockaddr_unsized *)&address, len, 0);
 	if (err) {
 		sock_release(s->sock);

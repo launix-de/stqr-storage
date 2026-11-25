@@ -344,3 +344,29 @@ recreated upper before kernel use. See [the shared contract](filesystem-posix.md
 Kernel transport transfers run in NOFS workers, independent of the task issuing filesystem I/O. Nonfatal process signals (including SIGCHLD and restartable timers) do not break partial shared RPC frames or invalidate other tasks' sessions. Socket timeouts still bound stalled transfers; fatal cancellation is observed between dispatches, and dispatched buffers remain owned until the worker has returned. The VM regression suite exercises repeated reads, writes and fsync under a 500-microsecond restartable timer.
 
 Overlay eviction never resolves metadata over the network from the background invalidation worker. A missing cached overlay snapshot leaves the inode invalid until foreground access refreshes it. mmap faults refresh that state before the kernel checks EOF, and fault-around defers while invalidation is pending. A two-mount VM regression uses a 2-KiB cache with 48 files, checks that idle cache/RPC counters stop growing, then truncates an evicted mapped inode through the second mount and verifies SIGBUS.
+
+### Read-ahead and storage fences
+
+Readahead queues bounded windows up to 1 MiB on a per-mount background workqueue.
+Only running workers allocate payload buffers; queued work retains locked folios.
+Unmount drains this queue before closing caches or RPC sessions. `mountstats`
+reports `read_windows`, successfully read `read_bytes`, `read_ns` and
+`read_queue_ns`; speculative errors fall back to ordinary page reads.
+
+Fsync captures preceding accepted-write marks under each RPC slot's framing lock
+and the subscription reader's wire lock. It merges marks for the same owner and
+bucket, then waits on independent, cached control sessions with those data locks
+released. Different owners confirm in parallel. Applying the results confirms
+only the returned durable prefixes; later writes and other buckets remain
+unconfirmed. The mount checkpoint mutex serializes competing fsync calls, not
+ordinary object requests. Whole WebSocket frames and TCP_NODELAY keep small
+notification ACKs from delaying the next request.
+
+Volume checkpoints pin the existing accepted-write buffer while physical WAL
+writes and flushes run outside the metadata RWMutex. Readers continue to use
+those same published bytes. In-place writers wait until that WAL space is safe
+to reuse. This does not create alternate object IDs, object revisions, MVCC or
+user transactions; the on-disk encoding and required persistence ordering are
+unchanged. The server waits for volume-switch and buffer-pressure fences outside
+node admission and reruns authorization, placement and quota checks before using
+the untouched incoming payload.

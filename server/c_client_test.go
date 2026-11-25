@@ -12,6 +12,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -29,7 +31,7 @@ func TestCClient(t *testing.T) {
 		t.Fatal(err)
 	}
 	binary := filepath.Join(t.TempDir(), "c-integration")
-	args := []string{"-std=c11", "-Wall", "-Wextra", "-Werror", "-g", "-O1", "-I" + filepath.Join(root, "include"), "-I" + filepath.Join(root, "src"), filepath.Join(root, "src/core.c"), filepath.Join(root, "src/posix.c"), filepath.Join(root, "tests/integration.c"), "-lcrypto", "-o", binary}
+	args := []string{"-std=c11", "-Wall", "-Wextra", "-Werror", "-g", "-O1", "-I" + filepath.Join(root, "include"), "-I" + filepath.Join(root, "src"), filepath.Join(root, "src/core.c"), filepath.Join(root, "src/posix.c"), filepath.Join(root, "tests/integration.c"), "-lcrypto", "-pthread", "-o", binary}
 	if os.Getenv("STQR_C_SANITIZE") == "1" {
 		args = append(args, "-fsanitize=address,undefined", "-fno-omit-frame-pointer")
 	}
@@ -55,6 +57,108 @@ func TestCClient(t *testing.T) {
 		t.Cleanup(host.Close)
 		admin := s.cfg.Auth.BootstrapAdmin
 		run(t, host.URL, admin.Username, admin.Password, client.ID(b.ID()).String(), "")
+	})
+	t.Run("independent-fence", func(t *testing.T) {
+		upgrade := websocket.Upgrader{Subprotocols: []string{"stqr.v2"}}
+		syncStarted, statSeen := make(chan struct{}), make(chan struct{})
+		var syncOnce, statOnce sync.Once
+		var sequence atomic.Uint64
+		var connections atomic.Int32
+		boot := client.ID{8}
+		host := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			c, err := upgrade.Upgrade(w, r, nil)
+			if err != nil {
+				return
+			}
+			defer c.Close()
+			connections.Add(1)
+			for {
+				_, raw, err := c.ReadMessage()
+				if err != nil {
+					return
+				}
+				m, err := client.DecodeMessage(raw)
+				if err != nil {
+					t.Error(err)
+					return
+				}
+				result := client.Encoder{}
+				var mark *client.CommitMark
+				switch m.Opcode {
+				case client.Hello:
+					result.U16(2)
+					result.U64(client.CapabilityDurability)
+					result.ID(client.ID{})
+					result.ID(client.ID{})
+					result.U64(0)
+					result.U64(0)
+				case client.ObjectAccepted:
+					result.U64(5)
+					result.Bool(false)
+					result.U32(0)
+					result.ID(client.ID{})
+					result.U8(0)
+					result.U16(5)
+					value := client.CommitMark{Boot: boot, Sequence: sequence.Add(1)}
+					mark = &value
+				case 0x0107:
+					select {
+					case <-syncStarted:
+					case <-time.After(3 * time.Second):
+						t.Error("no independent fence connection")
+						return
+					}
+					statOnce.Do(func() { close(statSeen) })
+					result.U64(5)
+					result.Bool(false)
+					result.U32(0)
+					result.ID(client.ID{})
+					result.U8(0)
+					result.U16(5)
+				case client.BucketSync:
+					d := client.Decoder{B: m.Body}
+					d.ID()
+					requested := client.CommitMark{Boot: d.ID(), Sequence: d.U64()}
+					if d.Done() != nil || requested.Boot != boot || requested.Sequence == 0 {
+						t.Error("invalid fence target")
+						return
+					}
+					syncOnce.Do(func() { close(syncStarted) })
+					select {
+					case <-statSeen:
+					case <-time.After(3 * time.Second):
+						t.Error("fence blocked ordinary object traffic")
+						return
+					}
+					// Returning exactly the requested prefix tests that applying an older
+					// fence preserves newer accepted writes on the original session.
+					result.B = requested.MarshalBinary()
+				default:
+					t.Errorf("unexpected opcode %x", m.Opcode)
+					return
+				}
+				body := client.ResponseBody(200, result.B, "")
+				if mark != nil {
+					e := client.Encoder{}
+					e.V(200)
+					h := client.Encoder{}
+					h.V(1)
+					h.V(client.DurabilityHeader)
+					h.Blob(mark.MarshalBinary())
+					e.Blob(h.B)
+					e.B = append(e.B, result.B...)
+					body = e.B
+				}
+				if err = c.WriteMessage(websocket.BinaryMessage, client.EncodeMessage(client.Message{Kind: client.Response, Opcode: m.Opcode, ID: m.ID, Body: body})); err != nil {
+					return
+				}
+			}
+		}))
+		defer host.Close()
+		run(t, host.URL, "fixture", "fixture-password", client.ID{1}.String(), "fence")
+		if got := connections.Load(); got != 5 {
+			t.Fatalf("fences reauthenticated instead of reusing the control session: %d connections", got)
+		}
 	})
 	for _, mode := range []string{"transient", "unavailable", "transient-stream"} {
 		t.Run(mode, func(t *testing.T) {

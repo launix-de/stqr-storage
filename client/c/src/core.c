@@ -1061,3 +1061,125 @@ void stqr_note_durable(stqr_client *c,const stqr_commit_mark *mark) {
         }
     load_channel(c,original);
 }
+
+/* A captured fence owns separate, bounded control sessions. Waiting never uses
+ * the original client's socket or mutable owner state, so object I/O and update
+ * delivery may continue. Capture/apply still follow that client's normal lock. */
+struct sq_fence_entry {
+    stqr_client *client;
+    stqr_commit_mark target, durable;
+    int active, confirmed;
+};
+struct stqr_fence {
+ struct sq_fence_entry entries[SQ_CHANNEL_LIMIT];
+ unsigned count, targets, active[SQ_CHANNEL_LIMIT];
+};
+static int fence_capture_owner(stqr_fence *f, const stqr_client *source,
+                               const char *host, const char *authority, unsigned port,
+                               stqr_commit_mark target, int lost) {
+    struct sq_fence_entry *e = NULL;
+    unsigned i;
+    if (lost) return -ESTALE;
+    if (!target.sequence) return 0;
+    for (i=0;i<f->count;i++)
+        if (!strcmp(f->entries[i].client->authority,authority) &&
+            !memcmp(f->entries[i].client->bucket.bytes,source->bucket.bytes,16) &&
+            f->entries[i].client->authorization_len==source->authorization_len &&
+            !memcmp(f->entries[i].client->authorization,source->authorization,source->authorization_len)) {
+            e=&f->entries[i]; break;
+        }
+    if (!e) {
+        if (f->count<SQ_CHANNEL_LIMIT) e=&f->entries[f->count++];
+        else {
+            for (i=0;i<f->count;i++) if (!f->entries[i].active) { e=&f->entries[i]; break; }
+            if (!e) return -ENOSPC;
+            stqr_close(e->client); memset(e,0,sizeof(*e));
+        }
+        e->client=sq_alloc(sizeof(*e->client));
+        if (!e->client) { /* Keep every retained cache entry well formed. */
+            unsigned index=(unsigned)(e-f->entries);
+            memmove(e,e+1,(f->count-index-1)*sizeof(*e)); f->count--; return -ENOMEM;
+        }
+        memcpy(e->client->host,host,sizeof(e->client->host));
+        memcpy(e->client->authority,authority,sizeof(e->client->authority));
+        e->client->port=port; e->client->timeout=source->timeout;
+        e->client->bucket=source->bucket;
+        e->client->authorization=sq_alloc(source->authorization_len+1);
+        if (!e->client->authorization) {
+            unsigned index=(unsigned)(e-f->entries); stqr_close(e->client);
+            memmove(e,e+1,(f->count-index-1)*sizeof(*e)); f->count--; return -ENOMEM;
+        }
+        memcpy(e->client->authorization,source->authorization,source->authorization_len);
+        e->client->authorization_len=source->authorization_len;
+    }
+    if (e->active) {
+        if (memcmp(e->target.boot.bytes,target.boot.bytes,16)) return -ESTALE;
+        if (e->target.sequence>=target.sequence) return 0;
+    } else f->active[f->targets++]=(unsigned)(e-f->entries);
+    e->target=target; e->active=1; e->confirmed=0;
+    memset(&e->durable,0,sizeof(e->durable));
+    return 0;
+}
+int stqr_fence_reset(stqr_fence **out) {
+    unsigned i; stqr_fence *f;
+    if (!out) return -EINVAL;
+    if (!*out) { *out=sq_alloc(sizeof(**out)); if (!*out) return -ENOMEM; }
+    f=*out; f->targets=0;
+    for (i=0;i<f->count;i++) { f->entries[i].active=0; f->entries[i].confirmed=0; }
+    return 0;
+}
+int stqr_fence_add(stqr_client *c, stqr_fence *f) {
+    struct sq_channel *s; int err=0;
+    if (!c || !f) return -EINVAL;
+    if (!c->channels)
+        return fence_capture_owner(f,c,c->host,c->authority,c->port,c->pending_mark,c->durability_lost);
+    save_channel(c);
+    for (s=c->channels;s && !err;s=s->next)
+        err=fence_capture_owner(f,c,s->host,s->authority,s->port,s->pending,s->lost);
+    return err;
+}
+int stqr_fence_capture(stqr_client *c, stqr_fence **out) {
+    int err;
+    if (!c || !out) return -EINVAL;
+    err=stqr_fence_reset(out);
+    return err?err:stqr_fence_add(c,*out);
+}
+unsigned stqr_fence_count(const stqr_fence *f) { return f?f->targets:0; }
+int stqr_fence_wait_one(stqr_fence *f, unsigned target) {
+    struct sq_fence_entry *e; int err;
+    if (!f || target>=f->targets) return -EINVAL;
+    e=&f->entries[f->active[target]];
+    if (e->confirmed) return 0;
+    err=e->client->socket?0:stqr_reconnect(e->client);
+    if (!err) err=stqr_sync_through(e->client,&e->target,&e->durable);
+    /* A barrier is idempotent, even after an unknown transport outcome. */
+    if (err==-ENOTCONN || err==-ECONNRESET || err==-EPIPE || err==-ETIMEDOUT) {
+        err=stqr_reconnect(e->client);
+        if (!err) err=stqr_sync_through(e->client,&e->target,&e->durable);
+    }
+    e->confirmed=!err;
+    return err;
+}
+int stqr_fence_wait(stqr_fence *f) {
+    unsigned i; int first=0;
+    if (!f) return 0;
+    for (i=0;i<f->targets;i++) {
+        int err=stqr_fence_wait_one(f,i);
+        if (!first) first=err;
+    }
+    return first;
+}
+void stqr_fence_apply(stqr_client *c, const stqr_fence *f) {
+    unsigned i;
+    if (!c || !f) return;
+    for (i=0;i<f->count;i++)
+        if (f->entries[i].active && f->entries[i].confirmed &&
+            !memcmp(f->entries[i].client->bucket.bytes,c->bucket.bytes,16))
+            stqr_note_durable(c,&f->entries[i].durable);
+}
+void stqr_fence_close(stqr_fence *f) {
+    unsigned i;
+    if (!f) return;
+    for (i=0;i<f->count;i++) stqr_close(f->entries[i].client);
+    sq_secret_free(f,sizeof(*f));
+}

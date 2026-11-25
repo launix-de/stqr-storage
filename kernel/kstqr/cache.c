@@ -404,14 +404,21 @@ void ks_cache_note_durable(struct ks_fs *f, const stqr_commit_mark *m)
 	mutex_unlock(&c->wire);
 }
 
-int ks_cache_sync(struct ks_fs *f)
+int ks_cache_fence_add(struct ks_fs *f, stqr_fence *fence)
 {
-	struct ks_cache *c = f->cache;
-	int err = 0;
-	if (!c)
-		return 0;
-	mutex_lock(&c->wire);
-	err = stqr_sync(c->client);
-	mutex_unlock(&c->wire);
-	return err;
+ struct ks_cache *c = f->cache;
+ int err;
+ if (!c) return 0;
+ mutex_lock(&c->wire);
+ err = stqr_fence_add(c->client, fence);
+ mutex_unlock(&c->wire);
+ return err;
+}
+void ks_cache_fence_apply(struct ks_fs *f, const stqr_fence *fence)
+{
+ struct ks_cache *c = f->cache;
+ if (!c) return;
+ mutex_lock(&c->wire);
+ stqr_fence_apply(c->client, fence);
+ mutex_unlock(&c->wire);
 }

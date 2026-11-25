@@ -81,6 +81,22 @@ int save_settings(const char *url, const char *user, const char *password,
 - Runtime IDs are retained across reconnect; an observed RAM-runtime change is
   reported as `-ESTALE`. Reads and mutations follow validated owner redirects as described below.
 
+## Split write fences
+
+`stqr_fence_capture` captures a client's preceding accepted-write marks while
+holding that client's normal external serialization. `stqr_fence_wait` uses
+independent, cached control connections, so the original client can continue
+object I/O. Apply results with `stqr_fence_apply` under the original client lock;
+close the fence with `stqr_fence_close`. A fence can be reused after completion.
+
+For several clients, use `stqr_fence_reset` followed by serialized
+`stqr_fence_add` calls. Same-owner, same-bucket marks are merged to the maximum.
+After capture, distinct `stqr_fence_wait_one` targets may run in parallel; join
+all of them before applying, resetting or closing the fence. Confirmations are
+bucket-scoped and never erase later, unconfirmed writes. The existing `stqr_sync`
+API keeps its serialized-call contract. No new wire messages or storage format
+are introduced.
+
 ## Kernel reuse
 
 `src/core.c` implements the canonical little-endian wire codec, WebSocket upgrade,
