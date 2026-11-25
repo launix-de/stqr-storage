@@ -24,19 +24,19 @@ func TestDashboardPeerVolumesBrowser(t *testing.T) {
 	target, _ := openPendingPeer(t, source, host.URL)
 	id, _ := parseID(target.running.Node.ID)
 	awaitPeerObservation(t, source, client.ID(id), func(o *peerObservation) bool { return o.online && o.snapshot != nil })
-	// Upgrade only the advertised software release, retaining safe v1 semantics.
+	// Advertise a newer manual protocol version, retaining safe v1 semantics.
 	// Reconnect performs the real authenticated discovery; the browser must show
 	// the older LOCAL node in red without disabling its ordinary administration.
 	profile := target.protocolVersion()
 	profile.Version = "browser-newer"
-	profile.Release = source.protocolVersion().Release + 1
+	profile.ProtocolVersion = source.protocolVersion().ProtocolVersion + 1
 	target.compatibility.Store(&profile)
 	source.peerStatsMu.RLock()
 	connection := source.peerStats[client.ID(id)].connection
 	source.peerStatsMu.RUnlock()
 	connection.close()
 	awaitPeerObservation(t, source, client.ID(id), func(o *peerObservation) bool {
-		return o.online && o.snapshot != nil && o.connection.Profile.Release == profile.Release
+		return o.online && o.snapshot != nil && o.connection.Profile.ProtocolVersion == profile.ProtocolVersion
 	})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
