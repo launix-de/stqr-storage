@@ -117,3 +117,11 @@ silently forgetting an unconfirmed dependency. C clients retain fixed-size marks
 See the tests in `volume/deferred_test.go` (power cuts including reused live
 pages), `server/durability_test.go` (barriers, subscriptions and cross-owner
 ordering), C integration tests and isolated kernel/FUSE tests.
+
+Quota ownership accounting is cached independently of global metadata revisions.
+Account edits, operation receipts and unchanged range-map envelopes do not
+reconstruct volume ownership. Adding an empty bucket installs its new ownership
+predicate without scanning existing records. A changed bucket with retained
+objects, tombstones or retry receipts still triggers a recount; recovery-origin
+and volume-cohort changes conservatively recount too. All predicate/cache changes
+remain under the volume lock and do not change the on-disk format or ACK contract.

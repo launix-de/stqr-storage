@@ -64,9 +64,18 @@ static umode_t node_mode(const struct ks_node *n)
 	}
 	return type | n->mode;
 }
-static void update_inode(struct inode *i, const struct ks_node *n, stqr_proof proof)
+static void update_inode(struct inode *i, const struct ks_node *n, const stqr_info *info)
 {
+	struct ks_fs *f = i->i_sb->s_fs_info;
+	struct ks_cache_stamp stamp = {0};
+	bool covered = n->kind == 1 &&
+		ks_cache_stamp(n->inherited && f->lower ? f->lower : f, KS_I(i)->id, info, &stamp);
+	stqr_proof proof = info->proof;
+
 	mutex_lock(&KS_I(i)->metadata_lock);
+	if (n->kind == 1 && (!covered || memcmp(&KS_I(i)->data_stamp, &stamp, sizeof(stamp))))
+		WRITE_ONCE(KS_I(i)->invalidate, true);
+	KS_I(i)->data_stamp = stamp;
 	if (n->directory_proof)
 		KS_I(i)->directory_proof = *n->directory_proof;
 	else
@@ -101,7 +110,7 @@ static int inode_set(struct inode *i, void *data)
 	return 0;
 }
 static struct inode *get_inode(struct super_block *sb, stqr_object_id id, const struct ks_node *n,
-			       stqr_proof proof)
+			       const stqr_info *info)
 {
 	struct inode *i;
 	unsigned long hash = 0;
@@ -121,10 +130,10 @@ static struct inode *get_inode(struct super_block *sb, stqr_object_id id, const 
 		mapping_set_stable_writes(i->i_mapping);
 		if (n->kind == 4 || n->kind == 5)
 			init_special_inode(i, node_mode(n), 0);
-		update_inode(i, n, proof);
+		update_inode(i, n, info);
 		unlock_new_inode(i);
 	} else
-		update_inode(i, n, proof);
+		update_inode(i, n, info);
 	return i;
 }
 /* Both namespace layers must still have uninterrupted subscription coverage. */
@@ -148,7 +157,7 @@ static int refresh_inode(struct inode *i)
 	struct ks_snapshot s;
 	int err = ks_snapshot(i->i_sb->s_fs_info, KS_I(i)->id, &s);
 	if (!err) {
-		update_inode(i, &s.node, s.info.proof);
+		update_inode(i, &s.node, &s.info);
 		ks_snapshot_free(&s);
 	}
 	return err;
@@ -197,7 +206,7 @@ static struct dentry *ks_lookup(struct inode *parent, struct dentry *d, unsigned
 					err = -ENOENT;
 				if (!err) {
 					i = get_inode(parent->i_sb, entries[k].id, &child.node,
-						      child.info.proof);
+						      &child.info);
 					if (IS_ERR(i)) {
 						err = PTR_ERR(i);
 						i = NULL;
@@ -297,7 +306,7 @@ static int ks_iterate(struct file *file, struct dir_context *ctx)
 				leave_fs(f, saved);
 				break;
 			}
-			ci = get_inode(i->i_sb, entries[k].id, &child.node, child.info.proof);
+			ci = get_inode(i->i_sb, entries[k].id, &child.node, &child.info);
 			ks_snapshot_free(&child);
 			leave_fs(f, saved);
 			if (IS_ERR(ci)) {
@@ -339,7 +348,7 @@ static int create_common(struct mnt_idmap *idmap, struct inode *parent, struct d
 	if (!err) {
 		err = ks_snapshot(f, id, &s);
 		if (!err) {
-			i = get_inode(parent->i_sb, id, &s.node, s.info.proof);
+			i = get_inode(parent->i_sb, id, &s.node, &s.info);
 			ks_snapshot_free(&s);
 			if (IS_ERR(i))
 				err = PTR_ERR(i);
@@ -400,7 +409,7 @@ static int ks_link_vfs(struct dentry *old, struct inode *parent, struct dentry *
 	if (!err) {
 		err = ks_snapshot(f, KS_I(d_inode(old))->id, &s);
 		if (!err) {
-			i = get_inode(parent->i_sb, s.id, &s.node, s.info.proof);
+			i = get_inode(parent->i_sb, s.id, &s.node, &s.info);
 			ks_snapshot_free(&s);
 			if (IS_ERR(i))
 				err = PTR_ERR(i);
@@ -1121,25 +1130,54 @@ void ks_queue_invalidation(struct ks_fs *f, const stqr_object_id *id)
 	 * Keep it off the CPU-bound shared queue used by unrelated kernel work. */
 	queue_work(system_unbound_wq, &f->invalidation_work);
 }
+/* An unrelated overlay/cache eviction must not throw away mapped program
+ * text whose exact inode snapshot still has uninterrupted subscription coverage.
+ * New subscriptions, changed cursors and missing namespace proofs do not qualify.
+ */
+static bool ks_cached_data_unchanged(struct inode *i, const struct ks_snapshot *snapshot)
+{
+	struct ks_fs *f = i->i_sb->s_fs_info;
+	struct ks_cache_stamp stamp = {0};
+	bool same;
+	if (!S_ISREG(i->i_mode) || snapshot->node.kind != 1 ||
+	    !ks_cache_stamp(snapshot->node.inherited && f->lower ? f->lower : f, KS_I(i)->id,
+			    &snapshot->info, &stamp))
+		return false;
+	mutex_lock(&KS_I(i)->metadata_lock);
+	same = !READ_ONCE(KS_I(i)->invalidate) &&
+	       !memcmp(&KS_I(i)->data_stamp, &stamp, sizeof(stamp));
+	mutex_unlock(&KS_I(i)->metadata_lock);
+	return same;
+}
 static void ks_invalidate_one(struct inode *i)
 {
 	struct address_space *mapping = i->i_mapping;
 	struct ks_snapshot snapshot;
 	int err = ks_snapshot_cached(i->i_sb->s_fs_info, KS_I(i)->id, &snapshot);
+	/* An overlay-root update can invalidate namespace proofs without changing
+	 * this file. Resolve it before taking the mapping lock, otherwise unrelated
+	 * creates repeatedly discard executable pages. This worker runs outside the
+	 * subscription callback/wire lock; never move the RPC under the mapping lock.
+	 * An unavailable or changed snapshot still takes the conservative path. */
+	if (err && S_ISREG(i->i_mode) && READ_ONCE(mapping->nrpages))
+		err = ks_snapshot(i->i_sb->s_fs_info, KS_I(i)->id, &snapshot);
 	if (!err) {
-		update_inode(i, &snapshot.node, snapshot.info.proof);
+		bool same = ks_cached_data_unchanged(i, &snapshot);
 		ks_snapshot_free(&snapshot);
+		if (same)
+			return;
 	}
+	/* Do not publish asynchronously copied metadata here: a foreground refresh
+	 * may already have observed a newer truncate. Leave refresh pending until
+	 * foreground access checks the current size before filemap_fault tests EOF.
+	 */
 	WRITE_ONCE(KS_I(i)->invalidate, true);
 	if (S_ISREG(i->i_mode)) {
 		filemap_invalidate_lock(mapping);
-		/* Never throw away unsynchronized local shared-mmap writes. */
 		if (!mapping_tagged(mapping, PAGECACHE_TAG_DIRTY) &&
 		    !mapping_tagged(mapping, PAGECACHE_TAG_WRITEBACK)) {
 			unmap_mapping_range(mapping, 0, 0, 0);
 			truncate_inode_pages(mapping, 0);
-			if (!err)
-				WRITE_ONCE(KS_I(i)->invalidate, false);
 		}
 		filemap_invalidate_unlock(mapping);
 	}
@@ -1475,7 +1513,7 @@ static int ks_fill_super(struct super_block *sb, struct fs_context *fc)
 		if (root.node.kind != 2 || root.node.removed)
 			err = -ENOTDIR;
 		else {
-			inode = get_inode(sb, ks_root_id, &root.node, root.info.proof);
+			inode = get_inode(sb, ks_root_id, &root.node, &root.info);
 			if (IS_ERR(inode))
 				err = PTR_ERR(inode);
 			else {
