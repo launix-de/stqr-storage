@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-only
+import {setupVolumeGrowth} from './volume-growth.js';
 import {formatNumber,formatBytes} from './numbers.js';
 import {setupClusterJoin} from './join.js';
 import {NodeConnection,newID} from './protocol.js';
@@ -23,7 +24,7 @@ function toast(message,error=false){const div=document.createElement('div');div.
 function setConnected(connected){$('connection').classList.toggle('offline',!connected);$('connection').innerHTML=`<span class="dot"></span>${connected?'Live · alle 3 Sekunden':'Verbindung wird wiederhergestellt'}`;$('refresh').disabled=!connected}
 function beginSession(session){
  joinView.stop();
- $('login').hidden=true;$('app').hidden=false;$('profile-name').textContent=session.username;userViews.clear();bucketViews.clear();pgViews.clear();node?.stop();nodeStates.clear();fetchingConfigs.clear();snapshot=null;configView=null;volumeNode=null;
+ $('login').hidden=true;$('app').hidden=false;$('profile-name').textContent=session.username;volumeGrowth.clear();userViews.clear();bucketViews.clear();pgViews.clear();node?.stop();nodeStates.clear();fetchingConfigs.clear();snapshot=null;configView=null;volumeNode=null;
  const connection=node=new NodeConnection(session.csrf_token,connected=>{if(node===connection)setConnected(connected)},stats=>{if(node===connection)onStats(stats)});
  connection.onOpen=async()=>{try{const [cfg]=await Promise.all([connection.getConfig(),connection.subscribeVersions(),connection.subscribeStats(),userViews.load(),bucketViews.load()]);if(node===connection)applyConfig(cfg)}catch(e){if(node===connection)toast(e.message,true)}};
  connection.onVersions=versions=>{if(node===connection){if(configView)configView.node_versions=versions;renderVolumes()}};
@@ -40,7 +41,7 @@ function beginSession(session){
 
 async function sessionFetch(method='GET',headers={}){return fetch('/api/session',{method,headers,credentials:'same-origin'})}
 $('login-form').addEventListener('submit',async e=>{e.preventDefault();const submit=e.submitter;submit.disabled=true;$('login-error').textContent='';try{const raw=new TextEncoder().encode(`${$('username').value}:${$('password').value}`);const response=await sessionFetch('POST',{Authorization:'Basic '+btoa(Array.from(raw,b=>String.fromCharCode(b)).join(''))});if(!response.ok){const failure=await response.json().catch(()=>({}));throw Error(response.status===503?'Die Node wartet auf die Aufnahme durch den Cluster. Bitte anschließend mit dem Zielkonto anmelden.':response.status===401?'Benutzername oder Passwort ist nicht korrekt.':response.status===403&&failure.error==='administrator required'?'Für das Dashboard ist ein Administratorkonto erforderlich.':response.status===403?'Zugriff auf das Dashboard verweigert.':'Anmeldung nicht möglich.')}const data=await response.json();$('password').value='';beginSession(data)}catch(e){$('login-error').textContent=e.message}finally{submit.disabled=false}});
-$('logout').addEventListener('click',async()=>{try{await sessionFetch('DELETE',{'X-CSRF-Token':node.csrf})}catch{}node?.stop();$('app').hidden=true;$('login').hidden=false;$('password').focus()});
+$('logout').addEventListener('click',async()=>{try{await sessionFetch('DELETE',{'X-CSRF-Token':node.csrf})}catch{}volumeGrowth.clear();node?.stop();$('app').hidden=true;$('login').hidden=false;$('password').focus()});
 function showView(view){
  for(const b of document.querySelectorAll('[data-view]'))b.classList.toggle('selected',b.dataset.view===view);
  for(const name of ['volumes','buckets','users','groups','settings'])$(name+'-view').hidden=view!==name;
@@ -49,7 +50,7 @@ function showView(view){
  if(view==='settings')node.getConfig().then(applyConfig).catch(e=>toast(e.message,true));if(view==='users')userViews.load();if(view==='buckets')bucketViews.load();
 }
 for(const button of document.querySelectorAll('[data-view]'))button.addEventListener('click',()=>showView(button.dataset.view));
-function requireLogin(message){node?.stop();$('app').hidden=true;$('login').hidden=false;$('password').value='';$('login-error').textContent=message;$('password').focus()}
+function requireLogin(message){volumeGrowth.clear();node?.stop();$('app').hidden=true;$('login').hidden=false;$('password').value='';$('login-error').textContent=message;$('password').focus()}
 const recoveryView=setupRecovery({connection:()=>node,config:()=>configView,states:nodeStates,toast,newID,refresh:target=>refreshConfig(target)});
 const forceView=setupForceDisconnect({connection:()=>node,config:()=>configView,states:nodeStates,toast,newID,refresh:()=>refreshConfig()});
 $('add-error').insertAdjacentHTML('beforebegin','<section id="volume-pg-selection" class="bucket-form-section"></section>');
@@ -134,39 +135,9 @@ function renderVolumes(){
 $('volume-search').addEventListener('input',renderVolumes);$('refresh').onclick=async()=>{try{onStats(await node.getStats());toast('Statistik aktualisiert.')}catch(e){toast(e.message,true)}};
 for(const b of document.querySelectorAll('[data-close]'))b.addEventListener('click',()=>$(b.dataset.close).close());
 function openDetail(id,target=localNode()){volumeNode=target;const v=nodeStates.get(target)?.snapshot?.volumes.find(v=>v.id===id),c=volumeConfig()?.config.volumes.find(v=>v.id===id);if(!v)return;$('detail-title').textContent=c?.name??v.path;const details=[['Volume-ID',id,true],['Pfad / Device',v.path,true],['Klasse',classes[v.class].toUpperCase()],['Zustand',stateNames[v.state]],['Kapazität',bytes(v.capacity)],['Belegt',bytes(v.allocated)],['Metadaten',bytes(v.metadata)],['Betriebsreserve',bytes(v.operating)],['Für neue Daten nutzbar',bytes(v.admission)]];let html='<dl class="detail-grid">'+details.map(([k,value,mono])=>`<div><dt>${escape(k)}</dt><dd class="${mono?'mono':''}">${escape(value)}</dd></div>`).join('')+'</dl>';if(c?.system)html+='<div class="notice">Admin-Dateivolume: wächst bei Platzbedarf automatisch. Die Startgröße ist keine Obergrenze.</div>';if(v.class<2)html+='<button id="rescan-volume" class="secondary">↻ Größe neu einlesen</button><p class="field-note">Nach einer externen Vergrößerung, z. B. mit LVM, wird zusätzlicher Platz crashsicher ins Layout übernommen.</p>';$('detail-body').innerHTML=html;if($('rescan-volume'))$('rescan-volume').onclick=async e=>{e.currentTarget.disabled=true;try{await volumeConnection().rescanVolume(id);toast('Volume-Größe neu eingelesen.');$('detail-dialog').close();await refreshConfig(volumeNode)}catch(e){toast(e.message,true);$('rescan-volume').disabled=false}};$('detail-dialog').showModal()}
-let growInfo,growVolume,growSteps=[],growRetry;
-async function openGrow(id,target=localNode()){
- volumeNode=target;growVolume=id;growInfo=null;growRetry=null;const c=volumeConfig()?.config.volumes.find(v=>v.id===id);
- $('grow-description').textContent=c?.name??id;$('grow-error').textContent='';$('grow-note').textContent='Verfügbarer Speicher wird ermittelt …';
- $('grow-size').value='';$('grow-size').disabled=true;$('grow-size').setCustomValidity('');$('grow-submit').disabled=true;$('grow-slider').disabled=true;$('grow-slider-wrap').hidden=true;
- $('grow-dialog').showModal();
- try{const info=await volumeConnection().volumeGrowInfo(id);if(growVolume!==id||volumeNode!==target||!$('grow-dialog').open)return;growInfo=info;
-  const raw=info.kind===1,value=raw?info.maximum:info.current;
-  $('grow-size').disabled=false;$('grow-size').readOnly=raw;$('grow-size').value=formatSize(value);
-  $('grow-slider-wrap').hidden=raw;
-  $('grow-note').textContent=raw?'Die volle aktuelle physische Device-Größe wird übernommen.':`Bisher ${formatSize(info.current)} + frei ${sizeLabel(info.available)} = maximal ${formatSize(info.maximum)}. K/M/G/T/P = 1024er-Schritte.`;
-  $('grow-submit').textContent=raw?'Auf volle Device-Größe vergrößern':'Vergrößern';
-  setGrowSlider(value);$('grow-submit').disabled=value<=info.current;
- }catch(e){$('grow-error').textContent=e.message}
-}
-function setGrowSlider(value){
- growSteps=sizeSteps(growInfo.maximum,value,growInfo.current);const slider=$('grow-slider');slider.min='0';slider.max=String(Math.max(0,growSteps.length-1));slider.step='1';slider.value=String(growSteps.findIndex(n=>n===value));slider.disabled=growSteps.length<2;slider.setAttribute('aria-valuetext',formatSize(value));
- $('grow-min').textContent=formatSize(growInfo.current);$('grow-max').textContent=formatSize(growInfo.maximum);$('grow-value').textContent=formatSize(value);
-}
-function updateGrowSize(){
- if(!growInfo)return false;
- try{const value=parseSize($('grow-size').value);if(value<growInfo.current||value>growInfo.maximum)throw Error(`Größe muss zwischen ${formatSize(growInfo.current)} und ${formatSize(growInfo.maximum)} liegen.`);
-  $('grow-size').setCustomValidity('');setGrowSlider(value);$('grow-submit').disabled=value<=growInfo.current;return true;
- }catch(e){$('grow-size').setCustomValidity(e.message);$('grow-submit').disabled=true;return false}
-}
-$('grow-size').addEventListener('input',updateGrowSize);
-$('grow-size').addEventListener('change',()=>{if(updateGrowSize())$('grow-size').value=formatSize(parseSize($('grow-size').value))});
-$('grow-slider').addEventListener('input',()=>{const value=growSteps[Number($('grow-slider').value)];if(value===undefined)return;$('grow-size').value=formatSize(value);$('grow-size').setCustomValidity('');$('grow-value').textContent=formatSize(value);$('grow-slider').setAttribute('aria-valuetext',formatSize(value));$('grow-submit').disabled=value<=growInfo.current});
-$('grow-form').addEventListener('submit',async e=>{
- e.preventDefault();if(!growInfo)return;$('grow-submit').disabled=true;$('grow-error').textContent='';
- try{const size=growInfo.kind===1?0n:parseSize($('grow-size').value),signature=`${growVolume}:${size}`;if(growRetry?.signature!==signature)growRetry={signature,id:newID()};await volumeConnection().growVolume(growVolume,size,growRetry.id);$('grow-dialog').close();toast('Volume wurde vergrößert.');await refreshConfig(volumeNode);onStats(await node.getStats())}
- catch(e){$('grow-error').textContent=e.message}finally{$('grow-submit').disabled=false}
-});
+const volumeGrowth=setupVolumeGrowth({connection:target=>target&&target!==localNode()?node.forNode(target):node,describe:(id,target)=>{const view=nodeStates.get(target)?.config?.config??configView?.config;return {volume:view?.volumes.find(v=>v.id===id),node:view?.node.name??target}},toast,refresh:async target=>{await refreshConfig(target);onStats(await node.getStats())}});
+function openGrow(id,target=localNode()){return volumeGrowth.open(id,target)}
+
 function openDrain(id,target=localNode()){volumeNode=target;const c=volumeConfig()?.config.volumes.find(v=>v.id===id);drainVolume=id;drainID=newID();$('drain-description').textContent=`„${c?.name??id}“ wird erst freigegeben, wenn alle benötigten Objekte sicher auf geeigneten Zielvolumes liegen.`;$('drain-error').textContent='';$('drain-dialog').showModal()}
 $('drain-form').addEventListener('submit',async e=>{e.preventDefault();e.submitter.disabled=true;try{await volumeConnection().removeVolume(drainVolume,drainID);$('drain-dialog').close();toast('Kooperatives Aushängen wurde gestartet.');await refreshConfig(volumeNode)}catch(e){$('drain-error').textContent=e.message}finally{e.submitter.disabled=false}});
 async function loadCandidates(){

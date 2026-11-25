@@ -107,8 +107,18 @@ func (s *Server) GrowVolume(id, vid string, sizeBytes int64) (Operation, error) 
 		if sizeBytes != 0 {
 			return s.finishOperation(op, fail(400, "blockdevices always grow to their full physical capacity"))
 		}
+		// Persist the resolved target before changing the committed layout.
+		// The wire request uses zero for full-device growth; recovery needs the
+		// actual requested capacity to recognize an already committed resize.
+		op.SizeBytes = int64(info.Maximum)
+		if e = s.saveOperation(op); e != nil {
+			return op, e
+		}
 		_, e = m.store.Rescan()
 	} else {
+		if sizeBytes%volume.PageSize != 0 {
+			return s.finishOperation(op, fail(400, "volume size must be a multiple of 4096 bytes"))
+		}
 		if sizeBytes < 0 || uint64(sizeBytes) < info.Current {
 			return s.finishOperation(op, fail(400, "new size must not be smaller than the current volume"))
 		}

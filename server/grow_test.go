@@ -2,6 +2,7 @@
 package server
 
 import (
+	"context"
 	"math"
 	"testing"
 
@@ -31,7 +32,7 @@ func TestManualGrowthAndBounds(t *testing.T) {
 		if source == 2 && info.Maximum != 4<<20 {
 			t.Fatalf("RAM maximum counts existing size twice or omits it: %+v", info)
 		}
-		for _, size := range []int64{512 << 10, int64(info.Maximum) + volume.PageSize} {
+		for _, size := range []int64{512 << 10, (1 << 20) + 1, int64(info.Maximum) + volume.PageSize} {
 			bad, e := s.GrowVolume(newID(), id, size)
 			if e == nil && bad.State != "failed" {
 				t.Fatal("invalid growth accepted", size)
@@ -82,6 +83,55 @@ func TestManualGrowthAndBounds(t *testing.T) {
 		if !v.config.System && v.store.Size() != 2<<20 {
 			t.Fatal("size lost at restart")
 		}
+	}
+}
+
+func TestStorageGrowthRecoveryAfterCommittedLayout(t *testing.T) {
+	s := testServer(t)
+	added := addTestVolume(t, s, "growth-recovery", "hdd", 1<<20)
+	b, _ := createProtocolBucket(t, s, "growth-recovery-data")
+	oid := volume.ObjectID{0x71}
+	payload := []byte("confirmed before storage-volume growth")
+	if _, err := b.Put(context.Background(), userPrincipal(t, s), oid, payload, volume.Options{RequestID: volume.ID(client.NewRequestID())}); err != nil {
+		t.Fatal(err)
+	}
+	// Model interruption after committing a full-backend growth but before
+	// publishing config/ACK. Raw-device wire requests use zero, whereas the
+	// operation records the resolved physical target before touching the layout.
+	op, _, err := s.beginOperation(newID(), "grow", struct {
+		Volume    string
+		SizeBytes int64
+	}{added.VolumeID, 0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	op.VolumeID, op.SizeBytes = added.VolumeID, 2<<20
+	if err = s.saveOperation(op); err != nil {
+		t.Fatal(err)
+	}
+	if err = s.volumes[added.VolumeID].store.Grow(op.SizeBytes); err != nil {
+		t.Fatal(err)
+	}
+	path := s.configPath
+	if err = s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := openTransportTestNode(Options{ConfigPath: path})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	recovered, err := reopened.operation(op.ID)
+	if err != nil || recovered.State != "fulfilled" || reopened.volumes[added.VolumeID].config.SizeBytes != 2<<20 {
+		t.Fatal("growth not recovered", recovered, err)
+	}
+	old, err := reopened.Bucket(b.ID())
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, _, err := old.Get(context.Background(), userPrincipal(t, reopened), oid)
+	if err != nil || string(got) != string(payload) {
+		t.Fatal("recovery lost committed objects", err)
 	}
 }
 func TestGrowthMaximumOverflowAndPageAlignment(t *testing.T) {
