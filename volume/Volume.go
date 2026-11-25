@@ -38,6 +38,7 @@ import (
 type Volume struct {
 	identity          atomic.Pointer[Identity]
 	deferred          *deferredGroup
+	fence             *writeFence
 	staging           map[uint64][]byte
 	durableGeneration uint64
 
@@ -257,7 +258,10 @@ func Open(dev VolumeIO, o OpenOptions) (*Volume, error) {
 		return nil, e
 	}
 	if s.Moving {
-		if e = v.resumeMoveLocked(); e != nil {
+		v.mu.Lock()
+		e = v.resumeMoveLocked()
+		v.mu.Unlock()
+		if e != nil {
 			return nil, e
 		}
 	}
@@ -320,7 +324,7 @@ func (v *Volume) sync() error {
 		// adds no durability and would hold the metadata lock again.
 		return v.flushDeferred()
 	}
-	return v.rawSync()
+	return v.syncVisible()
 }
 func (v *Volume) rawSync() error {
 	if e := v.dev.Sync(); e != nil {
@@ -361,7 +365,7 @@ func (v *Volume) Sync() error {
 func (v *Volume) Close() error {
 	v.mu.Lock()
 	defer v.mu.Unlock()
-	for v.preparing {
+	for v.preparing || v.checkpointing {
 		v.prepareCond.Wait()
 	}
 	if v.closed {

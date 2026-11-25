@@ -74,7 +74,7 @@ func (v *Volume) TryOpen(write bool) (h *Handle, acquired bool, err error) {
 }
 func (v *Volume) openHandleLocked(write bool) (*Handle, error) {
 	l := &handleLease{v: v, write: write}
-	if e := v.check(write); e != nil {
+	if e := v.checkHandle(write); e != nil {
 		l.release()
 		return nil, e
 	}
@@ -110,6 +110,10 @@ func (h *Handle) Close() error {
 }
 
 func withHandle[T any](h *Handle, write bool, f func(*Volume) (T, error)) (T, error) {
+	return withHandleMode(h, write, false, f)
+}
+
+func withHandleMode[T any](h *Handle, write, buffered bool, f func(*Volume) (T, error)) (T, error) {
 	// Keep the cleanup target alive through all I/O, including callback panics.
 	defer runtime.KeepAlive(h)
 	var zero T
@@ -125,8 +129,19 @@ func withHandle[T any](h *Handle, write bool, f func(*Volume) (T, error)) (T, er
 	if write && !l.write {
 		return zero, ErrReadOnly
 	}
-	if e := l.v.check(write); e != nil {
-		return zero, e
+	var err error
+	if write && buffered {
+		err = l.v.checkBuffered()
+	} else {
+		err = l.v.check(write)
+	}
+	if err != nil {
+		return zero, err
+	}
+	if write && !buffered {
+		if err := l.v.flushDeferred(); err != nil {
+			return zero, err
+		}
 	}
 	return f(l.v)
 }
@@ -184,8 +199,17 @@ func (h *Handle) ReadAt(k Key, dst []byte, offset uint64) (int, error) {
 }
 
 func (h *Handle) mutate(op uint8, k Key, offset, length uint64, src io.Reader, expected []byte, opts Options) (Result, error) {
-	return withHandle(h, true, func(v *Volume) (Result, error) {
-		return v.mutateWithRetryLocked(op, k, offset, length, src, expected, opts)
+	buffered := opts.prepare == nil && (length <= 1<<20 || op == opTrunc || op == opDelete)
+	return withHandleMode(h, true, buffered, func(v *Volume) (Result, error) {
+		durable := !opts.Accepted
+		if buffered {
+			opts.Accepted = true
+		}
+		result, err := v.mutateWithRetryLocked(op, k, offset, length, src, expected, opts)
+		if err == nil && durable && buffered {
+			err = v.checkpointLockedThrough(v.sb.Generation)
+		}
+		return result, err
 	})
 }
 

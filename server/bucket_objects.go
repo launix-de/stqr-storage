@@ -462,6 +462,12 @@ func (b *Bucket) mutateUnmetered(ctx context.Context, p principal, id volume.Obj
 	defer cancel()
 	for {
 		result, err := b.mutateAttempt(ctx, p, id, opcode, offset, length, src, expected, opt)
+		var published *publishedCheckpoint
+		if errors.As(err, &published) {
+			// The object is already published. Complete its durable response
+			// outside node admission, without replaying the mutation/payload.
+			return result, published.volume.CheckpointThrough(published.generation)
+		}
 		var wait *acceptedCheckpoint
 		if !errors.As(err, &wait) {
 			return result, err
@@ -671,10 +677,10 @@ func (b *Bucket) mutateAttempt(ctx context.Context, p principal, id volume.Objec
 	if opcode == 0x0105 || opcode == 0x0106 {
 		payloadLength = 0
 	}
-	if generation, pending := v.PendingCheckpoint(opt.Accepted, payloadLength); pending {
+	if generation, pending := v.PendingCheckpoint(opt.Accepted || payloadLength <= 1<<20 && opcode != cowRestoreOpcode, payloadLength); pending {
 		return volume.Result{}, &acceptedCheckpoint{v, generation}
 	}
-	if err := s.switchAcceptedVolume(b.ID(), v, opt.Accepted); err != nil {
+	if err := s.switchAcceptedVolume(b.ID(), v, opt.Accepted || payloadLength <= 1<<20 && opcode != cowRestoreOpcode); err != nil {
 		return volume.Result{}, err
 	}
 	if !exists && opcode != 0x0102 && opcode != 0x0106 && b.lostRange(id) {
@@ -933,6 +939,11 @@ func (b *Bucket) mutateAttempt(ctx context.Context, p principal, id volume.Objec
 		}
 		return result, e
 	}
+	durableAck := !opt.Accepted && payloadLength <= 1<<20 && opcode != cowRestoreOpcode
+	if durableAck {
+		opt.Accepted = true
+	}
+	var publishedGeneration uint64
 	b.usage.mu.Lock()
 	usageLocked := true
 	defer func() {
@@ -941,7 +952,11 @@ func (b *Bucket) mutateAttempt(ctx context.Context, p principal, id volume.Objec
 		}
 	}()
 	var acquired bool
-	h, acquired, err = v.TryOpen(true)
+	if opt.Accepted {
+		h, acquired, err = v.TryOpenBuffered()
+	} else {
+		h, acquired, err = v.TryOpen(true)
+	}
 	if err != nil {
 		return volume.Result{}, err
 	}
@@ -1000,6 +1015,7 @@ func (b *Bucket) mutateAttempt(ctx context.Context, p principal, id volume.Objec
 			return result, gerr
 		}
 		s.recordAccepted(b.ID(), v, generation)
+		publishedGeneration = generation
 	}
 	if err == nil && !p.cowInternal && !repeated && s.objectSubscriptions.watched(key) {
 		published, readErr := h.RecordInfo(key)
@@ -1060,6 +1076,9 @@ func (b *Bucket) mutateAttempt(ctx context.Context, p principal, id volume.Objec
 			}
 			return result, fail(503, "retry after range capacity handoff")
 		}
+	}
+	if err == nil && durableAck {
+		return result, &publishedCheckpoint{v, publishedGeneration}
 	}
 	return result, err
 }

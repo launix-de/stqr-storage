@@ -90,7 +90,11 @@ func (t *transaction) candidate(start, length, n, alignment, minimum uint64) (ui
 			off = (t.v.deferred.journal.off + t.v.deferred.journal.n + alignment - 1) / alignment * alignment
 			continue
 		}
-		for _, list := range [][]allocation{t.busy, t.retired} {
+		var fenced []allocation
+		if t.v.fence != nil {
+			fenced = t.v.fence.reserved
+		}
+		for _, list := range [][]allocation{fenced, t.busy, t.retired} {
 			for _, x := range list {
 				if t.reusable.n > 0 && x.off >= t.reusable.off && x.off+x.n <= t.reusable.off+t.reusable.n {
 					continue
@@ -334,7 +338,7 @@ func (v *Volume) readPage(off uint64) ([]byte, error) {
 	}
 	b := make([]byte, PageSize)
 	var e error
-	if v.deferred != nil || v.staging != nil {
+	if v.deferred != nil || v.staging != nil || v.fence != nil {
 		e = v.readLayer(b[:min(uint64(PageSize), v.limit-off)], off)
 	} else {
 		e = readFullAt(v.dev, b[:min(uint64(PageSize), v.limit-off)], off)
@@ -348,7 +352,7 @@ func (v *Volume) readBytes(dst []byte, off uint64) error {
 	if v.overlay != nil {
 		return v.overlay.readBytes(dst, off)
 	}
-	if v.deferred != nil || v.staging != nil {
+	if v.deferred != nil || v.staging != nil || v.fence != nil {
 		return v.readLayer(dst, off)
 	}
 	for len(dst) > 0 {
@@ -505,7 +509,7 @@ func (t *transaction) commitReserved(useGuaranteed bool, allowance, guaranteedAl
 				count++
 			}
 		}
-		if count > deferredPageLimit {
+		if count > t.v.deferred.pageLimit {
 			return errDeferredBudget
 		}
 		for off, page := range t.v.staging {
@@ -621,57 +625,13 @@ func (t *transaction) commitReserved(useGuaranteed bool, allowance, guaranteedAl
 		}
 		i += run
 	}
-	for i, off := range logPages {
-		p := make([]byte, PageSize)
-		if i+1 < len(logPages) {
-			diskOrder.PutUint64(p, logPages[i+1])
-		}
-		from := int64(i) * (PageSize - 16)
-		size := min(int64(PageSize-16), payload.size-from)
-		diskOrder.PutUint32(p[8:], uint32(size))
-		if _, e = payload.ReadAt(p[16:16+size], from); e != nil {
-			return e
-		}
-		diskOrder.PutUint32(p[12:], checksum(p[16:]))
-		if e = t.v.write(p, off); e != nil {
-			return e
-		}
+	live := t.v
+	ioView := &Volume{dev: live.dev, sb: live.sb, limit: live.limit, durableGeneration: live.durableGeneration}
+	fence := &writeFence{image: t}
+	for _, off := range logPages {
+		fence.reserved = append(fence.reserved, allocation{off, PageSize, false})
 	}
-	if e = t.v.sync(); e != nil {
-		return e
-	}
-	anchor := make([]byte, PageSize)
-	copy(anchor, "STQRCMT2")
-	diskOrder.PutUint64(anchor[8:], t.sb.Generation)
-	diskOrder.PutUint64(anchor[16:], logPages[0])
-	diskOrder.PutUint64(anchor[24:], uint64(payload.size))
-	copy(anchor[32:64], digest.Sum(nil))
-	copy(anchor[64:80], t.sb.Identity.VolumeID[:])
-	diskOrder.PutUint32(anchor[PageSize-4:], checksum(anchor[:PageSize-4]))
-	if e = t.v.write(anchor, uint64(2+int(t.sb.Generation%2))*PageSize); e != nil {
-		return e
-	}
-	if e = t.v.sync(); e != nil {
-		return e
-	}
-	for _, off := range offsets {
-		page, err := t.page(off)
-		if err != nil {
-			return err
-		}
-		if e = t.v.write(page[:min(uint64(PageSize), t.sb.Identity.Size-off)], off); e != nil {
-			return e
-		}
-	}
-	if e = t.v.sync(); e != nil {
-		return e
-	}
-	if e = t.v.write(header, t.sb.Generation%2*PageSize); e != nil {
-		return e
-	}
-	if e = t.v.sync(); e != nil {
-		return e
-	}
+	fence.reserved = mergeAllocations(fence.reserved)
 	t.v.sb = t.sb
 	t.v.publishIdentity()
 	if accounts != nil {
@@ -681,7 +641,6 @@ func (t *transaction) commitReserved(useGuaranteed bool, allowance, guaranteedAl
 			t.v.observer(StorageSnapshot{All: t.v.usage(accounts, t.sb), Owned: t.v.ownedUsage(owned, accounts, t.sb)})
 		}
 	}
-	t.v.durableGeneration = t.sb.Generation
 	t.v.inFlightReserved -= consumed
 	t.v.guaranteed -= guaranteedConsumed
 	if t.v.admission != nil {
@@ -699,7 +658,70 @@ func (t *transaction) commitReserved(useGuaranteed bool, allowance, guaranteedAl
 			}
 		}
 	}
-	return nil
+	// Invalidate object descriptors before unlocking: the new roots/pages are
+	// visible now, even though this request's durability ACK is still pending.
+	for key := range t.changed {
+		if key[0] == 0 {
+			live.cache.remove(key.object())
+		}
+	}
+	t.v = ioView
+	defer func() { t.v = live }()
+	return live.runFence(fence, ioView, func() error {
+		for i, off := range logPages {
+			p := make([]byte, PageSize)
+			if i+1 < len(logPages) {
+				diskOrder.PutUint64(p, logPages[i+1])
+			}
+			from := int64(i) * (PageSize - 16)
+			size := min(int64(PageSize-16), payload.size-from)
+			diskOrder.PutUint32(p[8:], uint32(size))
+			if _, e = payload.ReadAt(p[16:16+size], from); e != nil {
+				return e
+			}
+			diskOrder.PutUint32(p[12:], checksum(p[16:]))
+			if e = t.v.write(p, off); e != nil {
+				return e
+			}
+		}
+		if e = t.v.rawSync(); e != nil {
+			return e
+		}
+		anchor := make([]byte, PageSize)
+		copy(anchor, "STQRCMT2")
+		diskOrder.PutUint64(anchor[8:], t.sb.Generation)
+		diskOrder.PutUint64(anchor[16:], logPages[0])
+		diskOrder.PutUint64(anchor[24:], uint64(payload.size))
+		copy(anchor[32:64], digest.Sum(nil))
+		copy(anchor[64:80], t.sb.Identity.VolumeID[:])
+		diskOrder.PutUint32(anchor[PageSize-4:], checksum(anchor[:PageSize-4]))
+		if e = t.v.write(anchor, uint64(2+int(t.sb.Generation%2))*PageSize); e != nil {
+			return e
+		}
+		if e = t.v.rawSync(); e != nil {
+			return e
+		}
+		for _, off := range offsets {
+			page, err := t.page(off)
+			if err != nil {
+				return err
+			}
+			if e = t.v.write(page[:min(uint64(PageSize), t.sb.Identity.Size-off)], off); e != nil {
+				return e
+			}
+		}
+		if e = t.v.rawSync(); e != nil {
+			return e
+		}
+		if e = t.v.write(header, t.sb.Generation%2*PageSize); e != nil {
+			return e
+		}
+		if e = t.v.rawSync(); e != nil {
+			return e
+		}
+		ioView.durableGeneration = t.sb.Generation
+		return nil
+	})
 }
 func recoverWAL(dev VolumeIO, s Superblock) (Superblock, error) {
 	var anchor []byte

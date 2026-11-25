@@ -22,6 +22,7 @@ var errDeferredBudget = errors.New("accepted page budget exhausted")
 type deferredGroup struct {
 	journal      allocation
 	pages        map[uint64][]byte
+	pageLimit    int
 	baseFreeRoot uint64
 	baseNodes    *nodeCache
 }
@@ -32,11 +33,21 @@ func (v *Volume) beginDeferred() error {
 	}
 	t := v.transaction()
 	defer t.close()
-	_, _, off, err := t.findSpace(deferredJournalBytes, PageSize, false)
-	if err != nil {
-		return err
+	size := uint64(deferredJournalBytes)
+	var off uint64
+	for {
+		_, _, chosen, err := t.findSpace(size, PageSize, false)
+		if err == nil {
+			off = chosen
+			break
+		}
+		if !errors.Is(err, ErrFull) || size <= 8*PageSize {
+			return err
+		}
+		size = size / 2 / PageSize * PageSize
 	}
-	v.deferred = &deferredGroup{journal: allocation{off, deferredJournalBytes, false}, pages: map[uint64][]byte{}, baseFreeRoot: v.sb.FreeRoot, baseNodes: newNodeCache(128, 1<<20)}
+	limit := min(deferredPageLimit, int((size/PageSize*(PageSize-16)-PageSize-8)/(PageSize+8)))
+	v.deferred = &deferredGroup{journal: allocation{off, size, false}, pageLimit: limit, pages: map[uint64][]byte{}, baseFreeRoot: v.sb.FreeRoot, baseNodes: newNodeCache(128, 1<<20)}
 	return nil
 }
 func (v *Volume) stageWrite(b []byte, off uint64) error {
@@ -44,7 +55,7 @@ func (v *Volume) stageWrite(b []byte, off uint64) error {
 		page, at := off/PageSize*PageSize, off%PageSize
 		p := v.staging[page]
 		if p == nil {
-			if len(v.staging) >= deferredPageLimit {
+			if len(v.staging) >= v.deferred.pageLimit {
 				return errDeferredBudget
 			}
 			var err error
@@ -72,10 +83,23 @@ func (v *Volume) readLayer(dst []byte, off uint64) error {
 		if p == nil && v.deferred != nil {
 			p = v.deferred.pages[page]
 		}
+		if p == nil && v.fence != nil {
+			var err error
+			p, _, err = v.fence.page(page)
+			if err != nil {
+				return err
+			}
+		}
 		if p != nil {
 			copy(dst[:n], p[at:at+uint64(n)])
-		} else if err := readFullAt(v.dev, dst[:n], off); err != nil {
-			return err
+		} else {
+			// Raw devices may reject sub-page reads. The overlay changes read
+			// visibility, never the backend alignment contract.
+			b := make([]byte, PageSize)
+			if err := readFullAt(v.dev, b, page); err != nil {
+				return err
+			}
+			copy(dst[:n], b[at:at+uint64(n)])
 		}
 		off += uint64(n)
 		dst = dst[n:]
@@ -102,13 +126,18 @@ func (v *Volume) acceptedMutation(op uint8, k Key, off, length uint64, src io.Re
 		}
 		src = bytes.NewReader(payload)
 	}
-	if v.deferred != nil && len(v.deferred.pages) > deferredPageLimit/2 {
+	if v.deferred != nil && len(v.deferred.pages) > v.deferred.pageLimit/2 {
 		if err := v.flushDeferred(); err != nil {
 			return Result{}, err
 		}
 	}
 	if err := v.beginDeferred(); err != nil {
 		if errors.Is(err, ErrFull) {
+			// Exhausted buffering is backpressure, never permission to overwrite
+			// another checkpoint's WAL or to replace its fence.
+			if err = v.flushDeferred(); err != nil {
+				return Result{}, err
+			}
 			return v.mutateCore(op, k, off, length, src, expected, opt)
 		}
 		return Result{}, err
@@ -147,7 +176,12 @@ func (v *Volume) CheckpointThrough(generation uint64) error {
 	if generation > v.sb.Generation {
 		return ErrPrecondition
 	}
-	return v.flushDeferred()
+	for generation > v.durableGeneration {
+		if err := v.flushDeferred(); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 func (v *Volume) FlushAccepted() error {
 	v.mu.Lock()
@@ -165,12 +199,14 @@ func (v *Volume) PendingCheckpoint(accepted bool, length uint64) (uint64, bool) 
 	v.mu.RLock()
 	defer v.mu.RUnlock()
 	if v.checkpointing {
-		// An explicit Sync may already cover a durable generation. Wait for
-		// its pinned I/O rather than repeatedly retrying the same busy volume.
+		if accepted && length <= 1<<20 && v.fence != nil &&
+			(v.deferred == nil || len(v.deferred.pages) <= v.deferred.pageLimit/2) {
+			return 0, false
+		}
 		return 0, true
 	}
 	return v.sb.Generation, v.deferred != nil &&
-		(!accepted || length > 1<<20 || len(v.deferred.pages) > deferredPageLimit/2)
+		(!accepted || length > 1<<20 || len(v.deferred.pages) > v.deferred.pageLimit/2)
 }
 
 // IsDurableThrough only inspects local flush progress. The counter belongs to
@@ -227,27 +263,18 @@ func (v *Volume) syncVisible() error {
 	return v.checkpointIO((*Volume).rawSync)
 }
 
-func (v *Volume) checkpointIO(run func(*Volume) error) (err error) {
-	// Mutations cannot change these pages until completion. Readers continue to
-	// use the same visible pages while disk blocks are written in place. The
-	// private I/O view also keeps failure reporting from racing those readers.
-	ioView := &Volume{dev: v.dev, sb: v.sb, limit: v.limit, deferred: v.deferred,
+func (v *Volume) checkpointIO(run func(*Volume) error) error {
+	g := v.deferred
+	ioView := &Volume{dev: v.dev, sb: v.sb, limit: v.limit, deferred: g,
 		durableGeneration: v.durableGeneration}
-	v.preparing, v.checkpointing = true, true
-	v.mu.Unlock()
-	defer func() {
-		v.mu.Lock()
-		v.preparing, v.checkpointing = false, false
-		if ioView.failed != nil {
-			v.failed = ioView.failed
-		}
-		if err == nil {
-			v.durableGeneration = ioView.durableGeneration
-			v.deferred = ioView.deferred
-		}
-		v.prepareCond.Broadcast()
-	}()
-	return run(ioView)
+	f := &writeFence{group: g}
+	if g != nil {
+		f.reserved = []allocation{g.journal}
+	}
+	// The checkpoint keeps g immutable. New writes use a separate bounded
+	// overlay whose base is this checkpoint's published image.
+	v.deferred = nil
+	return v.runFence(f, ioView, func() error { return run(ioView) })
 }
 
 // Only the checkpoint owner uses this private view. WAL encoding, ordering and

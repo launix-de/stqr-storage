@@ -139,14 +139,13 @@ func TestCheckpointOrdersLaterInPlaceWrites(t *testing.T) {
 	<-entered
 	writer := make(chan error, 1)
 	go func() { _, err := testPut(v, testKey(1), []byte("later"), Options{Accepted: true}); writer <- err }()
-	select {
-	case err := <-writer:
-		t.Fatalf("writer reused an in-flight WAL: %v", err)
-	case <-time.After(20 * time.Millisecond):
+	awaitCheckpointTest(t, writer)
+	mustGet(t, v, testKey(1), []byte("later"))
+	if v.Header().Generation <= target {
+		t.Fatal("later write was not independently published")
 	}
 	release()
 	awaitCheckpointTest(t, fence)
-	awaitCheckpointTest(t, writer)
 	mustGet(t, v, testKey(1), []byte("later"))
 	if v.IsDurableThrough(v.Header().Generation) {
 		t.Fatal("old barrier incorrectly confirmed the later write")
@@ -166,18 +165,19 @@ func TestCheckpointFailureFencesWaitingWriter(t *testing.T) {
 	go func() { _, _, err := testGet(v, testKey(1)); read <- err }()
 	awaitCheckpointTest(t, read)
 	writer := make(chan error, 1)
-	go func() { _, err := testPut(v, testKey(2), []byte("must fail"), Options{Accepted: true}); writer <- err }()
+	go func() {
+		_, err := testPut(v, testKey(2), []byte("accepted until failure"), Options{Accepted: true})
+		writer <- err
+	}()
+	awaitCheckpointTest(t, writer)
 	release()
-	for _, ch := range []chan error{fence, writer} {
-		select {
-		case err := <-ch:
-			if !errors.Is(err, ErrRecovery) {
-				t.Fatalf("not fenced: %v", err)
-			}
-		case <-time.After(3 * time.Second):
-			t.Fatal("failed checkpoint stranded a waiter")
-		}
+	if err := <-fence; !errors.Is(err, ErrRecovery) {
+		t.Fatalf("not fenced: %v", err)
 	}
+	if _, err := testPut(v, testKey(3), []byte("must fail"), Options{}); !errors.Is(err, ErrRecovery) {
+		t.Fatalf("write survived a failed durability fence: %v", err)
+	}
+
 }
 
 func TestExplicitSyncAllowsReaders(t *testing.T) {
@@ -193,10 +193,14 @@ func TestExplicitSyncAllowsReaders(t *testing.T) {
 	read := make(chan error, 1)
 	go func() { _, _, err := testGet(v, testKey(1)); read <- err }()
 	awaitCheckpointTest(t, read)
-	generation, pending := v.PendingCheckpoint(true, 1)
-	if !pending || generation != 0 {
-		t.Fatalf("explicit flush must request an admission wait: %d %v", generation, pending)
+	if _, pending := v.PendingCheckpoint(true, 1); pending {
+		t.Fatal("physical flush blocked buffered publication")
 	}
+	writer := make(chan error, 1)
+	go func() { _, err := testPut(v, testKey(2), []byte("new"), Options{Accepted: true}); writer <- err }()
+	awaitCheckpointTest(t, writer)
+	mustGet(t, v, testKey(2), []byte("new"))
+	generation := uint64(0)
 	waited := make(chan error, 1)
 	go func() { waited <- v.CheckpointThrough(generation) }()
 	select {
