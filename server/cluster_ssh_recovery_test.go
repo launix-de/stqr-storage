@@ -35,7 +35,7 @@ func runSSHRecoveryFence(t *testing.T, f sshRecoveryFixture) {
 	t.Helper()
 	s, ctx := f.source, f.ctx
 	admin := s.cfg.Auth.BootstrapAdmin
-	c, err := client.Dial(ctx, s.cfg.Node.Advertise, admin.Username, admin.Password, client.BucketID(f.bucket.ID()))
+	c, err := client.Dial(ctx, s.cfg.Node.Advertise, admin.Username, admin.Password, client.BucketID(f.bucket.ID()), "fs")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -111,7 +111,7 @@ func runSSHRecoveryFence(t *testing.T, f sshRecoveryFixture) {
 	}
 	check := func() {
 		t.Helper()
-		c, err := client.Dial(ctx, f.remote.Node.Advertise, admin.Username, admin.Password, client.BucketID(f.bucket.ID()))
+		c, err := client.Dial(ctx, f.remote.Node.Advertise, admin.Username, admin.Password, client.BucketID(f.bucket.ID()), "fs")
 		if err != nil {
 			t.Fatal(err)
 		}

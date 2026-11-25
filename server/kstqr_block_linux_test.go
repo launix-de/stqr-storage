@@ -73,7 +73,7 @@ func TestKSTQRBlockVirtualMachine(t *testing.T) {
 		t.Fatal(err)
 	}
 	// One malformed descriptor must reject the whole export, without leaving disks/leases.
-	c, err := client.Dial(ctx, host.URL, admin.Username, admin.Password, client.ID(bad.ID()))
+	c, err := client.Dial(ctx, host.URL, admin.Username, admin.Password, client.ID(bad.ID()), "bd")
 	if err != nil {
 		t.Fatal(err)
 	}

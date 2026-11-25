@@ -392,7 +392,7 @@ addressed 1-MiB stripes used by [QEMU/NBD](../qemu-plugin-nbd/README.md).
 No format conversion, segment list, server-side filesystem/block implementation,
 NBD exporter or resident userspace helper is involved.
 
-Create the bucket, grants and named devices using the dashboard or `stqr-nbd`
+Create the bucket and grants using the dashboard, and named devices using `stqr-nbd`
 first. `bd` exports existing devices; it does not initialize or format them.
 A bucket containing an STFS root is rejected. Do not combine `bd` with `init`,
 native filesystem overlay options, `whitelist` or `nodev`.

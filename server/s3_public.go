@@ -69,6 +69,10 @@ func (s *Server) servePublicS3(w http.ResponseWriter, r *http.Request) bool {
 	if err != nil {
 		return false
 	}
+	// Anonymous requests cannot select an application format for a bucket.
+	if b.Describe().Format != "s3" {
+		return false
+	}
 	p, err := s.publicS3Principal(b)
 	if err != nil {
 		s3Failure(w, err)

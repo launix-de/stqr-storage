@@ -202,7 +202,7 @@ func checkDaemonRangeHandoff(t *testing.T, source, target *daemonTestNode, bucke
 	source.close()
 	target = restartDaemonTestNode(t, target)
 	admin := source.node.cfg.Auth.BootstrapAdmin
-	reader, err := client.Dial(ctx, target.node.cfg.Node.Advertise, admin.Username, admin.Password, client.BucketID(bucket))
+	reader, err := client.Dial(ctx, target.node.cfg.Node.Advertise, admin.Username, admin.Password, client.BucketID(bucket), "fs")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -277,7 +277,7 @@ func TestDaemonAutomaticExtension(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	admin := source.node.cfg.Auth.BootstrapAdmin
-	objects, err := client.Dial(ctx, source.node.cfg.Node.Advertise, admin.Username, admin.Password, client.BucketID(bucket.ID()))
+	objects, err := client.Dial(ctx, source.node.cfg.Node.Advertise, admin.Username, admin.Password, client.BucketID(bucket.ID()), "fs")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -413,7 +413,7 @@ func TestDaemonAutomaticExtension(t *testing.T) {
 	if len(view.manifest.Membership.Members) != 1 {
 		t.Fatal("departure left membership unchanged")
 	}
-	reader, err := client.Dial(context.Background(), target.node.cfg.Node.Advertise, admin.Username, admin.Password, client.BucketID(bucket.ID()))
+	reader, err := client.Dial(context.Background(), target.node.cfg.Node.Advertise, admin.Username, admin.Password, client.BucketID(bucket.ID()), "fs")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -452,7 +452,7 @@ func TestDaemonRAMRuntimeResetFencesOldRetries(t *testing.T) {
 	admin := node.node.cfg.Auth.BootstrapAdmin
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	c, err := client.Dial(ctx, node.node.cfg.Node.Advertise, admin.Username, admin.Password, client.BucketID(draft.ID()))
+	c, err := client.Dial(ctx, node.node.cfg.Node.Advertise, admin.Username, admin.Password, client.BucketID(draft.ID()), "fs")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -484,7 +484,7 @@ func TestDaemonRAMRuntimeResetFencesOldRetries(t *testing.T) {
 			t.Fatal("old runtime retry was accepted", err)
 		}
 	}
-	fresh, err := client.Dial(ctx, node.node.cfg.Node.Advertise, admin.Username, admin.Password, client.BucketID(draft.ID()))
+	fresh, err := client.Dial(ctx, node.node.cfg.Node.Advertise, admin.Username, admin.Password, client.BucketID(draft.ID()), "fs")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -537,7 +537,7 @@ func TestDaemonRAMNodeDrainPreservesLiveRuntime(t *testing.T) {
 	admin := source.node.cfg.Auth.BootstrapAdmin
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	c, err := client.Dial(ctx, source.node.cfg.Node.Advertise, admin.Username, admin.Password, client.BucketID(draft.ID()))
+	c, err := client.Dial(ctx, source.node.cfg.Node.Advertise, admin.Username, admin.Password, client.BucketID(draft.ID()), "fs")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -573,7 +573,7 @@ func TestDaemonRAMNodeDrainPreservesLiveRuntime(t *testing.T) {
 	if _, _, err := c.Get(ctx, oid); !errors.Is(err, client.ErrGone) {
 		t.Fatal("old RAM runtime remained readable after target restart", err)
 	}
-	fresh, err := client.Dial(ctx, target.node.cfg.Node.Advertise, admin.Username, admin.Password, client.BucketID(draft.ID()))
+	fresh, err := client.Dial(ctx, target.node.cfg.Node.Advertise, admin.Username, admin.Password, client.BucketID(draft.ID()), "fs")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -594,7 +594,7 @@ func TestDaemonExtensionWithConcentratedObjectHashes(t *testing.T) {
 	admin := source.node.cfg.Auth.BootstrapAdmin
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 	defer cancel()
-	c, err := client.Dial(ctx, source.node.cfg.Node.Advertise, admin.Username, admin.Password, client.BucketID(bucket.ID()))
+	c, err := client.Dial(ctx, source.node.cfg.Node.Advertise, admin.Username, admin.Password, client.BucketID(bucket.ID()), "fs")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -689,7 +689,7 @@ func TestDaemonNativeShortShutdownCommand(t *testing.T) {
 	admin := node.node.cfg.Auth.BootstrapAdmin
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	c, err := client.Dial(ctx, node.node.cfg.Node.Advertise, admin.Username, admin.Password, client.BucketID(bucket.ID()))
+	c, err := client.Dial(ctx, node.node.cfg.Node.Advertise, admin.Username, admin.Password, client.BucketID(bucket.ID()), "fs")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -768,7 +768,7 @@ func TestDaemonBucketDeletionReclaimsEveryNode(t *testing.T) {
 	admin := source.node.cfg.Auth.BootstrapAdmin
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	c, err := client.Dial(ctx, source.node.cfg.Node.Advertise, admin.Username, admin.Password, client.BucketID(bucket.ID()))
+	c, err := client.Dial(ctx, source.node.cfg.Node.Advertise, admin.Username, admin.Password, client.BucketID(bucket.ID()), "fs")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -894,7 +894,7 @@ func TestDaemonCodecPolicyConvertsEveryOwner(t *testing.T) {
 	admin := source.node.cfg.Auth.BootstrapAdmin
 	ctx, cancel := context.WithTimeout(context.Background(), 35*time.Second)
 	defer cancel()
-	c, err := client.Dial(ctx, source.node.cfg.Node.Advertise, admin.Username, admin.Password, client.BucketID(bucket.ID()))
+	c, err := client.Dial(ctx, source.node.cfg.Node.Advertise, admin.Username, admin.Password, client.BucketID(bucket.ID()), "fs")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -974,7 +974,7 @@ func TestDaemonStorageClassPolicyMovesToEligibleOwner(t *testing.T) {
 	admin := source.node.cfg.Auth.BootstrapAdmin
 	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
 	defer cancel()
-	c, err := client.Dial(ctx, source.node.cfg.Node.Advertise, admin.Username, admin.Password, client.BucketID(bucket.ID()))
+	c, err := client.Dial(ctx, source.node.cfg.Node.Advertise, admin.Username, admin.Password, client.BucketID(bucket.ID()), "fs")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1056,7 +1056,7 @@ func TestDaemonStorageClassPolicyMovesToEligibleOwner(t *testing.T) {
 	}
 	source.node.mu.RUnlock()
 	target = restartDaemonTestNode(t, target)
-	reader, err := client.Dial(ctx, target.node.cfg.Node.Advertise, admin.Username, admin.Password, client.BucketID(bucket.ID()))
+	reader, err := client.Dial(ctx, target.node.cfg.Node.Advertise, admin.Username, admin.Password, client.BucketID(bucket.ID()), "fs")
 	if err != nil {
 		t.Fatal(err)
 	}

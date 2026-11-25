@@ -119,13 +119,13 @@ func newBootSession(ctx context.Context, c config, lowerName string, quota uint6
 		return
 	}
 	var conn *client.Client
-	conn, err = client.Dial(ctx, c.URI, c.Username, c.Password, s.Upper)
+	conn, err = client.Dial(ctx, c.URI, c.Username, c.Password, s.Upper, "fs")
 	if err != nil {
 		return
 	}
 	func() {
 		defer conn.Close()
-		lower, e := client.Dial(ctx, c.URI, c.Username, c.Password, s.Lower)
+		lower, e := client.Dial(ctx, c.URI, c.Username, c.Password, s.Lower, "fs")
 		if e != nil {
 			err = e
 			return
@@ -187,7 +187,7 @@ type acceptedImport struct {
 func openImport(ctx context.Context, c config, id client.ID) (*acceptedImport, error) {
 	s := &acceptedImport{available: make(chan *client.Client, 8)}
 	for i := 0; i < 8; i++ {
-		conn, err := client.Dial(ctx, c.URI, c.Username, c.Password, id)
+		conn, err := client.Dial(ctx, c.URI, c.Username, c.Password, id, "fs")
 		if err != nil {
 			s.Close()
 			return nil, err

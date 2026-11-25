@@ -113,7 +113,20 @@ func TestFormatCompatibilityFixture(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		c, err := client.Dial(ctx, cfg.Node.Advertise, cfg.Auth.BootstrapAdmin.Username, cfg.Auth.BootstrapAdmin.Password, client.BucketID(id))
+		b, err := s.Bucket(id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		format := "objects"
+		switch b.Describe().Name {
+		case "compat-filesystem":
+			format = "fs"
+		case "compat-block":
+			format = "bd"
+		case "compat-s3":
+			format = "s3"
+		}
+		c, err := client.Dial(ctx, cfg.Node.Advertise, cfg.Auth.BootstrapAdmin.Username, cfg.Auth.BootstrapAdmin.Password, client.BucketID(id), format)
 		if err != nil {
 			t.Fatal(err)
 		}

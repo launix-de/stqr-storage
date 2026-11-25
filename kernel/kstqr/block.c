@@ -465,7 +465,7 @@ int ks_bd_fill_super(struct super_block *sb, const char *url, const char *user,
 	b->queue = alloc_ordered_workqueue("kstqr-bd", WQ_MEM_RECLAIM);
 	if (!b->queue)
 		return -ENOMEM;
-	err = stqr_dial(&b->client, url, user, password, bucket, timeout);
+	err = stqr_dial(&b->client, url, user, password, bucket, "bd", timeout);
 	if (err)
 		return err;
 	err = ks_bd_claim(b->client, readonly);

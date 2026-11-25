@@ -3,7 +3,7 @@
 The network constructor always receives URL, username, password and a bucket ID:
 
 ```go
-conn, err := client.Dial(ctx, nodeURL, username, password, bucketID)
+conn, err := client.Dial(ctx, nodeURL, username, password, bucketID, "fs")
 if err != nil {
     return err
 }
@@ -322,3 +322,27 @@ unconfirmed receipts cannot silently survive a reboot. The FUSE CLI negotiates
 this mode and uses actual barriers for filesystem sync operations; ordinary close
 is no longer a forced fsync. See [the durability contract](durability.md) for
 causal references, bounds, fallback behavior and recovery semantics.
+
+### Bucket format
+
+Every native opening declares an opaque, case-sensitive client format through
+`X-STQR-Format` (the final `Dial` argument). Filesystem and overlay clients use
+`fs`, block-device clients `bd`, the S3 gateway `s3`, and database clients may
+use `memcp`. The server stores the string without interpreting object contents.
+A fresh bucket has an empty format. Its first authorized opening atomically
+binds it; subsequent openings must match, including after reconnect or routing
+to a different node. Missing/invalid values return HTTP 400 and mismatches 409.
+Read-only grants may open buckets and bind an unset format; no additional object
+permissions are granted. A clone inherits the source format. Clearing objects
+retains it. The dashboard displays the format or `-` while unset.
+
+Administrative browser sockets may select multiple namespaces using
+`BUCKET_FORMAT_OPEN` (`0x0120`, request body: bucket ID, Text format). They must
+open a namespace on that socket before ordinary or delegated object requests.
+Private, authenticated object-copy sessions preserve the application format;
+public credentials cannot claim their maintenance exemption.
+
+The first binding is a normal committed cluster metadata change and requires
+all current members to support format binding. Already bound matching openings
+remain local and do not introduce a new online-member requirement. Upgrade all
+members before assigning the first format in an existing cluster.

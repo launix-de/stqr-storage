@@ -151,6 +151,13 @@ func (s *Server) cloneCow(ctx context.Context, m client.Message, p principal) ([
 			return fail(409, "clone component has reached its traversal limit")
 		}
 		a.ClonePeers = append(a.ClonePeers, BucketClonePeer{Bucket: b.ID, Link: m.ID.String()})
+		if b.Format != "" && b.Format != a.Format {
+			return fail(409, "clone destination format differs from source")
+		}
+		b.Format = a.Format
+		if b.Format != "" {
+			b.Schema = 2
+		}
 		b.ClonePeers = append(b.ClonePeers, BucketClonePeer{Bucket: a.ID, Link: m.ID.String()})
 		b.CloneDetach = !cowSameStorage(a.Policy, b.Policy)
 		receipt.Running = false

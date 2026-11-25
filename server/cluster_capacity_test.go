@@ -26,7 +26,7 @@ func TestClusterQuotaDisplayUsesAllMembersWithoutBlockingLocalWrites(t *testing.
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	admin := source.node.cfg.Auth.BootstrapAdmin
-	c, err := client.Dial(ctx, source.node.cfg.Node.Advertise, admin.Username, admin.Password, client.BucketID(bucket.ID()))
+	c, err := client.Dial(ctx, source.node.cfg.Node.Advertise, admin.Username, admin.Password, client.BucketID(bucket.ID()), "fs")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -49,7 +49,7 @@ func TestClusterQuotaDisplayUsesAllMembersWithoutBlockingLocalWrites(t *testing.
 		}
 	}
 	other, _ := createProtocolBucket(t, source.node, "independent-local-write")
-	localClient, err := client.Dial(ctx, source.node.cfg.Node.Advertise, admin.Username, admin.Password, client.BucketID(other.ID()))
+	localClient, err := client.Dial(ctx, source.node.cfg.Node.Advertise, admin.Username, admin.Password, client.BucketID(other.ID()), "fs")
 	if err != nil {
 		t.Fatal(err)
 	}

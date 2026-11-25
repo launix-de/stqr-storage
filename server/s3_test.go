@@ -290,7 +290,7 @@ func TestS3NativeSDKAndFailedPublication(t *testing.T) {
 	defer host.Close()
 	ctx := context.Background()
 	a := s.cfg.Auth.BootstrapAdmin
-	conn, err := client.Dial(ctx, host.URL, a.Username, a.Password, client.ID(b.ID()))
+	conn, err := client.Dial(ctx, host.URL, a.Username, a.Password, client.ID(b.ID()), "s3")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -544,7 +544,7 @@ func TestS3NativeSnapshotVersionMismatchEmitsNoBytes(t *testing.T) {
 	host := httptest.NewServer(s.Handler())
 	defer host.Close()
 	ctx := context.Background()
-	conn, err := client.Dial(ctx, host.URL, a.Username, a.Password, client.ID(b.ID()))
+	conn, err := client.Dial(ctx, host.URL, a.Username, a.Password, client.ID(b.ID()), "s3")
 	if err != nil {
 		t.Fatal(err)
 	}

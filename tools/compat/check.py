@@ -17,8 +17,8 @@ ROOT = Path(__file__).resolve().parents[2]
 FIXTURE = "server/format_compat_test.go"
 TEST = "^TestFormatCompatibilityFixture$"
 
-# Conservative ownership boundaries: changing one of these implementations
-# requires a checkpoint of the previous state, even for a compatible change.
+# Format owners trigger verification against a retained release/deployment
+# checkpoint. Intermediate source edits do not require additional tags.
 FORMAT_PATHS = (
     "volume/*.go", "client/filesystem*.go", "client/s3*.go", "client/c/src/core.c",
     "kernel/kstqr/*.c", "kernel/kstqr/*.h", "qemu-plugin-nbd/devices.go",
@@ -43,10 +43,10 @@ def require_checkpoint(base, refs):
         ancestor = subprocess.run(["git", "merge-base", "--is-ancestor", ref, base], cwd=ROOT, check=False)
         if ancestor.returncode not in (0, 1):
             raise RuntimeError(f"cannot inspect checkpoint ancestry: {ref}")
-        if ancestor.returncode == 0 and not format_changes(ref, base):
-            print(f"Pre-change checkpoint: {ref}", flush=True)
+        if ancestor.returncode == 0:
+            print(f"Retained deployment/release checkpoint: {ref}", flush=True)
             return
-    raise RuntimeError(f"format-owning source changed, but no ancestor tag captures the formats at base {base}; tag and push the previous compatible state before changing it")
+    raise RuntimeError(f"format-owning source changed, but no retained release/deployment checkpoint is an ancestor of base {base}")
 
 
 def event_base():

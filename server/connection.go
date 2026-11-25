@@ -3,7 +3,9 @@ package server
 
 import (
 	"encoding/hex"
+	"fmt"
 	"net/http"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -15,6 +17,7 @@ import (
 // Roles, bucket pointer and permissions are immutable; administrative changes
 // revoke the capability instead of making data requests reread account/ACL data.
 type connectionAuthorization struct {
+	openedFormats              sync.Map // bucket ID -> immutable format, for administrative object clients
 	lease                      atomic.Pointer[bucketLease]
 	leaseOwner                 atomic.Bool
 	admin, clusterPeer         bool
@@ -108,6 +111,11 @@ func (s *Server) authorizeConnection(r *http.Request, p principal) (*connectionA
 		b, err := s.Bucket(id)
 		if err != nil {
 			return nil, p, err
+		}
+		if p.frontendPermission == 0 || r.Header.Get(client.FormatHeader) != internalObjectFormat || b.Describe().Format != "" {
+			if format := r.Header.Get(client.FormatHeader); format == "" || format != b.Describe().Format {
+				return nil, p, fail(409, fmt.Sprintf("bucket format mismatch on connection: expected %q, got %q", b.Describe().Format, format))
+			}
 		}
 		user, err := bucketID(p.User.ID)
 		if err != nil {

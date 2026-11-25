@@ -212,7 +212,7 @@ func TestPGRebuildDisjointNetworkSplit(t *testing.T) {
 	defer cancel()
 	for i, b := range buckets {
 		a := nodes[i].node.cfg.Auth.BootstrapAdmin
-		c, err := client.Dial(ctx, nodes[i].node.cfg.Node.Advertise, a.Username, a.Password, client.ID(b.ID()))
+		c, err := client.Dial(ctx, nodes[i].node.cfg.Node.Advertise, a.Username, a.Password, client.ID(b.ID()), "fs")
 		if err != nil {
 			t.Fatal("split fresh auth", err)
 		}
@@ -266,7 +266,7 @@ func TestPGRebuildDisjointNetworkSplit(t *testing.T) {
 	}
 	quotaCtx, quotaCancel := context.WithTimeout(context.Background(), 3*time.Second)
 	admin := source.node.cfg.Auth.BootstrapAdmin
-	quotaClient, err := client.Dial(quotaCtx, nodes[creditWriter].node.cfg.Node.Advertise, admin.Username, admin.Password, client.ID(finite.ID()))
+	quotaClient, err := client.Dial(quotaCtx, nodes[creditWriter].node.cfg.Node.Advertise, admin.Username, admin.Password, client.ID(finite.ID()), "fs")
 	if err != nil {
 		quotaCancel()
 		t.Fatal(err)
@@ -279,7 +279,7 @@ func TestPGRebuildDisjointNetworkSplit(t *testing.T) {
 	}
 
 	a := source.node.cfg.Auth.BootstrapAdmin
-	c, err := client.Dial(ctx, source.node.cfg.Node.Advertise, a.Username, a.Password, client.ID(leaseBucket.ID()))
+	c, err := client.Dial(ctx, source.node.cfg.Node.Advertise, a.Username, a.Password, client.ID(leaseBucket.ID()), "fs")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -301,7 +301,7 @@ func TestPGRebuildDisjointNetworkSplit(t *testing.T) {
 	nodes[3] = auditSplitStart(t, g, old.path, &cfg, 1, address)
 	a = source.node.cfg.Auth.BootstrapAdmin
 	restartCtx, restartCancel := context.WithTimeout(context.Background(), 3*time.Second)
-	restarted, restartErr := client.Dial(restartCtx, nodes[3].node.cfg.Node.Advertise, a.Username, a.Password, client.ID(buckets[1].ID()))
+	restarted, restartErr := client.Dial(restartCtx, nodes[3].node.cfg.Node.Advertise, a.Username, a.Password, client.ID(buckets[1].ID()), "fs")
 	if restartErr != nil {
 		restartCancel()
 		t.Fatal("isolated restart auth", restartErr)

@@ -25,12 +25,12 @@ func subscriptionClients(t *testing.T) (*Server, *client.Client, *client.Client,
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	t.Cleanup(cancel)
 	admin := s.cfg.Auth.BootstrapAdmin
-	reader, err := client.Dial(ctx, host.URL, admin.Username, admin.Password, client.BucketID(b.ID()))
+	reader, err := client.Dial(ctx, host.URL, admin.Username, admin.Password, client.BucketID(b.ID()), "fs")
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { reader.Close() })
-	writer, err := client.Dial(ctx, host.URL, admin.Username, admin.Password, client.BucketID(b.ID()))
+	writer, err := client.Dial(ctx, host.URL, admin.Username, admin.Password, client.BucketID(b.ID()), "fs")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -264,7 +264,7 @@ func TestDaemonSubscriptionResyncsBeforeRangeHandoff(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	admin := source.node.cfg.Auth.BootstrapAdmin
-	c, err := client.Dial(ctx, source.node.cfg.Node.Advertise, admin.Username, admin.Password, client.BucketID(b.ID()))
+	c, err := client.Dial(ctx, source.node.cfg.Node.Advertise, admin.Username, admin.Password, client.BucketID(b.ID()), "fs")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -533,7 +533,7 @@ func TestSubscriptionStorePausedOwnerDoesNotBlockIndependentRange(t *testing.T) 
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	admin := source.node.cfg.Auth.BootstrapAdmin
-	c, err := client.Dial(ctx, source.node.cfg.Node.Advertise, admin.Username, admin.Password, client.BucketID(b.ID()))
+	c, err := client.Dial(ctx, source.node.cfg.Node.Advertise, admin.Username, admin.Password, client.BucketID(b.ID()), "fs")
 	if err != nil {
 		t.Fatal(err)
 	}

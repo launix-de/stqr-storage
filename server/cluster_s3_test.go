@@ -131,7 +131,7 @@ func TestFrontendCredentialsStayPrivateAndBucketBound(t *testing.T) {
 	}
 	wire[len(wire)-1] ^= 1 // forged live-operation ID, otherwise valid catalog binding
 	forged := frontendCredentialPrefix + base64.RawURLEncoding.EncodeToString(wire)
-	if conn, err := client.Dial(ctx, target.node.cfg.Node.Advertise, forged, secret, client.ID(bucket.ID())); err == nil {
+	if conn, err := client.Dial(ctx, target.node.cfg.Node.Advertise, forged, secret, client.ID(bucket.ID()), "s3"); err == nil {
 		conn.Close()
 		t.Fatal("cluster token invented a user session without a live frontend operation")
 	}
@@ -139,7 +139,7 @@ func TestFrontendCredentialsStayPrivateAndBucketBound(t *testing.T) {
 		password string
 		bucket   client.ID
 	}{{"incorrect-cluster-credential", client.ID(bucket.ID())}, {secret, client.ID{0xfa}}} {
-		conn, err := client.Dial(ctx, target.node.cfg.Node.Advertise, name, credentials.password, credentials.bucket)
+		conn, err := client.Dial(ctx, target.node.cfg.Node.Advertise, name, credentials.password, credentials.bucket, "s3")
 		if err == nil {
 			conn.Close()
 			t.Fatal("invalid frontend credential was accepted")
@@ -158,7 +158,7 @@ func TestFrontendCredentialsStayPrivateAndBucketBound(t *testing.T) {
 	if response.StatusCode != 401 {
 		t.Fatal("frontend credential exposed administrative HTTP API", response.StatusCode)
 	}
-	conn, err := client.Dial(ctx, target.node.cfg.Node.Advertise, name, secret, client.ID(bucket.ID()))
+	conn, err := client.Dial(ctx, target.node.cfg.Node.Advertise, name, secret, client.ID(bucket.ID()), "s3")
 	if err != nil {
 		t.Fatal("valid private frontend refused", err)
 	}
@@ -175,7 +175,7 @@ func TestFrontendCredentialsStayPrivateAndBucketBound(t *testing.T) {
 	if _, _, err := conn.Get(ctx, client.ObjectID{1}); !errors.Is(err, client.ErrUnauthorized) {
 		t.Fatal("revoked frontend session remained usable", err)
 	}
-	reopened, err := client.Dial(ctx, target.node.cfg.Node.Advertise, name, secret, client.ID(bucket.ID()))
+	reopened, err := client.Dial(ctx, target.node.cfg.Node.Advertise, name, secret, client.ID(bucket.ID()), "s3")
 	if err == nil {
 		reopened.Close()
 		t.Fatal("old frontend credential reconnected after account change")
@@ -349,6 +349,7 @@ func TestFrontendIssuerOfflineRemainsRetryable(t *testing.T) {
 	request.RemoteAddr = "127.0.0.1:1234"
 	request.SetBasicAuth(name, password)
 	request.Header.Set(client.BucketHeader, bucket.ID().String())
+	request.Header.Set(client.FormatHeader, "s3")
 	response := httptest.NewRecorder()
 	target.node.Handler().ServeHTTP(response, request)
 	if response.Code != 503 {

@@ -247,7 +247,20 @@ func (s *Server) frontendEndpoint(ctx context.Context) (string, error) {
 	return "", fail(503, "no allowed local address for the object frontend")
 }
 
-func (s *Server) openFrontend(ctx context.Context, bucket volume.ID, p principal) (*frontendClient, error) {
+func (s *Server) openFrontend(ctx context.Context, bucket volume.ID, p principal, declared ...string) (*frontendClient, error) {
+	format := internalObjectFormat
+	if len(declared) > 0 {
+		format = declared[0]
+	} else {
+		b, err := s.Bucket(bucket)
+		if err != nil {
+			return nil, err
+		}
+		if stored := b.Describe().Format; stored != "" {
+			format = stored
+		}
+	}
+
 	name, password, release, err := s.frontendCredentials(ctx, bucket, p)
 	if err != nil {
 		return nil, err
@@ -257,7 +270,7 @@ func (s *Server) openFrontend(ctx context.Context, bucket volume.ID, p principal
 		release()
 		return nil, err
 	}
-	c, err := client.Dial(ctx, endpoint, name, password, client.BucketID(bucket))
+	c, err := client.Dial(ctx, endpoint, name, password, client.BucketID(bucket), format)
 	if err != nil {
 		release()
 		return nil, err
