@@ -849,6 +849,47 @@ done:
 		ks_snapshot_free(out);
 	return err;
 }
+/* Invalidators may consume a live cached snapshot, but must never fetch or
+ * register subscriptions. Virtual directories and missing namespace proofs are
+ * left for foreground resolution. Keep the same upper/absence rules as normal
+ * overlay reads, including open-but-unlinked upper objects. */
+static int ks_overlay_snapshot_cached(struct ks_fs *f, stqr_object_id id,
+				     struct ks_snapshot *out)
+{
+	struct ks_snapshot root = {0};
+	struct ks_overlay_state *state = NULL;
+	int err = -ENODATA;
+	memset(out, 0, sizeof(*out));
+	if (ks_cache_peek(f, ks_root_id, &root.raw, &root.raw_len, &root.info))
+		return err;
+	mutex_lock(&f->overlay_cache_lock);
+	state = f->overlay_state;
+	if (state && state->root_head.n == root.raw_len &&
+	    !memcmp(state->root_head.p, root.raw, root.raw_len) &&
+	    !memcmp(state->info.runtime.bytes, root.info.runtime.bytes, 16))
+		refcount_inc(&state->refs);
+	else
+		state = NULL;
+	mutex_unlock(&f->overlay_cache_lock);
+	if (!state || ov_find(state, id))
+		goto done;
+	if (!ov_upper_ref(state, id) && ov_absent(f, id, root.info.proof)) {
+		err = ks_plain_snapshot_cached(f->lower, id, out);
+		if (!err) {
+			out->node.inherited = true;
+			out->node.upper_absent = root.info.proof;
+		}
+	} else
+		err = ks_plain_snapshot_cached(f, id, out);
+	if (!err && out->node.kind == 2)
+		err = -ENODATA;
+	if (err)
+		ks_snapshot_free(out);
+done:
+	ov_put(state);
+	ks_snapshot_free(&root);
+	return err;
+}
 int ks_overlay_snapshot(struct ks_fs *f, stqr_object_id id, struct ks_snapshot *out)
 {
 	struct ks_overlay_state *s;
