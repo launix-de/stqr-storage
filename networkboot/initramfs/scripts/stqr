@@ -22,14 +22,18 @@ mountroot() {
     # Keep future module reloads consistent without changing the shared lower.
     stqr_module=/lib/modules/$(uname -r)/extra/kstqr.ko
     mkdir -p "$rootmnt/lib/modules/$(uname -r)/extra"
-    cp "$stqr_module" "$rootmnt$stqr_module" || panic "STQR root module update failed"
+    dd if="$stqr_module" of="$rootmnt$stqr_module" bs=1048576 2>/dev/null || panic "STQR root module update failed"
     # Apply to the private upper before PID1 reads passwd/PAM. This also allows
     # a login-support hotpatch without rewriting the immutable published lower.
     mkdir -p "$rootmnt/usr/lib/stqr-networkboot" "$rootmnt/usr/libexec"
     for stqr_file in login.json install-login pam_stqr.so; do
-        cp -p "/usr/lib/stqr-networkboot/$stqr_file" "$rootmnt/usr/lib/stqr-networkboot/" || panic "STQR login payload missing"
+        dd if="/usr/lib/stqr-networkboot/$stqr_file" of="$rootmnt/usr/lib/stqr-networkboot/$stqr_file" bs=1048576 2>/dev/null || panic "STQR login payload missing"
     done
-    cp -p /usr/libexec/stqr-home /usr/libexec/stqr-bootctl "$rootmnt/usr/libexec/" || panic "STQR login helpers missing"
+    # The native client handles 1-MiB objects. Feed it full windows rather than
+    # cp's many small writes, each requiring a separate durable inode publication.
+    for stqr_helper in stqr-home stqr-bootctl; do
+        dd if="/usr/libexec/$stqr_helper" of="$rootmnt/usr/libexec/$stqr_helper" bs=1048576 2>/dev/null || panic "STQR login helpers missing"
+    done
     chmod 0755 "$rootmnt/usr/lib/stqr-networkboot" "$rootmnt/usr/lib/stqr-networkboot/install-login" "$rootmnt/usr/libexec/stqr-home" "$rootmnt/usr/libexec/stqr-bootctl" || panic "STQR login permissions failed"
     chmod 0644 "$rootmnt/usr/lib/stqr-networkboot/pam_stqr.so" || panic "STQR PAM permissions failed"
     chmod 0600 "$rootmnt/usr/lib/stqr-networkboot/login.json" || panic "STQR login manifest permissions failed"
