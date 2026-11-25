@@ -180,27 +180,30 @@ func (s *Server) applyPGCodec(ctx context.Context, body []byte, actor client.ID)
 				s.opMu.Unlock()
 				return nil, e
 			}
+			s.opMu.Unlock()
 			if len(records) == 0 {
-				s.opMu.Unlock()
 				break
 			}
 			for _, record := range records {
 				if record.Info.Deleted || record.Info.Compression == p.Compression {
 					continue
 				}
+				if err := s.waitForUserIO(ctx); err != nil {
+					return nil, err
+				}
+				s.opMu.Lock()
 				h, e = store.Open(true)
 				if e == nil {
 					e = h.RecompressWithOptions(record.Key, p.Compression, volume.Options{})
 					h.Close()
 				}
+				s.opMu.Unlock()
 				if e != nil {
-					s.opMu.Unlock()
 					return nil, e
 				}
 			}
 			next := records[len(records)-1].Key.Object
 			after = &next
-			s.opMu.Unlock()
 		}
 	}
 	return nil, nil

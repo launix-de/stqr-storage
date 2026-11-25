@@ -482,6 +482,22 @@ func TestPGWorkerDoesNotWaitForUnrelatedPG(t *testing.T) {
 		t.Fatal(err)
 	}
 	g.split(nodes)
+	// Also leave an unrelated global metadata reservation waiting on the
+	// unavailable fragment. It must not fence healthy PG payload work.
+	source.node.controller.mu.Lock()
+	defer source.node.controller.mu.Unlock()
+	globalCtx, globalCancel := context.WithTimeout(ctx, 300*time.Millisecond)
+	_, globalErr := source.node.controller.coordinator.begin(globalCtx, controlAdministration, membershipIDs(source.node.currentSystem.Load().manifest.Membership))
+	globalCancel()
+	if globalErr == nil {
+		t.Fatal("global ALL unexpectedly completed across the split")
+	}
+	source.node.control.ledger.mu.Lock()
+	reserved := source.node.control.ledger.slot != nil
+	source.node.control.ledger.mu.Unlock()
+	if !reserved {
+		t.Fatal("missing local global metadata reservation")
+	}
 	source.node.mu.Lock()
 	source.node.volumes[dataVolume(source).String()].config.State = "draining"
 	source.node.mu.Unlock()
@@ -496,5 +512,5 @@ func TestPGWorkerDoesNotWaitForUnrelatedPG(t *testing.T) {
 	if !stillWaiting {
 		t.Fatal("test did not retain an unavailable PG generation")
 	}
-	t.Log("healthy PG completed automatic rebalance while another PG on the same node/coordinator remained fenced and unavailable")
+	t.Log("healthy PG completed automatic rebalance while another PG was fenced and global metadata ALL waited on the same node/coordinator")
 }

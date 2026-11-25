@@ -137,7 +137,7 @@ func (r *rangeManager) runPGWorker(group string, worker pgRebuildWorker) {
 		}
 		var err error
 		if ok {
-			ctx, cancel := context.WithTimeout(s.ctx, 5*time.Second)
+			ctx, cancel := context.WithCancel(s.ctx)
 			started := time.Now()
 			err = r.move(ctx, plan)
 			cancel()
