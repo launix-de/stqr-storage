@@ -202,11 +202,13 @@ poweroff -f
 	if err = disk.ReadAt(ctx, data, raw, (1<<20)-512); err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Equal(raw[:512], bytes.Repeat([]byte("X"), 512)) || !bytes.Equal(raw[512:], make([]byte, 512)) {
+	if !bytes.Equal(raw, make([]byte, 1024)) {
 		t.Fatal("kernel trim changed unrelated bytes")
 	}
-	if _, _, err = disk.Client.Get(ctx, nbd.StripeID(data.ID, 2)); !errors.Is(err, client.ErrNotFound) {
-		t.Fatal("discard left full stripe allocated", err)
+	for _, index := range []uint64{1, 2} {
+		if _, _, err = disk.Client.Get(ctx, nbd.StripeID(data.ID, index)); !errors.Is(err, client.ErrNotFound) {
+			t.Fatal("unaligned discard left fully covered stripe allocated", index, err)
+		}
 	}
 	t.Log("native named block nodes, sparse/ranged IO, flush, discard, ext4 mount chaining, readonly, lease exclusion and teardown verified")
 }

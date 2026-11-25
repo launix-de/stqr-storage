@@ -77,6 +77,18 @@ int main(int argc, char **argv)
 	CHECK(pread(fd, p, 1024, M - 512) == 1024);
 	for (int j = 0; j < 512; j++)
 		CHECK(p[j] == 'X' && p[j + 512] == 0);
+	/* A long unaligned discard must still delete its completely covered
+	 * interior stripes after Linux splits it into bios. */
+	memset(p, 'D', 2 * M);
+	CHECK(pwrite(fd, p, 2 * M, M) == 2 * M);
+	CHECK(!fsync(fd));
+	trim[0] = 512;
+	trim[1] = 3 * M;
+	CHECK(!ioctl(fd, BLKDISCARD, trim));
+	CHECK(!fsync(fd));
+	CHECK(pread(fd, p, 4096, 0) == 4096 && !memcmp(p, "from Go", 7));
+	for (int j = 512; j < 4096; j++)
+		CHECK(!p[j]);
 	CHECK(!close(fd));
 	free(memory);
 	puts("KSTQR_BLOCK_IO_PASS");

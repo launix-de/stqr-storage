@@ -400,7 +400,9 @@ including sysfs, dynamic `/dev/kstqr*` nodes and partition discovery. Use the
 stable exported names in configuration; dynamically assigned kernel disk numbers
 are not persistent identities. The inventory is fixed for the mount lifetime;
 remount after adding, removing or resizing a device. At most 256 devices are
-exported by one mount.
+exported by one mount. Automatic exports require device names that are valid
+single filenames; use `device=NAME` to select a name containing a slash or a
+reserved directory name and expose it under the safe alias `bd`.
 
 To select one existing device and expose it as a single node named `bd`:
 
@@ -441,6 +443,8 @@ to the running kernel.
   A request is split at stripe boundaries. Partial reads/writes use ranged object
   operations; a complete stripe write uses PUT. No read-modify-write of a full
   stripe is required for a small write.
+- Discard alignment follows 1-MiB allocation units, so Linux splits long trim
+  requests at stripe boundaries. Small trims remain supported and zero bytes.
 - Missing objects and short stripe tails read as zeros. A full-stripe discard
   deletes the object; boundary discards zero only stored bytes. A WRITE grant
   without DELETE permission falls back to an empty payload for a full stripe.

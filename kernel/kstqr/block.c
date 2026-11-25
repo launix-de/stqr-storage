@@ -268,8 +268,12 @@ static void ks_bio_worker(struct work_struct *work)
 }
 static void ks_submit_bio(struct bio *bio)
 {
-	struct ks_disk *d = bio->bi_bdev->bd_disk->private_data;
+	struct ks_disk *d;
 	struct ks_bio_work *job;
+	bio = bio_split_to_limits(bio);
+	if (!bio)
+		return;
+	d = bio->bi_bdev->bd_disk->private_data;
 	if (READ_ONCE(d->owner->stopping)) {
 		bio_io_error(bio);
 		return;
@@ -377,7 +381,9 @@ static int ks_bd_add(struct super_block *sb, struct ks_bd_meta *m, const char *n
 	    .max_segment_size = KS_BD_STRIPE,
 	    .max_hw_discard_sectors = KS_BD_STRIPE / 512,
 	    .max_write_zeroes_sectors = KS_BD_STRIPE / 512,
-	    .discard_granularity = 512,
+		/* Splits of a long trim must align to allocation units, so fully
+		 * covered stripes remain deletable. Partial trims still zero bytes. */
+		.discard_granularity = KS_BD_STRIPE,
 	    .features = BLK_FEAT_WRITE_CACHE | BLK_FEAT_FUA,
 	};
 	if (!*name || strchr(name, '/') || !strcmp(name, ".") || !strcmp(name, ".."))
