@@ -22,6 +22,7 @@ func dialTestSocket(t *testing.T, host, username, password, bucket string) (*web
 	r.SetBasicAuth(username, password)
 	if bucket != "" {
 		r.Header.Set(client.BucketHeader, bucket)
+		r.Header.Set(client.FormatHeader, "fs")
 	}
 	d := websocket.Dialer{Subprotocols: []string{"stqr.v2"}}
 	return d.Dial("ws"+strings.TrimPrefix(host, "http")+"/api/ws", r.Header)
@@ -34,13 +35,13 @@ func TestConnectionChecksBucketGrantAtUpgrade(t *testing.T) {
 	defer host.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	if c, err := client.Dial(ctx, host.URL, user.Name, "bucket-test-password", client.BucketID(b.ID())); !errors.Is(err, client.ErrUnauthorized) {
+	if c, err := client.Dial(ctx, host.URL, user.Name, "bucket-test-password", client.BucketID(b.ID()), "fs"); !errors.Is(err, client.ErrUnauthorized) {
 		if c != nil {
 			c.Close()
 		}
 		t.Fatal("missing grant was not rejected at Dial", err)
 	}
-	if c, err := client.Dial(ctx, host.URL, user.Name, "bucket-test-password", client.BucketID{99}); !errors.Is(err, client.ErrNotFound) {
+	if c, err := client.Dial(ctx, host.URL, user.Name, "bucket-test-password", client.BucketID{99}, "fs"); !errors.Is(err, client.ErrNotFound) {
 		if c != nil {
 			c.Close()
 		}
@@ -60,7 +61,7 @@ func TestConnectionChecksBucketGrantAtUpgrade(t *testing.T) {
 	if _, err = s.buckets.Save(description, description.Revision); err != nil {
 		t.Fatal(err)
 	}
-	c, err := client.Dial(ctx, host.URL, user.Name, "bucket-test-password", client.BucketID(b.ID()))
+	c, err := client.Dial(ctx, host.URL, user.Name, "bucket-test-password", client.BucketID(b.ID()), "fs")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -95,7 +96,7 @@ func TestConnectionDataPathHasNoAccountOrGrantLookups(t *testing.T) {
 	defer host.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	c, err := client.Dial(ctx, host.URL, user.Name, "bucket-test-password", client.BucketID(b.ID()))
+	c, err := client.Dial(ctx, host.URL, user.Name, "bucket-test-password", client.BucketID(b.ID()), "fs")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -221,7 +222,7 @@ func TestConnectionPasswordChangeInvalidatesCachedAccess(t *testing.T) {
 	defer host.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	c, err := client.Dial(ctx, host.URL, user.Name, "bucket-test-password", client.BucketID(b.ID()))
+	c, err := client.Dial(ctx, host.URL, user.Name, "bucket-test-password", client.BucketID(b.ID()), "fs")
 	if err != nil {
 		t.Fatal(err)
 	}

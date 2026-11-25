@@ -220,7 +220,7 @@ func TestDaemonReplicaNodeReplacementPromotesAndPreservesQuota(t *testing.T) {
 	source.node.mu.RLock()
 	config := copyConfig(source.node.cfg)
 	source.node.mu.RUnlock()
-	conn, err := client.Dial(ctx, config.Node.Advertise, config.Auth.BootstrapAdmin.Username, config.Auth.BootstrapAdmin.Password, client.BucketID(b.ID()))
+	conn, err := client.Dial(ctx, config.Node.Advertise, config.Auth.BootstrapAdmin.Username, config.Auth.BootstrapAdmin.Password, client.BucketID(b.ID()), "fs")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -486,7 +486,7 @@ func TestDaemonReplicaAutomaticVolumeDrain(t *testing.T) {
 			source.node.mu.RLock()
 			cfg := copyConfig(source.node.cfg)
 			source.node.mu.RUnlock()
-			conn, err := client.Dial(ctx, cfg.Node.Advertise, cfg.Auth.BootstrapAdmin.Username, cfg.Auth.BootstrapAdmin.Password, client.BucketID(b.ID()))
+			conn, err := client.Dial(ctx, cfg.Node.Advertise, cfg.Auth.BootstrapAdmin.Username, cfg.Auth.BootstrapAdmin.Password, client.BucketID(b.ID()), "fs")
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -608,7 +608,7 @@ func TestDaemonReplicaDisjointNodeMaskReplacement(t *testing.T) {
 	source.node.mu.RLock()
 	cfg := copyConfig(source.node.cfg)
 	source.node.mu.RUnlock()
-	conn, err := client.Dial(ctx, cfg.Node.Advertise, cfg.Auth.BootstrapAdmin.Username, cfg.Auth.BootstrapAdmin.Password, client.BucketID(b.ID()))
+	conn, err := client.Dial(ctx, cfg.Node.Advertise, cfg.Auth.BootstrapAdmin.Username, cfg.Auth.BootstrapAdmin.Password, client.BucketID(b.ID()), "fs")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -702,7 +702,7 @@ func TestDaemonReplicaEverywhereNodeDrain(t *testing.T) {
 	source.node.mu.RLock()
 	cfg := copyConfig(source.node.cfg)
 	source.node.mu.RUnlock()
-	conn, err := client.Dial(ctx, cfg.Node.Advertise, cfg.Auth.BootstrapAdmin.Username, cfg.Auth.BootstrapAdmin.Password, client.BucketID(b.ID()))
+	conn, err := client.Dial(ctx, cfg.Node.Advertise, cfg.Auth.BootstrapAdmin.Username, cfg.Auth.BootstrapAdmin.Password, client.BucketID(b.ID()), "fs")
 	if err != nil {
 		t.Fatal(err)
 	}

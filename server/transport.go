@@ -4,6 +4,7 @@ package server
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"errors"
 	"net/http"
 	"sync"
@@ -28,7 +29,6 @@ type terminalFrame struct {
 }
 
 type wsSession struct {
-	blockControl       atomic.Bool
 	durabilityCap      atomic.Bool
 	versionsSubscribed bool   // guarded by subMu
 	versionSent        string // guarded by subMu
@@ -101,6 +101,19 @@ func (s *Server) serveWebSocket(w http.ResponseWriter, r *http.Request, p princi
 		httpError(w, 400, errors.New("stqr.v2 subprotocol required"))
 		return
 	}
+	// Reject malformed upgrades before a first connection can bind a format.
+	key, keyErr := base64.StdEncoding.DecodeString(r.Header.Get("Sec-WebSocket-Key"))
+	if !websocket.IsWebSocketUpgrade(r) || r.Header.Get("Sec-WebSocket-Version") != "13" || keyErr != nil || len(key) != 16 {
+		httpError(w, 400, errors.New("valid WebSocket upgrade required"))
+		return
+	}
+	if raw := r.Header.Get(client.BucketHeader); raw != "" {
+		if err := s.openBucketFormat(r.Context(), raw, r.Header.Get(client.FormatHeader), p); err != nil {
+			httpError(w, statusOf(err), err)
+			return
+		}
+	}
+
 	s.opMu.Lock()
 	authorization, p, authErr := s.authorizeConnection(r, p)
 	if authErr != nil {

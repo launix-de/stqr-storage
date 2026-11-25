@@ -32,7 +32,7 @@ int save_settings(const char *url, const char *user, const char *password,
     stqr_client *conn = NULL;
     stqr_options options = {0};
     stqr_info info;
-    int err = stqr_dial(&conn, url, user, password, bucket, 30000);
+    int err = stqr_dial(&conn, url, user, password, bucket, "fs", 30000);
     if (err) return err;
     err = stqr_request_id(&options.request_id);
     if (!err) err = stqr_put(conn, object, "hello", 5, &options, &info);

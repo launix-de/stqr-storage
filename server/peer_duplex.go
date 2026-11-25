@@ -87,7 +87,7 @@ func (ws *wsSession) requestDuplex(ctx context.Context, opcode uint16, body []by
 }
 
 func (ws *wsSession) receivePeerReply(m client.Message) bool {
-	if ws.authorization == nil || (!ws.authorization.peerVerified.Load() && !(m.Opcode == client.BucketBlockControl && ws.blockControl.Load() && !ws.authorization.invalid.Load())) {
+	if ws.authorization == nil || !ws.authorization.peerVerified.Load() {
 		return false
 	}
 	ws.peerMu.Lock()

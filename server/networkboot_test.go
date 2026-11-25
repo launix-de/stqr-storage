@@ -325,7 +325,7 @@ with tempfile.TemporaryDirectory(prefix='stqr-gateway-') as work:
 		t.Fatal("native manifest", err)
 	}
 	ctx := context.Background()
-	lower, err := client.Dial(ctx, host.URL, a.Username, a.Password, nativeManifest.RootBucket)
+	lower, err := client.Dial(ctx, host.URL, a.Username, a.Password, nativeManifest.RootBucket, "fs")
 	if err != nil {
 		t.Fatal(err)
 	}

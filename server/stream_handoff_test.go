@@ -110,7 +110,7 @@ func TestStreamingPutFinishesWithMapRedirectAfterHandoff(t *testing.T) {
 	if reply.ID != request || status != 301 || count != 1 || tag != 2 || h.Done() != nil || d.Done() != nil || err != nil || patch.Entries[0].Locations[0].Node != target.node.control.ledger.node {
 		t.Fatal("stream completion lost its adaptive map redirect", status, err)
 	}
-	c, err := client.Dial(ctx, source.node.cfg.Node.Advertise, admin.Username, admin.Password, client.BucketID(bucket.ID()))
+	c, err := client.Dial(ctx, source.node.cfg.Node.Advertise, admin.Username, admin.Password, client.BucketID(bucket.ID()), "fs")
 	if err != nil {
 		t.Fatal(err)
 	}

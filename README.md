@@ -352,8 +352,6 @@ filesystem on each exported disk. Missing stripes read as zeros, and complete
 discarded stripes return their payload allocation to STQR. Devices can grow
 sparsely through the library or `stqr-nbd resize`, including through a running
 exporter's private control socket. Reconnect NBD clients to discover the new size.
-The dashboard's **Buckets → Disks** view lists and grows devices, including those
-served by an exporter on another machine through its existing cluster lease.
 
 ```sh
 make -C qemu-plugin-nbd
@@ -383,7 +381,7 @@ Object addresses are native 32-byte values. Applications choose those addresses;
 they need not be hashes of the payload.
 
 ```go
-conn, err := client.Dial(ctx, nodeURL, username, password, bucketID)
+conn, err := client.Dial(ctx, nodeURL, username, password, bucketID, "fs")
 if err != nil {
     return err
 }
@@ -494,12 +492,12 @@ and native Windows callbacks/setup. The server suite is discovered automatically
 and split into disjoint groups. Kernel-module VMs, physical PXE boots, actual
 Windows drive mounts and external-host acceptance remain separate checks.
 
-Persistent format changes require a published Git release/checkpoint tag of the
-previous compatible state. The format CI builds every tagged version, uses its
+Persistent formats are checked against retained deployment/release checkpoints;
+intermediate source edits do not require new tags. CI builds every tagged version, uses its
 server and frontends to generate data, then verifies the same persisted files
 with the tested version and again after restart. The corpus covers native objects,
 filesystems, block devices and S3. See [CI and format checkpoints](docs/ci.md)
-for the workflow, coverage and mandatory tag rules.
+for the workflow, coverage and retained checkpoint rules.
 
 ```sh
 go test ./...

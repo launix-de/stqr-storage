@@ -18,6 +18,7 @@ struct stqr_client {
     struct stqr_socket *socket;
     char host[256], authority[272];
     char *authorization;
+    char format[256];
     size_t authorization_len;
     unsigned port, timeout;
     stqr_id bucket, runtime, lease;
@@ -316,8 +317,8 @@ static int handshake(stqr_client *c) {
     request = sq_alloc(capacity); headers = sq_alloc(16385);
     if (!request || !headers) { err = -ENOMEM; goto out; }
     n = (size_t)snprintf(request, capacity,
-        "GET /api/ws HTTP/1.1\r\nHost: %s\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: %s\r\nSec-WebSocket-Protocol: stqr.v2\r\nAuthorization: Basic %s\r\nX-STQR-Bucket: %s\r\n%s\r\n",
-        c->authority, key, c->authorization, bucket, lease);
+        "GET /api/ws HTTP/1.1\r\nHost: %s\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: %s\r\nSec-WebSocket-Protocol: stqr.v2\r\nAuthorization: Basic %s\r\nX-STQR-Bucket: %s\r\nX-STQR-Format: %s\r\n%s\r\n",
+        c->authority, key, c->authorization, bucket, c->format, lease);
     if (n >= capacity) { err = -E2BIG; goto out; }
     if ((err = sq_send(c->socket, request, n))) goto out;
     for (n = 0; n < 16384; n++) {
@@ -722,15 +723,18 @@ int stqr_reconnect(stqr_client *c) {
     disconnect_channels(c);
     return reconnect_active(c);
 }
-int stqr_dial(stqr_client **out, const char *url, const char *user, const char *password, stqr_id bucket, unsigned timeout) {
+int stqr_dial(stqr_client **out, const char *url, const char *user, const char *password, stqr_id bucket, const char *format, unsigned timeout) {
     stqr_client *c; char *plain; size_t u, p, n; int err;
     if (!out) return -EINVAL;
     *out = NULL;
     if (!user || !password || !*user || !*password || strchr(user, ':') || zero(bucket.bytes, 16) || !timeout || timeout > 3600000) return -EINVAL;
+    if (!format || !*format || strlen(format) > 255 || format[0] == ' ' || format[strlen(format)-1] == ' ') return -EINVAL;
+    for (n = 0; format[n]; n++) if ((unsigned char)format[n] < 32 || (unsigned char)format[n] == 127) return -EINVAL;
     u = strlen(user); p = strlen(password);
     if (u > 4096 || p > 4096) return -E2BIG;
     c = sq_alloc(sizeof(*c)); if (!c) return -ENOMEM;
     c->bucket = bucket; c->timeout = timeout;
+    memcpy(c->format, format, strlen(format)+1);
     if ((err = parse_url(c, url))) { sq_free(c); return err; }
     n = u+p+1; plain = sq_alloc(n);
     c->authorization_len = 4*((n+2)/3)+1; c->authorization = sq_alloc(c->authorization_len);
@@ -1130,6 +1134,7 @@ static int fence_capture_owner(stqr_fence *f, const stqr_client *source,
         memcpy(e->client->authority,authority,sizeof(e->client->authority));
         e->client->port=port; e->client->timeout=source->timeout;
         e->client->bucket=source->bucket;
+        memcpy(e->client->format,source->format,sizeof(e->client->format));
         e->client->authorization=sq_alloc(source->authorization_len+1);
         if (!e->client->authorization) {
             unsigned index=(unsigned)(e-f->entries); stqr_close(e->client);

@@ -11,7 +11,7 @@ import check
 
 
 class CompatibilityRunner(unittest.TestCase):
-    def test_each_format_revision_requires_its_own_pre_change_checkpoint(self):
+    def test_retained_deployment_checkpoint_covers_intermediate_source_changes(self):
         with tempfile.TemporaryDirectory() as tmp, patch.object(check, "ROOT", Path(tmp)):
             root = Path(tmp)
 
@@ -33,8 +33,9 @@ class CompatibilityRunner(unittest.TestCase):
             check.require_checkpoint(first, ["refs/tags/release-1"])
             file.write_text("format 3\n")
             git("add", "."); git("commit", "-qm", "third")
+            check.require_checkpoint(second, ["refs/tags/release-1"])
             with self.assertRaises(RuntimeError):
-                check.require_checkpoint(second, ["refs/tags/release-1"])
+                check.require_checkpoint(second, ["HEAD"])
             git("tag", "checkpoint-2", second)
             check.require_checkpoint(second, ["refs/tags/release-1", "refs/tags/checkpoint-2"])
 

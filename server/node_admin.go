@@ -10,7 +10,7 @@ import (
 // Delegated control operations must leave the ordinary duplex worker free for
 // PREPARE and READY callbacks. Both queues are bounded by the peer transport.
 func isControlPeerRequest(m client.Message) bool {
-	if m.Opcode == peerCowMaterialize {
+	if m.Opcode == peerBucketFormat || m.Opcode == peerCowMaterialize {
 		return true
 	}
 	if m.Opcode == peerBucketCopy {
@@ -39,6 +39,9 @@ func (s *Server) nodeAdmin(m client.Message, ws *wsSession, p principal) ([]byte
 		return failure(400, "invalid node administration request")
 	}
 	inner := client.Message{Kind: client.Request, Opcode: request.Opcode, ID: m.ID, Body: request.Body}
+	if err := checkSocketBucketFormat(inner, p); err != nil {
+		return failure(statusOf(err), err.Error())
+	}
 	s.mu.RLock()
 	local := s.cfg.Node.ID == request.Target.String()
 	s.mu.RUnlock()

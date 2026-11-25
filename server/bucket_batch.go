@@ -35,6 +35,9 @@ func (c *BucketCatalog) saveBatch(changes []BucketDescription) error {
 				return ErrBucketNotFound
 			}
 			old := current[index]
+			if old.Format != "" && old.Format != d.Format {
+				return ErrBucketInvalid
+			}
 			if seen[d.ID] || d.Revision != old.Revision {
 				return ErrBucketConflict
 			}
@@ -46,6 +49,9 @@ func (c *BucketCatalog) saveBatch(changes []BucketDescription) error {
 				return ErrBucketInvalid
 			}
 			d.Schema = 1
+			if d.Format != "" {
+				d.Schema = 2
+			}
 			d.Revision++
 			d, err = normalizeBucketDescription(d)
 			if err != nil {

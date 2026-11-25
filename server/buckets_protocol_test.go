@@ -45,6 +45,14 @@ func bucketHTTPReply(t *testing.T, s *Server, m client.Message, username, passwo
 	req := httptest.NewRequest(http.MethodPost, "http://localhost/api/message", bytes.NewReader(client.EncodeMessage(m)))
 	req.RemoteAddr = "127.0.0.1:12345"
 	req.SetBasicAuth(username, password)
+	format := "fs"
+	if len(m.Body) >= 16 {
+		d := client.Decoder{B: m.Body}
+		if b, err := s.Bucket(volume.ID(d.ID())); err == nil && b.Describe().Format != "" {
+			format = b.Describe().Format
+		}
+	}
+	req.Header.Set(client.FormatHeader, format)
 	recorder := httptest.NewRecorder()
 	s.Handler().ServeHTTP(recorder, req)
 	reply, err := client.DecodeMessage(recorder.Body.Bytes())
@@ -178,6 +186,7 @@ func TestBucketInfoWebSocketRevocation(t *testing.T) {
 	request, _ := http.NewRequest(http.MethodGet, host.URL, nil)
 	request.SetBasicAuth(user.Name, "bucket-test-password")
 	request.Header.Set(client.BucketHeader, b.ID().String())
+	request.Header.Set(client.FormatHeader, "fs")
 	dialer := websocket.Dialer{Subprotocols: []string{"stqr.v2"}}
 	conn, _, err := dialer.Dial("ws"+strings.TrimPrefix(host.URL, "http")+"/api/ws", request.Header)
 	if err != nil {

@@ -47,7 +47,7 @@ func TestDaemonPlacementMaskTransitionsKeepOldAndNewReadable(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer adminSocket.Close()
-			objects, err := client.Dial(ctx, source.node.cfg.Node.Advertise, admin.Username, admin.Password, client.BucketID(bucket.ID()))
+			objects, err := client.Dial(ctx, source.node.cfg.Node.Advertise, admin.Username, admin.Password, client.BucketID(bucket.ID()), "fs")
 			if err != nil {
 				t.Fatal(err)
 			}

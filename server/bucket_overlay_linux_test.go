@@ -45,7 +45,7 @@ func TestBucketNativeOverlayPHPCluster(t *testing.T) {
 	la, ua := lowerServer.cfg.Auth.BootstrapAdmin, upperServer.cfg.Auth.BootstrapAdmin
 	dial := func(uri, user, password string, id client.ID) *client.Client {
 		t.Helper()
-		c, e := client.Dial(ctx, uri, user, password, id)
+		c, e := client.Dial(ctx, uri, user, password, id, "fs")
 		if e != nil {
 			t.Fatal(e)
 		}

@@ -22,8 +22,11 @@ type s3Store struct {
 // All S3 operations, including copy and background multipart recovery, use
 // bucket-object routing. The cleanup bounds private credentials to this caller.
 func (s *Server) openS3(ctx context.Context, b *Bucket, p principal) (*client.S3, func(), error) {
+	if err := s.openBucketFormat(ctx, b.ID().String(), "s3", p); err != nil {
+		return nil, nil, err
+	}
 	if view := s.currentSystem.Load(); s.controller != nil && view != nil && len(view.manifest.Membership.Members) > 1 {
-		connection, err := s.openFrontend(ctx, b.ID(), p)
+		connection, err := s.openFrontend(ctx, b.ID(), p, "s3")
 		if err != nil {
 			return nil, nil, err
 		}

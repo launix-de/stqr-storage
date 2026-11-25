@@ -37,7 +37,7 @@ func TestLostRangeDistinguishesRepairFromPartialCreate(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	admin := s.cfg.Auth.BootstrapAdmin
-	c, err := client.Dial(ctx, s.cfg.Node.Advertise, admin.Username, admin.Password, client.BucketID(b.ID()))
+	c, err := client.Dial(ctx, s.cfg.Node.Advertise, admin.Username, admin.Password, client.BucketID(b.ID()), "fs")
 	if err != nil {
 		t.Fatal(err)
 	}

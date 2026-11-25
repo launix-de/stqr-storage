@@ -35,7 +35,7 @@ func TestBucketFsckNetworkExclusiveSweep(t *testing.T) {
 	admin := s.cfg.Auth.BootstrapAdmin
 	dial := func() *client.Client {
 		t.Helper()
-		c, e := client.Dial(ctx, host.URL, admin.Username, admin.Password, client.ID(b.ID()))
+		c, e := client.Dial(ctx, host.URL, admin.Username, admin.Password, client.ID(b.ID()), "fs")
 		if e != nil {
 			t.Fatal(e)
 		}
@@ -105,7 +105,7 @@ func TestBucketFsckNetworkExclusiveSweep(t *testing.T) {
 	if _, err = c.Put(ctx, client.ObjectID{5}, []byte("blocked"), client.PutOptions{RequestID: client.NewRequestID()}); err == nil {
 		t.Fatal("maintenance connection can write new references")
 	}
-	newClient, err := client.Dial(ctx, host.URL, admin.Username, admin.Password, client.ID(b.ID()))
+	newClient, err := client.Dial(ctx, host.URL, admin.Username, admin.Password, client.ID(b.ID()), "fs")
 	if err == nil {
 		newClient.Close()
 		t.Fatal("another mount entered during fsck")
@@ -226,7 +226,7 @@ func TestBucketFsckRecoversInterruptedRmdir(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	admin := s.cfg.Auth.BootstrapAdmin
-	c, err := client.Dial(ctx, host.URL, admin.Username, admin.Password, client.ID(b.ID()))
+	c, err := client.Dial(ctx, host.URL, admin.Username, admin.Password, client.ID(b.ID()), "fs")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -254,7 +254,7 @@ func TestBucketFsckRecoversInterruptedRmdir(t *testing.T) {
 		}
 		time.Sleep(time.Millisecond)
 	}
-	c, err = client.Dial(ctx, host.URL, admin.Username, admin.Password, client.ID(b.ID()))
+	c, err = client.Dial(ctx, host.URL, admin.Username, admin.Password, client.ID(b.ID()), "fs")
 	if err != nil {
 		t.Fatal(err)
 	}
