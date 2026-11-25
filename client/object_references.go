@@ -8,8 +8,8 @@ import (
 )
 
 // ObjectReference coordinates reference lifetime, without interpreting object data.
-const ObjectReference uint16 = 0x0120
-const CapabilityObjectReferences uint64 = 1 << 17
+const ObjectReference uint16 = 0x0121
+const CapabilityObjectReferences uint64 = 1 << 18
 
 // ObjectReferencesSupported preserves compatibility with older servers: callers
 // must retain their conservative lifetime policy when this capability is absent.

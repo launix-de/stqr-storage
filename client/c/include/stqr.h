@@ -108,7 +108,7 @@ int stqr_object_release_claim(stqr_client *, stqr_object_id, stqr_id token);
 int stqr_object_pin_dependency(stqr_client *, stqr_object_id, stqr_id token);
 int stqr_object_unpin_dependency(stqr_client *, stqr_object_id, stqr_id token);
 #define STQR_CAP_DURABILITY 8192U
-#define STQR_CAP_OBJECT_REFERENCES 131072U
+#define STQR_CAP_OBJECT_REFERENCES 262144U
 typedef struct { stqr_id boot; stqr_u64 sequence; } stqr_commit_mark;
 /* Mark observation includes reads and subscription updates, preserving causal
  * dependencies. Close is not a durability barrier. Marks survive reconnect;

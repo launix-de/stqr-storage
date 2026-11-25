@@ -20,7 +20,7 @@ single-object operations in clients; ordinary reads need no permanent receipt.
 
 ## Cooperative open and orphan lifetime
 
-Reference-aware clients negotiate capability bit 17 and use opcode 0x0120. The
+Reference-aware clients negotiate capability bit 18 and use opcode 0x0121. The
 bucket-local coordination root stores caller-owned tokens, bound to their account
 and target object. A pin survives reconnect, node restart and ownership transfer;
 it is not released by a socket timeout. An exclusive retirement claim succeeds

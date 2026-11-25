@@ -649,7 +649,7 @@ static int request_payload(stqr_client *c, unsigned op, struct buf *body, stqr_i
     for (unsigned redirects=0;redirects<16;) {
         struct buf wrapped={0}; unsigned wire_op=op; struct buf *wire_body=body;
         c->status=0; c->redirect[0]=0;
-        c->query_valid=((op>=0x100 && op<=0x110) || op==0x120) && body->n>=80;
+        c->query_valid=((op>=0x100 && op<=0x110) || op==0x121) && body->n>=80;
         if (c->query_valid) memcpy(c->query.bytes,body->p+16,32);
         if (mutation>1 && (c->capabilities & STQR_CAP_DURABILITY)) {
             if (body->n<80) return -EINVAL;
@@ -770,7 +770,7 @@ static int object_reference(stqr_client *c, stqr_object_id target, stqr_id token
     reference(c,&body,root);
     put(&body,target.bytes,sizeof(target.bytes));
     number(&body,action,1);put(&body,token.bytes,sizeof(token.bytes));
-    err=request(c,0x120,&body,request_id,1,&result,NULL);
+    err=request(c,0x121,&body,request_id,1,&result,NULL);
     if (!err) {
         if (readnum(&result,1)!=1) result.err=-EPROTO;
         err=done(&result);

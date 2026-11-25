@@ -101,7 +101,7 @@ The cross-client lifetime and allocation-reuse contract is described in
 [Object lifetime and allocation reuse](reclamation.md).
 
 Both server and client must support maintenance opcodes 0x0115/0x0116.
-Reference-aware peers additionally negotiate capability bit 17 and opcode 0x0120
+Reference-aware peers additionally negotiate capability bit 18 and opcode 0x0121
 for cooperative holder lifetime and offline metadata reclamation. Successful fsck
 ends retention of eligible tombstones and old retry results after the graph sweep;
 all old operations must be finished or abandoned and must not be replayed afterward.
