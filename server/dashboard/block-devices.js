@@ -26,7 +26,7 @@ export function setupBlockDevices({connection,escape,toast}){
  function render(){
   el('[data-count]').textContent=String(devices.length);
   el('[data-exporter]').textContent=meta.live?`Exporter verbunden · ${meta.readonly?'Nur lesen':'Schreibzugriff'} · Node ${meta.owner.slice(0,8)}`:'Kein Exporter verbunden · Verwaltung über native Objektoperationen';
-  el('[data-disks]').innerHTML=devices.map(d=>`<tr data-device="${d.id}"><td><div class="volume-name">${escape(d.name)}</div><div class="volume-path">${escape(d.id)}</div></td><td><strong title="${d.size} Bytes">${escape(sizeLabel(d.size))}</strong><div class="bucket-sub">Sparse · ${d.size.toLocaleString('de-DE')} Bytes</div></td><td>${escape(d.manufacturer)} · ${escape(d.model)}<div class="volume-path">${escape(d.serial)}</div></td><td><button type="button" class="row-action" data-grow="${d.id}" ${meta.readonly||d.size===MAX_SIZE?'disabled':''}>Vergrößern</button></td></tr>`).join('')||`<tr><td colspan="4" class="empty">${el('[data-search]').value?'Keine passenden Disks.':'In diesem Bucket sind keine virtuellen Disks angelegt.'}</td></tr>`;
+  el('[data-disks]').innerHTML=devices.map(d=>`<tr data-device="${d.id}"><td><div class="volume-name">${escape(d.name)}</div><div class="volume-path">${escape(d.id)}</div></td><td><strong title="${d.size} Bytes">${escape(sizeLabel(d.size))}</strong><div class="bucket-sub">Sparse · ${d.size.toLocaleString('de-DE')} Bytes</div></td><td>${escape(d.manufacturer)} · ${escape(d.model)}<div class="volume-path">${escape(d.serial)}</div></td><td><button type="button" class="row-action" data-grow="${d.id}" ${pending||meta.readonly||d.size===MAX_SIZE?'disabled':''}>Vergrößern</button></td></tr>`).join('')||`<tr><td colspan="4" class="empty">${el('[data-search]').value?'Keine passenden Disks.':'In diesem Bucket sind keine virtuellen Disks angelegt.'}</td></tr>`;
   for(const button of el('[data-disks]').querySelectorAll('[data-grow]'))button.onclick=()=>openGrow(devices.find(d=>d.id===button.dataset.grow));
  }
  const pager=new EndlessList({container:el('.storage-panel'),visible:()=>list.open,fetchPage:(after,limit,query)=>connection().listBlockDevices(bucket.id,after,Math.min(limit,100),query),entries:p=>p.devices,
@@ -68,7 +68,7 @@ export function setupBlockDevices({connection,escape,toast}){
  grow.querySelector('form').onsubmit=async event=>{
   event.preventDefault();if(pending)return;const size=validate();if(size===null){ge('[data-size]').reportValidity();return}
   const seq=epoch,target=bucket,device=selected;if(!retry||retry.size!==size)retry={id:newID(),size};
-  pending=true;ge('[data-submit]').disabled=true;ge('[data-submit]').textContent='Wird vergrößert …';ge('[data-error]').textContent='';
+  pending=true;render();ge('[data-submit]').disabled=true;ge('[data-submit]').textContent='Wird vergrößert …';ge('[data-error]').textContent='';
   for(const input of grow.querySelectorAll('input,button'))input.disabled=true;
   try{
    const result=await connection().growBlockDevice(target.id,device,size,retry.id);
@@ -76,7 +76,7 @@ export function setupBlockDevices({connection,escape,toast}){
    const actual=result.devices[0];if(!actual||actual.id!==device.id||actual.size!==size)throw Error('Unerwartete Größenbestätigung. Bitte Disks aktualisieren.');
    retry=null;grow.close();toast(`${device.name} auf ${sizeLabel(size)} vergrößert`);await refresh();
   }catch(e){if(seq===epoch)ge('[data-error]').textContent=e.message}
-  finally{pending=false;for(const input of grow.querySelectorAll('input,button'))input.disabled=false;ge('[data-submit]').textContent='Vergrößern';if(grow.open)validate()}
+  finally{pending=false;if(list.open)render();for(const input of grow.querySelectorAll('input,button'))input.disabled=false;ge('[data-submit]').textContent='Vergrößern';if(grow.open)validate()}
  };
  return {async open(target){bucket=target;devices=[];meta={};epoch++;el('[data-bucket-name]').textContent=target.name;el('[data-search]').value='';el('[data-exporter]').textContent='Verbindung wird geprüft …';el('[data-disks]').replaceChildren();list.showModal();await refresh()},clear(){epoch++;if(grow.open)grow.close();if(list.open)list.close();pager.clear();devices=[];bucket=null}};
 }

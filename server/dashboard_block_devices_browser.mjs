@@ -37,5 +37,37 @@ try{
  }
  await list.locator('[data-block-close]').first().click();
  if(errors.length)throw Error(errors.join('\n'));
+ // Deterministic pending-state fixture: the grow response is released by the
+ // test, and a mutation observer checks the freshly rendered refresh rows
+ // before the submit handler's finally continuation can run.
+ const fixture=await browser.newPage();
+ const fixtureURL=new URL('/resize-action-fixture',config.url).href;
+ await fixture.route(fixtureURL,route=>route.fulfill({contentType:'text/html',body:'<!doctype html><html><body></body></html>'}));
+ await fixture.goto(fixtureURL);
+ await fixture.evaluate(async()=>{
+  const {setupBlockDevices}=await import('/assets/block-devices.js');
+  const device={id:'12'.repeat(16),name:'fixture disk',size:1048576n,manufacturer:'STQR',model:'Sparse',serial:'1'};
+  let release;
+  const wire={listBlockDevices:async()=>({devices:[{...device}],next:'',total:1,live:false,readonly:false}),growBlockDevice:()=>new Promise(resolve=>{release=resolve})};
+  const ui=setupBlockDevices({connection:()=>wire,escape:s=>String(s),toast:()=>{}});
+  await ui.open({id:'34'.repeat(16),name:'fixture bucket'});
+  document.querySelector('[data-grow]').click();
+  document.querySelector('#block-device-grow-dialog form').requestSubmit();
+  if(!document.querySelector('[data-grow]').disabled)throw Error('Resize action is enabled while pending');
+  window.resizeRowChecked=new Promise((resolve,reject)=>{
+   const observer=new MutationObserver(()=>{
+    const button=document.querySelector('[data-grow]');
+    if(!button||!document.querySelector('[data-disks]').textContent.includes('2 MiB'))return;
+    observer.disconnect();
+    if(!button.disabled)reject(Error('Refreshed action enabled before completion'));else resolve();
+   });
+   observer.observe(document.querySelector('[data-disks]'),{childList:true});
+  });
+  device.size=2097152n;release({devices:[{...device}]});
+ });
+ await fixture.evaluate(()=>window.resizeRowChecked);
+ await fixture.locator('[data-grow]').click();
+ await fixture.locator('#block-device-grow-dialog').waitFor({state:'visible'});
+ await fixture.close();
  console.log(config.readonly?'Readonly live disks list and disabled resize passed.':'Live cross-node UI resize, presets, validation, search, mobile bounds and exact sizes above 2^53 passed.');
 }finally{await browser.close()}
