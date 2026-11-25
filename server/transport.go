@@ -344,7 +344,9 @@ func (ws *wsSession) requestLoop() {
 				continue
 			}
 			run := func() { ws.executeRequest(m, p) }
-			parallel := m.Kind == client.Request && (m.Opcode >= 0x0100 && m.Opcode <= 0x0108 || m.Opcode == client.ObjectAccepted || m.Opcode == client.ObjectSubscribe || m.Opcode == client.BucketStatFS || m.Opcode == client.BucketSync || m.Opcode == client.BucketObjectList)
+			// Global mutations serialize under the controller lock, not the socket
+			// reader: a delayed commit must not pin independent dashboard queries.
+			parallel := m.Kind == client.Request && (globalAdminMutation(m.Opcode) || m.Opcode >= 0x0100 && m.Opcode <= 0x0108 || m.Opcode == client.ObjectAccepted || m.Opcode == client.ObjectSubscribe || m.Opcode == client.BucketStatFS || m.Opcode == client.BucketSync || m.Opcode == client.BucketObjectList)
 			// Upload headers and their following chunks may arrive back-to-back.
 			// Establish staging before consuming the next frame, even when the
 			// sender does not wait for a response to its upload header.

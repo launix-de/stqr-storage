@@ -16,6 +16,7 @@ try{
  console.log('First deletion completed');await page.locator(`[data-user-delete="${config.remove}"]`).click();
  if(!await option.isChecked())throw Error('Reopening the dialog did not reset the default');
  await page.locator('#user-delete-form button[type=submit]').click();await page.locator('#user-delete-dialog').waitFor({state:'hidden'});
+ await page.locator(`[data-user="${config.keep}"]`).waitFor({state:'hidden'});await page.locator(`[data-user="${config.remove}"]`).waitFor({state:'hidden'});
  await page.locator('[data-view="buckets"]').click();
  for(const name of ['keep-data','shared-data'])await page.locator('#bucket-rows tr').filter({hasText:name}).waitFor();
  if(errors.length)throw Error(errors.join('\n'));

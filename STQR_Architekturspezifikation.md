@@ -1995,7 +1995,7 @@ ADMIN oder ausdrücklich ADMIN_READ für reine Leseoperationen. `C` bedeutet glo
 | 0x2005 | BUCKET_SET_QUOTA / Q/F / C | `bucket:ID,accounting:u8,guaranteed:u64,unlimited:Bool,absolute:u64,metadata_reserve_ppm:u32,expected_policy_version:u64` => `ack:AdminAck` |
 | 0x2006 | BUCKET_RENAME / Q/F / C | `bucket:ID,name:Text` => `ack:AdminAck` |
 | 0x2007 | BUCKET_LOCK / Q/F / C | `bucket:ID,locked:Bool` => `ack:AdminAck` |
-| 0x2008 | BUCKET_DELETE / Q/F / C,G | `bucket:ID` => `ack:AdminAck` |
+| 0x2008 | BUCKET_DELETE / Q/F / C,G | `bucket:ID,[delete_orphan_users:Bool]` => `ack:AdminAck` |
 | 0x2009 | BUCKET_GRANT / Q/F / C | `grant:Grant` => `ack:AdminAck` |
 | 0x200a | BUCKET_REVOKE / Q/F / C | `bucket:ID,user:ID` => `ack:AdminAck` |
 | 0x200b | USER_CREATE / Q/F / C | `user:User,password:Text` => `ack:AdminAck` |
@@ -2843,3 +2843,28 @@ bestehende seitenweise Bucket-Bereinigung erfüllt bereits die Entkopplung vom
 Generationsabschluss; daraus folgt noch keine vollständige Erfüllung dieses Vertrags.
 
 Das Storage-Dashboard verwaltet keine virtuellen Disks und interpretiert keine FS-, BD- oder sonstigen Bucket-Inhalte. Es zeigt ausschließlich den vom Client festgelegten Formatstring an. Formatspezifische Verwaltung bleibt Aufgabe externer Clients.
+
+
+### Bedienbare Löschvorgänge im Dashboard
+
+Das Bestätigen einer User- oder Bucket-Löschung schließt den Dialog unmittelbar.
+Die betroffene Zeile zeigt **„Löschung ausstehend“**, bis die replizierte
+Metadatenänderung bestätigt wurde. Weitere Löschungen können bestätigt werden;
+der Browser sendet sie über eine gemeinsame serielle Löschqueue, unabhängig von
+Listenabfragen und Navigation. Der WebSocket-Dispatcher lässt globale
+Verwaltungsänderungen über sein vorhandenes begrenztes Worker-Budget laufen,
+sodass sie nicht die Verarbeitung nachfolgender unabhängiger Anfragen blockieren.
+Der globale Controller serialisiert die Metadaten-Commits weiterhin. Fehler
+bleiben pro Zeile sichtbar, Wiederholungen behalten dieselbe Operations-ID und
+dieselben Optionen. Ein ausstehender Vorgang wird nicht als erfolgreich angezeigt.
+
+Beim Bucket-Löschen ist die Option **„User löschen, wenn dies sein letzter Bucket
+ist“** standardmäßig aktiviert. Kandidaten sind Nicht-Admins mit wirksamer Freigabe
+in dessen ACL. Ein anderer aktiver oder gesperrter Bucket mit wirksamer Freigabe
+schützt den Account; bereits zur Löschung vorgemerkte Buckets tun dies nicht.
+Administratoren und Accounts außerhalb der betroffenen ACL bleiben erhalten.
+Die Bucket-Löschvormerkung und die Entfernung der verwaisten Accounts werden
+atomar durch denselben ALL-Adminentscheid veröffentlicht. Physische Bereinigung
+bleibt nachgelagert. Bei ausgeschalteter Option oder fehlendem optionalem Bool
+(ältere Clients) werden keine Accounts mitgelöscht. Die Operation nutzt manuell
+vergebene Opcode-Semantikrevision 3; Revision 2 bleibt empfangsseitig lesbar.
