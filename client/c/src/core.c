@@ -611,7 +611,28 @@ static void broken(stqr_client *c) {
     forget_bindings(c,c->active);
     if (notify && c->update) c->update(c->update_arg, NULL);
 }
-static int request(stqr_client *c, unsigned op, struct buf *body, stqr_id id, int mutation, struct buf *result, struct download *s) {
+static int send_payload(stqr_client *c, stqr_id id, const void *data, size_t n, const stqr_u8 hash[32]) {
+    size_t pos = 0; stqr_u64 part = 0; int err = 0;
+    while (!err && pos < n) {
+        struct buf chunk = {0}; stqr_id rid; size_t count = n-pos < SQ_CHUNK ? n-pos : SQ_CHUNK;
+        err = stqr_request_id(&rid);
+        if (err) return err;
+        put(&chunk, id.bytes, 16); number(&chunk, part++, 8); number(&chunk, pos, 8);
+        blob(&chunk, (const stqr_u8 *)data+pos, count);
+        err = message_send(c, 0, 5, rid, &chunk);
+        drop(&chunk); pos += count;
+    }
+    if (!err) {
+        struct buf end = {0}; stqr_id rid;
+        err = stqr_request_id(&rid);
+        if (err) return err;
+        put(&end, id.bytes, 16); number(&end, n, 8); put(&end, hash, 32);
+        err = message_send(c, 0, 6, rid, &end);
+        drop(&end);
+    }
+    return err;
+}
+static int request_payload(stqr_client *c, unsigned op, struct buf *body, stqr_id id, int mutation, struct buf *result, struct download *s, const void *payload, size_t size, const stqr_u8 *hash) {
     int err;
     stqr_u64 started = sq_now_ms();
     if (!c || !c->socket) return -ENOTCONN;
@@ -629,6 +650,7 @@ static int request(stqr_client *c, unsigned op, struct buf *body, stqr_id id, in
             wire_op=0x118; wire_body=&wrapped;
         }
         err=message_send(c,1,wire_op,id,wire_body);
+        if (!err && payload) err=send_payload(c,id,payload,size,hash);
         if (!err) err=reply(c,wire_op,id,result,s);
         drop(&wrapped);
         /* 503 denotes temporary cluster backpressure, including quota-credit
@@ -665,6 +687,9 @@ static int request(stqr_client *c, unsigned op, struct buf *body, stqr_id id, in
         return err;
     }
     return -ELOOP;
+}
+static int request(stqr_client *c, unsigned op, struct buf *body, stqr_id id, int mutation, struct buf *result, struct download *s) {
+    return request_payload(c,op,body,id,mutation,result,s,NULL,0,NULL);
 }
 static int reconnect_active(stqr_client *c) {
     struct buf body = {0}, result = {0}; stqr_id id = {{0}}; int err;
@@ -774,7 +799,7 @@ out:
 int stqr_get(stqr_client *c, stqr_object_id id, void **data, size_t *n, stqr_info *info) { return get(c,id,0,0,0,data,n,info); }
 int stqr_get_range(stqr_client *c, stqr_object_id id, stqr_u64 off, stqr_u64 len, void **data, size_t *n, stqr_info *info) { return get(c,id,1,off,len,data,n,info); }
 static int write_payload(stqr_client *c, unsigned op, stqr_object_id id, stqr_u64 off, const void *data, size_t n, const stqr_options *opt, stqr_info *info, stqr_u64 *start) {
-    struct buf b = {0}, r = {0}; stqr_u8 hash[32]; int err; size_t pos = 0; stqr_u64 part = 0;
+    struct buf b = {0}, r = {0}; stqr_u8 hash[32]; int err;
     if (!c || !info || (n && !data) || n > STQR_BUFFER_LIMIT || (op == 0x103 && n > ~(stqr_u64)0-off)) return -EINVAL;
     reference(c, &b, id); if (op == 0x103) number(&b, off, 8);
     if ((err = options(&b, opt))) goto out;
@@ -783,24 +808,9 @@ static int write_payload(stqr_client *c, unsigned op, stqr_object_id id, stqr_u6
     if (b.err) { err = b.err; goto out; }
     if (n <= SQ_CHUNK) { err = request(c, op, &b, opt->request_id, 1+!!opt->accepted, &r, NULL); }
     else {
-        if (!c->socket) { err = -ENOTCONN; goto out; }
-        c->status = 0;
-        err = message_send(c, 1, op, opt->request_id, &b);
-        while (!err && pos < n) {
-            struct buf chunk = {0}; stqr_id rid; size_t count = n-pos < SQ_CHUNK ? n-pos : SQ_CHUNK;
-            err = stqr_request_id(&rid);
-            put(&chunk, opt->request_id.bytes, 16); number(&chunk, part++, 8); number(&chunk, pos, 8); blob(&chunk, (const stqr_u8 *)data+pos, count);
-            if (!err) err = message_send(c, 0, 5, rid, &chunk);
-            drop(&chunk); pos += count;
-        }
-        if (!err) {
-            struct buf end = {0}; stqr_id rid;
-            err = stqr_request_id(&rid); put(&end, opt->request_id.bytes, 16); number(&end, n, 8); put(&end, hash, 32);
-            if (!err) err = message_send(c, 0, 6, rid, &end);
-            drop(&end);
-        }
-        if (!err) err = reply(c, op, opt->request_id, &r, NULL);
-        if (err && !c->status) { broken(c); err = -EINPROGRESS; }
+        /* Replay a fully rejected upload with the same logical request ID.
+         * Unknown transport outcomes retain the common EINPROGRESS contract. */
+        err=request_payload(c,op,&b,opt->request_id,1,&r,NULL,data,n,hash);
     }
     if (!err) {
         info_decode(&r, info);
