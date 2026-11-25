@@ -524,6 +524,9 @@ func TestBucketCOWInterruptedMaterializationRecoversAfterPrimaryRestart(t *testi
 	storage.Redundancy = BucketRedundancy{Mode: "replication", Replicas: 2, ACK: "all"}
 	centralPGRequest(t, first.node, group, 0, PlacementMask{NodeSelection: "all", Storage: &storage})
 	a := replicaTestBucket(t, first.node, group, "cow-resume-source")
+	if err := first.node.openBucketFormat(context.Background(), a.ID().String(), "fs", userPrincipal(t, first.node)); err != nil {
+		t.Fatal(err)
+	}
 	id := volume.ObjectID{31}
 	entry, _ := first.node.placement.Load().lookup(client.ID(a.ID()), client.ObjectID(id))
 	primary, offline := first, second

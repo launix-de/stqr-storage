@@ -5,13 +5,14 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"github.com/launix-de/stqr-storage/client"
 	"github.com/launix-de/stqr-storage/volume"
 )
 
-const peerBucketFormat uint16 = 0x1090
+const peerBucketFormat uint16 = 0x10b0
 const internalObjectFormat = "__stqr_internal_objects"
 
 // Values are opaque and case sensitive. No frontend schema is known here.
@@ -62,6 +63,9 @@ func (s *Server) openBucketFormat(ctx context.Context, raw, format string, p pri
 		}
 		return nil
 	}
+	// A client cannot keep an initial metadata decision waiting indefinitely.
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
 	if s.controller == nil {
 		s.opMu.Lock()
 		defer s.opMu.Unlock()
@@ -77,7 +81,11 @@ func (s *Server) openBucketFormat(ctx context.Context, raw, format string, p pri
 			continue
 		}
 		o := s.peerStats[node]
-		if o == nil || !o.online || o.connection.Capabilities&client.CapabilityBucketFormat == 0 {
+		if o == nil || !o.online {
+			s.peerStatsMu.RUnlock()
+			return fail(503, "required cluster member unavailable during bucket format binding")
+		}
+		if o.connection.Capabilities&client.CapabilityBucketFormat == 0 {
 			s.peerStatsMu.RUnlock()
 			return fail(426, "all cluster members must support bucket format binding")
 		}
