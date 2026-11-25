@@ -610,7 +610,7 @@ This avoids full-index scans on content-deduplication probes and capacity retrie
 normal successful mutations still update the count and enforce the hard quota.
 
 Finite logical quotas now use durable per-node growth credits. Grant requests
-obtain reusable budgets up to 4 MiB where the donor has unused credits, scaled
+obtain reusable budgets up to 64 MiB where the donor has unused credits, scaled
 down for small quotas shared across members;
 the donor caps every grant at that unused allowance. This amortizes durable
 credit exchanges without increasing the bucket's hard quota. Credit transfers
