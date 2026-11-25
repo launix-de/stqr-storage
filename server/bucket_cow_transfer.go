@@ -195,6 +195,9 @@ func (s *Server) cowCaptureLocal(ctx context.Context, bucket volume.ID, object v
 		defer release()
 	}
 	ctx = context.WithValue(ctx, objectBindingKey{}, struct{}{})
+	// Copy-before-write captures belong to their query. No peer wait occurs here.
+	s.ioPriority.users.Add(1)
+	defer s.ioPriority.users.Add(-1)
 	key := volume.Key{Bucket: bucket, Object: object}
 	v, _, found, err := b.selectVolume(b.storageDescription(), key, volume.ID{}, false)
 	if errors.Is(err, volume.ErrNotFound) || !found && err == nil {

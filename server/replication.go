@@ -395,6 +395,9 @@ func (s *Server) replicaPeerMessage(m client.Message, actor client.ID) ([]byte, 
 	if header.Options.RequestID != header.Request.ID || header.Request.ID == (volume.ID{}) || header.Opcode != 4 && header.Opcode != 7 && header.Length > maxObjectStagingBytes || len(header.Expected) > 1<<20 {
 		return nil, client.ErrProtocol
 	}
+	// Local work for a foreground replicated query; no peer wait occurs here.
+	s.ioPriority.users.Add(1)
+	defer s.ioPriority.users.Add(-1)
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	v, err := r.validate(header, actor)

@@ -34,18 +34,19 @@ Snapshot sending checks priority between objects and
 receipt pages, but not at every storage boundary. `sendObject` hashes and
 exports a whole object while holding a volume read handle. A large export can
 therefore delay a write to another object on that volume. The receiving
-`peerRangeObjectEnd` path takes `opMu` and restores a whole object without first
-yielding to runnable user work. Replica mutation handlers take `opMu` directly
-and are not included in the foreground counter. Both source and target need
-consistent admission at safe transaction boundaries; waiting while holding a
+`peerRangeObjectEnd` path now yields before taking `opMu`, but still restores
+a whole object atomically. Replica mutation handlers and local COW captures
+count local work as foreground work. Snapshot hash/export, receiver installation
+and local codec/cleanup phases count rebuild I/O only while doing local work,
+rather than across peer waits. Both source and target still need consistent
+admission at every safe transaction boundary; waiting while holding a
 volume handle would introduce a deadlock rather than solve priority.
 
 ### P1: Drain work is not a separate background scheduling class
 
 `server/range_planner.go` selects node/volume drain handoffs together with
-required policy/replica transitions. `rangeManager.move` marks every handoff as
-priority-two work for its whole lifetime, including remote waits. Consequently
-a blocked drain can suppress idle deletion indefinitely. A drain intent is
+required policy/replica transitions. Drain handoffs share the local rebuild-I/O
+counter; remote waits no longer hold it. A drain intent is
 persistent and may already span many individual handoffs, but its remaining
 work needs explicit classification and a resumable scheduling budget.
 

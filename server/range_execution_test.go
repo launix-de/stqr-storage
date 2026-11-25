@@ -76,6 +76,35 @@ func TestRangeExecutionSharesWorkerWithForegroundHelper(t *testing.T) {
 		case <-time.After(time.Millisecond):
 		}
 	}
+	cancelled, stopHelper := context.WithCancel(ctx)
+	withdrawn := make(chan error, 1)
+	go func() { withdrawn <- s.scopes.executeMove(cancelled, p, true) }()
+	for {
+		s.scopes.pgRuntime.executionsMu.Lock()
+		e := s.scopes.pgRuntime.executions[p.id()]
+		shared := e != nil && e.refs == 3 && e.urgent.Load() == 2
+		s.scopes.pgRuntime.executionsMu.Unlock()
+		if shared {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			stopHelper()
+			t.Fatal(ctx.Err())
+		case <-time.After(time.Millisecond):
+		}
+	}
+	stopHelper()
+	if err := <-withdrawn; err != context.Canceled {
+		t.Fatal("cancelled helper did not withdraw", err)
+	}
+	s.scopes.pgRuntime.executionsMu.Lock()
+	e := s.scopes.pgRuntime.executions[p.id()]
+	retained := e != nil && e.refs == 2 && e.urgent.Load() == 1
+	s.scopes.pgRuntime.executionsMu.Unlock()
+	if !retained {
+		t.Fatal("cancelled helper damaged worker or retained priority")
+	}
 	if err := hold.Close(); err != nil {
 		t.Fatal(err)
 	}

@@ -89,6 +89,8 @@ func (r *rangeManager) buildPlacementTargets(group string, descriptions []Bucket
 	var resources []placementResource
 	var destinations []rangeDestination
 	eligible := make(map[client.ID][]int)
+	eligibleVolumes := make(map[client.ID]map[client.ID]bool)
+	pressured := make(map[client.ID]bool)
 	// Reuse equal policy pools across thousands of buckets. Quota backing is
 	// bucket-specific and is filled independently below.
 	type poolKey struct {
@@ -96,6 +98,7 @@ func (r *rangeManager) buildPlacementTargets(group string, descriptions []Bucket
 		version         uint64
 	}
 	pools := make(map[poolKey][]int)
+	poolVolumes := make(map[poolKey]map[client.ID]bool)
 	buckets := make([]client.ID, 0, len(byBucket))
 	for bucket := range byBucket {
 		buckets = append(buckets, bucket)
@@ -110,11 +113,18 @@ func (r *rangeManager) buildPlacementTargets(group string, descriptions []Bucket
 		key := poolKey{goal.PlacementGroup, goal.StorageStrategy, goal.PlacementMaskVersion}
 		if ids, ok := pools[key]; ok {
 			eligible[bucket] = ids
+			eligibleVolumes[bucket] = poolVolumes[key]
 			continue
 		}
 		d.Policy = goal
 		available, _ := r.destinations(d)
+		for id, needed := range r.capacityNeeds(available) {
+			if needed > 0 {
+				pressured[id] = true
+			}
+		}
 		var ids []int
+		pins := make(map[client.ID]bool, len(available))
 		for _, destination := range available {
 			key := volumeKey{destination.node, destination.volume.ID}
 			id, exists := resourceIDs[key]
@@ -125,8 +135,10 @@ func (r *rangeManager) buildPlacementTargets(group string, descriptions []Bucket
 				destinations = append(destinations, destination)
 			}
 			ids = append(ids, id)
+			pins[destination.volume.ID] = true
 		}
 		pools[key], eligible[bucket] = ids, ids
+		poolVolumes[key], eligibleVolumes[bucket] = pins, pins
 	}
 	// A node's total bucket usage is an upper bound on usage on any one of
 	// its volumes. Subtracting that bound is conservative for remote backing;
@@ -193,6 +205,11 @@ func (r *rangeManager) buildPlacementTargets(group string, descriptions []Bucket
 		}
 		demands[i] = placementDemand{Bucket: shape.bucket, Copies: shape.copies}
 		valid := len(entry.Locations) == shape.copies && s.replicaSetSatisfies(goal, entry.Locations)
+		for _, loc := range entry.Locations {
+			if pressured[loc.Volume] || !eligibleVolumes[shape.bucket][loc.Volume] {
+				valid = false
+			}
+		}
 		// Existing valid copies need no payload measurements. For a required
 		// move, measure once, shared by every candidate destination.
 		var cost uint64
@@ -226,6 +243,9 @@ func (r *rangeManager) buildPlacementTargets(group string, descriptions []Bucket
 					stays = true
 					break
 				}
+			}
+			if stays && pressured[destination.volume.ID] {
+				continue
 			}
 			if valid && !stays {
 				continue
@@ -407,10 +427,14 @@ func (r *rangeManager) diffPlacementTarget(target placementTarget, before client
 	makePlan := func(loc client.Location, next []client.Location, add, remove, promote, relocate bool) (rangePlan, bool) {
 		var cost uint64
 		var err error
+		codec := bucketCodec(d.Policy)
+		if len(entry.Locations) == 1 && !add {
+			codec = bucketCodec(goal)
+		}
 		if promote {
 			cost, err = r.replicaAbortCost(before, entry)
 		} else if !remove {
-			cost, _, err = r.policyPlacementCost(before, entry, loc.Node, volume.ID(loc.Volume), bucketCodec(d.Policy))
+			cost, _, err = r.policyPlacementCost(before, entry, loc.Node, volume.ID(loc.Volume), codec)
 		}
 		if err != nil {
 			return rangePlan{}, false
