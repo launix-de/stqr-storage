@@ -198,11 +198,7 @@ func (r *rangeManager) policyPlacementCost(before client.MapPatch, moving client
 			next := records[len(records)-1].Key.Object
 			after = &next
 		}
-		h, err := store.Open(false)
-		if err != nil {
-			return 0, 0, err
-		}
-		err = h.ScanRequests(func(record volume.RequestRecord) error {
+		err = scanRangeRequests(r.server.ctx, store, func(record volume.RequestRecord) error {
 			if record.Key.Bucket == volume.ID(before.Bucket) && p.contains(record.Key.Object) {
 				cost = addCapacity(cost, 512)
 				if len(retained) > 0 {
@@ -211,7 +207,6 @@ func (r *rangeManager) policyPlacementCost(before client.MapPatch, moving client
 			}
 			return nil
 		})
-		h.Close()
 		if err != nil {
 			return 0, 0, err
 		}
