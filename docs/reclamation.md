@@ -15,7 +15,7 @@ single-object operations in clients; ordinary reads need no permanent receipt.
 | Linux kernel filesystem | Same STFS/STIX, orphan queue and lower-anchor ledger as Go. File/directory open and mmap file lifetime hold durable pins, including readonly handles. A bounded worker retires eligible unlinked upper objects after last close. Go provides offline fsck. |
 | Linux kernel block devices | Deterministic stripe IDs; overwrite existing stripes, remove full discarded stripes and zero partial discards. No guest-filesystem collector or guest-snapshot implementation. |
 | QEMU/NBD and Linux NBD helper | Deterministic stripe IDs and fixed descriptor ID. TRIM releases eligible stripes. Explicit offline Catalog.Collect preserves supplied opaque roots and rejects collection while local readonly or writable exports exist. Native exclusive maintenance is still required across processes. The helper forwards NBD requests. |
-| JavaScript dashboard ObjectClient | STAT, GET, SCAN and ranged CAS; no PUT/DELETE or filesystem collector. Descriptor growth CAS uses its existing metadata ID. |
+| JavaScript native test fixture | Test-only STAT, GET, SCAN and ranged CAS on stable object IDs; no dashboard object/filesystem management or collector. |
 | Windows/WinFsp | Shared Go filesystem and Retain/Release. Close waits for in-flight handle operations. Unsupported overlays, alternate streams, security descriptors and hardlink creation remain documented in the Windows README. |
 
 ## Cooperative open and orphan lifetime
