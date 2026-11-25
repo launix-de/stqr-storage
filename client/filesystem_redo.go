@@ -55,11 +55,15 @@ func decodeFSWrites(d *Decoder, legacy bool) ([]fsBlockWrite, error) {
 }
 
 func (f *Filesystem) storeIntent(ctx context.Context, raw []byte) (ObjectID, error) {
+	return f.storeIntentAt(ctx, newFSID(), raw)
+}
+func (f *Filesystem) storeIntentAt(ctx context.Context, id ObjectID, raw []byte) (ObjectID, error) {
 	if len(raw) > fsMaxIntentBytes {
 		return ObjectID{}, ErrFSFormat
 	}
 	if len(raw) <= 64<<10 {
-		return f.putImmutable(ctx, raw)
+		_, err := f.store.CAS(ctx, id, 0, nil, raw, CASOptions{Scope: CASObject, MutationOptions: MutationOptions{RequestID: NewRequestID(), Absent: true}})
+		return id, err
 	}
 	// One small mutable decision object, bounded immutable REDO pieces only for
 	// the duration of this operation. These are not versions of filesystem blocks.
@@ -75,7 +79,8 @@ func (f *Filesystem) storeIntent(ctx context.Context, raw []byte) (ObjectID, err
 		}
 		e.B = append(e.B, id[:]...)
 	}
-	return f.putImmutable(ctx, e.B)
+	_, err := f.store.CAS(ctx, id, 0, nil, e.B, CASOptions{Scope: CASObject, MutationOptions: MutationOptions{RequestID: NewRequestID(), Absent: true}})
+	return id, err
 }
 func (f *Filesystem) loadIntent(ctx context.Context, id ObjectID) (fsTransaction, ObjectInfo, []byte, error) {
 	raw, info, err := f.store.Get(ctx, id)

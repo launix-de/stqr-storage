@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"sort"
+	"sync"
 	"syscall"
 	"time"
 )
@@ -21,9 +22,14 @@ var _ FilesystemStore = (*Client)(nil)
 
 // Filesystem is a bucket-local filesystem with a fixed root inode. It has no
 // global writer lock: inode writes use CAS, namespace transactions use durable
-// per-inode intents. Data/index objects are immutable. Unlinked inodes, old
-// segments and completed intents are retained until offline fsck collection.
+// per-inode intents. Mutable data/index blocks keep their identities; replaced
+// blocks and intents are retired after publication on reference-capable stores.
+// Cooperative opens pin unlinked inodes until last close; crashed holders and
+// legacy shared/orphan objects require exclusive offline fsck.
 type Filesystem struct {
+	orphanMu             sync.Mutex
+	orphanRunning        bool
+	orphanCollector      func(context.Context) error
 	directoryCache       *filesystemDirectoryCache
 	store                FilesystemStore
 	directoryMemoryLimit uint64
@@ -80,6 +86,9 @@ func OpenFilesystem(ctx context.Context, store FilesystemStore, opt FSOptions) (
 	}
 	if n.kind != fsDirectory {
 		return nil, ErrFSFormat
+	}
+	if _, managed := f.managedReferences(); managed {
+		f.scheduleOrphanCleanup()
 	}
 	return f, nil
 }
@@ -138,7 +147,8 @@ func (f *Filesystem) mutate(ctx context.Context, id ObjectID, fn func(*fsNode) e
 			}
 			return FSInfo{}, err
 		}
-		if len(n.edits) > 0 {
+		_, managed := f.managedReferences()
+		if len(n.edits) > 0 || managed {
 			committed, e := f.transact(ctx, []fsTxMember{fsMember(s, n)})
 			if e != nil {
 				return FSInfo{}, e
@@ -275,6 +285,9 @@ func (f *Filesystem) editDirectory(ctx context.Context, id ObjectID, fn func([]F
 		n.mtime = n.ctime
 		return err
 	})
+	if errors.Is(err, ErrNotFound) {
+		return syscall.ENOENT
+	}
 	return err
 }
 

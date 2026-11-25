@@ -99,10 +99,13 @@ func TestFilesystemFsckRecoversIntentBeforeInventory(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, _ = pendingTestTransaction(t, f)
+	intent, _ := pendingTestTransaction(t, f)
 	result, err := checkFilesystem(ctx, store)
-	if err != nil || result.Reachable != 1 || result.Deleted != 1 {
+	if err != nil || result.Reachable != 1 {
 		t.Fatal(result, err)
+	}
+	if _, _, err := store.Get(ctx, intent); !errors.Is(err, ErrNotFound) {
+		t.Fatal("recovered decision retained", err)
 	}
 	info, err := f.Stat(ctx, FilesystemRootID())
 	if err != nil || info.Mode != 0711 {

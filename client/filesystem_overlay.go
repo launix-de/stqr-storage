@@ -83,6 +83,7 @@ func OpenOverlayFilesystem(ctx context.Context, lowerStore, upperStore Filesyste
 	}
 	o := &OverlayFilesystem{lower: lower, lowerID: opt.LowerBucketID, paths: map[ObjectID]string{}}
 	o.upper = &Filesystem{directoryCache: newFilesystemDirectoryCache(), store: upperStore, lower: lower, directoryMemoryLimit: 64 << 20}
+	o.upper.orphanCollector = o.CollectOrphans
 	_, _, _, err = o.state(ctx)
 	if errors.Is(err, ErrNotFound) && opt.Create {
 		n, _, e := lower.load(ctx, FilesystemRootID())
@@ -113,6 +114,9 @@ func OpenOverlayFilesystem(ctx context.Context, lowerStore, upperStore Filesyste
 	}
 	if opt.Whitelist != nil && !equalStrings(policy, s.policy) {
 		return nil, errors.New("client: whitelist differs from persisted overlay policy; use a separate upper bucket")
+	}
+	if _, managed := o.upper.managedReferences(); managed {
+		o.upper.scheduleOrphanCleanup()
 	}
 	return o, nil
 }
@@ -209,8 +213,16 @@ func (o *OverlayFilesystem) publish(ctx context.Context, s *overlayState) error 
 	}
 	n.blob.digest = sha256.Sum256(body)
 	after := encodeOverlayRoot(o.lowerID, n.blob)
-	if len(n.edits) > 0 {
-		committed, e := o.upper.transact(ctx, []fsTxMember{{id: FilesystemRootID(), before: raw, after: after, writes: n.edits}})
+	_, managed := o.upper.managedReferences()
+	if len(n.edits) > 0 || len(s.orphanMembers) > 0 || len(s.orphaned) > 0 || managed {
+		members := append([]fsTxMember{{id: FilesystemRootID(), before: raw, after: after, writes: n.edits}}, s.orphanMembers...)
+		for _, id := range s.orphaned {
+			members, err = o.upper.withOrphan(ctx, members, id)
+			if err != nil {
+				return err
+			}
+		}
+		committed, e := o.upper.transact(ctx, members)
 		if e != nil {
 			return e
 		}
@@ -237,6 +249,12 @@ func (o *OverlayFilesystem) edit(ctx context.Context, fn func(*overlayState) err
 		err = o.publish(ctx, s)
 		if errors.Is(err, ErrPrecondition) {
 			continue
+		}
+		if err == nil && len(s.orphaned) > 0 {
+			cleanup := o.CollectOrphans(ctx)
+			if cleanup != nil && !errors.Is(cleanup, ErrUnauthorized) {
+				return cleanup
+			}
 		}
 		return err
 	}
@@ -373,6 +391,37 @@ func (o *OverlayFilesystem) directory(ctx context.Context, s *overlayState, id O
 	if n.removed {
 		return nil, syscall.ENOENT
 	}
+	if refs, ok := o.lower.store.(fsReferenceStore); ok {
+		if support, known := o.lower.store.(interface{ ObjectReferencesSupported() bool }); !known || support.ObjectReferencesSupported() {
+			temporary := NewRequestID()
+			if err := refs.PinObject(ctx, id, temporary); err != nil {
+				return nil, err
+			}
+			defer fsDetachedCleanup(ctx, func(clean context.Context) error { return refs.UnpinObject(clean, id, temporary) })
+			fresh, _, err := o.lower.load(ctx, id)
+			if err != nil {
+				return nil, err
+			}
+			if fresh.removed || fresh.kind != fsDirectory {
+				return nil, syscall.ENOENT
+			}
+			n = fresh
+			if deps, ok := o.lower.store.(fsDependencyStore); ok {
+				token, err := o.upper.reserveLowerAnchor(ctx, id, id)
+				if err != nil {
+					return nil, err
+				}
+				if err := deps.PinObjectDependency(ctx, id, token); err != nil {
+					return nil, err
+				}
+				if n.xattrs == nil {
+					n.xattrs = map[string][]byte{}
+				}
+				n.xattrs[fsLowerReferenceXattr] = append([]byte(nil), token[:]...)
+			}
+		}
+	}
+
 	n.blob = fsBlob{}
 	dir := &overlayDirectory{lower: id, node: n, entries: map[string]ObjectID{}}
 	s.dirs[id] = dir
@@ -607,6 +656,15 @@ func (o *OverlayFilesystem) copyUp(ctx context.Context, id ObjectID) error {
 	}
 	_, _, err = o.upper.store.Get(ctx, id)
 	if errors.Is(err, ErrNotFound) {
+		if refs, ok := o.lower.store.(fsReferenceStore); ok {
+			if support, known := o.lower.store.(interface{ ObjectReferencesSupported() bool }); !known || support.ObjectReferencesSupported() {
+				temporary := NewRequestID()
+				if err := refs.PinObject(ctx, id, temporary); err != nil {
+					return err
+				}
+				defer fsDetachedCleanup(ctx, func(clean context.Context) error { return refs.UnpinObject(clean, id, temporary) })
+			}
+		}
 		n, _, err := o.lower.load(ctx, id)
 		if err != nil {
 			return err
@@ -623,6 +681,22 @@ func (o *OverlayFilesystem) copyUp(ctx context.Context, id ObjectID) error {
 		if n.blob.lower {
 			n.blob.lowerOwner = id
 			n.blob.lowerDigest = lowerDataFingerprint(n)
+			if refs, ok := o.lower.store.(fsDependencyStore); ok {
+				if support, known := o.lower.store.(interface{ ObjectReferencesSupported() bool }); !known || support.ObjectReferencesSupported() {
+					token, err := o.upper.reserveLowerAnchor(ctx, id, id)
+					if err != nil {
+						return err
+					}
+					if err := refs.PinObjectDependency(ctx, id, token); err != nil {
+						return err
+					}
+					if n.xattrs == nil {
+						n.xattrs = map[string][]byte{}
+					}
+					n.xattrs[fsLowerReferenceXattr] = append([]byte(nil), token[:]...)
+					n.extended = true
+				}
+			}
 		}
 		n.writePath = p
 		_, err = o.upper.store.CAS(ctx, id, 0, nil, encodeFSNode(n), CASOptions{Scope: CASObject, MutationOptions: MutationOptions{RequestID: NewRequestID(), Absent: true}})

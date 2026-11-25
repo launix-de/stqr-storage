@@ -108,10 +108,133 @@ func NewFUSERoot(view FilesystemView) *FSNode {
 }
 
 type fsOpenFile struct {
+	mu     sync.RWMutex
+	closed bool
+	token  RequestID
+	view   interface {
+		Release(context.Context, ObjectID, RequestID) error
+	}
+	id       ObjectID
 	sync     bool
 	writable bool
 	append   bool
 	identity *fsInodeIdentity
+}
+
+func (h *fsOpenFile) Release(ctx context.Context) syscall.Errno {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.closed {
+		return 0
+	}
+	h.closed = true
+	if h.view != nil {
+		return fsErrno(h.view.Release(context.WithoutCancel(ctx), h.id, h.token))
+	}
+	return 0
+}
+
+func fsOpenOperation(fh fusefs.FileHandle) (func(), syscall.Errno) {
+	if dir, ok := fh.(*fsOpenDirectory); ok {
+		return fsOpenOperation(dir.fsOpenFile)
+	}
+	h, ok := fh.(*fsOpenFile)
+	if !ok {
+		return func() {}, 0
+	}
+	h.mu.RLock()
+	if h.closed {
+		h.mu.RUnlock()
+		return func() {}, syscall.EBADF
+	}
+	return h.mu.RUnlock, 0
+}
+
+func fsRetainOpen(ctx context.Context, view FilesystemView, id ObjectID, h *fsOpenFile) error {
+	if refs, ok := view.(interface {
+		Retain(context.Context, ObjectID) (RequestID, error)
+		Release(context.Context, ObjectID, RequestID) error
+	}); ok {
+		token, err := refs.Retain(ctx, id)
+		if err != nil {
+			return err
+		}
+		h.token, h.view, h.id = token, refs, id
+	}
+	return nil
+}
+
+type fsOpenDirectory struct {
+	*fsOpenFile
+	mu         sync.Mutex
+	entries    []fuse.DirEntry
+	position   uint64
+	filesystem FilesystemView
+}
+
+func (h *fsOpenDirectory) Readdirent(ctx context.Context) (*fuse.DirEntry, syscall.Errno) {
+	release, errno := fsOpenOperation(h.fsOpenFile)
+	if errno != 0 {
+		return nil, errno
+	}
+	defer release()
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.position >= uint64(len(h.entries)) {
+		return nil, 0
+	}
+	entry := h.entries[h.position]
+	h.position++
+	return &entry, 0
+}
+func (h *fsOpenDirectory) Seekdir(ctx context.Context, off uint64) syscall.Errno {
+	release, errno := fsOpenOperation(h.fsOpenFile)
+	if errno != 0 {
+		return errno
+	}
+	defer release()
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if off > uint64(len(h.entries)) {
+		return syscall.EINVAL
+	}
+	h.position = off
+	return 0
+}
+func (h *fsOpenDirectory) Releasedir(ctx context.Context, flags uint32) {
+	_ = h.fsOpenFile.Release(ctx)
+}
+func (h *fsOpenDirectory) Fsyncdir(ctx context.Context, flags uint32) syscall.Errno {
+	release, errno := fsOpenOperation(h.fsOpenFile)
+	if errno != 0 {
+		return errno
+	}
+	defer release()
+	return fsErrno(h.filesystem.Sync(ctx, h.id))
+}
+
+func (n *FSNode) OpendirHandle(ctx context.Context, flags uint32) (fusefs.FileHandle, uint32, syscall.Errno) {
+	h := &fsOpenFile{identity: n.identity}
+	if err := fsRetainOpen(ctx, n.filesystem, n.id, h); err != nil {
+		return nil, 0, fsErrno(err)
+	}
+	stream, errno := n.Readdir(ctx)
+	if errno != 0 {
+		_ = h.Release(ctx)
+		return nil, 0, errno
+	}
+	defer stream.Close()
+	var entries []fuse.DirEntry
+	for stream.HasNext() {
+		entry, errno := stream.Next()
+		if errno != 0 {
+			_ = h.Release(ctx)
+			return nil, 0, errno
+		}
+		entry.Off = uint64(len(entries) + 1)
+		entries = append(entries, entry)
+	}
+	return &fsOpenDirectory{fsOpenFile: h, entries: entries, filesystem: n.filesystem}, 0, 0
 }
 
 // Mount serves this filesystem through go-fuse. No daemon/CLI is started.
@@ -214,6 +337,11 @@ func (n *FSNode) child(ctx context.Context, info FSInfo, out *fuse.EntryOut) *fu
 	return child
 }
 func (n *FSNode) Getattr(ctx context.Context, fh fusefs.FileHandle, out *fuse.AttrOut) syscall.Errno {
+	release, errno := fsOpenOperation(fh)
+	if errno != 0 {
+		return errno
+	}
+	defer release()
 	info, err := n.filesystem.Stat(ctx, n.id)
 	if err != nil {
 		return fsErrno(err)
@@ -273,7 +401,11 @@ func (n *FSNode) Create(ctx context.Context, name string, flags, mode uint32, ou
 		return nil, nil, 0, fsErrno(err)
 	}
 	child := n.child(ctx, info, out)
-	return child, &fsOpenFile{sync: flags&(syscall.O_SYNC|syscall.O_DSYNC) != 0, writable: true, append: flags&syscall.O_APPEND != 0, identity: child.Operations().(*FSNode).identity}, fuse.FOPEN_DIRECT_IO, 0
+	h := &fsOpenFile{sync: flags&(syscall.O_SYNC|syscall.O_DSYNC) != 0, writable: true, append: flags&syscall.O_APPEND != 0, identity: child.Operations().(*FSNode).identity}
+	if err := fsRetainOpen(ctx, n.filesystem, info.ID, h); err != nil {
+		return nil, nil, 0, fsErrno(err)
+	}
+	return child, h, fuse.FOPEN_DIRECT_IO, 0
 }
 func (n *FSNode) Open(ctx context.Context, flags uint32) (fusefs.FileHandle, uint32, syscall.Errno) {
 	info, err := n.filesystem.Stat(ctx, n.id)
@@ -283,6 +415,16 @@ func (n *FSNode) Open(ctx context.Context, flags uint32) (fusefs.FileHandle, uin
 	if info.Directory {
 		return nil, 0, syscall.EISDIR
 	}
+	h := &fsOpenFile{sync: flags&(syscall.O_SYNC|syscall.O_DSYNC) != 0, writable: flags&(syscall.O_WRONLY|syscall.O_RDWR) != 0, append: flags&syscall.O_APPEND != 0, identity: n.identity}
+	if err := fsRetainOpen(ctx, n.filesystem, n.id, h); err != nil {
+		return nil, 0, fsErrno(err)
+	}
+	opened := false
+	defer func() {
+		if !opened {
+			_ = h.Release(ctx)
+		}
+	}()
 	if flags&(syscall.O_WRONLY|syscall.O_RDWR|syscall.O_TRUNC) != 0 {
 		if err = n.filesystem.PrepareWrite(ctx, n.id); err != nil {
 			return nil, 0, fsErrno(err)
@@ -308,9 +450,15 @@ func (n *FSNode) Open(ctx context.Context, flags uint32) (fusefs.FileHandle, uin
 			}
 		}
 	}
-	return &fsOpenFile{sync: flags&(syscall.O_SYNC|syscall.O_DSYNC) != 0, writable: flags&(syscall.O_WRONLY|syscall.O_RDWR) != 0, append: flags&syscall.O_APPEND != 0, identity: n.identity}, openFlags, 0
+	opened = true
+	return h, openFlags, 0
 }
 func (n *FSNode) Read(ctx context.Context, fh fusefs.FileHandle, dst []byte, offset int64) (fuse.ReadResult, syscall.Errno) {
+	release, errno := fsOpenOperation(fh)
+	if errno != 0 {
+		return nil, errno
+	}
+	defer release()
 	count, err := n.filesystem.ReadAt(ctx, n.id, dst, offset)
 	if errors.Is(err, io.EOF) {
 		err = nil
@@ -321,6 +469,11 @@ func (n *FSNode) Read(ctx context.Context, fh fusefs.FileHandle, dst []byte, off
 	return fuse.ReadResultData(dst[:count]), 0
 }
 func (n *FSNode) Write(ctx context.Context, fh fusefs.FileHandle, data []byte, offset int64) (uint32, syscall.Errno) {
+	release, errno := fsOpenOperation(fh)
+	if errno != 0 {
+		return 0, errno
+	}
+	defer release()
 	var count int
 	var err error
 	if h, ok := fh.(*fsOpenFile); ok && h.append {
@@ -336,6 +489,11 @@ func (n *FSNode) Write(ctx context.Context, fh fusefs.FileHandle, data []byte, o
 	return uint32(count), fsErrno(err)
 }
 func (n *FSNode) Fsync(ctx context.Context, fh fusefs.FileHandle, flags uint32) syscall.Errno {
+	release, errno := fsOpenOperation(fh)
+	if errno != 0 {
+		return errno
+	}
+	defer release()
 	return fsErrno(n.filesystem.Sync(ctx, n.id))
 }
 
@@ -357,6 +515,11 @@ func (n *FSNode) Rename(ctx context.Context, name string, newParent fusefs.Inode
 	return fsErrno(n.filesystem.RenameWithFlags(ctx, n.id, name, other.id, newName, flags))
 }
 func (n *FSNode) Setattr(ctx context.Context, fh fusefs.FileHandle, in *fuse.SetAttrIn, out *fuse.AttrOut) syscall.Errno {
+	release, errno := fsOpenOperation(fh)
+	if errno != 0 {
+		return errno
+	}
+	defer release()
 	a := FSAttributes{}
 	if x, ok := in.GetATime(); ok {
 		if x.UnixNano() < 0 {

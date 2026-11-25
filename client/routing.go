@@ -9,7 +9,7 @@ import (
 )
 
 func objectMessage(m Message) bool {
-	return (m.Opcode >= 0x0100 && m.Opcode <= 0x0110 || m.Opcode == BucketObjectList) && len(m.Body) >= 80
+	return (m.Opcode >= 0x0100 && m.Opcode <= 0x0110 || m.Opcode == BucketObjectList || m.Opcode == ObjectReference) && len(m.Body) >= 80
 }
 
 func (c *Client) routeMessage(m *Message) (string, ID, error) {

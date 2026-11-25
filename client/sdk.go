@@ -134,7 +134,7 @@ func (c *Client) connectEndpoint(ctx context.Context, endpoint string) (*objectT
 	hello := Encoder{}
 	hello.U16(2)
 	hello.U16(2)
-	hello.U64(CapabilityDurability)
+	hello.U64(CapabilityDurability | CapabilityObjectReferences)
 	hello.Text("stqr-go")
 	r, e := t.roundTrip(ctx, Message{Kind: Request, Opcode: Hello, ID: NewRequestID(), Body: hello.B}, false, nil)
 	if e == nil {

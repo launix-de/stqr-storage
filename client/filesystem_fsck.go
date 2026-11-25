@@ -4,6 +4,8 @@ package client
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"errors"
 	"fmt"
 	"sort"
 )
@@ -25,7 +27,11 @@ func (c *Client) CheckFilesystem(ctx context.Context) (FSCheckResult, error) {
 	if err := c.beginMaintenance(ctx); err != nil {
 		return FSCheckResult{}, err
 	}
-	return checkFilesystem(ctx, c)
+	result, err := checkFilesystem(ctx, c)
+	if err == nil {
+		err = c.ReclaimBucketMetadata(ctx)
+	}
+	return result, err
 }
 
 func (c *Client) beginMaintenance(ctx context.Context) error {
@@ -45,12 +51,20 @@ func (c *Client) scanFilesystemObjects(ctx context.Context, after *ObjectID, lim
 
 func checkFilesystem(ctx context.Context, store fsCheckStore, opaqueRoots ...ObjectID) (FSCheckResult, error) {
 	var result FSCheckResult
+	if reset, ok := store.(interface{ ResetAbandonedObjectReferences(context.Context) error }); ok {
+		if err := reset.ResetAbandonedObjectReferences(ctx); err != nil {
+			return result, err
+		}
+	}
 	if raw, _, err := store.Get(ctx, FilesystemRootID()); err == nil && len(raw) >= 4 && string(raw[:4]) == "STOR" {
 		return result, ErrOverlayNeedsLower
 	}
 	f := Filesystem{store: store, directoryMemoryLimit: 64 << 20}
 	if err := f.recoverNamespace(ctx); err != nil {
 		return result, fmt.Errorf("fsck namespace recovery; nothing deleted: %w", err)
+	}
+	if err := prepareDependencyOrphans(ctx, &f, store); err != nil {
+		return result, fmt.Errorf("fsck dependency orphan recovery; nothing deleted: %w", err)
 	}
 	inventory, err := filesystemInventory(ctx, store)
 	if err != nil {
@@ -61,10 +75,17 @@ func checkFilesystem(ctx context.Context, store fsCheckStore, opaqueRoots ...Obj
 	if err := mark.inode(ctx, FilesystemRootID(), true); err != nil {
 		return result, fmt.Errorf("fsck validation; nothing deleted: %w", err)
 	}
+	if err := protectFilesystemDependencies(ctx, store, inventory, mark); err != nil {
+		return result, fmt.Errorf("fsck dependency validation; nothing deleted: %w", err)
+	}
 	for id, record := range mark.links {
 		refs := mark.references[id]
 		if record.kind == fsDirectory {
-			if refs != 1 {
+			expected := uint64(1)
+			if refs == 0 && mark.dependencies[id] {
+				expected = 0
+			}
+			if refs != expected {
 				return result, fmt.Errorf("directory has multiple parents: %w", ErrFSFormat)
 			}
 		} else if refs != uint64(record.count) {
@@ -81,6 +102,105 @@ func checkFilesystem(ctx context.Context, store fsCheckStore, opaqueRoots ...Obj
 		mark.roles[id] = 4
 	}
 	return filesystemSweep(ctx, store, inventory, mark.roles)
+}
+
+// Dependency pins are live application roots, even when their owning upper
+// bucket or COW snapshot is offline. Unlike crashed open references, they must
+// survive ordinary fsck; releasing them requires global graph knowledge.
+func protectFilesystemDependencies(ctx context.Context, store fsCheckStore, inventory map[ObjectID]ObjectInfo, mark *fsCheckMarker) error {
+	reader, ok := store.(interface {
+		ReadObjectDependencies(context.Context) ([]ObjectID, error)
+	})
+	if !ok {
+		return nil
+	}
+	ids, err := reader.ReadObjectDependencies(ctx)
+	if err != nil {
+		return err
+	}
+	if len(ids) == 0 {
+		return nil
+	}
+	if _, exists := inventory[ObjectReferenceRootID()]; exists {
+		mark.roles[ObjectReferenceRootID()] = 4
+	}
+	for _, id := range ids {
+		if id == ObjectReferenceRootID() {
+			return ErrFSFormat
+		}
+		if mark.dependencies == nil {
+			mark.dependencies = map[ObjectID]bool{}
+		}
+		mark.dependencies[id] = true
+		if err := mark.inode(ctx, id, false); err != nil {
+			return err
+		}
+		// The dependency is a lifetime root, not an extra POSIX hard link.
+		mark.references[id]--
+	}
+	if _, exists := inventory[filesystemOrphansID]; exists {
+		if err := mark.inode(ctx, filesystemOrphansID, false); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// Keep a bounded queue of dependency-protected zero-link inodes. Once an upper
+// graph releases its last anchor, a cooperating lower writer can finish normal
+// cleanup rather than losing discoverability in an earlier offline sweep.
+func prepareDependencyOrphans(ctx context.Context, f *Filesystem, store fsCheckStore) error {
+	reader, ok := store.(interface {
+		ReadObjectDependencies(context.Context) ([]ObjectID, error)
+	})
+	if !ok {
+		return nil
+	}
+	dependencies, err := reader.ReadObjectDependencies(ctx)
+	if err != nil || len(dependencies) == 0 {
+		return err
+	}
+	var keep []ObjectID
+	for _, id := range dependencies {
+		n, _, err := f.load(ctx, id)
+		if err != nil {
+			return err
+		}
+		if fsLinks(n) == 0 {
+			keep = append(keep, id)
+		}
+	}
+	sort.Slice(keep, func(i, j int) bool { return bytes.Compare(keep[i][:], keep[j][:]) < 0 })
+	s, old, err := f.orphanSnapshot(ctx, len(keep) > 0)
+	if errors.Is(err, ErrNotFound) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if len(old) == len(keep) {
+		equal := true
+		for i := range old {
+			equal = equal && old[i] == keep[i]
+		}
+		if equal {
+			return nil
+		}
+	}
+	n := s.node
+	body := encodeFSOrphans(keep)
+	if err := f.stableBody(ctx, &n, body); err != nil {
+		return err
+	}
+	n.blob.digest = sha256.Sum256(body)
+	committed, err := f.transact(ctx, []fsTxMember{fsMember(s, n)})
+	if err != nil {
+		return err
+	}
+	if !committed {
+		return ErrPrecondition
+	}
+	return nil
 }
 
 func filesystemInventory(ctx context.Context, store fsCheckStore) (map[ObjectID]ObjectInfo, error) {
@@ -151,6 +271,7 @@ type fsCheckLinks struct {
 	count uint32
 }
 type fsCheckMarker struct {
+	dependencies map[ObjectID]bool
 	references   map[ObjectID]uint64
 	links        map[ObjectID]fsCheckLinks
 	store        fsCheckStore
@@ -208,8 +329,14 @@ func (m *fsCheckMarker) inode(ctx context.Context, id ObjectID, root bool) error
 	if root && node.kind != fsDirectory {
 		return ErrFSFormat
 	}
+	if node.blob.lowerOwner != (ObjectID{}) {
+		f := Filesystem{lower: m.lower}
+		if err := f.checkLowerAnchor(ctx, node.blob); err != nil {
+			return err
+		}
+	}
 	if node.blob.root != (ObjectID{}) {
-		if err = m.segment(context.WithValue(ctx, fsSparsePageKey{}, node.blob.mutable), fsSegment{id: node.blob.root, length: node.blob.length}, node.blob.depth); err != nil {
+		if err = m.segment(context.WithValue(ctx, fsSparsePageKey{}, node.blob.mutable), fsSegment{id: node.blob.root, length: node.blob.length, lower: node.blob.lower}, node.blob.depth); err != nil {
 			return err
 		}
 		if err != nil {
@@ -220,6 +347,9 @@ func (m *fsCheckMarker) inode(ctx context.Context, id ObjectID, root bool) error
 		m.visiting[id] = true
 		defer delete(m.visiting, id)
 		f := Filesystem{store: m.store, directoryMemoryLimit: 64 << 20}
+		if node.removed && m.dependencies[id] {
+			node.removed = false
+		}
 		entries, err := f.directory(ctx, node)
 		if err != nil {
 			return err
@@ -237,6 +367,9 @@ func (m *fsCheckMarker) segment(ctx context.Context, segment fsSegment, depth ui
 	if segment.id == (ObjectID{}) {
 		return nil
 	} // sparse span
+	if segment.lower {
+		return m.lowerSource(ctx, segment.id, segment.offset, segment.length, depth)
+	}
 	if depth == 0 {
 		if segment.lower {
 			return m.lowerSource(ctx, segment.id, segment.offset, segment.length, 0)
@@ -286,5 +419,9 @@ func (c *Client) BeginMaintenance(ctx context.Context) error { return c.beginMai
 // then read/validate the application's root manifest under that same exclusion.
 // A dedicated connection must be closed afterward. Missing roots abort the sweep.
 func (c *Client) CheckFilesystemWithOpaqueRoots(ctx context.Context, roots []ObjectID) (FSCheckResult, error) {
-	return checkFilesystem(ctx, c, roots...)
+	result, err := checkFilesystem(ctx, c, roots...)
+	if err == nil {
+		err = c.ReclaimBucketMetadata(ctx)
+	}
+	return result, err
 }
