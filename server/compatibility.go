@@ -13,8 +13,8 @@ import (
 
 // Software contract for rolling upgrades:
 //
-//   - Build/release identify software for operators, NEVER permission to decode
-//     data. Release is a monotonically increasing release number, not SemVer.
+//   - Build identity is informational. ProtocolVersion is assigned by hand;
+//     software hashes, timestamps and package releases never order protocols.
 //   - stqr.v1 upgrade, HELLO, NODE_HELLO and this bounded HTTP discovery header
 //     remain a stable bootstrap. Missing headers mean the original v1 profile.
 //     Claims become telemetry only AFTER authentication AND NODE_HELLO binding.
@@ -52,7 +52,11 @@ const nodeVersionsMessage uint16 = 0x203a
 // Set by the Debian build script through -ldflags. Developer builds remain usable.
 var SoftwareVersion = "dev"
 var SoftwareRevision = "unknown"
-var SoftwareRelease = "2"
+
+// ProtocolVersion is assigned by hand when peer protocol semantics change.
+// Never derive it from build time, commit count, package version or Git hash.
+// v3 includes the current unversioned control and bucket-lease semantics.
+const ProtocolVersion uint64 = 3
 
 type operationSemantics struct {
 	Emit uint16 `json:"emit"`
@@ -60,12 +64,13 @@ type operationSemantics struct {
 	Max  uint16 `json:"max"`
 }
 type protocolProfile struct {
-	Version    string                        `json:"version"`
-	Revision   string                        `json:"revision"`
-	Release    uint64                        `json:"release"`
-	WireMin    uint16                        `json:"wire_min"`
-	WireMax    uint16                        `json:"wire_max"`
-	Operations map[string]operationSemantics `json:"operations,omitempty"`
+	ProtocolVersion uint64                        `json:"protocol_version,omitempty"`
+	Version         string                        `json:"version"`
+	Revision        string                        `json:"revision"`
+	Release         uint64                        `json:"release"`
+	WireMin         uint16                        `json:"wire_min"`
+	WireMax         uint16                        `json:"wire_max"`
+	Operations      map[string]operationSemantics `json:"operations,omitempty"`
 }
 type nodeVersionStatus struct {
 	Profile      protocolProfile `json:"profile"`
@@ -88,8 +93,9 @@ func (s *Server) protocolVersion() protocolProfile {
 	if p := s.compatibility.Load(); p != nil {
 		return *p
 	}
-	release, _ := strconv.ParseUint(SoftwareRelease, 10, 64)
-	return protocolProfile{Version: SoftwareVersion, Revision: SoftwareRevision, Release: release, WireMin: 1, WireMax: 1, Operations: currentOperationSemantics()}
+	// Release is retained only as a wire alias for older readers. It is no
+	// longer a software release or a timestamp and never drives our comparison.
+	return protocolProfile{ProtocolVersion: ProtocolVersion, Version: SoftwareVersion, Revision: SoftwareRevision, Release: ProtocolVersion, WireMin: 1, WireMax: 1, Operations: currentOperationSemantics()}
 }
 func profileHeader(p protocolProfile) string { b, _ := json.Marshal(p); return string(b) }
 func decodeProfile(h http.Header) (protocolProfile, error) {
@@ -174,13 +180,15 @@ func (s *Server) versionsView() map[string]nodeVersionStatus {
 	}
 	s.versions.Unlock()
 	profiles[s.running.Node.ID] = local
-	newest := local.Release
+	newest := local.ProtocolVersion
 	for _, p := range profiles {
-		newest = max(newest, p.Release)
+		newest = max(newest, p.ProtocolVersion)
 	}
 	result := make(map[string]nodeVersionStatus, len(profiles))
 	for id, p := range profiles {
-		v := nodeVersionStatus{Profile: p, Outdated: p.Release < newest, Incompatible: !wireCompatible(local, p)}
+		// A legacy profile without the manual field is unknown, not ordered by
+		// its old build-derived release. Opcode/wire safety checks still apply.
+		v := nodeVersionStatus{Profile: p, Outdated: p.ProtocolVersion != 0 && p.ProtocolVersion < newest, Incompatible: !wireCompatible(local, p)}
 		if v.Incompatible {
 			v.Reason = "Kein gemeinsames Wire-Protokoll; wartet auf kompatible Version"
 		}

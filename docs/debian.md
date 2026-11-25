@@ -8,9 +8,10 @@ sudo apt install ./dist/stqr_0.1.0_amd64.deb
 ```
 
 `DEB_ARCH=arm64` baut für ARM64, `GO` wählt den Go-Compiler. Das zweite
-Argument wählt das Ausgabeverzeichnis. `STQR_RELEASE` ist eine über Releases
-streng steigende Zahl (Standard: Commit-Zeitstempel); sie dient der Anzeige,
-nicht der Freigabe von Requests. `--version` zeigt Paketversion und Git-Revision.
+Argument wählt das Ausgabeverzeichnis. Die Protokollnummer wird ausschließlich
+über `server.ProtocolVersion` im Quellcode vergeben. Paketversion, Git-Hash und
+Commit-Zeitstempel verändern sie nicht. `--version` zeigt weiterhin die
+Paketversion und Git-Revision als Build-Information.
 
 Der eigene `stqr.service` läuft als Benutzer `stqr` mit Arbeitsverzeichnis
 `/var/lib/stqr`. Die Node erzeugt und pflegt `/etc/stqr/stqr.yaml`, einschließlich
