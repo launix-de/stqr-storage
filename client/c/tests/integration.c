@@ -135,6 +135,21 @@ int main(void) {
             CHECK(!stqr_sync(c));
         }
         {
+            /* Routing a subscription must retain, not checkpoint, an accepted
+             * dependency. The subsequent cross-owner publication fences it. */
+            stqr_object_id left={{1}},right={{0x81}};
+            stqr_id sid; stqr_u64 cursor; stqr_commit_mark before,after; stqr_fence *retained=NULL;
+            o=fresh();o.accepted=1;CHECK(!stqr_put(c,left,"volatile",8,&o,&info));
+            CHECK(!stqr_pending_mark(c,&before) && before.sequence);
+            CHECK(!stqr_request_id(&sid));
+            CHECK(!stqr_subscribe(c,right,sid,0,0,0,NULL,&data,&n,&info,&cursor));stqr_free(data);
+            CHECK(!stqr_fence_capture(c,&retained) && stqr_fence_count(retained)==1);
+            stqr_fence_close(retained);
+            CHECK(!stqr_unsubscribe(c,sid));
+            o=fresh();CHECK(!stqr_put(c,right,"dependent",9,&o,&info));
+            CHECK(!stqr_pending_mark(c,&after) && !after.sequence);
+        }
+        {
             stqr_client *writer = NULL;
             stqr_object_id left = {{1}}, right = {{0x81}};
             stqr_id a, b; stqr_u64 cursor; struct observer events = {0};
