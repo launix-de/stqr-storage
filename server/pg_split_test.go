@@ -207,6 +207,12 @@ func TestPGRebuildDisjointNetworkSplit(t *testing.T) {
 		}
 	}
 	leaseBucket := replicaTestBucket(t, nodes[0].node, groups[0], "exclusive")
+	// Bind application formats while global metadata coordination is available.
+	for _, bucket := range append(append([]*Bucket{}, buckets...), finite, leaseBucket) {
+		if err := source.node.openBucketFormat(context.Background(), bucket.ID().String(), "fs", userPrincipal(t, source.node)); err != nil {
+			t.Fatal(err)
+		}
+	}
 	g.split(nodes)
 	ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
 	defer cancel()

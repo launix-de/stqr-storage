@@ -162,7 +162,7 @@ func TestBucketInfoHTTPAuthenticationAndPolicy(t *testing.T) {
 	}
 	description = b.Describe()
 	description.State = BucketLocked
-	if _, err = s.buckets.Save(description, 1); err != nil {
+	if _, err = s.buckets.Save(description, description.Revision); err != nil {
 		t.Fatal(err)
 	}
 	status, reply := bucketHTTPReply(t, s, bucketInfoRequest("application"), user.Name, "bucket-test-password")
@@ -195,9 +195,13 @@ func TestBucketInfoWebSocketRevocation(t *testing.T) {
 	defer conn.Close()
 	reply := requestMessage(t, conn, bucketInfoRequest("shared"))
 	assertBucketWire(t, bucketReplyResult(t, reply, 200), b.ID(), "shared", BucketRead, 0)
+	b, err = s.Bucket(b.ID())
+	if err != nil {
+		t.Fatal(err)
+	}
 	description = b.Describe()
 	description.Grants = nil
-	if _, err = s.buckets.Save(description, 1); err != nil {
+	if _, err = s.buckets.Save(description, description.Revision); err != nil {
 		t.Fatal(err)
 	}
 	// A revoked connection capability is closed before the next request runs.
