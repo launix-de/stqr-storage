@@ -530,15 +530,9 @@ static int help_tx(struct ks_fs *f, stqr_object_id first)
 	sq_free(stack);
 	return err ? err : first_result;
 }
-int ks_snapshot_cached(struct ks_fs *f, stqr_object_id id, struct ks_snapshot *s)
+static int ks_overlay_snapshot_cached(struct ks_fs *, stqr_object_id, struct ks_snapshot *);
+static int ks_plain_snapshot_cached(struct ks_fs *f, stqr_object_id id, struct ks_snapshot *s)
 {
-	/* The overlay resolver can fetch STOM payloads and register subscriptions.
-	 * Calling it from the invalidator makes eviction resubscribe other evicted
-	 * inodes indefinitely. Leave refresh to foreground access on a cache miss. */
-	if (f->lower) {
-		memset(s, 0, sizeof(*s));
-		return -ENODATA;
-	}
 	int err;
 	memset(s, 0, sizeof(*s));
 	s->id = id;
@@ -552,6 +546,11 @@ int ks_snapshot_cached(struct ks_fs *f, stqr_object_id id, struct ks_snapshot *s
 		sq_hash(256, s->raw, s->raw_len, s->node.head_digest);
 	}
 	return err;
+}
+int ks_snapshot_cached(struct ks_fs *f, stqr_object_id id, struct ks_snapshot *s)
+{
+	return f->lower ? ks_overlay_snapshot_cached(f, id, s)
+			: ks_plain_snapshot_cached(f, id, s);
 }
 int ks_snapshot(struct ks_fs *f, stqr_object_id id, struct ks_snapshot *s)
 {
