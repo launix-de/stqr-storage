@@ -24,6 +24,9 @@ def write(path, text, mode):
             out.flush()
             os.fsync(out.fileno())
         os.chmod(tmp, mode)
+        if path.exists():
+            previous = path.stat()
+            os.chown(tmp, previous.st_uid, previous.st_gid)
         os.replace(tmp, path)
     finally:
         Path(tmp).unlink(missing_ok=True)
@@ -116,7 +119,7 @@ def install(root, plan, server=None):
             write(root / 'var/lib/AccountsService/users' / name, '[User]\nSystemAccount=true\n', 0o600)
     for name in files:
         write(root / 'etc' / name, ''.join(':'.join(r) + '\n' for r in table[name].values()),
-              0o600 if name in ('shadow', 'gshadow') else 0o644)
+              (root / 'etc' / name).stat().st_mode & 0o777)
     write(auth, managed(auth.read_text(), [
         'auth [success=1 default=ignore] pam_succeed_if.so quiet user notingroup ' + GROUP,
         'auth [success=done default=die] /usr/lib/stqr-networkboot/pam_stqr.so']), 0o644)
