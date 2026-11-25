@@ -908,8 +908,28 @@ out:
 	sb_end_pagefault(i->i_sb);
 	return result;
 }
+/* Eviction deliberately leaves inode metadata stale instead of resubscribing
+ * from the invalidator. A fault must refresh that metadata before filemap_fault
+ * tests i_size, otherwise a remote truncate could return zeroes past EOF rather
+ * than SIGBUS. Fault-around must defer while that refresh is outstanding. */
+static vm_fault_t ks_filemap_fault(struct vm_fault *vmf)
+{
+	struct file *file = vmf->vma->vm_file;
+	if (READ_ONCE(KS_I(file_inode(file))->invalidate)) {
+		int err = ks_revalidate_cache(file);
+		if (err)
+			return vmf_error(err);
+	}
+	return filemap_fault(vmf);
+}
+static vm_fault_t ks_filemap_map_pages(struct vm_fault *vmf, pgoff_t start, pgoff_t end)
+{
+	if (READ_ONCE(KS_I(file_inode(vmf->vma->vm_file))->invalidate))
+		return 0;
+	return filemap_map_pages(vmf, start, end);
+}
 static const struct vm_operations_struct ks_vm_ops = {
-    .fault = filemap_fault, .map_pages = filemap_map_pages, .page_mkwrite = ks_page_mkwrite};
+    .fault = ks_filemap_fault, .map_pages = ks_filemap_map_pages, .page_mkwrite = ks_page_mkwrite};
 static int ks_mmap(struct file *file, struct vm_area_struct *vma)
 {
 	struct inode *i = file_inode(file);

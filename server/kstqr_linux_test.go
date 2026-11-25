@@ -612,6 +612,7 @@ rmmod kstqr
 		copyFile("../networkboot/bin/stqr-boot-root", "bin/stqr-boot-root", 0755)
 		copyFile("../networkboot/bin/mount.kstqr", "bin/mount.kstqr", 0755)
 		run("cc", "-static", "-O2", "-Wall", "-Wextra", "-Werror", "-o", filepath.Join(initrdRoot, "overlay-test"), filepath.Join(root, "tests/overlay.c"))
+	run("cc", "-static", "-O2", "-Wall", "-Wextra", "-Werror", "-o", filepath.Join(initrdRoot, "overlay-cache-quiet"), filepath.Join(root, "tests/overlay_cache_quiet.c"))
 
 		init = fmt.Sprintf(`#!/bin/sh
 set -eu
@@ -682,6 +683,11 @@ echo allowed > /fresh/work/new
 if mkdir /fresh/other; then exit 1; fi
 /mount.kstqr --uri %[1]s --bucket %[2]s --readonly-bucket %[3]s --credentials /credentials /mnt
 /overlay-test
+umount /mnt
+/mount.kstqr --uri %[1]s --bucket %[2]s --readonly-bucket %[3]s --credentials /credentials --metadata-cache-bytes 2048 /mnt
+/mount.kstqr --uri %[1]s --bucket %[2]s --readonly-bucket %[3]s --credentials /credentials /other
+/overlay-cache-quiet
+umount /other
 umount /mnt
 umount /fresh
 umount /readonly
