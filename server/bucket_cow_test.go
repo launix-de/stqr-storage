@@ -9,6 +9,7 @@ import (
 	"io"
 	"math/rand"
 	"net/http/httptest"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -334,6 +335,18 @@ func TestBucketCOWSubscriptionUsesNoReadMaterializationAndEnforcesOriginalGrant(
 		forbidden.Close()
 		t.Fatal("copy-only user acquired source grant")
 	}
+	t.Run("RAM-only inherited snapshot", func(t *testing.T) {
+		t.Setenv("TMPDIR", filepath.Join(t.TempDir(), "missing"))
+		sub, err := c.Subscribe(ctx, client.ObjectID(id), client.SubscribeOptions{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer sub.Close(ctx)
+		data, _, _, err := sub.Snapshot()
+		if err != nil || string(data) != "before" {
+			t.Fatalf("inherited snapshot %q: %v", data, err)
+		}
+	})
 	sub, err := c.Subscribe(ctx, client.ObjectID(id), client.SubscribeOptions{})
 	if err != nil {
 		t.Fatal(err)

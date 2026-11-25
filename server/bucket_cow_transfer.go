@@ -221,16 +221,6 @@ func (s *Server) cowCaptureLocal(ctx context.Context, bucket volume.ID, object v
 	if info.Deleted || metadata {
 		return &cowSnapshot{Info: info}, nil
 	}
-	file, err := newReplicaSpool(v.Identity().Class == volume.RAM)
-	if err != nil {
-		return nil, err
-	}
-	success := false
-	defer func() {
-		if !success {
-			file.Close()
-		}
-	}()
 	extents, err := h.Extents(key)
 	if err != nil {
 		return nil, err
@@ -238,6 +228,53 @@ func (s *Server) cowCaptureLocal(ctx context.Context, bucket volume.ID, object v
 	if ranges, ok := ctx.Value(cowCaptureRangesKey{}).([]volume.Extent); ok {
 		extents = cowReadExtents(extents, ranges)
 	}
+	var captureBytes uint64
+	for _, extent := range extents {
+		if !extent.Zero {
+			if extent.Length > math.MaxInt64-captureBytes {
+				return nil, volume.ErrRange
+			}
+			captureBytes += extent.Length
+		}
+	}
+	// Native filesystem/block clients use at most 1-MiB objects. Their COW
+	// read-through captures must not introduce a hidden disk spool underneath
+	// an otherwise RAM-only subscription. Keep these bounded captures in RAM;
+	// large general-purpose preservation transfers retain their disk path.
+	memory := v.Identity().Class == volume.RAM || captureBytes <= maxSubscriptionEntryBytes
+	reserved := false
+	if memory && captureBytes <= maxObjectStagingBytes {
+		if err = s.objectSubscriptions.reserveSnapshot(captureBytes); err != nil {
+			return nil, err
+		}
+		reserved = true
+	}
+	file, err := newReplicaSpool(memory)
+	if err != nil {
+		if reserved {
+			s.objectSubscriptions.releaseSnapshot(captureBytes)
+		}
+		return nil, err
+	}
+	if reserved {
+		file.memory = make([]byte, 0, int(captureBytes))
+	}
+	var closeOnce sync.Once
+	closeSnapshot := func() error {
+		closeOnce.Do(func() {
+			file.Close()
+			if reserved {
+				s.objectSubscriptions.releaseSnapshot(captureBytes)
+			}
+		})
+		return nil
+	}
+	success := false
+	defer func() {
+		if !success {
+			closeSnapshot()
+		}
+	}()
 	packed := &cowPackedReader{file: file, length: info.Length}
 	var kept []volume.Extent
 	var physical uint64
@@ -259,7 +296,7 @@ func (s *Server) cowCaptureLocal(ctx context.Context, bucket volume.ID, object v
 		physical += extent.Length
 	}
 	success = true
-	return &cowSnapshot{Info: info, Data: packed, Extents: kept, Close: func() error { file.Close(); return nil }}, nil
+	return &cowSnapshot{Info: info, Data: packed, Extents: kept, Close: closeSnapshot}, nil
 }
 func writeCowInfo(e *client.Encoder, info volume.Info) {
 	e.U64(info.Length)

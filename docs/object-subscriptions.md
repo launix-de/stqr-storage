@@ -11,7 +11,9 @@ SUBSCRIBE to the same primary that receives writes; ordinary GET may still read
 a replica. Registration, ACK and UNSUBSCRIBE do not broadcast descriptors to the
 cluster, persist them as objects, create snapshot spool files or force a disk
 checkpoint. The server indexes watchers by object and session/subscription ID;
-native clients index subscription IDs with hash tables. LRU lists only choose
+native clients index subscription IDs with hash tables. Native-sized (up to
+1-MiB) COW read-through captures also use bounded RAM rather than a disk spool;
+larger general-purpose COW preservation transfers retain their storage staging. LRU lists only choose
 cache entries to evict. Iteration over an object's actual watchers is necessary
 to deliver updates, and is not a global subscription search.
 
