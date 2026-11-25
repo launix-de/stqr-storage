@@ -93,3 +93,24 @@ func TestSeedURLRemainsAliasForItsAdvertisedNode(t *testing.T) {
 		t.Fatal("ignored changed node address", endpoint, err)
 	}
 }
+
+func TestPausedOwnerSubscriptionDoesNotAttachToReadReplica(t *testing.T) {
+	p := testMapPatch()
+	p.Entries[0].Locations = []Location{{Node: ID{2}, Role: 0}, {Node: ID{3}, Role: 1}}
+	p.Addresses = append(p.Addresses, NodeAddress{Node: ID{3}, Addresses: []string{"http://replica:7419"}})
+	c := &Client{bucket: p.Bucket, paused: map[ID]bool{{2}: true}, routers: map[string]ID{}}
+	if _, err := c.routes.Apply(p); err != nil {
+		t.Fatal(err)
+	}
+	c.rememberRouters(p)
+	m := Message{Opcode: ObjectSubscribe, Body: make([]byte, 80)}
+	copy(m.Body, p.Bucket[:])
+	if _, _, err := c.routeMessage(&m); err != ErrSubscriptionResync {
+		t.Fatal("subscription attached to paused primary or read replica", err)
+	}
+	m.Opcode = objectGet
+	endpoint, node, err := c.routeMessage(&m)
+	if err != nil || node != (ID{3}) || endpoint != "ws://replica:7419/api/ws" {
+		t.Fatal("uncached read did not reach available replica", endpoint, node, err)
+	}
+}
