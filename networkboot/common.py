@@ -50,7 +50,7 @@ def remember_preparation(config, bucket, work, phase='prepared'):
         return
     record = preparation_record(config, bucket)
     record.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    data = json.dumps({'work': str(work), 'phase': phase})
+    data = json.dumps({'work': str(work), 'phase': phase, 'login_setup': 1})
     marker = work / '.stqr-preparation.json'
     marker.write_text(str(record))
     marker.chmod(0o600)
@@ -74,6 +74,7 @@ def prepared_release(config, bucket):
         marker = work / '.stqr-preparation.json'
         if (work.is_symlink() or work.stat().st_uid != os.getuid()
                 or data['phase'] not in ('prepared', 'published')
+                or data['phase'] == 'prepared' and data.get('login_setup') != 1
                 or marker.read_text() != str(record)
                 or not all((work / name).is_file() for name in ('rootfs.tar', 'vmlinuz', 'initrd.img', 'release.json'))):
             return None
@@ -271,7 +272,7 @@ def extract(socket, work, kernel_version=None, config=None):
     finally:
         guest(socket, 'command', '/bin/cp -p /etc/fstab.stqr-original /etc/fstab')
     (work / 'release.json').write_text(json.dumps({'schema': 1, 'kernel': version,
-        'boot': 'kstqr-overlay', 'architecture': 'x86_64'}))
+        'boot': 'kstqr-overlay', 'architecture': 'x86_64', 'login_setup': 1}))
 
 
 def cli(main):
