@@ -810,13 +810,6 @@ out:
 }
 static int read_node(struct ks_fs *f, const struct ks_node *n, void *dst, size_t count, u64 offset)
 {
-	if (n->inherited) {
-		if (!f->lower)
-			return -EUCLEAN;
-		struct ks_node local = *n;
-		local.inherited = false;
-		return ks_read(f->lower, &local, dst, count, offset);
-	}
 	if (n->lower) {
 		struct ks_node local = *n;
 		if (!f->lower)
@@ -839,6 +832,15 @@ static int read_node(struct ks_fs *f, const struct ks_node *n, void *dst, size_t
 }
 int ks_read(struct ks_fs *f, const struct ks_node *node, void *dst, size_t count, u64 offset)
 {
+	/* Inherited inode identities and their read guards belong to the lower
+	 * bucket. Switch stores before both the payload read and guard checks. */
+	if (node->inherited) {
+		struct ks_node local = *node;
+		if (!f->lower)
+			return -EUCLEAN;
+		local.inherited = false;
+		return ks_read(f->lower, &local, dst, count, offset);
+	}
 	const struct ks_node *n = node;
 	struct ks_snapshot fresh = {0};
 	unsigned attempt;

@@ -612,7 +612,7 @@ rmmod kstqr
 		copyFile("../networkboot/bin/stqr-boot-root", "bin/stqr-boot-root", 0755)
 		copyFile("../networkboot/bin/mount.kstqr", "bin/mount.kstqr", 0755)
 		run("cc", "-static", "-O2", "-Wall", "-Wextra", "-Werror", "-o", filepath.Join(initrdRoot, "overlay-test"), filepath.Join(root, "tests/overlay.c"))
-	run("cc", "-static", "-O2", "-Wall", "-Wextra", "-Werror", "-o", filepath.Join(initrdRoot, "overlay-cache-quiet"), filepath.Join(root, "tests/overlay_cache_quiet.c"))
+		run("cc", "-static", "-O2", "-Wall", "-Wextra", "-Werror", "-o", filepath.Join(initrdRoot, "overlay-cache-quiet"), filepath.Join(root, "tests/overlay_cache_quiet.c"))
 
 		init = fmt.Sprintf(`#!/bin/sh
 set -eu
@@ -719,6 +719,64 @@ poweroff -f
 `, endpoint, nativeUpperID.String(), client.ID(b.ID()).String(), policyID.String(), controlURL.Port(), strings.Repeat("a", 64), client.ID(empty.ID()).String())
 	}
 
+	if os.Getenv("STQR_KERNEL_CACHE_RETENTION") == "1" {
+		hot, e := fs.Create(ctx, client.FilesystemRootID(), "retention-hot", 0644, 0, 0, false)
+		if e != nil {
+			t.Fatal(e)
+		}
+		if _, e = fs.WriteAt(ctx, hot.ID, bytes.Repeat([]byte("H"), 65536), 0); e != nil {
+			t.Fatal(e)
+		}
+		for group := 0; group < 66; group++ {
+			dir, e := fs.Create(ctx, client.FilesystemRootID(), fmt.Sprintf("retention-%02d", group), 0755, 0, 0, true)
+			if e != nil {
+				t.Fatal(e)
+			}
+			for number := 0; number < 32; number++ {
+				if _, e = fs.Create(ctx, dir.ID, fmt.Sprintf("file-%02d", number), 0644, 0, 0, false); e != nil {
+					t.Fatal(e)
+				}
+			}
+		}
+		upper, _ := createProtocolBucket(t, s, "retention-upper")
+		upperID := client.ID(upper.ID())
+		uc, e := client.Dial(ctx, host.URL, admin.Username, admin.Password, upperID)
+		if e != nil {
+			t.Fatal(e)
+		}
+		if _, e = client.OpenOverlayFilesystem(ctx, conn, uc, client.OverlayOptions{Create: true, LowerBucketID: client.ID(b.ID())}); e != nil {
+			t.Fatal(e)
+		}
+		if e = uc.Sync(ctx); e != nil {
+			t.Fatal(e)
+		}
+		uc.Close()
+		run("cc", "-static", "-O2", "-Wall", "-Wextra", "-Werror", "-o", filepath.Join(initrdRoot, "cache-retention"), filepath.Join(root, "tests/cache_retention.c"))
+		init = fmt.Sprintf(`#!/bin/sh
+set -eu
+export PATH=/bin
+/bin/busybox --install -s /bin
+trap 'echo KSTQR_VM_FAIL; poweroff -f' EXIT
+mount -t proc proc /proc
+mount -t sysfs sys /sys
+mount -t devtmpfs dev /dev
+ip link set lo up
+ip link set eth0 up
+ip addr add 10.0.2.15/24 dev eth0
+ip route add default via 10.0.2.2
+insmod /kstqr.ko
+/mount.kstqr --uri %[1]s --bucket %[2]s --readonly-bucket %[3]s --credentials /credentials /mnt
+/mount.kstqr --uri %[1]s --bucket %[2]s --readonly-bucket %[3]s --credentials /credentials /other
+/cache-retention
+umount /other
+umount /mnt
+rmmod kstqr
+if dmesg | grep -E 'BUG:|WARNING:|Oops:|KASAN:'; then exit 1; fi
+echo KSTQR_VM_PASS
+trap - EXIT
+poweroff -f
+`, endpoint, upperID.String(), client.ID(b.ID()).String())
+	}
 	if err = os.WriteFile(filepath.Join(initrdRoot, "init"), []byte(init), 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -745,6 +803,9 @@ poweroff -f
 	output, err := vm.CombinedOutput()
 	if logPath := os.Getenv("STQR_KERNEL_LOG"); logPath != "" {
 		os.WriteFile(logPath, output, 0600)
+	}
+	if os.Getenv("STQR_KERNEL_CACHE_RETENTION") == "1" && !strings.Contains(string(output), "KSTQR_CACHE_RETENTION_PASS") {
+		t.Fatalf("cache retention test did not pass: %v\n%s", err, output)
 	}
 	if err != nil || !strings.Contains(string(output), "KSTQR_VM_PASS") || strings.Contains(string(output), "KSTQR_VM_FAIL") {
 		t.Fatalf("kernel VM: %v\n%s", err, output)
@@ -839,6 +900,10 @@ poweroff -f
 				t.Fatal(err)
 			}
 		}
+		return
+	}
+	if os.Getenv("STQR_KERNEL_CACHE_RETENTION") == "1" {
+		t.Log("Cache pressure, retained mapped data, remote copy-up and clean unload passed")
 		return
 	}
 	t.Log("Standalone kernel mount, Go interoperability, filesystem operations and clean unload passed")

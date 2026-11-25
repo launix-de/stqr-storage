@@ -343,7 +343,7 @@ recreated upper before kernel use. See [the shared contract](filesystem-posix.md
 
 Kernel transport transfers run in NOFS workers, independent of the task issuing filesystem I/O. Nonfatal process signals (including SIGCHLD and restartable timers) do not break partial shared RPC frames or invalidate other tasks' sessions. Socket timeouts still bound stalled transfers; fatal cancellation is observed between dispatches, and dispatched buffers remain owned until the worker has returned. The VM regression suite exercises repeated reads, writes and fsync under a 500-microsecond restartable timer.
 
-Overlay eviction never resolves metadata over the network from the background invalidation worker. A missing cached overlay snapshot leaves the inode invalid until foreground access refreshes it. mmap faults refresh that state before the kernel checks EOF, and fault-around defers while invalidation is pending. A two-mount VM regression uses a 2-KiB cache with 48 files, checks that idle cache/RPC counters stop growing, then truncates an evicted mapped inode through the second mount and verifies SIGBUS.
+Overlay invalidation preserves file pages when their current inode still has the same continuously covered subscription snapshot. When namespace changes invalidate the cached overlay lookup, the worker may resolve a regular file that has cached pages before taking the mapping lock. It runs outside notification callbacks and subscription wire locks. Missing or changed coverage takes the conservative invalidation path. The worker never publishes asynchronously copied inode metadata: foreground access refreshes pending state before mmap checks EOF, and fault-around defers while invalidation is pending. A two-mount VM regression uses a 2-KiB cache with 48 files, checks that idle cache/RPC counters stop growing, then truncates an evicted mapped inode through the second mount and verifies SIGBUS.
 
 ### Read-ahead and storage fences
 
@@ -373,6 +373,16 @@ node admission and reruns authorization, placement and quota checks before using
 the untouched incoming payload.
 
 Kernel VM regressions set `panic_on_warn=1` and reject every `WARNING:`, including Linux 7 diagnostics of the form `WARNING: kernel/workqueue.c`. A workqueue warning is a failed test even if the VM later reaches its success marker.
+
+
+The cache-retention VM regression reads a 64-KiB inherited file through mmap,
+queries 2,112 unrelated lower inodes and creates unrelated upper files. It uses
+`mincore` to reject page eviction without memory pressure, then changes that
+same file through a second mount and requires the mapping to observe the update.
+Run it with `STQR_TEST_KERNEL=1 STQR_KERNEL_CACHE_RETENTION=1` and the target
+kernel image/header settings used by the ordinary VM tests. Inherited data reads
+switch to the lower bucket before both payload access and integrity-guard checks;
+a lower guard must never be looked up in the upper bucket.
 
 ## Native block-device buckets (`-o bd`)
 
