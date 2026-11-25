@@ -447,13 +447,28 @@ func (o *OverlayFilesystem) path(ctx context.Context, s *overlayState, rootKey s
 	}
 	o.mu.Lock()
 	cached, ok := o.paths[target]
-	if o.cacheRoot != rootKey {
-		ok = false
-	}
 	o.mu.Unlock()
 	if ok {
 		if id, err := o.pathID(ctx, s, cached); err == nil && id == target {
 			return cached, nil
+		}
+	}
+	// New upper files already carry their publication path. Validate that
+	// hint against this namespace snapshot instead of discovering it through
+	// every file in the immutable lower. A root change alone is not evidence
+	// that a still-validated cached path has become invalid.
+	if n, _, err := o.upper.load(ctx, target); err == nil && n.kind != fsDirectory && n.writePath != "" {
+		if fsLinks(n) == 0 {
+			return "", syscall.ENOENT // writable() handles the retained orphan.
+		}
+		if id, err := o.pathID(ctx, s, n.writePath); err == nil && id == target {
+			o.mu.Lock()
+			if o.paths == nil {
+				o.paths = map[ObjectID]string{}
+			}
+			o.paths[target] = n.writePath
+			o.mu.Unlock()
+			return n.writePath, nil
 		}
 	}
 	paths := map[ObjectID]string{}

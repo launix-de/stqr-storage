@@ -1158,16 +1158,33 @@ static int ov_writable(struct ks_fs *f, struct ks_overlay_state *s, stqr_object_
 	int err = ov_snapshot(f, s, id, &node);
 	if (err)
 		return err;
-	err = ov_path(f, s, id, &path);
-	if (err == -ENOENT && node.node.kind != 2 && node.node.write_path_len) {
+	/* A retained unlinked file has no namespace path to discover. Its
+	 * publication path still determines the write policy. For linked files,
+	 * validate the stored hint before falling back to dentry/tree lookup. */
+	err = -ENOENT;
+	if (node.node.kind != 2 && node.node.write_path_len) {
 		path = sq_alloc(node.node.write_path_len + 1);
-		if (!path)
+		if (!path) {
 			err = -ENOMEM;
-		else {
-			memcpy(path, node.node.write_path, node.node.write_path_len);
+			goto checked;
+		}
+		memcpy(path, node.node.write_path, node.node.write_path_len);
+		if (!node.node.links)
 			err = 0;
+		else {
+			stqr_object_id found;
+			err = ov_path_id(f, s, path, &found);
+			if (!err && !eqid(found, id))
+				err = -ENOENT;
+		}
+		if (err) {
+			sq_free(path);
+			path = NULL;
 		}
 	}
+	if (err)
+		err = ov_path(f, s, id, &path);
+checked:
 	if (!err && !ov_allowed(s, path, node.node.kind == 2))
 		err = -EROFS;
 	ks_snapshot_free(&node);
