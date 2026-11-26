@@ -8,7 +8,7 @@ LDLIBS += -lcrypto
 SOURCES = src/core.c src/posix.c
 OBJECTS = $(SOURCES:.c=.o)
 all: libstqr.a libstqr.so
-%.o: %.c include/stqr.h src/port.h
+%.o: %.c include/stqr.h src/port.h src/async.c
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(WARN) -fPIC -c $< -o $@
 libstqr.a: $(OBJECTS)
 	$(AR) rcs $@ $^

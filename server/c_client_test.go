@@ -2,6 +2,7 @@
 package server
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/sha256"
@@ -39,6 +40,19 @@ func TestCClient(t *testing.T) {
 	if out, err := exec.Command("cc", args...).CombinedOutput(); err != nil {
 		t.Fatalf("build: %v\n%s", err, out)
 	}
+	t.Run("async-state", func(t *testing.T) {
+		unit := filepath.Join(t.TempDir(), "c-async-state")
+		unitArgs := []string{"-std=c11", "-Wall", "-Wextra", "-Werror", "-g", "-O1", "-I" + filepath.Join(root, "include"), "-I" + filepath.Join(root, "src"), filepath.Join(root, "tests/async_state.c"), filepath.Join(root, "src/posix.c"), "-lcrypto", "-o", unit}
+		if os.Getenv("STQR_C_SANITIZE") == "1" {
+			unitArgs = append(unitArgs, "-fsanitize=address,undefined", "-fno-omit-frame-pointer")
+		}
+		if out, err := exec.Command("cc", unitArgs...).CombinedOutput(); err != nil {
+			t.Fatalf("build state test: %v\n%s", err, out)
+		}
+		if out, err := exec.Command(unit).CombinedOutput(); err != nil {
+			t.Fatalf("state test: %v\n%s", err, out)
+		}
+	})
 	run := func(t *testing.T, url, user, password, bucket, mode string) {
 		t.Helper()
 		cmd := exec.Command(binary)
@@ -58,6 +72,104 @@ func TestCClient(t *testing.T) {
 		t.Cleanup(host.Close)
 		admin := s.cfg.Auth.BootstrapAdmin
 		run(t, host.URL, admin.Username, admin.Password, client.ID(b.ID()).String(), "")
+	})
+	for _, mode := range []string{"async", "async-close", "accepted-references", "accepted-cas-reconnect"} {
+		t.Run(mode, func(t *testing.T) {
+			s := testServer(t)
+			addTestVolume(t, s, "c-async", "hdd", 32<<20)
+			b, _ := createProtocolBucket(t, s, "c-async")
+			host := httptest.NewServer(s.Handler())
+			defer host.Close()
+			admin := s.cfg.Auth.BootstrapAdmin
+			run(t, host.URL, admin.Username, admin.Password, client.ID(b.ID()).String(), mode)
+		})
+	}
+	t.Run("async-progress", func(t *testing.T) {
+		s := testServer(t)
+		addTestVolume(t, s, "c-progress", "hdd", 32<<20)
+		var managed *managedVolume
+		s.mu.RLock()
+		for _, m := range s.volumes {
+			if m.config.Name == "c-progress" {
+				managed = m
+			}
+		}
+		s.mu.RUnlock()
+		if managed == nil {
+			t.Fatal("missing test volume")
+		}
+		identity := managed.store.Identity()
+		if err := managed.store.Close(); err != nil {
+			t.Fatal(err)
+		}
+		mem, err := volume.NewMemory(32 << 20)
+		if err != nil {
+			t.Fatal(err)
+		}
+		gate := &serverFlushGate{VolumeIO: mem}
+		v, err := volume.Format(gate, volume.FormatOptions{Class: volume.HDD, ClusterID: identity.ClusterID, NodeID: identity.NodeID, VolumeID: identity.VolumeID})
+		if err != nil {
+			t.Fatal(err)
+		}
+		s.mu.Lock()
+		managed.store = v
+		s.mu.Unlock()
+		b, _ := createProtocolBucket(t, s, "c-progress")
+		raw, err := hex.DecodeString("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
+		if err != nil {
+			t.Fatal(err)
+		}
+		var oid volume.ObjectID
+		copy(oid[:], raw)
+		if _, err = b.Put(context.Background(), quotaPrincipal(t, s), oid, []byte("seed"), volume.Options{RequestID: volume.ID(client.NewRequestID())}); err != nil {
+			t.Fatal(err)
+		}
+		host := httptest.NewServer(s.Handler())
+		defer host.Close()
+		entered, release := make(chan struct{}), make(chan struct{})
+		var once sync.Once
+		unblock := func() { once.Do(func() { close(release) }) }
+		defer unblock()
+		gate.mu.Lock()
+		gate.entered, gate.release = entered, release
+		gate.mu.Unlock()
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		cmd := exec.CommandContext(ctx, binary)
+		a := s.cfg.Auth.BootstrapAdmin
+		cmd.Env = append(os.Environ(), "STQR_TEST_URL="+host.URL, "STQR_TEST_USER="+a.Username, "STQR_TEST_PASSWORD="+a.Password, "STQR_TEST_BUCKET="+client.ID(b.ID()).String(), "STQR_TEST_MODE=async-progress")
+		out, err := cmd.StdoutPipe()
+		if err != nil {
+			t.Fatal(err)
+		}
+		var stderr bytes.Buffer
+		cmd.Stderr = &stderr
+		if err = cmd.Start(); err != nil {
+			t.Fatal(err)
+		}
+		seen := false
+		scan := bufio.NewScanner(out)
+		for scan.Scan() {
+			if scan.Text() != "READ_BEFORE_FENCE" {
+				continue
+			}
+			select {
+			case <-entered:
+				seen = true
+			case <-ctx.Done():
+			}
+			unblock()
+		}
+		unblock()
+		if err = cmd.Wait(); err != nil {
+			t.Fatalf("C asynchronous progress: %v: %s", err, stderr.String())
+		}
+		if err = scan.Err(); err != nil {
+			t.Fatal(err)
+		}
+		if !seen {
+			t.Fatal("no read completion while physical fence blocked on original socket")
+		}
 	})
 	t.Run("reuse", func(t *testing.T) {
 		s := testServer(t)
@@ -102,6 +214,82 @@ func TestCClient(t *testing.T) {
 		run(t, host.URL, admin.Username, admin.Password, client.ID(b.ID()).String(), "references")
 		if err := b.allVolumes()[0].Scrub(); err != nil {
 			t.Fatal(err)
+		}
+	})
+	t.Run("legacy-reconnect", func(t *testing.T) {
+		upgrade := websocket.Upgrader{Subprotocols: []string{"stqr.v2"}}
+		var connections, syncs atomic.Int32
+		mark := client.CommitMark{Boot: client.ID{8}, Sequence: 7}
+		host := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			conn, err := upgrade.Upgrade(w, r, nil)
+			if err != nil {
+				return
+			}
+			defer conn.Close()
+			connections.Add(1)
+			for {
+				_, raw, err := conn.ReadMessage()
+				if err != nil {
+					return
+				}
+				m, err := client.DecodeMessage(raw)
+				if err != nil {
+					t.Error(err)
+					return
+				}
+				result := client.Encoder{}
+				includeMark := false
+				switch m.Opcode {
+				case client.Hello:
+					result.U16(2)
+					result.U64(client.CapabilityDurability)
+					result.ID(client.ID{})
+					result.ID(client.ID{})
+					result.U64(0)
+					result.U64(0)
+				case client.ObjectAccepted:
+					result.U64(5)
+					result.Bool(false)
+					result.U32(0)
+					result.ID(client.ID{})
+					result.U8(0)
+					result.U16(5)
+					includeMark = true
+				case client.BucketSync:
+					d := client.Decoder{B: m.Body}
+					d.ID()
+					requested := client.CommitMark{Boot: d.ID(), Sequence: d.U64()}
+					if d.Done() != nil || requested != mark {
+						t.Error("wrong legacy SyncThrough target")
+						return
+					}
+					result.B = mark.MarshalBinary()
+					syncs.Add(1)
+				default:
+					t.Errorf("unexpected legacy opcode %x", m.Opcode)
+					return
+				}
+				body := client.ResponseBody(200, result.B, "")
+				if includeMark {
+					e := client.Encoder{}
+					e.V(200)
+					h := client.Encoder{}
+					h.V(1)
+					h.V(client.DurabilityHeader)
+					h.Blob(mark.MarshalBinary())
+					e.Blob(h.B)
+					e.B = append(e.B, result.B...)
+					body = e.B
+				}
+				if conn.WriteMessage(websocket.BinaryMessage, client.EncodeMessage(client.Message{Kind: client.Response, Opcode: m.Opcode, ID: m.ID, Body: body})) != nil {
+					return
+				}
+			}
+		}))
+		defer host.Close()
+		run(t, host.URL, "user", "password", client.ID{1}.String(), "legacy-reconnect")
+		if connections.Load() != 2 || syncs.Load() != 1 {
+			t.Fatalf("legacy reconnect/fence: connections=%d syncs=%d", connections.Load(), syncs.Load())
 		}
 	})
 	t.Run("independent-fence", func(t *testing.T) {

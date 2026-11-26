@@ -4,7 +4,6 @@ package server
 import (
 	"bytes"
 	"context"
-	"fmt"
 	"testing"
 	"time"
 
@@ -313,15 +312,20 @@ func TestRangeCleanupAdvancesUnfinishedBucketPurgeBetweenPages(t *testing.T) {
 	defer s.currentSystem.Store(oldView)
 	var after *volume.ObjectID
 	for page := 1; page <= 2; page++ {
-		if err = r.cleanupPage(context.Background(), p, v, func(h *volume.Handle) error {
-			records, err := p.scanObjects(h, after, 32)
-			if err != nil || len(records) != 32 {
-				return fmt.Errorf("range cleanup page: count=%d, error=%v", len(records), err)
-			}
-			next := records[len(records)-1].Key.Object
-			after = &next
-			return h.PurgeBatch(records)
-		}); err != nil {
+		h, err = v.Open(false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		records, err := p.scanObjects(h, after, 32)
+		h.Close()
+		if err != nil || len(records) != 32 {
+			t.Fatalf("range cleanup page: count=%d, error=%v", len(records), err)
+		}
+		next := records[len(records)-1].Key.Object
+		after = &next
+		// Exercise the production page path: scan under a read handle, then
+		// authority-checked buffered deletion and an unlocked physical fence.
+		if err = r.cleanupBatch(context.Background(), p, v, records, nil); err != nil {
 			t.Fatal(err)
 		}
 		h, err = v.Open(false)

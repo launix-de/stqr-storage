@@ -3,48 +3,65 @@ package volume
 
 import "errors"
 
-// The caller owns a durable deletion/ownership fence. It must checkpoint the
-// returned generation before confirming completion. The overlay and its WAL
-// are the existing accepted-write mechanism; no on-disk representation changes.
+// Buffered cleanup publishes exactly the same metadata as durable cleanup. The
+// caller already owns a persistent deletion/ownership fence and must checkpoint
+// the returned generation before recording completion of that cleanup intent.
+// Exhausted buffer space returns ErrBusy without a partially published batch;
+// the caller leaves its outer locks before flushing/retrying.
 func (v *Volume) bufferCleanup(run func() error) (uint64, error) {
-	// A cleanup batch is bounded, but an existing foreground group might already
-	// fill the budget. The caller releases its node admission lock before here.
-	if err := v.flushDeferred(); err != nil {
-		return 0, err
+	return v.bufferCleanupMode(run, false)
+}
+
+func (v *Volume) bufferCleanupMode(run func() error, continuation bool) (uint64, error) {
+	if !continuation && v.deferred != nil && len(v.deferred.pages) > v.deferred.pageLimit/2 {
+		return 0, ErrBusy
 	}
 	if err := v.beginDeferred(); err != nil {
 		if !errors.Is(err, ErrFull) {
 			return 0, err
 		}
-		// Tiny/full volumes use the existing scratch-WAL durable path. They must
-		// still make progress when an extra 8-MiB accepted journal cannot fit.
+		if v.checkpointing {
+			return 0, ErrBusy
+		}
+		// A full/tiny volume still has the existing fixed WAL scratch area.
+		// Its bounded durable fallback also releases v.mu during every fence.
 		err = run()
 		return v.sb.Generation, err
 	}
 	base := v.sb.Generation
 	v.staging = map[uint64][]byte{}
-	err := func() error { defer func() { v.staging = nil }(); return run() }()
-	if v.sb.Generation == base && len(v.deferred.pages) == 0 {
-		v.deferred = nil
-		if errors.Is(err, errDeferredBudget) {
+	err := run()
+	v.staging = nil
+	if errors.Is(err, errDeferredBudget) {
+		if len(v.deferred.pages) == 0 && v.sb.Generation == base && !v.checkpointing {
+			v.deferred = nil
 			err = run()
+		} else {
+			err = ErrBusy
 		}
 	}
 	return v.sb.Generation, err
 }
 
-// PurgeBatchAccepted publishes a bounded purge; checkpoint its generation before
-// acknowledging durable reclamation. A tiny-volume fallback may be durable already.
+// PurgeAccepted finishes an already accepted DELETE without introducing a
+// durable housekeeping operation. The caller must have fenced ownership and
+// established that no clone/migration needs the tombstone. The real staging
+// budget still bounds the transaction; the soft half-full threshold must not
+// force an intervening checkpoint between DELETE and its small index cleanup.
+func (h *Handle) PurgeAccepted(k Key) (uint64, error) {
+	return withHandleMode(h, true, true, func(v *Volume) (uint64, error) {
+		return v.bufferCleanupMode(func() error { return v.purgeBatchLocked([]ObjectRecord{{Key: k}}) }, true)
+	})
+}
+
 func (h *Handle) PurgeBatchAccepted(records []ObjectRecord) (uint64, error) {
-	return withHandle(h, true, func(v *Volume) (uint64, error) {
+	return withHandleMode(h, true, true, func(v *Volume) (uint64, error) {
 		return v.bufferCleanup(func() error { return v.purgeBatchLocked(records) })
 	})
 }
 
-// ForgetRequestsAccepted is the matching buffered cleanup for settled receipts.
-// The caller must checkpoint the returned generation before recording completion.
 func (h *Handle) ForgetRequestsAccepted(ids []ID) (uint64, error) {
-	return withHandle(h, true, func(v *Volume) (uint64, error) {
+	return withHandleMode(h, true, true, func(v *Volume) (uint64, error) {
 		return v.bufferCleanup(func() error { return v.forgetRequestsLocked(ids) })
 	})
 }

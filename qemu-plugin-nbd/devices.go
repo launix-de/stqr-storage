@@ -109,7 +109,16 @@ func decodeMetadata(raw []byte) (Metadata, error) {
 	return m, m.validate()
 }
 
+type blockOperation struct {
+	device     client.ID
+	begin, end uint64
+	write, all bool
+	done       chan struct{}
+}
 type Catalog struct {
+	writeMu    sync.Mutex // protects in-memory causal completion dependencies only
+	operations map[*blockOperation]struct{}
+
 	store   Store
 	mu      sync.Mutex
 	writers map[client.ID]bool
@@ -262,6 +271,11 @@ func (c *Catalog) ReadAt(ctx context.Context, m Metadata, dst []byte, off uint64
 	if off > m.Size || uint64(len(dst)) > m.Size-off {
 		return client.ErrRange
 	}
+	complete, err := c.beginOperation(ctx, m.ID, off, off+uint64(len(dst)), false, false)
+	if err != nil {
+		return err
+	}
+	defer complete()
 	clear(dst)
 	for len(dst) > 0 {
 		index, at := off/StripeSize, off%StripeSize
@@ -310,26 +324,98 @@ func (c *Catalog) WriteAt(ctx context.Context, m Metadata, data []byte, off uint
 	if off > m.Size || uint64(len(data)) > m.Size-off {
 		return client.ErrRange
 	}
+	complete, err := c.beginOperation(ctx, m.ID, off, off+uint64(len(data)), true, false)
+	if err != nil {
+		return err
+	}
+	defer complete()
+	parallel, ok := c.store.(interface{ ConcurrentObjectRequests() bool })
+	concurrent := ok && parallel.ConcurrentObjectRequests()
+	var calls sync.WaitGroup
+	var results []*error
+	write := func(id client.ObjectID, at, n uint64, payload []byte) error {
+		opt := client.PutOptions{Accepted: true, RequestID: client.NewRequestID()}
+		if at == 0 && n == StripeSize {
+			_, err := c.store.Put(ctx, id, payload, opt)
+			return err
+		}
+		_, err := c.store.PutRange(ctx, id, at, payload, opt)
+		return err
+	}
 	for len(data) > 0 {
 		at := off % StripeSize
 		n := min(uint64(len(data)), StripeSize-at)
 		id := StripeID(m.ID, off/StripeSize)
-		opt := client.PutOptions{Accepted: true, RequestID: client.NewRequestID()}
-		var e error
-		if at == 0 && n == StripeSize {
-			_, e = c.store.Put(ctx, id, data[:n], opt)
-		} else {
-			_, e = c.store.PutRange(ctx, id, at, data[:n], opt)
-		}
-		if e != nil {
-			return e
+		payload := data[:n]
+		if concurrent {
+			calls.Add(1)
+			// Each result slot is allocated before launch; do not capture the slice
+			// header while another stripe is appending to it.
+			slot := new(error)
+			go func() { defer calls.Done(); *slot = write(id, at, n, payload) }()
+			results = append(results, slot)
+		} else if err := write(id, at, n, payload); err != nil {
+			return err
 		}
 		data = data[n:]
 		off += n
 	}
+	calls.Wait()
+	for _, failure := range results {
+		if *failure != nil {
+			return *failure
+		}
+	}
+
 	return nil
 }
-func (c *Catalog) Sync(ctx context.Context) error { return c.store.Sync(ctx) }
+
+// Sync is the explicit durability boundary. It captures locally admitted work
+// and waits only for completion before sending the native owner fences.
+func (c *Catalog) Sync(ctx context.Context) error {
+	complete, err := c.beginOperation(ctx, client.ID{}, 0, 0, true, true)
+	if err != nil {
+		return err
+	}
+	defer complete()
+	return c.store.Sync(ctx)
+}
+
+// beginOperation records visibility dependencies, never storage barriers. A
+// later overlapping operation waits for actual results; disjoint ranges proceed.
+// The global form is used only for explicit flush or administrative inventory.
+func (c *Catalog) beginOperation(ctx context.Context, device client.ID, begin, end uint64, write, all bool) (func(), error) {
+	op := &blockOperation{device: device, begin: begin, end: end, write: write, all: all, done: make(chan struct{})}
+	c.writeMu.Lock()
+	var predecessors []<-chan struct{}
+	for old := range c.operations {
+		if all || old.all || device == old.device && (write || old.write) && begin < old.end && old.begin < end {
+			predecessors = append(predecessors, old.done)
+		}
+	}
+	if c.operations == nil {
+		c.operations = map[*blockOperation]struct{}{}
+	}
+	c.operations[op] = struct{}{}
+	c.writeMu.Unlock()
+	var once sync.Once
+	complete := func() {
+		once.Do(func() { c.writeMu.Lock(); delete(c.operations, op); close(op.done); c.writeMu.Unlock() })
+	}
+	for _, prior := range predecessors {
+		select {
+		case <-prior:
+		case <-ctx.Done():
+			complete()
+			return nil, ctx.Err()
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		complete()
+		return nil, err
+	}
+	return complete, nil
+}
 
 // Trim deletes complete 1-MiB stripes and zeroes only the stored portion of
 // boundary stripes. Missing objects/tails already read as zero and stay sparse.
@@ -338,6 +424,11 @@ func (c *Catalog) Trim(ctx context.Context, m Metadata, off, length uint64) erro
 	if off > m.Size || length > m.Size-off {
 		return client.ErrRange
 	}
+	complete, err := c.beginOperation(ctx, m.ID, off, off+length, true, false)
+	if err != nil {
+		return err
+	}
+	defer complete()
 	var zeros []byte
 	for length > 0 {
 		if err := ctx.Err(); err != nil {
@@ -381,6 +472,11 @@ func (c *Catalog) Trim(ctx context.Context, m Metadata, off, length uint64) erro
 // opaque roots. Acquire maintenance and read the application manifest first.
 // Memory is bounded by device metadata and one native scan page, not disk size.
 func (c *Catalog) Collect(ctx context.Context, opaque []client.ObjectID) (uint64, error) {
+	complete, err := c.beginOperation(ctx, client.ID{}, 0, 0, true, true)
+	if err != nil {
+		return 0, err
+	}
+	defer complete()
 	// Local exports, including read-only ones, can still address a generation
 	// whose descriptor was removed. Keep their stripes until the last export
 	// releases it and exclude new claims for the complete inventory/sweep.

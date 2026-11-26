@@ -3,6 +3,7 @@ package server
 
 import (
 	"context"
+	"errors"
 	"github.com/launix-de/stqr-storage/client"
 	"github.com/launix-de/stqr-storage/volume"
 	"runtime"
@@ -334,6 +335,29 @@ func (s *Server) reclaimBucketStep(preferObjects ...bool) bool {
 	return worked
 }
 
+// Even an empty index can be an accepted view of a previously durable record.
+// Confirm the generation observed under this handle before recording absence.
+// Later accepted writes do not change this captured durability obligation.
+func checkpointCleanupView(h *volume.Handle, v *volume.Volume, progress ...*cleanupVolumeProgress) error {
+	generation, err := h.Generation()
+	if err == nil {
+		for _, p := range progress {
+			p.checkpoint = generation
+		}
+	}
+	h.Close()
+	if err != nil {
+		return err
+	}
+	if err := v.CheckpointThrough(generation); err != nil {
+		return err
+	}
+	for _, p := range progress {
+		p.checkpoint = 0
+	}
+	return nil
+}
+
 func (s *Server) cleanupObjectPage(overdue bool) bool {
 	for i := 0; i < len(s.cleanupOrder); i++ {
 		s.cleanupCursor = (s.cleanupCursor + 1) % len(s.cleanupOrder)
@@ -383,7 +407,9 @@ func (s *Server) cleanupObjectPage(overdue bool) bool {
 				}
 			}
 			if !found {
-				h.Close()
+				if err := checkpointCleanupView(h, v, p); err != nil {
+					return false
+				}
 				p.objectsDone = true
 				p.requestsDone = true
 				return true
@@ -394,11 +420,26 @@ func (s *Server) cleanupObjectPage(overdue bool) bool {
 				continue
 			}
 			if len(records) == 0 {
-				h.Close()
+				if err := checkpointCleanupView(h, v, p); err != nil {
+					return false
+				}
 				p.objectsDone = true
 				return true
 			}
 			generation, err := h.PurgeBatchAccepted(records)
+			if errors.Is(err, volume.ErrBusy) || errors.Is(err, volume.ErrFull) {
+				// The current accepted group may fill the metadata budget. Capture
+				// its generation while locked, then flush without a handle before
+				// retrying this page. A failed fence retains the obligation.
+				generation, _ = h.Generation()
+				p.checkpoint = generation
+				h.Close()
+				if err := v.CheckpointThrough(generation); err != nil {
+					return false
+				}
+				p.checkpoint = 0
+				return false
+			}
 			h.Close()
 			if err != nil {
 				continue
@@ -476,16 +517,26 @@ func (s *Server) cleanupReceiptPage(overdue bool) bool {
 					present[u.Bucket] = true
 				}
 			}
+			var absent []*cleanupVolumeProgress
 			for id, p := range sweep.buckets {
 				if !present[id] {
-					p.objectsDone = true
-					p.requestsDone = true
-					delete(sweep.buckets, id)
+					absent = append(absent, p)
 				}
 			}
-			if len(sweep.buckets) == 0 {
-				h.Close()
-				delete(s.cleanupReceipts, vid)
+			if len(absent) > 0 {
+				if err := checkpointCleanupView(h, v, absent...); err != nil {
+					return false
+				}
+				for id, p := range sweep.buckets {
+					if !present[id] {
+						p.objectsDone = true
+						p.requestsDone = true
+						delete(sweep.buckets, id)
+					}
+				}
+				if len(sweep.buckets) == 0 {
+					delete(s.cleanupReceipts, vid)
+				}
 				return true
 			}
 		}
@@ -493,6 +544,20 @@ func (s *Server) cleanupReceiptPage(overdue bool) bool {
 		if err != nil {
 			h.Close()
 			continue
+		}
+		if len(records) == 0 {
+			var participants []*cleanupVolumeProgress
+			for _, p := range sweep.buckets {
+				participants = append(participants, p)
+			}
+			if err := checkpointCleanupView(h, v, participants...); err != nil {
+				return false
+			}
+			for _, p := range participants {
+				p.requestsDone = true
+			}
+			delete(s.cleanupReceipts, vid)
+			return true
 		}
 		var remove []volume.ID
 		for _, record := range records {
@@ -503,6 +568,20 @@ func (s *Server) cleanupReceiptPage(overdue bool) bool {
 		var generation uint64
 		if len(remove) > 0 {
 			generation, err = h.ForgetRequestsAccepted(remove)
+		}
+		if errors.Is(err, volume.ErrBusy) || errors.Is(err, volume.ErrFull) {
+			generation, _ = h.Generation()
+			for _, p := range sweep.buckets {
+				p.checkpoint = generation
+			}
+			h.Close()
+			if err := v.CheckpointThrough(generation); err != nil {
+				return false
+			}
+			for _, p := range sweep.buckets {
+				p.checkpoint = 0
+			}
+			return false
 		}
 		h.Close()
 		if err != nil {
@@ -519,15 +598,8 @@ func (s *Server) cleanupReceiptPage(overdue bool) bool {
 				p.checkpoint = 0
 			}
 		}
-		if len(records) == 0 {
-			for _, p := range sweep.buckets {
-				p.requestsDone = true
-			}
-			delete(s.cleanupReceipts, vid)
-		} else {
-			next := records[len(records)-1].ID
-			sweep.after = &next
-		}
+		next := records[len(records)-1].ID
+		sweep.after = &next
 		return true
 	}
 	return false

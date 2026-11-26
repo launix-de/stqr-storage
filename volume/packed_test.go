@@ -190,6 +190,8 @@ func defragFixture(t *testing.T, d VolumeIO) (*Volume, []byte) {
 	if e != nil {
 		t.Fatal(e)
 	}
+	v.mu.Lock()
+	defer v.mu.Unlock()
 	tx := v.transaction()
 	gap, e := tx.alloc(PageSize, false)
 	if e != nil {

@@ -10,8 +10,13 @@ import "fmt"
 func (v *Volume) Grow(sizeBytes int64) error {
 	v.mu.Lock()
 	defer v.mu.Unlock()
+	v.beginMaintenance()
+	defer v.endMaintenance()
 	if e := v.check(true); e != nil {
 		return e
+	}
+	if err := v.flushDeferred(); err != nil {
+		return err
 	}
 	n, e := alignedSize(sizeBytes)
 	if e != nil {
@@ -61,8 +66,13 @@ func (v *Volume) Grow(sizeBytes int64) error {
 func (v *Volume) Rescan() (uint64, error) {
 	v.mu.Lock()
 	defer v.mu.Unlock()
+	v.beginMaintenance()
+	defer v.endMaintenance()
 	if e := v.check(true); e != nil {
 		return 0, e
+	}
+	if err := v.flushDeferred(); err != nil {
+		return 0, err
 	}
 	return v.rescanLocked()
 }
@@ -125,8 +135,13 @@ func (v *Volume) BackingSize() (uint64, error) {
 func (v *Volume) Shrink(sizeBytes int64) error {
 	v.mu.Lock()
 	defer v.mu.Unlock()
+	v.beginMaintenance()
+	defer v.endMaintenance()
 	if e := v.check(true); e != nil {
 		return e
+	}
+	if err := v.flushDeferred(); err != nil {
+		return err
 	}
 	n, e := alignedSize(sizeBytes)
 	if e != nil {

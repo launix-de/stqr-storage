@@ -38,12 +38,11 @@ and final completion require successful durability confirmation; a failed fence
 retains the pending generation. An empty volatile view is not proof of durable
 completion.
 
-Very small/full volumes, or a batch exceeding the accepted-write workspace, use
-the existing durable scratch-WAL path so cleanup can still release space. This
-fallback also runs outside node admission, but retains that existing path's
-volume-lock behavior during its physical commit. Removing that remaining
-volume-level serialization belongs to the general write-fence work. No WAL,
-volume, object, or protocol format changes are introduced here.
+Very small/full volumes, or a batch exceeding the accepted-write workspace, can
+use the existing durable scratch-WAL fallback so cleanup can still release
+space. Bucket cleanup keeps physical checkpoints outside node admission and
+uses the general write-fence mechanism for the fallback's durability ordering.
+No WAL, volume, object, or protocol format changes are introduced here.
 
 Regression coverage checks shared receipt work against a separate-traversal
 control, unrelated payload/receipt retention, late participants, busy-volume

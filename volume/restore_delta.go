@@ -91,7 +91,7 @@ func (h *Handle) RestoreDelta(k Key, base [32]byte, info Info, patches []Restore
 		if err = t.commitReserved(opts.UseGuaranteed, opts.InFlightAllowance, opts.GuaranteedAllowance); err != nil {
 			return err
 		}
-		v.cache.put(k, o)
+		v.cache.remove(k)
 		return nil
 	})
 }

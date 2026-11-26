@@ -6,11 +6,19 @@ import (
 	"context"
 	"crypto/sha256"
 	"errors"
+	"sync"
 )
 
 const fsMaxIntentBytes = 128 << 20
 
-type fsDurableKey struct{}
+// fsFreshReadKey bypasses cached ownership observations. It does not request
+// durable mutation acknowledgements; persistence belongs to explicit Sync.
+type fsFreshReadKey struct{}
+type fsExternalWrite struct {
+	owner ObjectID
+	index uint64
+	write fsBlockWrite
+}
 
 func encodeFSWrites(e *Encoder, writes []fsBlockWrite) {
 	e.U32(uint32(len(writes)))
@@ -72,12 +80,19 @@ func (f *Filesystem) storeIntentAt(ctx context.Context, id ObjectID, raw []byte)
 	e.U8(fsTxPending)
 	e.U32(uint32(len(raw)))
 	e.U32(uint32((len(raw) + FSObjectSize - 1) / FSObjectSize))
-	for at := 0; at < len(raw); at += FSObjectSize {
-		id, err := f.putImmutable(ctx, raw[at:min(at+FSObjectSize, len(raw))])
-		if err != nil {
-			return ObjectID{}, err
-		}
-		e.B = append(e.B, id[:]...)
+	parts := make([]ObjectID, (len(raw)+FSObjectSize-1)/FSObjectSize)
+	if err := f.objectBurst(ctx, len(parts), func(ctx context.Context, i int) error {
+		at := i * FSObjectSize
+		var err error
+		parts[i], err = f.putImmutable(ctx, raw[at:min(at+FSObjectSize, len(raw))])
+		return err
+	}); err != nil {
+		return ObjectID{}, err
+	}
+	// Only the final descriptor publishes these independent, already visible
+	// pieces. Their completion order has no bearing on the encoded chunk order.
+	for _, part := range parts {
+		e.B = append(e.B, part[:]...)
 	}
 	_, err := f.store.CAS(ctx, id, 0, nil, e.B, CASOptions{Scope: CASObject, MutationOptions: MutationOptions{RequestID: NewRequestID(), Absent: true}})
 	return id, err
@@ -104,27 +119,34 @@ func (f *Filesystem) loadIntent(ctx context.Context, id ObjectID) (fsTransaction
 	if state > fsTxAborted || length <= 64<<10 || length > fsMaxIntentBytes || count != (length+FSObjectSize-1)/FSObjectSize || uint64(count)*32 != uint64(len(d.B)) {
 		return fsTransaction{}, info, nil, ErrFSFormat
 	}
-	assembled := make([]byte, 0, int(length))
-	for i := uint32(0); i < count; i++ {
-		var part ObjectID
-		copy(part[:], d.Take(32))
-		if part == id || part == (ObjectID{}) {
+	parts := make([]ObjectID, int(count))
+	for i := range parts {
+		copy(parts[i][:], d.Take(32))
+		if parts[i] == id || parts[i] == (ObjectID{}) {
 			return fsTransaction{}, info, nil, ErrFSFormat
 		}
-		data, _, e := f.store.Get(ctx, part)
-		if e != nil || len(data) != min(FSObjectSize, int(length)-len(assembled)) {
-			if errors.Is(e, ErrNotFound) || e == nil {
-				done, doneInfo, re := f.store.Get(ctx, id)
-				if re == nil && len(done) == 7 && string(done[:6]) == "STFD\x01\x00" && (done[6] == fsTxCommitted || done[6] == fsTxAborted) {
-					return fsTransaction{state: done[6]}, doneInfo, done, nil
-				}
-			}
-			if e == nil {
-				e = ErrFSFormat
-			}
-			return fsTransaction{}, info, nil, e
+	}
+	assembled := make([]byte, int(length))
+	loadErr := f.objectBurst(ctx, len(parts), func(ctx context.Context, i int) error {
+		data, _, err := f.store.Get(ctx, parts[i])
+		want := min(FSObjectSize, int(length)-i*FSObjectSize)
+		if err != nil {
+			return err
 		}
-		assembled = append(assembled, data...)
+		if len(data) != want {
+			return ErrFSFormat
+		}
+		copy(assembled[i*FSObjectSize:], data)
+		return nil
+	})
+	if loadErr != nil {
+		if errors.Is(loadErr, ErrNotFound) || errors.Is(loadErr, ErrFSFormat) {
+			done, doneInfo, re := f.store.Get(ctx, id)
+			if re == nil && len(done) == 7 && string(done[:6]) == "STFD\x01\x00" && (done[6] == fsTxCommitted || done[6] == fsTxAborted) {
+				return fsTransaction{state: done[6]}, doneInfo, done, nil
+			}
+		}
+		return fsTransaction{}, info, nil, loadErr
 	}
 	tx, e := decodeFSTransaction(assembled, id)
 	tx.state = state
@@ -186,7 +208,7 @@ func (f *Filesystem) applyFSWrite(ctx context.Context, txID ObjectID, index uint
 	return err
 }
 
-// Retire redo payload only after every inode marker is durably gone. A tiny
+// Retire redo payload only after every inode marker is visibly gone. A tiny
 // completed descriptor remains until ordinary fsck so delayed helpers can still
 // recognize completion without finding a dangling marker. Payloads do not grow
 // with the number of successful overwrites.
@@ -295,4 +317,68 @@ func (f *Filesystem) casOwnedBlock(ctx context.Context, id ObjectID, before, dat
 		return p.Put(ctx, id, data, opt)
 	}
 	return f.store.CAS(ctx, id, 0, before, data, CASOptions{Scope: CASObject, MutationOptions: opt})
+}
+
+// objectBurst overlaps independent immutable object I/O. Custom stores retain
+// their previous serial contract unless they explicitly opt into concurrency.
+// Dependent inode markers and the final decision never move across this join.
+func (f *Filesystem) objectBurst(ctx context.Context, count int, run func(context.Context, int) error) error {
+	parallel, ok := f.store.(interface{ ConcurrentObjectRequests() bool })
+	if !ok || !parallel.ConcurrentObjectRequests() {
+		for i := 0; i < count; i++ {
+			if err := run(ctx, i); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	ctx = context.WithValue(ctx, filesystemWaitKey{}, true)
+	errs := make([]error, count)
+	var work sync.WaitGroup
+	for i := 0; i < count; i++ {
+		work.Add(1)
+		go func(i int) { defer work.Done(); errs[i] = run(ctx, i) }(i)
+	}
+	work.Wait()
+	for _, err := range errs {
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// applyExternalWrites runs only after the visible REDO decision and marker
+// ownership checks. Distinct objects are independent; a repeated object starts
+// another wave. Completion of one wave establishes visibility for the next;
+// physical durability is requested only by the caller through Filesystem.Sync.
+func (f *Filesystem) applyExternalWrites(ctx context.Context, txID ObjectID, writes []fsExternalWrite, pinned bool) error {
+	for len(writes) > 0 {
+		seen := map[ObjectID]bool{}
+		end := 0
+		for end < len(writes) && !seen[writes[end].write.id] {
+			seen[writes[end].write.id] = true
+			end++
+		}
+		wave := writes[:end]
+		err := f.objectBurst(ctx, len(wave), func(ctx context.Context, i int) error {
+			item := wave[i]
+			if pinned {
+				return f.applyPinnedWrite(ctx, txID, item.index, item.write)
+			}
+			err := f.applyFSWrite(ctx, txID, item.index, item.write)
+			if err != nil {
+				head, _, readErr := f.store.Get(ctx, item.owner)
+				if readErr == nil && !bytes.Equal(head, fsLock(txID)) {
+					return nil
+				}
+			}
+			return err
+		})
+		if err != nil {
+			return err
+		}
+		writes = writes[end:]
+	}
+	return nil
 }
