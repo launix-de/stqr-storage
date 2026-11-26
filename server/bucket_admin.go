@@ -20,6 +20,7 @@ import (
 type bucketListEntry struct {
 	BucketDescription
 	UsedBytes                   *uint64 `json:"used_bytes,omitempty"`
+	OccupiedPhysicalBytes       *uint64 `json:"occupied_physical_bytes,omitempty"`
 	UsageError                  string  `json:"usage_error,omitempty"`
 	GuaranteedRemainingPhysical *uint64 `json:"guaranteed_remaining_physical,omitempty"`
 	GuaranteeEstimateShortfall  *uint64 `json:"guarantee_estimate_shortfall,omitempty"`
@@ -66,16 +67,12 @@ func decodeBucketPolicy(d *client.Decoder) (volume.ID, string, BucketState, Buck
 	return id, name, []BucketState{BucketActive, BucketLocked, BucketDeleting}[state], p
 }
 func (s *Server) validBucketUsers(users []BucketGrant) error {
-	var image accountsImage
-	if err := s.readBlob("accounts", &image); err != nil {
+	x, err := s.accountIndex()
+	if err != nil {
 		return err
 	}
-	known := map[string]bool{}
-	for _, u := range image.Users {
-		known[u.ID] = true
-	}
 	for _, u := range users {
-		if !known[u.UserID] {
+		if _, exists := x.byID[u.UserID]; !exists {
 			return fail(404, "bucket user does not exist")
 		}
 	}
@@ -141,6 +138,7 @@ func (s *Server) executeBuckets(m client.Message, p principal) ([]byte, int, err
 			return nil, 0, fail(400, "BUCKET_LIST requires after-name Text and limit 1..1000")
 		}
 		list := s.bucketSnapshots()
+		usageImage := s.dashboardBucketUsage()
 		sort.Slice(list, func(i, j int) bool { return list[i].Name < list[j].Name })
 		page := []bucketListEntry{}
 		budget := client.MaxMessage - 1024
@@ -170,6 +168,8 @@ func (s *Server) executeBuckets(m client.Message, p principal) ([]byte, int, err
 				} else {
 					entry.UsedBytes = &used
 				}
+			} else {
+				usageImage.annotate(&entry)
 			}
 			s.addQuotaDiagnostics(&entry)
 			encoded, e := json.Marshal(entry)
