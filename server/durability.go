@@ -111,6 +111,7 @@ func (s *Server) acceptedMark(bucket volume.ID) (client.CommitMark, bool) {
 // Optional confirmation accompanies existing accepted marks. Unknown response
 // headers are ignored by older clients; only a positively checked local prefix
 // is confirmed, without issuing storage I/O or starting a checkpoint.
+// Confirmation is optional: a busy volume must never delay unrelated replies.
 const durabilityConfirmedHeader uint64 = 49
 
 func (s *Server) durabilityResponse(status int, result []byte, bucket volume.ID) []byte {
@@ -130,7 +131,7 @@ func (s *Server) durabilityResponse(status int, result []byte, bucket volume.ID)
 	d.mu.Unlock()
 	confirmed := true
 	for _, ref := range refs {
-		if !ref.v.IsDurableThrough(ref.generation) {
+		if !ref.v.TryIsDurableThrough(ref.generation) {
 			confirmed = false
 			break
 		}

@@ -5,6 +5,7 @@ import (
 	"github.com/launix-de/stqr-storage/client"
 	"github.com/launix-de/stqr-storage/volume"
 	"testing"
+	"time"
 )
 
 func TestDurabilityResponseConfirmsOnlyCheckpointedPrefix(t *testing.T) {
@@ -27,8 +28,8 @@ func TestDurabilityResponseConfirmsOnlyCheckpointedPrefix(t *testing.T) {
 		gens[i] = connectionTestPut(t, v, volume.Key{Object: volume.ObjectID{byte(i + 1)}}, "accepted")
 		s.recordAccepted(bucket, v, gens[i])
 	}
-	headers := func() map[uint64]client.CommitMark {
-		d := client.Decoder{B: s.durabilityResponse(200, nil, bucket)}
+	decodeHeaders := func(body []byte) map[uint64]client.CommitMark {
+		d := client.Decoder{B: body}
 		d.V()
 		h := client.Decoder{B: d.Blob()}
 		count := h.V()
@@ -46,6 +47,7 @@ func TestDurabilityResponseConfirmsOnlyCheckpointedPrefix(t *testing.T) {
 		}
 		return result
 	}
+	headers := func() map[uint64]client.CommitMark { return decodeHeaders(s.durabilityResponse(200, nil, bucket)) }
 	if err := stores[0].CheckpointThrough(gens[0]); err != nil {
 		t.Fatal(err)
 	}
@@ -59,6 +61,30 @@ func TestDurabilityResponseConfirmsOnlyCheckpointedPrefix(t *testing.T) {
 	h = headers()
 	if h[durabilityConfirmedHeader] != (client.CommitMark{Boot: s.boot, Sequence: 2}) {
 		t.Fatal("missing exact prefix confirmation", h)
+	}
+	// An already-durable prefix is still only a best-effort response hint.
+	// A locked unrelated volume must suppress confirmation rather than queue
+	// the response behind its storage work.
+	hold, err := stores[0].Open(true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := make(chan []byte, 1)
+	go func() { response <- s.durabilityResponse(200, nil, bucket) }()
+	select {
+	case body := <-response:
+		hold.Close()
+		h = decodeHeaders(body)
+		if h[durabilityConfirmedHeader].Sequence != 0 || h[client.DurabilityHeader].Sequence != 2 {
+			t.Fatal("busy volume did not conservatively omit optional confirmation", h)
+		}
+	case <-time.After(time.Second):
+		hold.Close()
+		<-response
+		t.Fatal("response waited for an unrelated volume lock")
+	}
+	if h = headers(); h[durabilityConfirmedHeader].Sequence != 2 {
+		t.Fatal("idle volume confirmation did not resume", h)
 	}
 	// Background/explicit pruning must not remove confirmation for a client
 	// which still retains an earlier accepted mark.

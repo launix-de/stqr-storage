@@ -209,7 +209,9 @@ ordinary object operations and does not interpret device metadata.
 
 Response durability headers use a 16-byte server boot ID and 64-bit sequence.
 Tag 48 identifies an accepted bucket prefix; optional tag 49 confirms that all
-local volume generations captured for that prefix are already durable. Older
+local volume generations captured for that prefix are already durable. This
+optional confirmation is omitted when a volume is busy, so unrelated replies
+never wait for that volume's storage work. Older
 clients ignore tag 49. The C client clears only covered marks from the same boot;
 confirmation cannot clear uncertainty already latched by losing a modern
 connection. Legacy peers retain their boot-qualified marks across reconnect and

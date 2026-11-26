@@ -224,6 +224,17 @@ func (v *Volume) IsDurableThrough(generation uint64) bool {
 	return generation <= v.durableGeneration
 }
 
+// TryIsDurableThrough reports only immediately available, confirmed local
+// progress. Optional response hints may omit confirmation when metadata is busy;
+// persistence barriers must retain IsDurableThrough/CheckpointThrough instead.
+func (v *Volume) TryIsDurableThrough(generation uint64) bool {
+	if !v.mu.TryRLock() {
+		return false
+	}
+	defer v.mu.RUnlock()
+	return generation <= v.durableGeneration
+}
+
 func (v *Volume) flushDeferred() (err error) {
 	// All callers own the exclusive metadata lock. A second barrier waits for
 	// the same physical checkpoint while releasing that lock to readers.
