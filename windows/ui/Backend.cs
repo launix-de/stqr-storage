@@ -24,7 +24,7 @@ public sealed record Request(string Action, string? Drive = null, MountConfig? C
 { public int Version => 1; }
 public sealed record Profile(string Drive, string Bucket, bool Running)
 { public string Label => $"{Drive}  ·  {Bucket}"; }
-public sealed record Reply(int Version, string Type, string? Message, MountConfig? Config, Profile[]? Profiles, bool Running, bool Saved, bool WinFsp);
+public sealed record Reply(int Version, string Type, string? Message, MountConfig? Config, Profile[]? Profiles, bool Running, bool Saved, bool WinFsp, bool ReadOnly = false);
 
 public sealed class Backend(string executable)
 {
