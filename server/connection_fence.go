@@ -4,6 +4,7 @@ package server
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 
 	"github.com/launix-de/stqr-storage/client"
@@ -15,6 +16,9 @@ import (
 // A fence retains the preceding in-flight jobs and their final touched-volume
 // generations. Later messages cannot overtake that cut or extend its lifetime.
 // The server interprets no client format and contacts no other node for a fence.
+const maxConnectionFailures = 256
+const maxConnectionFailureDetail = 1024
+
 type connectionWork struct {
 	session     *wsSession
 	sequence    uint64
@@ -149,7 +153,16 @@ func (ws *wsSession) completeConnectionMessage(m client.Message, status int, bod
 		}
 		failure := connectionFailure{job.sequence, m.ID, m.Opcode, status, detail}
 		job.failure = &failure
-		ws.connectionFailures = append(ws.connectionFailures, failure)
+		if len(detail) > maxConnectionFailureDetail {
+			failure.detail = strings.Clone(detail[:maxConnectionFailureDetail])
+		}
+		if len(ws.connectionFailures) >= maxConnectionFailures {
+			// Never forget a covering error to make room. Disconnect makes the
+			// unfinished prefix uncertain to clients; no successful fence follows.
+			ws.close()
+		} else {
+			ws.connectionFailures = append(ws.connectionFailures, failure)
+		}
 	}
 	delete(ws.connectionJobs, m.ID)
 	job.headerOnce.Do(func() { close(job.headerReady) })

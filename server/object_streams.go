@@ -75,15 +75,17 @@ func (ws *wsSession) beginObjectUpload(op *objectMutation, p principal) error {
 	ws.stagedBytes += op.length
 	return nil
 }
-func (ws *wsSession) discardUpload(id client.ID) {
+func (ws *wsSession) discardUpload(id client.ID) bool {
 	ws.uploadMu.Lock()
 	defer ws.uploadMu.Unlock()
 	if u := ws.uploads[id]; u != nil {
 		if u.finishing {
-			return
+			return false
 		} // CANCEL cancels its context; owner closes it
 		ws.discardUploadLocked(id, u)
+		return true
 	}
+	return false
 }
 
 func (ws *wsSession) discardUploadLocked(id client.ID, u *serverObjectUpload) {
@@ -144,8 +146,7 @@ func (ws *wsSession) objectTransfer(m client.Message, p principal, startCall fun
 		if d.Done() != nil {
 			return fail(400, "invalid CANCEL")
 		}
-		ws.discardUpload(id)
-		if u != nil {
+		if ws.discardUpload(id) && u != nil {
 			ws.completeConnectionMessage(u.op.message, 499, client.ResponseBody(499, nil, "upload cancelled"))
 		}
 		return nil

@@ -25,6 +25,8 @@ import (
 // Telemetry keeps the latest complete snapshot. Delivery classes are future work.
 const receiveQueueCapacity = 16
 const sendQueueCapacity = 32
+const maxPendingUploadFrames = 64
+const maxPendingUploadFrameBytes = 16 << 20
 
 type terminalFrame struct {
 	wire []byte
@@ -32,15 +34,19 @@ type terminalFrame struct {
 }
 
 type wsSession struct {
-	acceptedReferencesCap atomic.Bool
-	connectionFenceCap    atomic.Bool
-	fenceMu               sync.Mutex
-	connectionSequence    uint64
-	connectionJobs        map[client.ID]*connectionWork
-	connectionTouches     map[*volume.Volume]uint64
-	connectionFences      map[client.ID]*connectionFence
-	connectionFailures    []connectionFailure
-	uploadTails           map[client.ID]chan struct{}
+	acceptedReferencesCap   atomic.Bool
+	connectionFenceCap      atomic.Bool
+	fenceMu                 sync.Mutex
+	connectionSequence      uint64
+	connectionJobs          map[client.ID]*connectionWork
+	connectionTouches       map[*volume.Volume]uint64
+	connectionFences        map[client.ID]*connectionFence
+	connectionFailures      []connectionFailure
+	uploadTails             map[client.ID]chan struct{}
+	frameMu                 sync.Mutex
+	pendingUploadFrames     int
+	pendingUploadFrameBytes int
+	frameWake               chan struct{}
 
 	durabilityCap      atomic.Bool
 	versionsSubscribed bool   // guarded by subMu
@@ -82,7 +88,9 @@ func (ws *wsSession) close() {
 		if ws.cancel != nil {
 			ws.cancel()
 		}
-		ws.conn.Close()
+		if ws.conn != nil {
+			ws.conn.Close()
+		}
 	})
 }
 
@@ -256,6 +264,9 @@ func (s *Server) serveWebSocket(w http.ResponseWriter, r *http.Request, p princi
 		// Upload chunks use TCP backpressure when staging falls behind. Closing
 		// every full queue would make a valid large upload retry forever.
 		if m.Opcode == 5 || m.Opcode == 6 || m.Opcode == 7 {
+			if !ws.reserveUploadFrame(len(m.Body)) {
+				return
+			}
 			select {
 			case ws.requests <- m:
 			case <-ws.done:
@@ -351,6 +362,7 @@ func (ws *wsSession) requestLoop() {
 				id := d.ID()
 				previous, finished := ws.connectionUploadFrame(id)
 				startCall(func() {
+					defer ws.releaseUploadFrame(len(m.Body))
 					defer ws.finishConnectionUploadFrames(id, finished)
 					if previous != nil {
 						select {
@@ -512,4 +524,46 @@ func (ws *wsSession) auxiliaryRequestLoop(queue <-chan client.Message) {
 			}()
 		}
 	}
+}
+
+// Reserve before enqueueing, so waiting callbacks and the receive queue share
+// one budget. Only upload frame admission waits; storage calls keep independent
+// goroutines. The receiver holds at most one additional decoded frame.
+func (ws *wsSession) reserveUploadFrame(n int) bool {
+	if n > maxPendingUploadFrameBytes {
+		return false
+	}
+	for {
+		ws.frameMu.Lock()
+		select {
+		case <-ws.done:
+			ws.frameMu.Unlock()
+			return false
+		default:
+		}
+		if ws.frameWake == nil {
+			ws.frameWake = make(chan struct{})
+		}
+		if ws.pendingUploadFrames < maxPendingUploadFrames && n <= maxPendingUploadFrameBytes-ws.pendingUploadFrameBytes {
+			ws.pendingUploadFrames++
+			ws.pendingUploadFrameBytes += n
+			ws.frameMu.Unlock()
+			return true
+		}
+		wake := ws.frameWake
+		ws.frameMu.Unlock()
+		select {
+		case <-wake:
+		case <-ws.done:
+			return false
+		}
+	}
+}
+func (ws *wsSession) releaseUploadFrame(n int) {
+	ws.frameMu.Lock()
+	ws.pendingUploadFrames--
+	ws.pendingUploadFrameBytes -= n
+	close(ws.frameWake)
+	ws.frameWake = make(chan struct{})
+	ws.frameMu.Unlock()
 }

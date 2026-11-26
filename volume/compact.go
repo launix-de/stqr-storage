@@ -19,8 +19,8 @@ func (v *Volume) Checkpoint() error {
 func (v *Volume) Compact() error {
 	v.mu.Lock()
 	defer v.mu.Unlock()
-	v.maintenance = true
-	defer func() { v.maintenance = false }()
+	v.beginMaintenance()
+	defer v.endMaintenance()
 	if e := v.check(false); e != nil {
 		return e
 	}

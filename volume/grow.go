@@ -10,8 +10,8 @@ import "fmt"
 func (v *Volume) Grow(sizeBytes int64) error {
 	v.mu.Lock()
 	defer v.mu.Unlock()
-	v.maintenance = true
-	defer func() { v.maintenance = false }()
+	v.beginMaintenance()
+	defer v.endMaintenance()
 	if e := v.check(true); e != nil {
 		return e
 	}
@@ -66,8 +66,8 @@ func (v *Volume) Grow(sizeBytes int64) error {
 func (v *Volume) Rescan() (uint64, error) {
 	v.mu.Lock()
 	defer v.mu.Unlock()
-	v.maintenance = true
-	defer func() { v.maintenance = false }()
+	v.beginMaintenance()
+	defer v.endMaintenance()
 	if e := v.check(true); e != nil {
 		return 0, e
 	}
@@ -135,8 +135,8 @@ func (v *Volume) BackingSize() (uint64, error) {
 func (v *Volume) Shrink(sizeBytes int64) error {
 	v.mu.Lock()
 	defer v.mu.Unlock()
-	v.maintenance = true
-	defer func() { v.maintenance = false }()
+	v.beginMaintenance()
+	defer v.endMaintenance()
 	if e := v.check(true); e != nil {
 		return e
 	}

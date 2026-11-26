@@ -62,6 +62,26 @@ int main(void) {
     CHECK(!stqr_parse_id(getenv("STQR_TEST_BUCKET"), &bucket));
     CHECK(!stqr_parse_object_id("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", &id));
     CHECK(!stqr_dial(&c, url, getenv("STQR_TEST_USER"), getenv("STQR_TEST_PASSWORD"), bucket,"fs", 3000));
+    if (mode && !strcmp(mode,"accepted-cas-reconnect")) {
+        struct async_result result={0},fence={0};stqr_commit_mark mark;
+        o=fresh();CHECK(!stqr_put(c,id,"before",6,&o,&info));
+        o=fresh();o.accepted=1;
+        CHECK(!stqr_cas_async(c,id,1,0,"before",6,"after",5,&o,async_completed,&result));
+        async_wait(c,&result,1);CHECK(!result.error);CHECK(!stqr_async_pending(c));
+        CHECK(!stqr_pending_mark(c,&mark)&&mark.sequence);
+        CHECK(!stqr_reconnect(c));
+        CHECK(stqr_connection_sync_async(c,async_completed,&fence)==-ESTALE);
+        CHECK(stqr_sync(c)==-ESTALE);CHECK(!fence.done);
+        /* Filesystem opt-in keeps live accepted visibility after uncertainty,
+         * while explicit persistence confirmation must remain ESTALE. */
+        stqr_set_accepted_references(c,1);memset(&result,0,sizeof(result));
+        o=fresh();o.accepted=1;
+        CHECK(!stqr_cas_async(c,id,1,0,"after",5,"visible",7,&o,async_completed,&result));
+        async_wait(c,&result,1);CHECK(!result.error);
+        CHECK(!stqr_get(c,id,&data,&n,&info));CHECK(n==7&&!memcmp(data,"visible",7));stqr_free(data);
+        CHECK(stqr_sync(c)==-ESTALE);
+        stqr_close(c);puts("accepted CAS reconnect preserves uncertain prefix");return 0;
+    }
     if (mode && !strcmp(mode,"async-close")) {
         struct async_result pending={0};
         o=fresh();CHECK(!stqr_put_async(c,id,"unfenced",8,&o));

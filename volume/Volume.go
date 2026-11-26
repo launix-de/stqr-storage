@@ -61,7 +61,7 @@ type Volume struct {
 	failed           error
 	closed           bool
 	closing          bool
-	maintenance      bool
+	maintenance      uint64
 	name             string
 	state            State
 	guaranteed       uint64

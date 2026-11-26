@@ -160,9 +160,8 @@ func (v *Volume) acceptedMutation(op uint8, k Key, off, length uint64, src io.Re
 // allocator image must stay stable while preceding overlays are drained. Reads
 // remain available at fences; new buffered writers receive bounded backpressure.
 func (v *Volume) durableMutation(op uint8, k Key, off, length uint64, src io.Reader, expected []byte, opt Options) (Result, error) {
-	prior := v.maintenance
-	v.maintenance = true
-	defer func() { v.maintenance = prior }()
+	v.beginMaintenance()
+	defer v.endMaintenance()
 	if err := v.flushDeferred(); err != nil {
 		return Result{}, err
 	}

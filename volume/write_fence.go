@@ -30,11 +30,35 @@ func (f *writeFence) page(off uint64) ([]byte, bool, error) {
 	return nil, false, nil
 }
 
+// Maintenance reservations survive overlapping callers while physical I/O
+// releases mu. Every caller owns one reservation and releases it under mu,
+// including panic exits. Admission waits for the last owner, not an old snapshot.
+func (v *Volume) beginMaintenance() {
+	if v.prepareCond == nil {
+		v.prepareCond = sync.NewCond(&v.mu)
+	}
+	v.maintenance++
+}
+
+func (v *Volume) endMaintenance() {
+	v.maintenance--
+	if v.maintenance == 0 {
+		v.prepareCond.Broadcast()
+	}
+}
+
+// Keep the generic builder's reservation limited to its prerequisite drain.
+func (v *Volume) drainMaintenance() error {
+	v.beginMaintenance()
+	defer v.endMaintenance()
+	return v.flushDeferred()
+}
+
 // checkBuffered permits bounded mutations while a physical fence is running.
 // Other maintenance/publication paths still use check(true) and wait before
 // building their changes, rather than constructing a stale allocator image.
 func (v *Volume) checkBuffered() error {
-	if v.maintenance {
+	if v.maintenance != 0 {
 		return ErrBusy
 	}
 	if v.checkpointing && v.fence != nil {

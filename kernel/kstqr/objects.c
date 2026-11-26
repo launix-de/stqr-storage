@@ -142,7 +142,8 @@ int ks_reconnect_wait(struct ks_fs *f, stqr_client *client)
         if(!err) {
             /* A foreground request may win the reconnect race against the
              * receiver. Restore coverage in either path while framing is held. */
-            ks_cache_reconnected(f);
+            if (client == f->rpc[0].client)
+                ks_cache_reconnected(f);
             return 0;
         }
 		if (!ks_transport_retryable(client, err))

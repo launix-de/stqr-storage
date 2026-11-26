@@ -44,12 +44,21 @@ static void async_finish(stqr_client *c,struct sq_async *p,int error,int status,
 }
 static void async_fail(stqr_client *c,struct sq_channel *channel,int error) {
     unsigned i;
+    /* A replacement socket cannot fence its predecessor's accepted prefix,
+     * including acknowledged requests whose async ticket was already freed. */
+    if (channel==c->active) {
+        if (c->pending_mark.sequence) c->durability_lost=1;
+    } else if (channel && channel->pending.sequence) channel->lost=1;
+    if (channel==c->active && channel && c->durability_lost) channel->lost=1;
     for (i=0;i<64;i++) {
         struct sq_async *p=c->async[i],*next;
         while(p) {
             next=p->next;
             if (p->channel==channel) {
-                if (p->fire) c->durability_lost=1;
+                if (p->fire) {
+                    if (channel) channel->lost=1;
+                    if (channel==c->active) c->durability_lost=1;
+                }
                 async_finish(c,p,p->mutation?-EINPROGRESS:error,0,NULL,0,NULL);
             }
             p=next;
@@ -148,13 +157,16 @@ static int async_decode_get(stqr_client *c,struct sq_async *p,struct buf *r,void
     err=accept_info(c,info);if(err)return err;
     *data=p->stream.data.p;*actual=p->stream.data.n;p->stream.data.p=NULL;return 0;
 }
-static void async_retire_fire(stqr_client *c,struct sq_async *fence,int *error,int *status) {
-    unsigned i;stqr_u64 first=~(stqr_u64)0;
+/* A failed checkpoint/protocol response does not certify successful writes.
+ * Keep their tickets until a later successful cut or an uncertain disconnect;
+ * definite per-write failures may retire without replacing the fence error. */
+static void async_retire_fire(stqr_client *c,struct sq_async *fence,int confirmed,int *error,int *status) {
+    unsigned i;int original_error=*error;stqr_u64 first=~(stqr_u64)0;
     for(i=0;i<64;i++) {
         struct sq_async *p=c->async[i],*next;
         while(p){next=p->next;
-            if(p->fire&&p->channel==fence->channel&&p->sequence<=fence->cut){
-                if(p->error&&p->sequence<first){first=p->sequence;*error=p->error;*status=p->status;}
+            if(p->fire&&p->channel==fence->channel&&p->sequence<=fence->cut&&(confirmed||p->error)){
+                if(!original_error&&p->error&&p->sequence<first){first=p->sequence;*error=p->error;*status=p->status;}
                 async_remove(c,p);async_free(p);
             }
             p=next;
@@ -227,7 +239,7 @@ static int async_dispatch(stqr_client *c,unsigned kind,unsigned op,const stqr_u8
             if(!memcmp(c->pending_mark.boot.bytes,p->mark.boot.bytes,16) &&
                c->pending_mark.sequence<=p->mark.sequence)memset(&c->pending_mark,0,sizeof(c->pending_mark));
         }
-        async_retire_fire(c,p,&err,&status);
+        async_retire_fire(c,p,!err,&err,&status);
     }
     async_finish(c,p,err,status,data,n,(p->op==0x100||p->op==0x101||p->op==0x107||p->op==0x108||p->op==0x110||p->op==0x102||p->op==0x103)?&info:NULL);
     return 1;

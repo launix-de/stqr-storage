@@ -56,7 +56,7 @@ func (v *Volume) Open(write bool) (*Handle, error) {
 		// relinquishing their reservation; exposing their transient ErrBusy
 		// here would make concurrent ordinary callers fail nondeterministically.
 		// Ordinary checkpoints have neither flag and still admit pipelined writes.
-		for v.maintenance || v.preparing {
+		for v.maintenance != 0 || v.preparing {
 			v.prepareCond.Wait()
 		}
 	} else {
@@ -153,10 +153,7 @@ func withHandleMode[T any](h *Handle, write, buffered bool, f func(*Volume) (T, 
 		// Generic metadata builders start from a stable allocator image.
 		// Briefly apply backpressure while draining the preceding overlay;
 		// subsequent ordinary published writes may pipeline at their fence.
-		prior := l.v.maintenance
-		l.v.maintenance = true
-		err := l.v.flushDeferred()
-		l.v.maintenance = prior
+		err := l.v.drainMaintenance()
 		if err != nil {
 			return zero, err
 		}

@@ -40,6 +40,19 @@ func TestCClient(t *testing.T) {
 	if out, err := exec.Command("cc", args...).CombinedOutput(); err != nil {
 		t.Fatalf("build: %v\n%s", err, out)
 	}
+	t.Run("async-state", func(t *testing.T) {
+		unit := filepath.Join(t.TempDir(), "c-async-state")
+		unitArgs := []string{"-std=c11", "-Wall", "-Wextra", "-Werror", "-g", "-O1", "-I" + filepath.Join(root, "include"), "-I" + filepath.Join(root, "src"), filepath.Join(root, "tests/async_state.c"), filepath.Join(root, "src/posix.c"), "-lcrypto", "-o", unit}
+		if os.Getenv("STQR_C_SANITIZE") == "1" {
+			unitArgs = append(unitArgs, "-fsanitize=address,undefined", "-fno-omit-frame-pointer")
+		}
+		if out, err := exec.Command("cc", unitArgs...).CombinedOutput(); err != nil {
+			t.Fatalf("build state test: %v\n%s", err, out)
+		}
+		if out, err := exec.Command(unit).CombinedOutput(); err != nil {
+			t.Fatalf("state test: %v\n%s", err, out)
+		}
+	})
 	run := func(t *testing.T, url, user, password, bucket, mode string) {
 		t.Helper()
 		cmd := exec.Command(binary)
@@ -60,7 +73,7 @@ func TestCClient(t *testing.T) {
 		admin := s.cfg.Auth.BootstrapAdmin
 		run(t, host.URL, admin.Username, admin.Password, client.ID(b.ID()).String(), "")
 	})
-	for _, mode := range []string{"async", "async-close", "accepted-references"} {
+	for _, mode := range []string{"async", "async-close", "accepted-references", "accepted-cas-reconnect"} {
 		t.Run(mode, func(t *testing.T) {
 			s := testServer(t)
 			addTestVolume(t, s, "c-async", "hdd", 32<<20)
