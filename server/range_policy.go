@@ -134,7 +134,7 @@ func (r *rangeManager) planPolicyPlacement(description BucketDescription, draini
 // No placement retry may reopen an object/request/replica index to refine this
 // estimate. Only the selected transfer reads records as it actually copies them;
 // destination admission remains authoritative and rejects insufficient storage.
-func (r *rangeManager) placementCostTotals(before client.MapPatch, moving client.RangeEntry, target client.ID, destination volume.ID, retained ...map[volume.ID]uint64) (physical, logical, count uint64, err error) {
+func (r *rangeManager) placementCostTotals(before client.MapPatch, moving client.RangeEntry, retained ...map[volume.ID]uint64) (physical, logical, count uint64, err error) {
 	b, e := r.server.Bucket(volume.ID(before.Bucket))
 	if e != nil {
 		return 0, 0, 0, e
@@ -145,8 +145,15 @@ func (r *rangeManager) placementCostTotals(before client.MapPatch, moving client
 		return 0, 0, 0, fail(503, "placement accounting is unavailable")
 	}
 	weights := r.placementWeights(image, map[client.ID]BucketDescription{before.Bucket: b.storageDescription()})
-	p := rangePlan{Before: before, Moving: moving, Source: r.node, Target: target, Volume: destination}
-	for _, store := range r.sourceVolumes(p) {
+	// Account every authoritative source, including a retained destination.
+	// Excluding that destination here would erase in-place codec growth and
+	// make a wholly unavailable source indistinguishable from an empty range.
+	p := rangePlan{Before: before, Moving: moving, Source: r.node}
+	stores := r.sourceVolumes(p)
+	if len(stores) == 0 {
+		return 0, 0, 0, fail(503, "source storage accounting is unavailable")
+	}
+	for _, store := range stores {
 		id := store.Identity().VolumeID
 		rows, known := usage.volumes[id]
 		if !known {
@@ -157,6 +164,10 @@ func (r *rangeManager) placementCostTotals(before client.MapPatch, moving client
 			return 0, 0, 0, fail(503, "range accounting is unavailable")
 		}
 		share := math.Min(1, math.Ldexp(1, -int(moving.PrefixBits))/weight)
+		// A complete known volume snapshot may omit an empty bucket.
+		if len(retained) > 0 {
+			retained[0][id] = 0
+		}
 		for _, row := range rows {
 			if row.Bucket != volume.ID(before.Bucket) {
 				continue
@@ -166,7 +177,7 @@ func (r *rangeManager) placementCostTotals(before client.MapPatch, moving client
 			logical = addCapacity(logical, placementCostShare(row.Logical, share))
 			count = addCapacity(count, placementCostShare(row.Objects, share))
 			if len(retained) > 0 {
-				retained[0][id] = addCapacity(retained[0][id], n)
+				retained[0][id] = n
 			}
 			break
 		}
@@ -185,7 +196,8 @@ func placementCostShare(total uint64, share float64) uint64 {
 }
 
 func (r *rangeManager) policyPlacementCost(before client.MapPatch, moving client.RangeEntry, target client.ID, destination volume.ID, codec volume.Compression, retained ...map[volume.ID]uint64) (uint64, uint64, error) {
-	physical, logical, count, err := r.placementCostTotals(before, moving, target, destination, retained...)
+	byVolume := make(map[volume.ID]uint64)
+	physical, logical, count, err := r.placementCostTotals(before, moving, byVolume)
 	if err != nil {
 		return 0, 0, err
 	}
@@ -193,10 +205,30 @@ func (r *rangeManager) policyPlacementCost(before client.MapPatch, moving client
 	if err != nil {
 		return 0, 0, err
 	}
-	if bucketCodec(b.storageDescription().Policy) != codec {
+	codecChange := bucketCodec(b.storageDescription().Policy) != codec
+	if codecChange {
 		// A codec change may expand compressed data. Logical bytes provide a
 		// conservative planning bound; sparse ranges may therefore be overestimated.
 		physical = max(physical, addCapacity(addCapacity(logical, logical/16), saturatingProduct(count, 256)))
+	}
+	if len(retained) > 0 {
+		for id, n := range byVolume {
+			retained[0][id] = n
+		}
+	}
+	// Reuse an existing local copy, but subtract its existing allocation only
+	// after computing codec expansion. Retained bytes are not copied again;
+	// extra encoding headroom still belongs in the candidate budget.
+	if target == r.node && !(codecChange && physical == math.MaxUint64) {
+		var copied uint64
+		for id, n := range byVolume {
+			if id != destination {
+				copied = addCapacity(copied, n)
+			}
+		}
+		// A saturated sum minus one retained component must not erase other
+		// known copied components. Saturated codec growth stays unknown/max.
+		physical = max(copied, subtractCapacity(physical, byVolume[destination]))
 	}
 	// Budget target index/record growth without enumerating records. The source
 	// aggregate already accounts for retry/abort history, so it is not scanned

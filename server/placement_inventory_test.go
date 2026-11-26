@@ -2,8 +2,10 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
+	"math"
 	"runtime"
 	"strings"
 	"sync"
@@ -95,7 +97,7 @@ func TestPlacementInventoryYieldsVolumeToQueuedWriter(t *testing.T) {
 	probe.armed.Store(true)
 	done := make(chan error, 1)
 	go func() {
-		_, _, err := 0, 0, scanRangeRequests(r.server.ctx, v, func(volume.RequestRecord) error { return nil })
+		err := scanRangeRequests(r.server.ctx, v, func(volume.RequestRecord) error { return nil })
 		done <- err
 	}()
 	select {
@@ -320,5 +322,100 @@ func TestPlacementPendingDiffUsesRAMWithoutIO(t *testing.T) {
 	r.server.quotaUsage.Store(nil)
 	if _, _, err := r.policyPlacementCost(p, p.Entries[0], client.ID{9}, volume.ID{8}, volume.Raw); err == nil {
 		t.Fatal("missing counters fabricated as empty range")
+	}
+}
+
+// In-place codec conversion retains the destination's existing allocation but
+// still needs RAM-derived growth headroom before the transfer is attempted.
+func TestPlacementInPlaceCodecUsesRetainedAccounting(t *testing.T) {
+	r, v, _, p, d := placementInventoryFixture(t)
+	h, err := v.Open(true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = h.Put(volume.Key{Bucket: volume.ID(p.Bucket), Object: volume.ObjectID{1}}, bytes.Repeat([]byte("x"), 1<<20), volume.Options{Compression: volume.Codec(volume.Gzip), Accepted: true})
+	h.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	d.Policy.Compression = "gzip"
+	r.server.bucketsByID[volume.ID(p.Bucket)].description = d
+	before := v.IOStats()
+	cost, count, err := r.policyPlacementCost(p, p.Entries[0], r.node, v.Identity().VolumeID, volume.Raw)
+	if err != nil || cost == 0 || count != 1 {
+		t.Fatal("retained codec expansion was free", cost, count, err)
+	}
+	same, _, err := r.policyPlacementCost(p, p.Entries[0], r.node, v.Identity().VolumeID, volume.Gzip)
+	if err != nil || same != 0 {
+		t.Fatal("unchanged retained copy was charged again", same, err)
+	}
+	if after := v.IOStats(); after.ReadOps != before.ReadOps || after.WriteOps != before.WriteOps || after.SyncOps != before.SyncOps {
+		t.Fatal("retained codec estimate touched storage", before, after)
+	}
+}
+
+func TestPlacementMissingSourceIsUnknownButKnownEmptyIsZero(t *testing.T) {
+	r, v, _, p, _ := placementInventoryFixture(t)
+	bad := p
+	bad.Entries = append([]client.RangeEntry(nil), p.Entries...)
+	bad.Entries[0].Locations = []client.Location{{Node: r.node, Volume: client.ID{99}}}
+	if _, _, err := r.policyPlacementCost(bad, bad.Entries[0], client.ID{9}, volume.ID{8}, volume.Raw); statusOf(err) != 503 {
+		t.Fatal("missing authoritative source fabricated as empty", err)
+	}
+	h, err := v.Open(true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := volume.Key{Bucket: volume.ID(p.Bucket), Object: volume.ObjectID{1}}
+	err = h.Delete(key, volume.Options{})
+	if err == nil {
+		err = h.Purge(key)
+	}
+	h.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, row := range r.server.quotaUsage.Load().volumes[v.Identity().VolumeID] {
+		if row.Bucket == key.Bucket {
+			t.Fatal("empty fixture still has allocation", row)
+		}
+	}
+	before := v.IOStats()
+	cost, count, err := r.policyPlacementCost(p, p.Entries[0], client.ID{9}, volume.ID{8}, volume.Raw)
+	if err != nil || cost != 0 || count != 0 {
+		t.Fatal("known complete snapshot omitted an empty bucket", cost, count, err)
+	}
+	if after := v.IOStats(); after.ReadOps != before.ReadOps || after.WriteOps != before.WriteOps {
+		t.Fatal("empty estimate read storage", before, after)
+	}
+}
+
+func TestPlacementRangeCostBoundsAtCounterLimit(t *testing.T) {
+	r, v, _, p, _ := placementInventoryFixture(t)
+	vid := v.Identity().VolumeID
+	// Exercise the arithmetic boundary of maintained uint64 counters directly;
+	// allocating MaxUint64 bytes is neither necessary nor possible in a fixture.
+	r.server.quotaUsage.Store(&quotaUsageImage{volumes: map[volume.ID][]volume.BucketStorage{vid: {{Bucket: volume.ID(p.Bucket), Physical: math.MaxUint64, Logical: math.MaxUint64, Objects: math.MaxUint64}}}})
+	before := v.IOStats()
+	cost, count, err := r.policyPlacementCost(p, p.Entries[0], client.ID{9}, volume.ID{8}, volume.Gzip)
+	if err != nil || cost != math.MaxUint64 || count != math.MaxUint64 {
+		t.Fatal("full-range arithmetic wrapped", cost, count, err)
+	}
+	retainedCost, _, err := r.policyPlacementCost(p, p.Entries[0], r.node, vid, volume.Gzip)
+	if err != nil || retainedCost != math.MaxUint64 {
+		t.Fatal("retained subtraction erased saturated codec growth", retainedCost, err)
+	}
+	var prior uint64
+	for _, bits := range []uint16{256, 128, 64, 32, 8, 1, 0} {
+		moving := p.Entries[0]
+		moving.PrefixBits = bits
+		physical, _, objects, err := r.placementCostTotals(p, moving)
+		if err != nil || physical == 0 || objects == 0 || physical < prior {
+			t.Fatal("hash width produced empty/nonmonotone estimate", bits, physical, objects, err)
+		}
+		prior = physical
+	}
+	if after := v.IOStats(); after.ReadOps != before.ReadOps || after.WriteOps != before.WriteOps || after.SyncOps != before.SyncOps {
+		t.Fatal("counter bound estimate touched storage", before, after)
 	}
 }

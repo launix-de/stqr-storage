@@ -144,7 +144,7 @@ func (s *Server) receiveReplicaAbortHistory(m client.Message, actor client.ID) (
 // upper budget for retained abort/retry history. Never scan the replica index
 // on a planning tick; transfer walks actual history only after selecting a move.
 func (r *rangeManager) replicaAbortCost(before client.MapPatch, entry client.RangeEntry, retained ...map[volume.ID]uint64) (uint64, error) {
-	cost, _, _, err := r.placementCostTotals(before, entry, client.ID{}, volume.ID{}, retained...)
+	cost, _, _, err := r.placementCostTotals(before, entry, retained...)
 	if err == nil && cost > 0 {
 		cost = addCapacity(cost, 64<<10)
 	}
