@@ -143,7 +143,7 @@ func (s *Server) Bucket(id volume.ID) (*Bucket, error) {
 	s.bucketMu.RLock()
 	b := s.bucketsByID[id]
 	s.bucketMu.RUnlock()
-	if b == nil || b.Describe().DeletionComplete {
+	if b == nil || b.storageDescription().DeletionComplete {
 		return nil, ErrBucketNotFound
 	}
 	return b, nil
