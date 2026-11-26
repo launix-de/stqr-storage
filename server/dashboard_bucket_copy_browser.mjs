@@ -11,7 +11,7 @@ try{
  await button.click();if(await page.evaluate(()=>navigator.clipboard.readText())!==id)throw Error('Clipboard API copied wrong ID');
  if(await page.locator('#bucket-create-dialog').evaluate(e=>e.open))throw Error('Copy opened settings');
  // Ordinary intranet HTTP has no Clipboard API. Exercise the actual fallback.
- await page.evaluate(()=>{window.readClipboard=navigator.clipboard.readText.bind(navigator.clipboard);Object.defineProperty(navigator,'clipboard',{configurable:true,value:undefined})});
+ await page.evaluate(async()=>{await navigator.clipboard.writeText('fallback-control');window.readClipboard=navigator.clipboard.readText.bind(navigator.clipboard);if(await window.readClipboard()!=='fallback-control')throw Error('Clipboard control failed');Object.defineProperty(navigator,'clipboard',{configurable:true,value:undefined})});
  await button.click();if(await page.evaluate(()=>window.readClipboard())!==id)throw Error('HTTP fallback copied wrong ID');
  const code=page.locator(`[data-bucket="${id}"] .bucket-id code`);if(await code.textContent()!==id || await code.evaluate(e=>getComputedStyle(e).userSelect)!=='text')throw Error('ID is not selectable');
  await code.click();if(await page.locator('#bucket-create-dialog').evaluate(e=>e.open))throw Error('Selecting ID opened settings');

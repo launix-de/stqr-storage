@@ -370,8 +370,14 @@ func (v *Volume) mutateWithRetryLocked(op uint8, k Key, offset, length uint64, s
 	return v.mutateCore(op, k, offset, length, src, expected, opts)
 }
 func (v *Volume) mutateCore(op uint8, k Key, offset, length uint64, src io.Reader, expected []byte, opts Options) (Result, error) {
-	if e := v.check(true); e != nil {
-		return Result{}, e
+	var checkErr error
+	if opts.Accepted {
+		checkErr = v.checkBuffered()
+	} else {
+		checkErr = v.check(true)
+	}
+	if checkErr != nil {
+		return Result{}, checkErr
 	}
 	if opts.Compression != nil && !opts.Compression.valid() {
 		return Result{}, ErrRange
@@ -682,7 +688,7 @@ func (v *Volume) mutateCore(op uint8, k Key, offset, length uint64, src io.Reade
 	if e = t.commitReserved(opts.UseGuaranteed, opts.InFlightAllowance, opts.GuaranteedAllowance); e != nil {
 		return Result{}, e
 	}
-	v.cache.put(k, o)
+	v.cache.remove(k)
 	return result, nil
 }
 

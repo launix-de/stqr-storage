@@ -69,7 +69,7 @@ func CreateFile(path string, size int64) (*FileIO, error) {
 }
 func (f *FileIO) ReadAt(p []byte, off int64) (int, error)  { return f.file.ReadAt(p, off) }
 func (f *FileIO) WriteAt(p []byte, off int64) (int, error) { return f.file.WriteAt(p, off) }
-func (f *FileIO) Sync() error                              { return f.file.Sync() }
+func (f *FileIO) Sync() error                              { return syncVolumeFile(f.file) }
 func (f *FileIO) Size() (int64, error)                     { return fileSize(f.file) }
 func (f *FileIO) Close() error                             { f.once.Do(func() { f.closeErr = f.file.Close() }); return f.closeErr }
 

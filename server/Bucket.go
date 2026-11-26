@@ -586,9 +586,18 @@ func (c *BucketCatalog) Save(d BucketDescription, expectedRevision uint64) (*Buc
 			return nil, err
 		}
 		index := -1
+		candidate := cloneBucketDescription(d)
 		for i, current := range descriptions {
 			if current.ID == d.ID {
 				index = i
+				// Cleanup relies on a committed deletion being irreversible even
+				// when physical I/O runs outside node admission.
+				if current.State == BucketDeleting && (candidate.State != BucketDeleting || candidate.Name != current.Name || current.DeletionComplete && !candidate.DeletionComplete) {
+					return nil, ErrBucketConflict
+				}
+				if current.State != BucketDeleting && candidate.State == BucketDeleting {
+					candidate.Name = unusedDeletedBucketName(current.Name, descriptions)
+				}
 				if current.Format != "" && current.Format != d.Format {
 					return nil, ErrBucketInvalid
 				}
@@ -598,14 +607,17 @@ func (c *BucketCatalog) Save(d BucketDescription, expectedRevision uint64) (*Buc
 				if !c.upgrading && (d.Policy.Version < current.Policy.Version || (d.Policy != current.Policy && d.Policy.Version == current.Policy.Version)) {
 					return nil, ErrBucketInvalid
 				}
-			} else if current.Name == d.Name && !current.DeletionComplete && !d.DeletionComplete {
+			}
+		}
+		for _, current := range descriptions {
+			if current.ID != candidate.ID && current.Name == candidate.Name && !current.DeletionComplete && !candidate.DeletionComplete {
 				return nil, ErrBucketConflict
 			}
 		}
 		if (index < 0 && expectedRevision != 0) || (index >= 0 && expectedRevision == 0) {
 			return nil, ErrBucketConflict
 		}
-		hash, err := c.persistDescription(d)
+		hash, err := c.persistDescription(candidate)
 		if err != nil {
 			return nil, err
 		}
@@ -633,12 +645,34 @@ func (c *BucketCatalog) Save(d BucketDescription, expectedRevision uint64) (*Buc
 			return nil, err
 		}
 		if c.onSave != nil {
-			c.onSave(cloneBucketDescription(d))
+			c.onSave(cloneBucketDescription(candidate))
 		}
-		return &Bucket{description: cloneBucketDescription(d)}, nil
+		return &Bucket{description: cloneBucketDescription(candidate)}, nil
 	}
 	return nil, ErrBucketConflict
 }
+
+// Choose from the committed original name on every catalog CAS attempt. Keep
+// completed deletions reserved too, so later cleanup never aliases their names.
+func unusedDeletedBucketName(original string, descriptions []BucketDescription) string {
+	occupied := make(map[string]bool, len(descriptions))
+	for _, d := range descriptions {
+		occupied[d.Name] = true
+	}
+	for n := uint64(0); ; n++ {
+		suffix := fmt.Sprintf("-deleted%02d", n)
+		prefix := original
+		for len(prefix)+len(suffix) > 255 {
+			_, size := utf8.DecodeLastRuneInString(prefix)
+			prefix = prefix[:len(prefix)-size]
+		}
+		name := prefix + suffix
+		if !occupied[name] {
+			return name
+		}
+	}
+}
+
 func (c *BucketCatalog) persistDescription(d BucketDescription) (volume.ObjectID, error) {
 	data, err := json.Marshal(d)
 	if err != nil {

@@ -80,3 +80,7 @@ opportunities, not evidence that the current server wire format is incompatible.
 For this C-core fix, rebuild native C consumers and the kernel module. Existing
 installed copies retain the old code until replaced/reloaded; the kernel test
 above does not replace the host's loaded module or any user's mount.
+
+For subsequent real Windows/WinFsp validation and the WinUI/native-overlay follow-up,
+see [the three-client parity matrix](fs-client-parity.md). The audit results above
+describe their original baseline.

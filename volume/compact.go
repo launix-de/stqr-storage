@@ -19,8 +19,13 @@ func (v *Volume) Checkpoint() error {
 func (v *Volume) Compact() error {
 	v.mu.Lock()
 	defer v.mu.Unlock()
+	v.beginMaintenance()
+	defer v.endMaintenance()
 	if e := v.check(false); e != nil {
 		return e
+	}
+	if err := v.flushDeferred(); err != nil {
+		return err
 	}
 	return v.compactLocked()
 }
@@ -139,7 +144,7 @@ func (v *Volume) rewriteObject(k Key, old *object, codec Compression, opts Optio
 	if e = t.commitReserved(opts.UseGuaranteed, opts.InFlightAllowance, opts.GuaranteedAllowance); e != nil {
 		return e
 	}
-	v.cache.put(k, o)
+	v.cache.remove(k)
 	return nil
 }
 func (v *Volume) recompressLocked(k Key, codec Compression, opts Options) error {

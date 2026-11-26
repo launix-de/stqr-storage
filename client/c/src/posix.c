@@ -95,3 +95,6 @@ int sq_wait(struct stqr_socket *s, unsigned ms) {
 
 stqr_u64 sq_now_ms(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return (stqr_u64)t.tv_sec*1000+t.tv_nsec/1000000; }
 int sq_pause(unsigned ms) { struct timespec t = {ms/1000, (long)(ms%1000)*1000000}; return nanosleep(&t, NULL) ? -errno : 0; }
+
+/* Userspace owns its event loop; stqr_poll performs the readiness wait. */
+void sq_set_readable(struct stqr_socket *s, void (*ready)(void *), void *arg) { (void)s; (void)ready; (void)arg; }

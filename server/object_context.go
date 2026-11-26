@@ -31,9 +31,9 @@ func (ws *wsSession) objectContext(id client.ID) context.Context {
 	ws.objectMu.Lock()
 	defer ws.objectMu.Unlock()
 	if r, ok := ws.objectContexts[id]; ok {
-		return r.ctx
+		return ws.connectionContext(r.ctx, id)
 	}
-	return ws.ctx
+	return ws.connectionContext(ws.ctx, id)
 }
 func (ws *wsSession) cancelObjectContext(id client.ID) {
 	ws.objectMu.Lock()

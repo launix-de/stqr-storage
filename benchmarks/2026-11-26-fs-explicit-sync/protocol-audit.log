@@ -1,0 +1,10 @@
+=== RUN   TestFilesystemOrdinaryOperationsDoNotRequestDurability
+=== RUN   TestFilesystemOrdinaryOperationsDoNotRequestDurability/native
+    filesystem_deferred_test.go:344: ordinary FS burst: accepted mutations=19 references=14 fences=0 durable requests=0
+=== RUN   TestFilesystemOrdinaryOperationsDoNotRequestDurability/subscription
+    filesystem_deferred_test.go:344: ordinary FS burst: accepted mutations=19 references=14 fences=0 durable requests=0
+--- PASS: TestFilesystemOrdinaryOperationsDoNotRequestDurability (3.03s)
+    --- PASS: TestFilesystemOrdinaryOperationsDoNotRequestDurability/native (1.50s)
+    --- PASS: TestFilesystemOrdinaryOperationsDoNotRequestDurability/subscription (1.53s)
+PASS
+ok  	github.com/launix-de/stqr-storage/server	4.044s

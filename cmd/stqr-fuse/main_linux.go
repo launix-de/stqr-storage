@@ -113,9 +113,6 @@ func parseOptions(args []string, out io.Writer) (options, error) {
 	if bucket == "" && readonlyBucket == "" {
 		return opt, errors.New("--bucket or --readonly-bucket is required")
 	}
-	if bucket != "" && bucket == readonlyBucket {
-		return opt, errors.New("upper and readonly buckets must be different")
-	}
 	if bucket == "" && (opt.create || opt.fsck) {
 		return opt, errors.New("--init and --fsck require a writable --bucket")
 	}

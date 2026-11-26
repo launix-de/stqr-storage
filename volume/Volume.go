@@ -28,7 +28,7 @@ import (
 //     directory. In-flight operations can temporarily hold one object's metadata.
 //   - Checkpoint I/O runs against a pinned, immutable accepted-write buffer
 //     outside the metadata lock. Readers may continue; subsequent in-place
-//     writers wait for the WAL space to be reusable.
+//     writers use a separate bounded overlay until the WAL space is reusable.
 //   - A successful disk mutation has synced payload and redo WAL before updating affected pages. RAM has the same atomicity but no restart durability.
 //   - After an ambiguous I/O/flush failure the instance is fenced until reopened.
 //     A retry with the same nonzero RequestID recovers its original result.
@@ -38,6 +38,7 @@ import (
 type Volume struct {
 	identity          atomic.Pointer[Identity]
 	deferred          *deferredGroup
+	fence             *writeFence
 	staging           map[uint64][]byte
 	durableGeneration uint64
 
@@ -59,6 +60,8 @@ type Volume struct {
 	nodes            *nodeCache
 	failed           error
 	closed           bool
+	closing          bool
+	maintenance      uint64
 	name             string
 	state            State
 	guaranteed       uint64
@@ -257,7 +260,10 @@ func Open(dev VolumeIO, o OpenOptions) (*Volume, error) {
 		return nil, e
 	}
 	if s.Moving {
-		if e = v.resumeMoveLocked(); e != nil {
+		v.mu.Lock()
+		e = v.resumeMoveLocked()
+		v.mu.Unlock()
+		if e != nil {
 			return nil, e
 		}
 	}
@@ -281,7 +287,7 @@ func (v *Volume) check(write bool) error {
 	if write && v.preparing {
 		return ErrBusy
 	}
-	if v.closed {
+	if v.closed || v.closing {
 		return ErrClosed
 	}
 	if v.failed != nil {
@@ -299,8 +305,10 @@ func (v *Volume) write(b []byte, off uint64) error {
 	if v.staging != nil {
 		return v.stageWrite(b, off)
 	}
-	if err := v.flushDeferred(); err != nil {
-		return err
+	// Allocation must never implicitly drop the metadata lock to flush a
+	// newer visible overlay after its caller has built a mutable plan.
+	if v.deferred != nil || v.checkpointing {
+		return ErrBusy
 	}
 	return v.rawWrite(b, off)
 }
@@ -320,7 +328,7 @@ func (v *Volume) sync() error {
 		// adds no durability and would hold the metadata lock again.
 		return v.flushDeferred()
 	}
-	return v.rawSync()
+	return v.syncVisible()
 }
 func (v *Volume) rawSync() error {
 	if e := v.dev.Sync(); e != nil {
@@ -361,21 +369,26 @@ func (v *Volume) Sync() error {
 func (v *Volume) Close() error {
 	v.mu.Lock()
 	defer v.mu.Unlock()
-	for v.preparing {
+	if v.closed {
+		return nil
+	}
+	v.closing = true
+	for v.preparing || v.checkpointing {
 		v.prepareCond.Wait()
 	}
 	if v.closed {
 		return nil
 	}
 	var flushErr error
-	if v.failed == nil {
-		flushErr = v.flushDeferred()
+	if v.failed == nil && v.deferred != nil {
+		// New publications are rejected while the final accepted buffer is
+		// checkpointed, so clean close cannot discard a later overlay.
+		flushErr = v.checkpointIO((*Volume).flushDeferredIO)
 	}
 	v.closed = true
 	v.state = Detached
 	e := errors.Join(flushErr, v.dev.Close())
-	v.deferred = nil
-	v.staging = nil
+	v.deferred, v.staging = nil, nil
 	if v.onClose != nil {
 		v.onClose()
 	}

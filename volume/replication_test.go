@@ -240,6 +240,16 @@ func TestReplicaReadersContinueWhilePrepareStreamsPayload(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("reader waited for unfinished PREPARE payload")
 	}
+	writer := make(chan error, 1)
+	go func() {
+		_, err := testPut(v, testKey(2), []byte("independent"), Options{Accepted: true})
+		writer <- err
+	}()
+	select {
+	case err := <-writer:
+		t.Fatalf("blocking writer did not wait for private payload staging: %v", err)
+	case <-time.After(30 * time.Millisecond):
+	}
 	release.Do(func() { close(reader.release) })
 	select {
 	case err := <-done:
@@ -249,6 +259,8 @@ func TestReplicaReadersContinueWhilePrepareStreamsPayload(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("prepare did not finish")
 	}
+	awaitCheckpointTest(t, writer)
+	mustGet(t, v, testKey(2), []byte("independent"))
 	mustGet(t, v, k, []byte("committed"))
 }
 

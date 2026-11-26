@@ -83,7 +83,7 @@ func (v *Volume) resumeMoveLocked() error {
 	if e = t.commit(true); e != nil {
 		return e
 	}
-	v.cache.put(s.MoveKey, o)
+	v.cache.remove(s.MoveKey)
 	return nil
 }
 

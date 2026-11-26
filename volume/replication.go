@@ -374,7 +374,7 @@ func (h *Handle) PublishReplica(id ID, binding ReplicaBinding) (Result, error) {
 		if err = t.commit(true); err != nil {
 			return Result{}, err
 		}
-		v.cache.put(r.Request.Key, o)
+		v.cache.remove(r.Request.Key)
 		return r.Request.Result, nil
 	})
 }

@@ -338,7 +338,12 @@ func (b *Bucket) getRange(ctx context.Context, p principal, id volume.ObjectID, 
 	if err := b.server.checkObjectBinding(ctx, b.ID(), id, true); err != nil {
 		return nil, volume.Info{}, err
 	}
-	return h.GetRange(volume.Key{Bucket: b.ID(), Object: id}, offset, length)
+	data, info, err := h.GetRange(volume.Key{Bucket: b.ID(), Object: id}, offset, length)
+	if err == nil {
+		generation, _ := h.Generation()
+		touchConnectionVolume(ctx, v, generation)
+	}
+	return data, info, err
 }
 
 // CopyTo captures a bounded local snapshot before invoking the caller writer.
@@ -399,6 +404,9 @@ func (b *Bucket) copyToCheckedUnmetered(ctx context.Context, p principal, id vol
 	if err != nil {
 		return info, 0, err
 	}
+	if g, e := h.Generation(); e == nil {
+		touchConnectionVolume(ctx, v, g)
+	}
 	if condition != nil {
 		if err := h.Check(key, *condition); err != nil {
 			return info, 0, err
@@ -442,7 +450,19 @@ func (b *Bucket) Stat(ctx context.Context, p principal, id volume.ObjectID) (vol
 	if err := b.server.checkObjectOwner(b.ID(), id, true); err != nil {
 		return volume.Info{}, err
 	}
-	_, info, _, err := b.selectVolume(d, volume.Key{Bucket: b.ID(), Object: id}, volume.ID{}, false)
+	v, info, _, err := b.selectVolume(d, volume.Key{Bucket: b.ID(), Object: id}, volume.ID{}, false)
+	if err == nil && v != nil {
+		h, openErr := v.Open(false)
+		if openErr != nil {
+			return volume.Info{}, openErr
+		}
+		info, err = h.Stat(volume.Key{Bucket: b.ID(), Object: id})
+		if err == nil {
+			generation, _ := h.Generation()
+			touchConnectionVolume(ctx, v, generation)
+		}
+		h.Close()
+	}
 	if bindingErr := b.server.checkObjectBinding(ctx, b.ID(), id, true); bindingErr != nil {
 		err = bindingErr
 	}
@@ -469,6 +489,12 @@ func (b *Bucket) mutateUnmetered(ctx context.Context, p principal, id volume.Obj
 	defer cancel()
 	for {
 		result, err := b.mutateAttempt(ctx, p, id, opcode, offset, length, src, expected, opt)
+		var published *publishedCheckpoint
+		if errors.As(err, &published) {
+			// The object is already published. Complete its durable response
+			// outside node admission, without replaying the mutation/payload.
+			return result, published.volume.CheckpointThrough(published.generation)
+		}
 		var wait *acceptedCheckpoint
 		if !errors.As(err, &wait) {
 			return result, err
@@ -678,11 +704,18 @@ func (b *Bucket) mutateAttempt(ctx context.Context, p principal, id volume.Objec
 	if opcode == 0x0105 || opcode == 0x0106 {
 		payloadLength = 0
 	}
-	if generation, pending := v.PendingCheckpoint(opt.Accepted, payloadLength); pending {
+	if generation, pending := v.PendingCheckpoint(opt.Accepted || payloadLength <= 1<<20 && opcode != cowRestoreOpcode, payloadLength); pending && (generation == 0 || !v.IsDurableThrough(generation)) {
 		return volume.Result{}, &acceptedCheckpoint{v, generation}
 	}
-	if err := s.switchAcceptedVolume(b.ID(), v, opt.Accepted); err != nil {
-		return volume.Result{}, err
+	// A rejected buffered mutation may leave an empty group at an already
+	// durable generation. Waiting through that generation cannot drain it.
+	// Continue to the normal handle path, which rechecks admission and drains
+	// the group before building a durable mutation. Later writes remain subject
+	// to the same handle/operation checks, not this preflight hint.
+	if !connectionFenced(ctx) {
+		if err := s.switchAcceptedVolume(b.ID(), v, opt.Accepted || payloadLength <= 1<<20 && opcode != cowRestoreOpcode); err != nil {
+			return volume.Result{}, err
+		}
 	}
 	if !exists && opcode != 0x0102 && opcode != 0x0106 && b.lostRange(id) {
 		return volume.Result{}, fail(410, "partial mutation cannot recreate a lost object")
@@ -926,7 +959,7 @@ func (b *Bucket) mutateAttempt(ctx context.Context, p principal, id volume.Objec
 		result, e = h.PublishReplica(opt.RequestID, record.Binding)
 		if e == nil {
 			if !p.cowInternal && current.State != volume.ReplicaPublished && s.objectSubscriptions.watched(key) {
-				s.objectSubscriptions.publish(key, result.Info, h)
+				s.objectSubscriptions.publish(key, result.Info, h, v)
 			}
 			h.Close()
 			b.usage.mu.Lock()
@@ -940,6 +973,11 @@ func (b *Bucket) mutateAttempt(ctx context.Context, p principal, id volume.Objec
 		}
 		return result, e
 	}
+	durableAck := !opt.Accepted && payloadLength <= 1<<20 && opcode != cowRestoreOpcode
+	if durableAck {
+		opt.Accepted = true
+	}
+	var publishedGeneration uint64
 	b.usage.mu.Lock()
 	usageLocked := true
 	defer func() {
@@ -948,7 +986,11 @@ func (b *Bucket) mutateAttempt(ctx context.Context, p principal, id volume.Objec
 		}
 	}()
 	var acquired bool
-	h, acquired, err = v.TryOpen(true)
+	if opt.Accepted {
+		h, acquired, err = v.TryOpenBuffered()
+	} else {
+		h, acquired, err = v.TryOpen(true)
+	}
 	if err != nil {
 		return volume.Result{}, err
 	}
@@ -1001,20 +1043,13 @@ func (b *Bucket) mutateAttempt(ctx context.Context, p principal, id volume.Objec
 	default:
 		err = volume.ErrUnsupported
 	}
-	if err == nil && opt.Accepted {
-		generation, gerr := h.Generation()
-		if gerr != nil {
-			return result, gerr
-		}
-		s.recordAccepted(b.ID(), v, generation)
-	}
-	if err == nil && !p.cowInternal && !repeated && s.objectSubscriptions.watched(key) {
-		published, readErr := h.RecordInfo(key)
-		if readErr == nil {
-			s.objectSubscriptions.publish(key, published, h)
-		} else {
-			s.objectSubscriptions.resyncWhere(func(k volume.Key) bool { return k == key })
-		}
+	mutationPublished := err == nil
+	notify := mutationPublished && !p.cowInternal && !repeated && s.objectSubscriptions.watched(key)
+	var notification volume.Info
+	var notificationErr error
+	if notify {
+		// Capture DELETE metadata before optional physical index reclamation.
+		notification, notificationErr = h.RecordInfo(key)
 	}
 	if err == nil && opcode == 0x0106 && !retainResult && !p.cowInternal && len(d.ClonePeers) == 0 && !b.lostRange(id) {
 		moving := false
@@ -1031,7 +1066,30 @@ func (b *Bucket) mutateAttempt(ctx context.Context, p principal, id volume.Objec
 		// No copy/clone can still need this deletion marker. The node's
 		// admission lock prevents a new handoff from starting in this gap.
 		if !moving {
-			err = h.Purge(key)
+			if opt.Accepted {
+				_, err = h.PurgeAccepted(key)
+			} else {
+				err = h.Purge(key)
+			}
+		}
+	}
+	if mutationPublished && opt.Accepted {
+		// Include accepted tombstone reclamation in the same connection fence;
+		// recording the generation before housekeeping could ACK an older cut.
+		generation, gerr := h.Generation()
+		if gerr != nil {
+			return result, gerr
+		}
+		s.recordAccepted(b.ID(), v, generation)
+		touchConnectionVolume(ctx, v, generation)
+		publishedGeneration = generation
+	}
+	if notify {
+		// Publish only after the receipt includes the final cleanup generation.
+		if notificationErr == nil {
+			s.objectSubscriptions.publish(key, notification, h, v)
+		} else {
+			s.objectSubscriptions.resyncWhere(func(k volume.Key) bool { return k == key })
 		}
 	}
 	// Release the write handle before consulting capacity/index statistics.
@@ -1067,6 +1125,9 @@ func (b *Bucket) mutateAttempt(ctx context.Context, p principal, id volume.Objec
 			}
 			return result, fail(503, "retry after range capacity handoff")
 		}
+	}
+	if err == nil && durableAck {
+		return result, &publishedCheckpoint{v, publishedGeneration}
 	}
 	return result, err
 }

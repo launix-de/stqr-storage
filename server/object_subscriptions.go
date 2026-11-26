@@ -153,7 +153,11 @@ func (r *objectSubscriptionRegistry) sendLocked(sub *objectSubscription, u clien
 
 // Called under the same native write handle which committed the mutation. The
 // reader registers under a native read handle, closing the snapshot/listen gap.
-func (r *objectSubscriptionRegistry) publish(key volume.Key, info volume.Info, h *volume.Handle) {
+func (r *objectSubscriptionRegistry) publish(key volume.Key, info volume.Info, h *volume.Handle, volumes ...*volume.Volume) {
+	var generation uint64
+	if h != nil {
+		generation, _ = h.Generation()
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	type window struct{ off, length uint64 }
@@ -211,6 +215,9 @@ func (r *objectSubscriptionRegistry) publish(key volume.Key, info volume.Info, h
 			}
 		}
 		cost = len(u.Data) + 128
+		if len(volumes) > 0 {
+			sub.ws.observeConnectionVolume(volumes[0], generation)
+		}
 		if !r.sendLocked(sub, u) || u.Change == client.UpdateResyncRequired {
 			r.removeLocked(sub)
 			continue
@@ -320,6 +327,9 @@ func (s *Server) executeObjectSubscription(m client.Message, ws *wsSession, p pr
 		info, err = h.Stat(key)
 		if err != nil {
 			return nil, 0, err
+		}
+		if generation, e := h.Generation(); e == nil {
+			touchConnectionVolume(ctx, v, generation)
 		}
 	}
 	offset, n := uint64(0), info.Length

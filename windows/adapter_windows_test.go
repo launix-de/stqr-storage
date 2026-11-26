@@ -83,3 +83,23 @@ func TestWindowsMetadataCallbacks(t *testing.T) {
 		t.Fatal("invalid nanoseconds", code)
 	}
 }
+
+func TestWindowsDeleteAccessReadonly(t *testing.T) {
+	f, _ := fixture(t)
+	h, err := f.Open("/file", OpenOptions{Create: true, Write: true}, 0600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close(h)
+	a := &Adapter{FS: f}
+	if code := a.Access("/file", fuse.DELETE_OK); code != 0 {
+		t.Fatal("writable delete denied", code)
+	}
+	f.ReadOnly = true
+	if code := a.Access("/file", fuse.DELETE_OK); code != -fuse.EROFS {
+		t.Fatal("readonly delete preflight accepted", code)
+	}
+	if code := a.Access("/file", fuse.R_OK); code != 0 {
+		t.Fatal("readonly read denied", code)
+	}
+}

@@ -12,7 +12,7 @@ DEB_OUT ?= dist
 
 .PHONY: all server fuse stqr stqr-fuse c-client c-integration kernel \
 	kernel-module kernel-helper nbd pam networkboot windows windows-resources \
-	deb clean help
+	windows-package deb clean help
 
 all: server fuse c-client kernel nbd networkboot windows
 
@@ -52,6 +52,10 @@ networkboot: nbd pam
 windows: windows/cmd/stqr-windows/resource_windows_amd64.syso
 	$(MAKE) -C windows all
 
+# Full WinUI bundle; run on Windows with PowerShell and the .NET 10 SDK.
+windows-package:
+	$(MAKE) -C windows package
+
 windows-resources: windows/cmd/stqr-windows/resource_windows_amd64.syso
 windows/cmd/stqr-windows/resource_windows_amd64.syso: windows/cmd/stqr-windows/app.rc windows/cmd/stqr-windows/app.manifest
 	$(MAKE) -C windows resources
@@ -74,7 +78,7 @@ clean:
 
 help:
 	@printf '%s\n' \
-		'make all                Build every production component (default; Linux build host)' \
+		'make all                Build Linux components and Windows backend (default)' \
 		'make server             Build ./stqr' \
 		'make fuse               Build ./stqr-fuse (GOFLAGS=-race for race instrumentation)' \
 		'make c-client           Build static/shared C SDK libraries' \
@@ -85,7 +89,8 @@ help:
 		'make nbd                Build the NBD server and native boot client' \
 		'make pam                Build networkboot/bin/pam_stqr.so' \
 		'make networkboot        Build networkboot tools, boot helpers, PAM and source archive' \
-		'make windows            Cross-compile windows/bin/stqr-windows.exe (amd64)' \
+		'make windows            Cross-compile the Windows Go backend (amd64)' \
+		'make windows-package    Build the complete WinUI bundle on a Windows host' \
 		'make windows-resources  Update the Windows resource when its sources changed (LLVM)' \
 		'make deb VERSION=...    Build a Debian package (DEB_OUT=dist by default)' \
 		'make clean              Remove generated build artifacts; preserve packages in dist/'

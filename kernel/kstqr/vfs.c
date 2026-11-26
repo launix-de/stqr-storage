@@ -625,7 +625,7 @@ static ssize_t ks_read_iter(struct kiocb *iocb, struct iov_iter *to)
 	err = ks_revalidate_cache(iocb->ki_filp);
 	return err ? err : generic_file_read_iter(iocb, to);
 }
-static ssize_t ks_write_iter(struct kiocb *iocb, struct iov_iter *from)
+static ssize_t ks_write_iter_sync(struct kiocb *iocb, struct iov_iter *from)
 {
 	struct inode *i = file_inode(iocb->ki_filp);
 	struct ks_fs *f = i->i_sb->s_fs_info;
@@ -709,36 +709,52 @@ out:
 	}
 	return total ? total : err;
 }
-static int ks_read_folio(struct file *file, struct folio *folio)
+/* Asynchronous kiocbs retain their file and copied source until completion.
+ * Userspace iterators must be consumed in the submitting task, never retained
+ * by a work item. The completion callback runs with no inode/RPC locks held. */
+struct ks_write_request {
+ struct work_struct work;
+ struct kiocb *iocb;
+ struct file *file;
+ void *data;
+ size_t length;
+};
+static void ks_write_request_worker(struct work_struct *work)
 {
-	struct inode *i = folio->mapping->host;
-	struct ks_fs *f = i->i_sb->s_fs_info;
-	struct ks_snapshot s = {0};
-	unsigned saved;
-	void *buffer;
-	size_t n = 0;
-	int err;
-	(void)file;
-	buffer = sq_alloc(folio_size(folio));
-	if (!buffer) {
-		folio_unlock(folio);
-		return -ENOMEM;
-	}
-	saved = enter_fs(f);
-	err = ks_snapshot(f, KS_I(i)->id, &s);
-	if (!err && folio_pos(folio) < s.node.size) {
-		n = min_t(u64, folio_size(folio), s.node.size - folio_pos(folio));
-		err = ks_read(f, &s.node, buffer, n, folio_pos(folio));
-	}
-	if (!err) {
-		memcpy_to_folio(folio, 0, buffer, folio_size(folio));
-		folio_mark_uptodate(folio);
-	}
-	ks_snapshot_free(&s);
-	leave_fs(f, saved);
-	sq_free(buffer);
-	folio_unlock(folio);
-	return err;
+ struct ks_write_request *job = container_of(work, struct ks_write_request, work);
+ struct kiocb local = *job->iocb;
+ struct kvec vector = { .iov_base = job->data, .iov_len = job->length };
+ struct iov_iter source;
+ ssize_t result;
+ local.ki_complete = NULL;
+ iov_iter_kvec(&source, ITER_SOURCE, &vector, 1, job->length);
+ result = ks_write_iter_sync(&local, &source);
+ job->iocb->ki_pos = local.ki_pos;
+ job->iocb->ki_complete(job->iocb, result);
+ fput(job->file);
+ sq_free(job->data);
+ kfree(job);
+}
+static ssize_t ks_write_iter(struct kiocb *iocb, struct iov_iter *from)
+{
+ struct ks_write_request *job;
+ size_t length;
+ if (is_sync_kiocb(iocb)) return ks_write_iter_sync(iocb, from);
+ if (iocb->ki_flags & IOCB_NOWAIT) return -EAGAIN;
+ if (iocb->ki_flags & IOCB_DIRECT) return -EOPNOTSUPP;
+ length = min_t(size_t, iov_iter_count(from), 1U << 20);
+ if (!length) return 0;
+ job = kzalloc(sizeof(*job), GFP_KERNEL);
+ if (!job) return -ENOMEM;
+ job->data = sq_alloc(length);
+ if (!job->data) { kfree(job); return -ENOMEM; }
+ if (!copy_from_iter_full(job->data, length, from)) {
+  sq_free(job->data); kfree(job); return -EFAULT;
+ }
+ job->iocb = iocb; job->file = get_file(iocb->ki_filp); job->length = length;
+ INIT_WORK(&job->work, ks_write_request_worker);
+ queue_work(((struct ks_fs *)file_inode(job->file)->i_sb->s_fs_info)->read_queue, &job->work);
+ return -EIOCBQUEUED;
 }
 /* Queue contiguous windows without waiting in the caller. A bounded worker
  * pool allocates the payload buffers only when it runs; queued jobs retain
@@ -815,9 +831,33 @@ static void ks_readahead(struct readahead_control *rac)
   queue_work(f->read_queue, &job->work);
  }
 }
+static int ks_read_folio(struct file *file, struct folio *folio)
+{
+	struct inode *inode = folio->mapping->host;
+	struct ks_fs *f = inode->i_sb->s_fs_info;
+	struct ks_read_window *job = kzalloc(sizeof(*job), GFP_NOFS);
+	(void)file;
+	if (!job) {
+		folio_unlock(folio);
+		return -ENOMEM;
+	}
+	job->fs = f;
+	job->id = KS_I(inode)->id;
+	job->offset = folio_pos(folio);
+	job->length = folio_size(folio);
+	job->queued = ktime_get_ns();
+	job->count = 1;
+	folio_get(folio);
+	job->folios[0] = folio;
+	INIT_WORK(&job->work, ks_read_window_worker);
+	queue_work(f->read_queue, &job->work);
+	return 0;
+}
 #define KS_WRITEBACK_BYTES (1U << 20)
 #define KS_WRITEBACK_FOLIOS (KS_WRITEBACK_BYTES / PAGE_SIZE)
 struct ks_write_batch {
+    struct work_struct work;
+    struct inode *inode;
 	struct folio *folios[KS_WRITEBACK_FOLIOS];
 	void *data;
 	loff_t start;
@@ -829,38 +869,64 @@ struct ks_write_batch {
  * take their locks: truncate and page_mkwrite may hold those locks waiting for
  * writeback. The writeback bit prevents removal from the mapping until we finish.
  */
-static int ks_flush_write_batch(struct address_space *mapping, struct writeback_control *wbc,
-				struct ks_write_batch *batch)
+static void ks_write_batch_worker(struct work_struct *work)
 {
-	struct inode *i = mapping->host;
-	struct ks_fs *f = i->i_sb->s_fs_info;
-	u64 position = batch->start, started;
-	unsigned saved;
-	int err;
-	if (!batch->count)
-		return 0;
-	started = ktime_get_ns();
-	atomic64_inc(&f->writeback_batches);
-	atomic64_add(batch->count, &f->writeback_folios);
-	atomic64_add(batch->length, &f->writeback_bytes);
-	saved = enter_fs(f);
-	err = ks_write(f, KS_I(i)->id, &position, batch->data, batch->length, false);
-	leave_fs(f, saved);
-	atomic64_add(ktime_get_ns() - started, &f->writeback_ns);
-	if (err) {
-		atomic64_inc(&f->writeback_errors);
-		mapping_set_error(mapping, err);
-	}
-	for (unsigned n = 0; n < batch->count; n++) {
-		struct folio *folio = batch->folios[n];
-		if (err)
-			folio_redirty_for_writepage(wbc, folio);
-		folio_end_writeback(folio);
-		folio_put(folio);
-	}
-	batch->count = 0;
-	batch->length = 0;
-	return err;
+ struct ks_write_batch *batch = container_of(work, struct ks_write_batch, work);
+ struct inode *i = batch->inode;
+ struct address_space *mapping = i->i_mapping;
+ struct ks_fs *f = i->i_sb->s_fs_info;
+ u64 position = batch->start, started = ktime_get_ns();
+ unsigned saved;
+ int err;
+ /* Separate sparse batches share one inode head and REDO claim graph. Only
+  * that genuine publication dependency is serialized; sockets and other files
+  * remain fully concurrent. Never take inode_lock: callers can wait writeback
+  * while holding it. */
+ mutex_lock(&KS_I(i)->writeback_publish_lock);
+ saved = enter_fs(f);
+ err = ks_write(f, KS_I(i)->id, &position, batch->data, batch->length, false);
+ mutex_unlock(&KS_I(i)->writeback_publish_lock);
+ leave_fs(f, saved);
+ atomic64_add(ktime_get_ns() - started, &f->writeback_ns);
+ if (err) { atomic64_inc(&f->writeback_errors); mapping_set_error(mapping, err); }
+ for (unsigned n = 0; n < batch->count; n++) {
+  struct folio *folio = batch->folios[n];
+  if (err) folio_mark_dirty(folio);
+  folio_end_writeback(folio);
+  folio_put(folio);
+ }
+ iput(i);
+ sq_free(batch->data);
+ kfree(batch);
+}
+static int ks_flush_write_batch(struct address_space *mapping, struct writeback_control *wbc,
+                                struct ks_write_batch *batch)
+{
+ struct ks_fs *f = mapping->host->i_sb->s_fs_info;
+ struct ks_write_batch *job;
+ void *replacement;
+ if (!batch->count) return 0;
+ job = kmalloc(sizeof(*job), GFP_NOFS);
+ replacement = sq_alloc(batch->limit);
+ if (!job || !replacement) {
+  kfree(job); sq_free(replacement);
+  for (unsigned n=0;n<batch->count;n++) {
+   folio_redirty_for_writepage(wbc,batch->folios[n]);
+   folio_end_writeback(batch->folios[n]);folio_put(batch->folios[n]);
+  }
+  batch->count=0;batch->length=0;return -ENOMEM;
+ }
+ *job = *batch;
+ job->inode = igrab(mapping->host);
+ /* Folio writeback references keep the inode alive until this point. */
+ if (WARN_ON_ONCE(!job->inode)) { kfree(job);sq_free(replacement);return -EIO; }
+ atomic64_inc(&f->writeback_batches);
+ atomic64_add(batch->count,&f->writeback_folios);
+ atomic64_add(batch->length,&f->writeback_bytes);
+ batch->data=replacement;batch->count=0;batch->length=0;
+ INIT_WORK(&job->work,ks_write_batch_worker);
+ queue_work(f->read_queue,&job->work);
+ return 0;
 }
 static int ks_writepages(struct address_space *mapping, struct writeback_control *wbc)
 {
@@ -1361,6 +1427,7 @@ static struct inode *ks_alloc_inode(struct super_block *sb)
 	if (!i)
 		return NULL;
 	mutex_init(&i->metadata_lock);
+    mutex_init(&i->writeback_publish_lock);
 	INIT_LIST_HEAD(&i->mount_list);
 	inode_init_once(&i->inode);
 	return &i->inode;
@@ -1384,6 +1451,7 @@ static void ks_close_lower(struct ks_fs *f)
 	stqr_fence_close(f->fence);
 	f->fence = NULL;
 	for (unsigned slot = 0; slot < KS_RPC_SLOTS; slot++) {
+		ks_rpc_stop(&f->rpc[slot]);
 		stqr_close(f->rpc[slot].client);
 	}
 	kfree(f->url);
@@ -1413,6 +1481,7 @@ static void ks_put_super(struct super_block *sb)
 	ks_close_lower(f->lower);
 	f->lower = NULL;
 	for (unsigned slot = 0; slot < KS_RPC_SLOTS; slot++) {
+		ks_rpc_stop(&f->rpc[slot]);
 		stqr_close(f->rpc[slot].client);
 	}
 	ks_overlay_stop(f);
@@ -1595,7 +1664,7 @@ static int ks_fill_super(struct super_block *sb, struct fs_context *fc)
 	if (f->readonly)
 		sb->s_flags |= SB_RDONLY;
 	set_default_d_op(sb, &ks_dentry_ops);
- f->read_queue = alloc_workqueue("kstqr-read", WQ_UNBOUND | WQ_MEM_RECLAIM, KS_RPC_SLOTS);
+ f->read_queue = alloc_workqueue("kstqr-read", WQ_UNBOUND | WQ_MEM_RECLAIM, 0);
  if (!f->read_queue) { ks_put_super(sb); return -ENOMEM; }
 
 	saved = enter_fs(f);
@@ -1603,6 +1672,9 @@ static int ks_fill_super(struct super_block *sb, struct fs_context *fc)
 	for (unsigned slot = 0; slot < KS_RPC_SLOTS && !err; slot++)
 		err = stqr_dial(&f->rpc[slot].client, c->url, c->username, c->password, c->bucket, "fs",
 				c->timeout);
+	if (!err)
+		for (unsigned slot = 0; slot < KS_RPC_SLOTS; slot++)
+			ks_rpc_start(&f->rpc[slot],f);
 	if (!err)
 		f->references = !!(stqr_capabilities(f->rpc[0].client) & STQR_CAP_OBJECT_REFERENCES);
 	if (!err)
@@ -1633,6 +1705,9 @@ static int ks_fill_super(struct super_block *sb, struct fs_context *fc)
 					err =
 					    stqr_dial(&lower->rpc[slot].client, c->url, c->username,
 						      c->password, c->lower, "fs", c->timeout);
+				if (!err)
+					for (unsigned slot = 0; slot < KS_RPC_SLOTS; slot++)
+						ks_rpc_start(&lower->rpc[slot],lower);
 				if (!err)
 					lower->references = !!(stqr_capabilities(lower->rpc[0].client) &
 							      STQR_CAP_OBJECT_REFERENCES);

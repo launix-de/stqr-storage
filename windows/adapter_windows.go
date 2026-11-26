@@ -17,7 +17,14 @@ import (
 
 type Adapter struct {
 	fuse.FileSystemBase
-	FS *Filesystem
+	FS      *Filesystem
+	OnReady func()
+}
+
+func (a *Adapter) Init() {
+	if a.OnReady != nil {
+		a.OnReady()
+	}
 }
 
 func errno(e error) int {
@@ -27,7 +34,7 @@ func errno(e error) int {
 	for _, pair := range []struct {
 		err  error
 		code int
-	}{{syscall.ENOENT, fuse.ENOENT}, {syscall.EEXIST, fuse.EEXIST}, {syscall.EPERM, fuse.EPERM}, {syscall.EACCES, fuse.EACCES}, {syscall.EROFS, fuse.EROFS}, {syscall.ENOTDIR, fuse.ENOTDIR}, {syscall.EISDIR, fuse.EISDIR}, {syscall.ENOTEMPTY, fuse.ENOTEMPTY}, {syscall.EBADF, fuse.EBADF}, {syscall.EBUSY, fuse.EBUSY}, {syscall.EINVAL, fuse.EINVAL}, {syscall.EAGAIN, fuse.EAGAIN}, {syscall.EOPNOTSUPP, fuse.EOPNOTSUPP}, {syscall.ENOSPC, fuse.ENOSPC}, {syscall.EFBIG, fuse.EFBIG}, {syscall.EMLINK, fuse.EMLINK}, {syscall.ESTALE, fuse.EIO}, {client.ErrNotFound, fuse.ENOENT}, {client.ErrPrecondition, fuse.EAGAIN}, {client.ErrFull, fuse.ENOSPC}, {client.ErrUnauthorized, fuse.EACCES}, {client.ErrRange, fuse.EINVAL}, {client.ErrNotImplemented, fuse.ENOSYS}, {context.Canceled, fuse.EINTR}, {context.DeadlineExceeded, fuse.ETIMEDOUT}} {
+	}{{syscall.ENOENT, fuse.ENOENT}, {syscall.EEXIST, fuse.EEXIST}, {syscall.EPERM, fuse.EPERM}, {syscall.EACCES, fuse.EACCES}, {syscall.EROFS, fuse.EROFS}, {syscall.ENOTDIR, fuse.ENOTDIR}, {syscall.EISDIR, fuse.EISDIR}, {syscall.ENOTEMPTY, fuse.ENOTEMPTY}, {syscall.EBADF, fuse.EBADF}, {syscall.EBUSY, fuse.EBUSY}, {syscall.EINVAL, fuse.EINVAL}, {syscall.EAGAIN, fuse.EAGAIN}, {syscall.EOPNOTSUPP, fuse.EOPNOTSUPP}, {syscall.ENODATA, fuse.ENODATA}, {syscall.ENOSPC, fuse.ENOSPC}, {syscall.EFBIG, fuse.EFBIG}, {syscall.EMLINK, fuse.EMLINK}, {syscall.ESTALE, fuse.EIO}, {client.ErrNotFound, fuse.ENOENT}, {client.ErrPrecondition, fuse.EAGAIN}, {client.ErrFull, fuse.ENOSPC}, {client.ErrUnauthorized, fuse.EACCES}, {client.ErrRange, fuse.EINVAL}, {client.ErrNotImplemented, fuse.ENOSYS}, {context.Canceled, fuse.EINTR}, {context.DeadlineExceeded, fuse.ETIMEDOUT}} {
 		if errors.Is(e, pair.err) {
 			return -pair.code
 		}
@@ -116,7 +123,13 @@ func (a *Adapter) Readlink(p string) (int, string) {
 	if e != nil {
 		return errno(e), ""
 	}
-	target, e := a.FS.Volume.Readlink(a.FS.Context, i.ID)
+	links, ok := a.FS.Volume.(interface {
+		Readlink(context.Context, client.ObjectID) ([]byte, error)
+	})
+	if !ok {
+		return -fuse.EOPNOTSUPP, ""
+	}
+	target, e := links.Readlink(a.FS.Context, i.ID)
 	return errno(e), string(target)
 }
 func (a *Adapter) Chmod(p string, mode uint32) int {
@@ -166,12 +179,18 @@ func (a *Adapter) Utimens(p string, ts []fuse.Timespec) int {
 	}
 	return errno(a.FS.Setattr(p, 0, v))
 }
+
+// WinFsp checks deletion before cleanup; unlink errors during cleanup are ignored.
 func (a *Adapter) Access(p string, mask uint32) int {
-	if _, e := a.FS.Lookup(p); e != nil {
-		return errno(e)
+	info, err := a.FS.Lookup(p)
+	if err != nil {
+		return errno(err)
 	}
-	if mask&fuse.W_OK != 0 {
-		return errno(a.FS.writable())
+	if mask&(fuse.W_OK|fuse.DELETE_OK) != 0 {
+		if err := a.FS.writable(); err != nil {
+			return errno(err)
+		}
+		return errno(a.FS.Volume.CheckWrite(a.FS.Context, info.ID))
 	}
 	return 0
 }
@@ -211,6 +230,27 @@ func (a *Adapter) Statfs(_ string, s *fuse.Statfs_t) int {
 		return errno(e)
 	}
 	*s = fuse.Statfs_t{Bsize: 4096, Frsize: 4096, Blocks: space.Total / 4096, Bfree: space.Free / 4096, Bavail: space.Available / 4096, Namemax: 255}
+	return 0
+}
+
+func (a *Adapter) Getxattr(p, name string) (int, []byte) {
+	value, err := a.FS.GetXattr(p, name)
+	return errno(err), value
+}
+func (a *Adapter) Setxattr(p, name string, value []byte, flags int) int {
+	return errno(a.FS.SetXattr(p, name, value, flags))
+}
+func (a *Adapter) Removexattr(p, name string) int { return errno(a.FS.RemoveXattr(p, name)) }
+func (a *Adapter) Listxattr(p string, fill func(string) bool) int {
+	names, err := a.FS.ListXattr(p)
+	if err != nil {
+		return errno(err)
+	}
+	for _, name := range names {
+		if !fill(name) {
+			break
+		}
+	}
 	return 0
 }
 

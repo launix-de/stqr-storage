@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/launix-de/stqr-storage/client"
+	"github.com/launix-de/stqr-storage/volume"
 )
 
 func TestBucketNameConnectionCanonicalIDAndRename(t *testing.T) {
@@ -147,5 +148,63 @@ func TestBucketNameConnectionAuthorizationAndFormat(t *testing.T) {
 	defer named.Close()
 	if named.BucketID() != client.ID(hexName.ID()) {
 		t.Fatal("hex-looking name resolved as ID")
+	}
+}
+
+func TestBucketNameConnectionDoesNotReuseDeletingName(t *testing.T) {
+	s := testServer(t)
+	addTestVolume(t, s, "deleted-name", "hdd", 8<<20)
+	original, _ := createProtocolBucket(t, s, "reused-name")
+	host := httptest.NewServer(s.Handler())
+	defer host.Close()
+	a := s.cfg.Auth.BootstrapAdmin
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	old, err := client.DialBucket(ctx, host.URL, a.Username, a.Password, "reused-name", "fs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer old.Close()
+	// Keep cleanup pending so name reuse is tested while the old ID still exists.
+	s.mu.Lock()
+	if s.bucketJobs == nil {
+		s.bucketJobs = make(map[volume.ID]bool)
+	}
+	s.bucketJobs[original.ID()] = true
+	s.mu.Unlock()
+	e := client.Encoder{}
+	e.ID(client.ID(original.ID()))
+	if _, status, _ := adminBucketMessage(t, s, client.BucketDelete, e.B); status != 202 {
+		t.Fatal("delete", status)
+	}
+	replacement, _ := createProtocolBucket(t, s, "reused-name")
+	fresh, err := client.DialBucket(ctx, host.URL, a.Username, a.Password, "reused-name", "fs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer fresh.Close()
+	id := client.ObjectID{27}
+	if _, err = fresh.Put(ctx, id, []byte("replacement"), client.PutOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	s.wsMu.Lock()
+	for ws := range s.sockets {
+		if ws.authorization.bucket == original {
+			ws.conn.Close()
+		}
+	}
+	s.wsMu.Unlock()
+	if _, _, err = old.Get(ctx, id); err == nil {
+		t.Fatal("deleted named connection read replacement bucket")
+	}
+	if _, err = old.Put(ctx, id, []byte("wrong bucket"), client.PutOptions{}); err == nil {
+		t.Fatal("deleted named connection wrote replacement bucket")
+	}
+	if old.BucketID() != client.ID(original.ID()) || fresh.BucketID() != client.ID(replacement.ID()) {
+		t.Fatal("canonical bucket identity changed")
+	}
+	data, _, err := fresh.Get(ctx, id)
+	if err != nil || string(data) != "replacement" {
+		t.Fatal("replacement changed", string(data), err)
 	}
 }

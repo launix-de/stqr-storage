@@ -45,6 +45,10 @@ func (c *Client) observeDurability(t *objectTransport, b []byte) error {
 	if err != nil {
 		return err
 	}
+	if t.capabilities&CapabilityConnectionSync != 0 {
+		t.noteConnectionDependency(m.Boot)
+		return nil
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.durability == nil {
@@ -89,6 +93,9 @@ func (c *Client) syncExcept(ctx context.Context, except *objectTransport) error 
 		}
 	}
 	c.mu.Unlock()
+	if err := c.syncConnections(ctx, except); err != nil {
+		return err
+	}
 	for _, p := range pending {
 		t, err := c.connectionFor(ctx, p.endpoint, p.node)
 		if err != nil {
