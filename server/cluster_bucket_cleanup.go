@@ -127,7 +127,11 @@ func (s *Server) purgeDeletedBucket(body []byte, actor client.ID) ([]byte, error
 	if desc.State != BucketDeleting || desc.Revision != revision || len(desc.ClonePeers) > 0 {
 		return nil, errControlConflict
 	}
-	s.cleanupMu.Lock()
+	// Status must never wait for a physical cleanup fence while the caller
+	// holds cluster-controller admission. Retry the observation next tick.
+	if !s.cleanupMu.TryLock() {
+		return nil, fail(503, "bucket cleanup status is busy")
+	}
 	job := s.cleanupJobs[bucket]
 	done := job != nil && job.done
 	s.cleanupMu.Unlock()

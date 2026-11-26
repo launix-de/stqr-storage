@@ -4,7 +4,9 @@ A committed `DELETING` catalog description remains the durable cleanup intent.
 Normal client access and new clone edges are rejected in this state. Physical
 reclamation can therefore work under the volume lock without holding node
 admission (`opMu`). Completion still requires every required cluster member to
-confirm its local cleanup before the catalog is marked complete.
+confirm its local cleanup before the catalog is marked complete. Status probes
+use nonblocking cleanup admission and return a retryable response while a page
+is busy, so a slow physical fence cannot pin the cluster controller indirectly.
 
 The reclaimer alternates bounded object pages (32 records) and receipt pages
 (128 records). A receipt traversal belongs to a volume and serves a fixed set

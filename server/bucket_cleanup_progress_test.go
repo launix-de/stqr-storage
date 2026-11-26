@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
+	"github.com/launix-de/stqr-storage/client"
 	"github.com/launix-de/stqr-storage/volume"
 	"runtime"
 	"strings"
@@ -424,4 +425,36 @@ func TestCleanupRemovesObsoleteSweepParticipants(t *testing.T) {
 	if len(s.cleanupJobs) != 0 || len(s.cleanupReceipts) != 0 {
 		t.Fatal("obsolete sweep retained completed jobs")
 	}
+}
+
+func TestCleanupStatusDoesNotWaitForPhysicalFence(t *testing.T) {
+	s, _, _ := cleanupFixture(t, 1)
+	actor := client.ID{1}
+	view := *s.currentSystem.Load()
+	view.manifest.Membership.Members = []client.Member{{ID: actor}}
+	s.currentSystem.Store(&view)
+	s.control = &controlRuntime{}
+	e := client.Encoder{}
+	e.Blob(nil)
+	e.ID(client.ID(volume.ID{11}))
+	e.U64(1)
+	s.cleanupMu.Lock()
+	released := false
+	defer func() {
+		if !released {
+			s.cleanupMu.Unlock()
+		}
+	}()
+	result := make(chan error, 1)
+	go func() { _, err := s.purgeDeletedBucket(e.B, actor); result <- err }()
+	select {
+	case err := <-result:
+		if statusOf(err) != 503 {
+			t.Fatal("expected retryable status", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("status waits for physical cleanup and pins controller")
+	}
+	s.cleanupMu.Unlock()
+	released = true
 }
