@@ -66,16 +66,12 @@ func decodeBucketPolicy(d *client.Decoder) (volume.ID, string, BucketState, Buck
 	return id, name, []BucketState{BucketActive, BucketLocked, BucketDeleting}[state], p
 }
 func (s *Server) validBucketUsers(users []BucketGrant) error {
-	var image accountsImage
-	if err := s.readBlob("accounts", &image); err != nil {
+	x, err := s.accountIndex()
+	if err != nil {
 		return err
 	}
-	known := map[string]bool{}
-	for _, u := range image.Users {
-		known[u.ID] = true
-	}
 	for _, u := range users {
-		if !known[u.UserID] {
+		if _, exists := x.byID[u.UserID]; !exists {
 			return fail(404, "bucket user does not exist")
 		}
 	}
