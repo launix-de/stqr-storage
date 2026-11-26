@@ -213,9 +213,10 @@ func (m *MemoryIO) grow(size int64) error {
 }
 
 // newFileIO maps only virtual address space. It does not populate pages or build
-// a RAM index of every object. Passing FileIO to Open/Format transfers exclusive
+// a RAM index of every object. A successful Open/Format transfers exclusive
 // lifecycle ownership: callers must not independently Close, resize or truncate
-// its file while a Volume (and any of its handles) is alive.
+// its file while a Volume (and any of its handles) is alive. On failure, callers
+// remain responsible for closing the FileIO.
 func newFileIO(file *os.File, size int64) (*FileIO, error) {
 	f := &FileIO{file: file, size: size}
 	if err := f.remap(size); err != nil {

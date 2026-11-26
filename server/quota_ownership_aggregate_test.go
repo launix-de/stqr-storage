@@ -85,7 +85,7 @@ func TestQuotaWholeBucketTransitionKeepsExistingAccounting(t *testing.T) {
 		if err := s.refreshQuotaOwnership(v); err != nil {
 			t.Fatal(err)
 		}
-		if after := v.IOStats(); after.ReadOps != before.ReadOps || after.WriteOps != before.WriteOps {
+		if after := v.IOStats(); testStorageReadOps(after) != testStorageReadOps(before) || after.WriteOps != before.WriteOps {
 			t.Fatal("whole-bucket server transition scanned storage", before, after)
 		}
 		if got := storagePhysical(s.quotaUsage.Load().volumes[vid], bid) > 0; got != own {
@@ -109,7 +109,7 @@ func TestQuotaWholeBucketTransitionKeepsExistingAccounting(t *testing.T) {
 	if err := s.refreshQuotaOwnership(v); err != nil {
 		t.Fatal(err)
 	}
-	if v.IOStats().ReadOps == before.ReadOps || storagePhysical(s.quotaUsage.Load().volumes[vid], bid) != 0 {
+	if testStorageReadOps(v.IOStats()) == testStorageReadOps(before) || storagePhysical(s.quotaUsage.Load().volumes[vid], bid) != 0 {
 		t.Fatal("mixed ownership did not use exact recount")
 	}
 }
@@ -201,7 +201,7 @@ func TestQuotaOwnershipUnboundEpochChangeDoesNotReadStorage(t *testing.T) {
 		t.Fatal(err)
 	}
 	after := v.IOStats()
-	if after.ReadOps != before.ReadOps || after.WriteOps != before.WriteOps {
+	if testStorageReadOps(after) != testStorageReadOps(before) || after.WriteOps != before.WriteOps {
 		t.Fatal("unbound metadata change scanned storage", before, after)
 	}
 	if got := storagePhysical(s.quotaUsage.Load().volumes[vid], bid); got != used {

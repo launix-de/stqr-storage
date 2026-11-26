@@ -63,7 +63,7 @@ never closes the handle, even on errors or panics. Only `Handle.Close` ends the
 session. A read session allows other readers and prevents writes/GC/volume close;
 a write session excludes them all and also exposes `Put`/`PutReader`,
 `PutRange`/`PutRangeReader`, `Append`/`AppendReader`, `Trunc`, `Delete` and `CAS`.
-Both modes expose `Stat`, `ReadAt` and `CopyTo`. Read-handle mutations return
+Both modes expose `Stat`, `ReadAt`, `WithReadView` and `CopyTo`. Read-handle mutations return
 `ErrReadOnly`; operations after close return `ErrClosed`. Separate writes remain
 separate durable commits, not a multi-operation transaction.
 
@@ -71,8 +71,41 @@ The lock, backend and lease remain private. Handle methods serialize concurrent
 use and close; close waits for an active transfer. Do not copy a handle or call
 ordinary volume methods while it is open; use handle methods to avoid recursive
 locking. Callbacks must not reenter either the handle or its volume.
-The injected writer prepares the interface for future direct I/O transfers;
-current transfers still verify/decompress bounded blocks.
+Linux regular-file and raw-block backends use read-only `MAP_SHARED` mappings
+of their physical address space. No pages are eagerly populated. Object/request
+B-tree lookups and walks parse validated mapped page bytes directly instead of
+allocating a decoded node for each search. Writer-side nodes and the object cache
+remain bounded. Positioned writes, WAL ordering and persistence fences are
+unchanged; the on-disk format version is unchanged.
+
+`Handle.WithReadView(key, offset, length, callback)` lends read-only `ReadSegment`
+values for the callback's duration. `Data == nil` represents `Length` sparse zero
+bytes. RAW bytes borrow mapped or native RAM pages; compressed chunks may use
+bounded decoded buffers. `Borrowed` distinguishes those cases. Slices must never
+be modified or retained after the callback, and callbacks must not reenter the
+handle/volume. A range is clipped at EOF and bounded by `MaxBufferedRead`.
+`ReadView.WriteTo` sends its segments without a second payload copy; `CopyTo`
+streams larger ranges through bounded views. `Get`/`GetRange` retain owned-copy
+semantics.
+
+The private handle lock and `KeepAlive` protect an active callback from concurrent
+Close/cleanup. Its Volume lock pins the mapping until the handle closes, so
+Grow/Rescan/Shrink/Close cannot invalidate a borrowed address. Accepted/staging
+and immutable in-flight fence pages override mapped physical bytes: readers
+never borrow a stale map page while a checkpoint writes it. A growing mapping is
+prepared before the previous mapping is removed; a failed remap retains the old
+one. Internal shrink unmaps the retired address range before truncation. External
+truncation of an exclusively owned, active backend violates the software contract.
+
+Native sparse RAM backends lend their existing pages; unsupported/custom
+providers keep aligned, bounded positioned reads. No all-object RAM directory is
+introduced by either path.
+
+`IOStats.ReadOps/ReadBytes` count positioned backend reads. Separate
+`ViewReadOps/ViewReadBytes` count mapped/RAM access requests, not physical I/O.
+Neither measures OS page-cache misses or device traffic. Current network Volume
+statistics do not carry view counters; their read rate therefore excludes mapped
+accesses. Logical bucket/user traffic counters still count delivered payload.
 
 `runtime.AddCleanup` releases the lock for a collected, abandoned handle as a
 fallback. Its independent lease does not retain the handle; `runtime.KeepAlive`
@@ -81,7 +114,7 @@ lock synchronously and exactly once, including repeated/concurrent closes.
 The Go runtime does **not** guarantee cleanup execution or timing, particularly
 before process exit: `defer h.Close()` is part of the caller's contract.
 
-- Both handle modes: `Stat`, `Get`, `GetRange`, `ReadAt`, `CopyTo`, `Extents`, `ScanObjects`,
+- Both handle modes: `Stat`, `Get`, `GetRange`, `ReadAt`, `WithReadView`, `CopyTo`, `Extents`, `ScanObjects`,
   hash-ordered `Scan`, `OperationStatus`, `ScanRequests`, `Close`.
 - Write handles additionally: `Put`, `PutReader`, `PutRange`, `PutRangeReader`,
   `Append`, `AppendReader`, `Trunc`, `Delete`, `CAS`, `Recompress`, `Restore`,

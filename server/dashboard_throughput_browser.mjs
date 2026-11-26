@@ -4,9 +4,12 @@ const require=createRequire(import.meta.url),{chromium}=require(process.env.STQR
 let input='';for await(const chunk of process.stdin)input+=chunk;
 const config=JSON.parse(input),browser=await chromium.launch({executablePath:process.env.STQR_TEST_BROWSER_EXECUTABLE??'/usr/bin/google-chrome',headless:true,args:['--no-sandbox']});
 try{
- const page=await browser.newPage({viewport:{width:1700,height:1050}}),errors=[];page.on('pageerror',e=>errors.push(e.message));
+ const page=await browser.newPage({bypassCSP:true,viewport:{width:1700,height:1050}}),errors=[];page.on('pageerror',e=>errors.push(e.message));
  await page.goto(config.url);await page.locator('#username').fill(config.username);await page.locator('#password').fill(config.password);await page.locator('#login-form button[type=submit]').click();
- await page.waitForFunction(id=>{const cell=document.querySelector(`[data-volume="${id}"] .io-rates`);return cell&&!cell.textContent.includes('—')&&!cell.textContent.includes(' 0 B/s')},config.volume);
+ // Position-backed writes stay observable. mmap reads deliberately are not
+ // counted as positioned backend reads; the Go fixture verifies their separate
+ // view counters, while logical bucket/user read checks remain mandatory below.
+ await page.waitForFunction(id=>{const cell=document.querySelector(`[data-volume="${id}"] .io-rates`),rates=cell?.querySelectorAll('strong');return rates?.length===2&&[...rates].every(r=>!r.textContent.includes('—'))&&rates[1].textContent!=='0 B/s'},config.volume);
  await page.screenshot({path:'/tmp/stqr-throughput-volumes.png'});
  await page.locator('[data-view="buckets"]').click();
  await page.waitForFunction(id=>{const cell=document.querySelector(`[data-bucket-throughput="${id}"]`);return cell&&!cell.textContent.includes('—')&&!cell.textContent.includes(' 0 B/s')},config.bucket);
@@ -24,5 +27,5 @@ try{
  if((await admin.locator('[data-user-throughput]').innerText()).includes('Schreiben 0 B/s'))throw Error('Active user throughput missing');
  await page.screenshot({path:'/tmp/stqr-throughput-users.png'});
  if(errors.length)throw Error(errors.join('\n'));
- console.log('Live statistics render nonzero physical volume and logical bucket read/write rates.');
+ console.log('Known positioned volume write rates and nonzero logical bucket/user read/write rates render correctly; mapped view counters are verified separately in Go.');
 }finally{await browser.close()}

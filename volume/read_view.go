@@ -29,7 +29,9 @@ type ReadView struct {
 	Segments []ReadSegment
 }
 
-var readViewZeros [PageSize]byte
+// One shared bounded zero block avoids replacing each former 1-MiB sparse
+// write with 256 tiny Writer calls. It is never exposed as writable view data.
+var readViewZeros [BlockSize]byte
 
 // WriteTo sends the view without copying mapped payloads into a Go buffer.
 // The io.Writer contract forbids modifying or retaining p after Write returns.
@@ -172,7 +174,7 @@ func (v *Volume) readOnlyPage(off uint64) ([]byte, error) {
 		return nil, ErrCorrupt
 	}
 	if data == nil {
-		return readViewZeros[:], nil
+		return readViewZeros[:PageSize:PageSize], nil
 	}
 	return data, nil
 }

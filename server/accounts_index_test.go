@@ -88,16 +88,19 @@ func TestSystemMetadataRAMLookupsDoNotReadAdminVolume(t *testing.T) {
 		t.Fatal(err)
 	}
 	after := s.system.IOStats()
-	if after.ReadOps != before.ReadOps || after.ReadBytes != before.ReadBytes {
-		t.Fatalf("runtime metadata caused %d reads / %d bytes", after.ReadOps-before.ReadOps, after.ReadBytes-before.ReadBytes)
+	if after.ReadOps != before.ReadOps || after.ReadBytes != before.ReadBytes || after.ViewReadOps != before.ViewReadOps || after.ViewReadBytes != before.ViewReadBytes {
+		t.Fatalf("runtime metadata caused positioned %d reads / %d bytes and mapped/RAM %d views / %d bytes", after.ReadOps-before.ReadOps, after.ReadBytes-before.ReadBytes, after.ViewReadOps-before.ViewReadOps, after.ViewReadBytes-before.ViewReadBytes)
 	}
 	// Positive control: this oracle must observe an actual persistent read.
 	var stored accountsImage
 	if err := s.readStoredBlob("accounts", &stored); err != nil {
 		t.Fatal(err)
 	}
-	if measured := s.system.IOStats(); measured.ReadOps <= after.ReadOps || measured.ReadBytes <= after.ReadBytes {
-		t.Fatal("backend read counters did not detect the persistent-read control")
+	measured := s.system.IOStats()
+	positioned := measured.ReadOps > after.ReadOps && measured.ReadBytes > after.ReadBytes
+	viewed := measured.ViewReadOps > after.ViewReadOps && measured.ViewReadBytes > after.ViewReadBytes
+	if !positioned && !viewed {
+		t.Fatal("neither backend read family detected the persistent-read control")
 	}
 }
 
@@ -143,7 +146,7 @@ func TestSystemMetadataRAMSnapshotsAndRestart(t *testing.T) {
 	if err != nil || got.Name != user.Name || got.S3Keys[0].ID != "snapshot-key-0001" {
 		t.Fatal("restart did not rebuild index", err)
 	}
-	if after := reopened.system.IOStats(); after.ReadOps != before.ReadOps {
+	if after := reopened.system.IOStats(); after.ReadOps != before.ReadOps || after.ViewReadOps != before.ViewReadOps {
 		t.Fatal("first lookup after restart read disk")
 	}
 }

@@ -262,3 +262,25 @@ func TestReadViewWriterErrors(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+type viewCountingWriter struct {
+	calls int
+	bytes uint64
+}
+
+func (w *viewCountingWriter) Write(data []byte) (int, error) {
+	w.calls++
+	w.bytes += uint64(len(data))
+	return len(data), nil
+}
+func TestReadViewSparseWriterRemainsBlockBounded(t *testing.T) {
+	const size = 2*BlockSize + 17
+	view := ReadView{Length: size, Segments: []ReadSegment{{Length: size}}}
+	var writer viewCountingWriter
+	if n, err := view.WriteTo(&writer); err != nil || n != size {
+		t.Fatal(n, err)
+	}
+	if writer.calls != 3 || writer.bytes != size {
+		t.Fatal("sparse copy fragmented into tiny writes", writer)
+	}
+}

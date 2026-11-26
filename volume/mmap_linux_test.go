@@ -382,3 +382,97 @@ func TestMmapLoopBlockdeviceAndResize(t *testing.T) {
 }
 
 var _ io.Writer = (*mappedPointerWriter)(nil)
+
+type failedMappedSync struct {
+	*FileIO
+	fail atomic.Bool
+}
+
+func (d *failedMappedSync) Sync() error {
+	if d.fail.Load() {
+		return io.ErrClosedPipe
+	}
+	return d.FileIO.Sync()
+}
+func TestMmapFailedCloseStillUnmaps(t *testing.T) {
+	file, err := CreateFile(filepath.Join(t.TempDir(), "failed-close"), 8<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dev := &failedMappedSync{FileIO: file}
+	v, err := Format(dev, FormatOptions{Class: SSD})
+	if err != nil {
+		file.Close()
+		t.Fatal(err)
+	}
+	if _, err = testPut(v, testKey(1), []byte("accepted"), Options{Accepted: true}); err != nil {
+		v.Close()
+		t.Fatal(err)
+	}
+	dev.fail.Store(true)
+	if err = v.Close(); err == nil {
+		t.Fatal("injected checkpoint failure hidden")
+	}
+	if file.mapping != nil {
+		t.Fatal("failed Close leaked mapping")
+	}
+	if err = v.Close(); err != nil {
+		t.Fatal("second Close not idempotent", err)
+	}
+}
+
+func TestMmapCallbackPanicRetainsExplicitHandleContract(t *testing.T) {
+	v, _ := mappedTestVolume(t, 4<<20)
+	key := testKey(1)
+	if _, err := testPut(v, key, []byte("value"), Options{}); err != nil {
+		t.Fatal(err)
+	}
+	h, err := v.Open(false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	func() {
+		defer func() {
+			if recover() == nil {
+				t.Fatal("callback panic swallowed")
+			}
+		}()
+		h.WithReadView(key, 0, 5, func(ReadView) error { panic("consumer panic") })
+	}()
+	// The operation lock is released on panic, but the enclosing handle retains
+	// its read lock until the caller's explicit/finally Close as documented.
+	h.Close()
+	if err = v.Grow(8 << 20); err != nil {
+		t.Fatal("panic leaked handle mutex", err)
+	}
+}
+
+func TestMmapCounterPositiveControlUsesRealReadAtFallback(t *testing.T) {
+	file, err := CreateFile(filepath.Join(t.TempDir(), "positioned-control"), 4<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	v, err := Format(readAtOnlyFile{file: file}, FormatOptions{Class: SSD})
+	if err != nil {
+		file.Close()
+		t.Fatal(err)
+	}
+	defer v.Close()
+	key := testKey(1)
+	if _, err = testPut(v, key, []byte("control"), Options{}); err != nil {
+		t.Fatal(err)
+	}
+	h, err := v.Open(false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer h.Close()
+	before := v.ioStatsLocked()
+	if got := readViewBytes(t, h, key, 0, 7); string(got) != "control" {
+		t.Fatal("positioned fallback content")
+	}
+	after := v.ioStatsLocked()
+	if after.ReadOps <= before.ReadOps || after.ReadBytes <= before.ReadBytes || after.ViewReadOps != before.ViewReadOps {
+		t.Fatal("real positioned read was not distinguished from mapped access", before, after)
+	}
+}
