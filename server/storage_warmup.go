@@ -158,6 +158,7 @@ func storageWarmReadMessage(m client.Message) bool {
 		client.BucketList, client.BucketListPage, client.PlacementGroupList, client.AdminOperationStatus,
 		client.VolumeCandidates, client.VolumeCapacityGet, client.VolumeGrowInfo,
 		client.NodeHelloMessage, client.PeerDirectoryMessage, nodeVersionsMessage, client.PeerVerifyAdmin, peerControlInfo, peerSystemChunk,
+		peerVerifyFrontend, peerCowCapture, peerCowRead, peerCowClose, peerCowInventory,
 		0x0100, 0x0101, 0x0107:
 		return true
 	}
