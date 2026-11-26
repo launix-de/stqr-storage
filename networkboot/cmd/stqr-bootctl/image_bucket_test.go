@@ -514,8 +514,22 @@ func TestBootCleanupRetainsMountedUpperUntilStorageConnectionCloses(t *testing.T
 	if _, _, err = mounted.Get(ctx, client.FilesystemRootID()); err != nil {
 		t.Fatal(err)
 	}
-	if err = removeBootSession(ctx, cfg, session.User, session.Upper, session.Lower); err == nil {
-		t.Fatal("cleanup deleted a mounted upper")
+	other, err := newBootSession(ctx, cfg, "ubuntu", 8<<20, "", "ubuntu")
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherMount, err := client.Dial(ctx, other.URI, other.Username, other.Password, other.Upper, "fs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer otherMount.Close()
+
+	// Repeated failed collectors must release their own sockets and keep the
+	// mounted guest usable. Otherwise every later attempt would see a leak.
+	for attempt := 0; attempt < 8; attempt++ {
+		if err = removeBootSession(ctx, cfg, session.User, session.Upper, session.Lower); !errors.Is(err, errSessionActive) {
+			t.Fatalf("expected typed active deferral, got %v", err)
+		}
 	}
 	// Failed collection must not revoke the currently active VM's identity.
 	if _, _, err = mounted.Get(ctx, client.FilesystemRootID()); err != nil {
@@ -531,6 +545,12 @@ func TestBootCleanupRetainsMountedUpperUntilStorageConnectionCloses(t *testing.T
 			t.Fatal(err)
 		}
 		time.Sleep(10 * time.Millisecond)
+	}
+
+	// A concurrent guest on the same lower has an independent identity/upper.
+	// Collecting one must neither block on nor revoke the other.
+	if _, _, err = otherMount.Get(ctx, client.FilesystemRootID()); err != nil {
+		t.Fatal("independent live guest was disrupted", err)
 	}
 	if conn, e := client.Dial(ctx, session.URI, session.Username, session.Password, session.Lower, "fs"); e == nil {
 		conn.Close()
