@@ -103,9 +103,13 @@ introduced by either path.
 
 `IOStats.ReadOps/ReadBytes` count positioned backend reads. Separate
 `ViewReadOps/ViewReadBytes` count mapped/RAM access requests, not physical I/O.
-Neither measures OS page-cache misses or device traffic. Current network Volume
-statistics do not carry view counters; their read rate therefore excludes mapped
-accesses. Logical bucket/user traffic counters still count delivered payload.
+Neither measures OS page-cache misses or device traffic. Existing wire
+`PhysicalReadBytes` is a legacy name: volume/node read rates sum positioned and
+view bytes exactly once and are labeled **storage accesses**, including RAM/mmap,
+metadata and migration. They are not physical-device throughput. Retired volume
+history uses the same conversion. Backend operation counts stay separate from
+object operation counts; logical bucket/user traffic still counts delivered
+payload. No statistics wire layout change is required.
 
 `runtime.AddCleanup` releases the lock for a collected, abandoned handle as a
 fallback. Its independent lease does not retain the handle; `runtime.KeepAlive`

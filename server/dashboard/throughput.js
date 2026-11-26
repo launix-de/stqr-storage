@@ -17,7 +17,7 @@ export function nodeRate(entry,key,now=Date.now()){
 }
 export function throughputHTML(read,write,logical=false){
  const text=formatRate;
- return `<div class="io-rates" title="${logical?'Logische Nutzdaten · alle meldenden Nodes':'Physische Bytes · einschließlich Metadaten und Migration'}"><span>Lesen <strong>${text(read)}</strong></span><span>Schreiben <strong>${text(write)}</strong></span></div>`;
+ return `<div class="io-rates" title="${logical?'Logische Nutzdaten · alle meldenden Nodes':'Speicherzugriffe · einschließlich RAM/mmap, Metadaten und Migration · kein Datenträger-I/O'}"><span>Lesen <strong>${text(read)}</strong></span><span>Schreiben <strong>${text(write)}</strong></span></div>`;
 }
 export function bucketRates(entries,id,now=Date.now()){
  return ['logicalRead','logicalWrite'].map(key=>{
