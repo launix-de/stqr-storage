@@ -75,6 +75,10 @@ func (s *Server) CollectStats(filter client.StatsFilter) client.StatsSnapshot {
 			}
 		}
 	}
+	if s.storageWarming.Load() {
+		snap.NodeState = 2         // runtime pause only; never persistent drain/admin intent
+		snap.ReasonBits |= 1 << 10 // accounting/recovery warmup
+	}
 	var usage syscall.Rusage
 	if syscall.Getrusage(syscall.RUSAGE_SELF, &usage) == nil {
 		snap.CPUTimeNS = uint64(usage.Utime.Nano() + usage.Stime.Nano())
@@ -94,7 +98,7 @@ func (s *Server) CollectStats(filter client.StatsFilter) client.StatsSnapshot {
 		id := client.ID(v.Identity.VolumeID)
 		io := volumeAccessIO(v.IO)
 		state := uint8(m.store.State())
-		if len(m.config.PlacementGroupsPending) > 0 {
+		if s.storageWarming.Load() || len(m.config.PlacementGroupsPending) > 0 {
 			state = 0
 		}
 		if s.controller != nil && m.config.State == "draining" {

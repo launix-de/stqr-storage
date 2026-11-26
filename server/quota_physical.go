@@ -29,6 +29,9 @@ type quotaPhysicalSnapshot struct {
 }
 
 func (b *Bucket) physicalUsage() (uint64, error) {
+	if b.server.storageWarming.Load() {
+		return 0, b.server.storageUnavailable()
+	}
 	var total uint64
 	for _, v := range b.server.quotaVolumes() {
 		if err := b.server.refreshQuotaOwnership(v); err != nil {
@@ -51,6 +54,9 @@ func (b *Bucket) accountedUsage() (uint64, error) {
 	return b.accountedUsageFor(quotaPolicy(b.storageDescription()))
 }
 func (b *Bucket) accountedUsageFor(p BucketPolicy) (uint64, error) {
+	if b.server.storageWarming.Load() {
+		return 0, b.server.storageUnavailable()
+	}
 	if p.Limits.Accounting == "physical" {
 		return b.physicalUsage()
 	}

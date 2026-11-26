@@ -4,6 +4,7 @@ package server
 import (
 	"github.com/launix-de/stqr-storage/client"
 	"github.com/launix-de/stqr-storage/volume"
+	"path/filepath"
 )
 
 func (s *Server) remainingPhysical(view *systemView, node, device client.ID, usage []volume.BucketStorage) uint64 {
@@ -108,6 +109,22 @@ func (s *Server) applyQuotaProtectionLocked() error {
 	s.mu.RUnlock()
 	for _, v := range stores {
 		id := v.Identity().VolumeID
+		if s.storageWarming.Load() && !s.storageAccountingWarmed.Load() {
+			stamp := s.quotaOwnership(v)
+			_, err := v.ConfigureAccounting(volume.AccountingOptions{
+				CachePath: filepath.Join(s.accountingDir, id.String()+".cache"),
+				Stamp:     stamp, Include: stamp.includesRecord,
+				Admission: s.quotaAdmission(v, client.ID(id)),
+				Observer:  func(usage volume.StorageSnapshot) { s.publishQuotaUsage(id, usage.Owned, usage.All) },
+			})
+			if err != nil {
+				return err
+			}
+			s.quotaHooked[id] = v
+			// Unknown is never zero. No reserve/admission writes until all
+			// configured data volumes have exact, published counters.
+			continue
+		}
 		if err := s.refreshQuotaOwnership(v); err != nil {
 			return err
 		}

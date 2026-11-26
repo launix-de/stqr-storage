@@ -16,6 +16,9 @@ import (
 // quota proofs. A probe deadline reports an unavailable measurement; it cannot
 // evict a node, shorten an ownership claim or invent zero usage.
 func (b *Bucket) administrativeUsage(ctx context.Context, p principal) (uint64, error) {
+	if b.server.storageWarming.Load() {
+		return 0, b.server.storageUnavailable()
+	}
 	if b.server.bucketAwaitingRecovery(client.ID(b.ID())) {
 		return 0, fail(503, "bucket has unavailable recovery ranges")
 	}
