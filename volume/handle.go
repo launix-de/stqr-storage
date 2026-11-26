@@ -19,8 +19,9 @@ import (
 // management methods and standalone Stat acquire locks and must be called
 // outside a handle session.
 // A write handle excludes other mutations; a read handle excludes publication.
-// A pinned checkpoint temporarily admits readers while waiting for physical I/O;
-// it still excludes other writers and preserves the handle's accepted bytes.
+// Physical checkpoints release the metadata lock. Readers see the published
+// bytes and later bounded mutations use a separate overlay while the caller
+// waits for its durability ACK. The older fence never confirms that later tail.
 // PrepareMutation alone admits readers during its private payload staging, so
 // large uploads never hide the previous committed object behind a network read.
 // Multiple mutations under a write handle are individually committed, not one
@@ -42,8 +43,8 @@ type handleLease struct {
 }
 
 // Open acquires the volume lock. write=false allows concurrent readers;
-// write=true also permits mutations. Checkpoints may temporarily admit readers
-// while retaining the exclusive right to mutate this volume.
+// write=true also permits mutations. Physical checkpoints release the lock;
+// bounded buffered mutations may publish while that I/O is in flight.
 // The returned handle is the only supported way to compose locked operations.
 func (v *Volume) Open(write bool) (*Handle, error) {
 	if write {
@@ -74,7 +75,7 @@ func (v *Volume) TryOpen(write bool) (h *Handle, acquired bool, err error) {
 }
 func (v *Volume) openHandleLocked(write bool) (*Handle, error) {
 	l := &handleLease{v: v, write: write}
-	if e := v.check(write); e != nil {
+	if e := v.checkHandle(write); e != nil {
 		l.release()
 		return nil, e
 	}
@@ -110,6 +111,10 @@ func (h *Handle) Close() error {
 }
 
 func withHandle[T any](h *Handle, write bool, f func(*Volume) (T, error)) (T, error) {
+	return withHandleMode(h, write, false, f)
+}
+
+func withHandleMode[T any](h *Handle, write, buffered bool, f func(*Volume) (T, error)) (T, error) {
 	// Keep the cleanup target alive through all I/O, including callback panics.
 	defer runtime.KeepAlive(h)
 	var zero T
@@ -125,8 +130,19 @@ func withHandle[T any](h *Handle, write bool, f func(*Volume) (T, error)) (T, er
 	if write && !l.write {
 		return zero, ErrReadOnly
 	}
-	if e := l.v.check(write); e != nil {
-		return zero, e
+	var err error
+	if write && buffered {
+		err = l.v.checkBuffered()
+	} else {
+		err = l.v.check(write)
+	}
+	if err != nil {
+		return zero, err
+	}
+	if write && !buffered {
+		if err := l.v.flushDeferred(); err != nil {
+			return zero, err
+		}
 	}
 	return f(l.v)
 }
@@ -184,8 +200,17 @@ func (h *Handle) ReadAt(k Key, dst []byte, offset uint64) (int, error) {
 }
 
 func (h *Handle) mutate(op uint8, k Key, offset, length uint64, src io.Reader, expected []byte, opts Options) (Result, error) {
-	return withHandle(h, true, func(v *Volume) (Result, error) {
-		return v.mutateWithRetryLocked(op, k, offset, length, src, expected, opts)
+	buffered := opts.prepare == nil && (length <= 1<<20 || op == opTrunc || op == opDelete)
+	return withHandleMode(h, true, buffered, func(v *Volume) (Result, error) {
+		durable := !opts.Accepted
+		if buffered {
+			opts.Accepted = true
+		}
+		result, err := v.mutateWithRetryLocked(op, k, offset, length, src, expected, opts)
+		if err == nil && durable && buffered {
+			err = v.checkpointLockedThrough(v.sb.Generation)
+		}
+		return result, err
 	})
 }
 
@@ -240,13 +265,11 @@ func (h *Handle) Check(k Key, opts Options) error {
 // CAS compares bytes under the volume write lock. WholeObject also compares
 // the complete old length before replacing the object; CreateOnly requires absence.
 func (h *Handle) CAS(k Key, offset uint64, expected, replacement []byte, opts Options) (Info, error) {
-	r, e := withHandle(h, true, func(v *Volume) (Result, error) {
-		if e := validateCAS(offset, expected, replacement, opts); e != nil {
-			return Result{}, e
-		}
-		return v.mutateWithRetryLocked(opCAS, k, offset, uint64(len(replacement)), bytes.NewReader(replacement), expected, opts)
-	})
-	return r.Info, e
+	if err := validateCAS(offset, expected, replacement, opts); err != nil {
+		return Info{}, err
+	}
+	r, err := h.mutate(opCAS, k, offset, uint64(len(replacement)), bytes.NewReader(replacement), expected, opts)
+	return r.Info, err
 }
 
 func (h *Handle) do(write bool, f func(*Volume) error) error {

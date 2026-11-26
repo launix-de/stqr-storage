@@ -125,3 +125,7 @@ predicate without scanning existing records. A changed bucket with retained
 objects, tombstones or retry receipts still triggers a recount; recovery-origin
 and volume-cohort changes conservatively recount too. All predicate/cache changes
 remain under the volume lock and do not change the on-disk format or ACK contract.
+
+The [write-fence implementation](write-fences.md) separates readable publication
+from durable acknowledgement and permits later bounded writes during physical
+checkpoint I/O without holding the volume metadata lock.

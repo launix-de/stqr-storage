@@ -124,6 +124,7 @@ func TestStorageSafetyTreeSplitMergeReuse(t *testing.T) {
 	for round := 0; round < 2; round++ {
 		order := rng.Perm(count)
 		for start := 0; start < count; start += 100 {
+			v.mu.Lock()
 			tx := v.transaction()
 			for _, i := range order[start:min(start+100, count)] {
 				if err := tx.set(&tx.sb.ObjectRoot, objectKey(testKey(uint64(i))), uint64(i+1)); err != nil {
@@ -133,6 +134,7 @@ func TestStorageSafetyTreeSplitMergeReuse(t *testing.T) {
 			if err := tx.commit(false); err != nil {
 				t.Fatal(err)
 			}
+			v.mu.Unlock()
 			assertSafetyTree(t, v, v.sb.ObjectRoot, treeObjects)
 			assertSafetyTree(t, v, v.sb.FreeRoot, treeFree)
 		}
@@ -149,6 +151,7 @@ func TestStorageSafetyTreeSplitMergeReuse(t *testing.T) {
 		}
 		order = rng.Perm(count)
 		for start := 0; start < count; start += 100 {
+			v.mu.Lock()
 			tx := v.transaction()
 			for _, i := range order[start:min(start+100, count)] {
 				if err := tx.remove(&tx.sb.ObjectRoot, objectKey(testKey(uint64(i)))); err != nil {
@@ -158,6 +161,7 @@ func TestStorageSafetyTreeSplitMergeReuse(t *testing.T) {
 			if err := tx.commit(false); err != nil {
 				t.Fatal(err)
 			}
+			v.mu.Unlock()
 			assertSafetyTree(t, v, v.sb.ObjectRoot, treeObjects)
 			assertSafetyTree(t, v, v.sb.FreeRoot, treeFree)
 		}

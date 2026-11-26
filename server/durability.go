@@ -35,6 +35,17 @@ type acceptedCheckpoint struct {
 
 func (*acceptedCheckpoint) Error() string { return "waiting for local write fence" }
 
+// A completed logical mutation waiting only for its durability ACK. Its payload
+// must never be consumed again, nor its APPEND/CAS applied a second time.
+type publishedCheckpoint struct {
+	volume     *volume.Volume
+	generation uint64
+}
+
+func (*publishedCheckpoint) Error() string {
+	return "published mutation awaiting durable acknowledgement"
+}
+
 // Called under opMu before every object mutation. Keeping just one volatile
 // volume per bucket preserves causal data/index/inode ordering across local
 // volumes: a change of destination checkpoints the preceding volume first.

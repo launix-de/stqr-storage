@@ -88,3 +88,26 @@ func ensureFileBacking(f *os.File, size int64) error {
 	}
 	return f.Sync()
 }
+
+// fdatasync is a real persistence barrier, including file-size/allocation
+// metadata needed to retrieve the data, but not unrelated timestamp updates.
+// SyscallConn pins the descriptor against Close without serializing ReadAt or
+// WriteAt through an application-wide file/volume lock.
+func syncVolumeFile(f *os.File) error {
+	raw, err := f.SyscallConn()
+	if err != nil {
+		return err
+	}
+	var syncErr error
+	if err = raw.Control(func(fd uintptr) {
+		for {
+			syncErr = syscall.Fdatasync(int(fd))
+			if syncErr != syscall.EINTR {
+				break
+			}
+		}
+	}); err != nil {
+		return err
+	}
+	return syncErr
+}

@@ -187,7 +187,7 @@ func (h *Handle) RestoreEncoded(k Key, info Info, source EncodedSource, opts Opt
 		if err = t.commitReserved(opts.UseGuaranteed, opts.InFlightAllowance, opts.GuaranteedAllowance); err != nil {
 			return err
 		}
-		v.cache.put(k, o)
+		v.cache.remove(k)
 		return nil
 	})
 }

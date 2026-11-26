@@ -3,9 +3,8 @@ package server
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"io"
-	"os"
 	"time"
 
 	"github.com/launix-de/stqr-storage/client"
@@ -272,26 +271,23 @@ func (r *rangeManager) announce(p rangePlan, c rangeCommit) {
 	}
 }
 
+// Reclamation is background work. Scan bounded index pages and publish one
+// batch per lock hold; wait for its durability outside node and volume locks.
 func (r *rangeManager) cleanup(ctx context.Context, p rangePlan) error {
 	if p.ReplicaAdd || p.ReplicaRemove || p.ReplicaPromote || p.ReplicaRelocate {
 		return nil
 	}
-	end, err := r.server.beginRebuildIO(ctx)
-	if err != nil {
-		return err
-	}
-	defer end()
 	for _, v := range r.sourceVolumes(p) {
 		var after *volume.ObjectID
 		for {
-			if err := ctx.Err(); err != nil {
+			if err := r.server.waitForUserIO(ctx); err != nil {
 				return err
 			}
 			h, err := v.Open(false)
 			if err != nil {
 				return err
 			}
-			records, err := p.scanObjects(h, after, 128)
+			records, err := p.scanObjects(h, after, 64)
 			h.Close()
 			if err != nil {
 				return err
@@ -299,92 +295,134 @@ func (r *rangeManager) cleanup(ctx context.Context, p rangePlan) error {
 			if len(records) == 0 {
 				break
 			}
+			var obsolete []volume.ObjectRecord
 			for _, record := range records {
-				if !p.contains(record.Key.Object) {
-					continue
+				if p.contains(record.Key.Object) {
+					obsolete = append(obsolete, record)
 				}
-				if err := r.server.waitForUserIO(ctx); err != nil {
-					return err
-				}
-				r.server.opMu.Lock()
-				if err := r.cleanupAllowed(p); err != nil {
-					r.server.opMu.Unlock()
-					return err
-				}
-				h, err := v.Open(true)
-				if err == nil {
-					err = h.Purge(record.Key)
-					h.Close()
-				}
-				r.server.opMu.Unlock()
-				if err != nil {
+			}
+			if len(obsolete) > 0 {
+				if err := r.cleanupBatch(ctx, p, v, obsolete, nil); err != nil {
 					return err
 				}
 			}
 			last := records[len(records)-1].Key.Object
 			after = &last
 		}
-		file, err := os.CreateTemp("", "stqr-range-cleanup-*")
-		if err != nil {
-			return err
-		}
-		err = func() error {
-			defer func() { file.Close(); os.Remove(file.Name()) }()
+		var cursor *volume.ID
+		for {
+			if err := r.server.waitForUserIO(ctx); err != nil {
+				return err
+			}
 			h, err := v.Open(false)
 			if err != nil {
 				return err
 			}
-			err = h.ScanRequests(func(record volume.RequestRecord) error {
-				if record.Key.Bucket != volume.ID(p.Before.Bucket) || !p.contains(record.Key.Object) {
-					return nil
-				}
-				_, err := file.Write(record.ID[:])
-				return err
-			})
+			records, err := h.ScanRequestRecords(cursor, 64)
 			h.Close()
 			if err != nil {
 				return err
 			}
-			if _, err := file.Seek(0, io.SeekStart); err != nil {
-				return err
+			if len(records) == 0 {
+				break
 			}
-			for {
-				var id volume.ID
-				_, err := io.ReadFull(file, id[:])
-				if err == io.EOF {
-					return nil
+			var ids []volume.ID
+			for _, record := range records {
+				if record.Key.Bucket == volume.ID(p.Before.Bucket) && p.contains(record.Key.Object) {
+					ids = append(ids, record.ID)
 				}
-				if err != nil {
-					return err
-				}
-				if err := ctx.Err(); err != nil {
-					return err
-				}
-				r.server.opMu.Lock()
-				if err := r.cleanupAllowed(p); err != nil {
-					r.server.opMu.Unlock()
-					return err
-				}
-				h, err := v.Open(true)
-				if err == nil {
-					err = h.ForgetRequest(id)
-					h.Close()
-				}
-				r.server.opMu.Unlock()
-				if err != nil {
+			}
+			if len(ids) > 0 {
+				if err := r.cleanupBatch(ctx, p, v, nil, ids); err != nil {
 					return err
 				}
 			}
-		}()
-		if err != nil {
-			return err
+			last := records[len(records)-1].ID
+			cursor = &last
 		}
 	}
 	return nil
 }
 
-// The scan is advisory. Recheck authority under opMu immediately before each
-// destructive write: an exclusion may have cancelled this worker meanwhile.
+func (r *rangeManager) cleanupBatch(ctx context.Context, p rangePlan, v *volume.Volume, objects []volume.ObjectRecord, ids []volume.ID) error {
+	// Match PR #44's page-scoped priority: unfinished bucket deletions
+	// receive a bounded turn after this page releases its locks and priority.
+	defer r.server.reclaimBucketStep()
+	end, err := r.server.beginRebuildIO(ctx)
+	if err != nil {
+		return err
+	}
+	defer end()
+	for {
+		if err := r.server.waitForUserIO(ctx); err != nil {
+			return err
+		}
+		r.server.opMu.Lock()
+		if err := r.cleanupAllowed(p); err != nil {
+			r.server.opMu.Unlock()
+			return err
+		}
+		if generation, pending := v.PendingCheckpoint(true, 0); pending {
+			r.server.opMu.Unlock()
+			if err := v.CheckpointThrough(generation); err != nil {
+				return err
+			}
+			continue
+		}
+		h, acquired, err := v.TryOpenBuffered()
+		if err != nil {
+			r.server.opMu.Unlock()
+			return err
+		}
+		if !acquired {
+			r.server.opMu.Unlock()
+			if err := v.CheckpointThrough(0); err != nil {
+				return err
+			}
+			continue
+		}
+		var generation uint64
+		if len(objects) > 0 {
+			generation, err = h.PurgeBatchAccepted(objects)
+		} else {
+			generation, err = h.ForgetRequestsAccepted(ids)
+		}
+		h.Close()
+		r.server.opMu.Unlock()
+		if errors.Is(err, volume.ErrBusy) || errors.Is(err, volume.ErrFull) {
+			// Flush an earlier buffer outside node admission. If no buffer can
+			// fit (tiny/full volume), bounded cleanup uses the existing WAL.
+			generation, _ := v.PendingCheckpoint(false, 0)
+			if !v.IsDurableThrough(generation) {
+				if err := v.CheckpointThrough(generation); err != nil {
+					return err
+				}
+				continue
+			}
+			r.server.opMu.Lock()
+			if err := r.cleanupAllowed(p); err != nil {
+				r.server.opMu.Unlock()
+				return err
+			}
+			h, err := v.Open(true)
+			if err == nil {
+				if len(objects) > 0 {
+					err = h.PurgeBatch(objects)
+				} else {
+					err = h.ForgetRequests(ids)
+				}
+				h.Close()
+			}
+			r.server.opMu.Unlock()
+			return err
+		}
+		if err != nil {
+			return err
+		}
+		return v.CheckpointThrough(generation)
+	}
+}
+
 func (r *rangeManager) cleanupAllowed(p rangePlan) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()

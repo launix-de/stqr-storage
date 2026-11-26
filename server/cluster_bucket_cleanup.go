@@ -3,6 +3,7 @@ package server
 
 import (
 	"context"
+	"errors"
 	"github.com/launix-de/stqr-storage/client"
 	"github.com/launix-de/stqr-storage/volume"
 	"sort"
@@ -141,6 +142,7 @@ type cleanupVolumeProgress struct {
 	objectsDone  bool
 	objectAfter  *volume.ObjectID
 	requestAfter *volume.ID
+	checkpoint   uint64
 }
 type bucketCleanupJob struct {
 	volumes []cleanupVolumeProgress
@@ -238,6 +240,9 @@ func (s *Server) reclaimBucketStep() bool {
 		if !s.cleanupIdle() || !s.opMu.TryLock() {
 			return false
 		}
+		var checkpointVolume *volume.Volume
+		var checkpointGeneration uint64
+		var checkpointProgress *cleanupVolumeProgress
 		worked := func() bool {
 			defer s.opMu.Unlock()
 			if !s.cleanupIdle() {
@@ -249,6 +254,10 @@ func (s *Server) reclaimBucketStep() bool {
 			s.mu.RUnlock()
 			if managed == nil {
 				job.next++
+				return true
+			}
+			if generation, pending := managed.store.PendingCheckpoint(true, 0); pending || progress.checkpoint != 0 {
+				checkpointVolume, checkpointGeneration, checkpointProgress = managed.store, max(generation, progress.checkpoint), progress
 				return true
 			}
 			h, acquired, err := managed.store.TryOpen(true)
@@ -282,9 +291,16 @@ func (s *Server) reclaimBucketStep() bool {
 					progress.objectsDone = true
 					return true
 				}
-				if err = h.PurgeBatch(records); err != nil {
+				generation, err := h.PurgeBatchAccepted(records)
+				if err != nil {
+					if errors.Is(err, volume.ErrBusy) || errors.Is(err, volume.ErrFull) {
+						generation, _ = h.Generation()
+						checkpointVolume, checkpointGeneration, checkpointProgress = managed.store, generation, progress
+					}
 					return false
 				}
+				progress.checkpoint = generation
+				checkpointVolume, checkpointGeneration, checkpointProgress = managed.store, generation, progress
 				next := records[len(records)-1].Key.Object
 				progress.objectAfter = &next
 				return true
@@ -303,13 +319,30 @@ func (s *Server) reclaimBucketStep() bool {
 					remove = append(remove, record.ID)
 				}
 			}
-			if err = h.ForgetRequests(remove); err != nil {
-				return false
+			if len(remove) > 0 {
+				generation, err := h.ForgetRequestsAccepted(remove)
+				if err != nil {
+					if errors.Is(err, volume.ErrBusy) || errors.Is(err, volume.ErrFull) {
+						generation, _ = h.Generation()
+						checkpointVolume, checkpointGeneration, checkpointProgress = managed.store, generation, progress
+					}
+					return false
+				}
+				progress.checkpoint = generation
+				checkpointVolume, checkpointGeneration, checkpointProgress = managed.store, generation, progress
 			}
 			next := records[len(records)-1].ID
 			progress.requestAfter = &next
 			return true
 		}()
+		// DELETING remains durable until all reclaimed pages are checkpointed.
+		// No node admission or volume lock is held during physical writeback.
+		if checkpointVolume != nil {
+			if err := checkpointVolume.CheckpointThrough(checkpointGeneration); err != nil {
+				return false
+			}
+			checkpointProgress.checkpoint = 0
+		}
 		return worked
 	}
 	return false

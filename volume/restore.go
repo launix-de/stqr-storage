@@ -180,7 +180,7 @@ func (v *Volume) restoreLocked(k Key, info Info, source ExtentSource, opts Optio
 	if e = t.commitReserved(opts.UseGuaranteed, opts.InFlightAllowance, opts.GuaranteedAllowance); e != nil {
 		return e
 	}
-	v.cache.put(k, o)
+	v.cache.remove(k)
 	return nil
 }
 func (v *Volume) restoreRequestLocked(x RequestRecord, opts Options) error {

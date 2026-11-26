@@ -31,16 +31,13 @@ operations on different volumes, callers must establish a consistent lock order.
 The server is responsible for cluster ownership, replication, bucket access and
 quotas across volumes. `Bind` persists/checks the node/cluster identity.
 
-Private payload staging and pinned checkpoints are deliberate exceptions to
-the write handle's read exclusion. `PrepareMutation` admits readers of the
-previous committed index while staging private payloads. Checkpoint I/O pins the
-existing accepted-write buffer, releases the metadata lock and admits readers
-of those same visible bytes. Subsequent in-place writers wait without excluding
-readers until the WAL is reusable; completion and failure are published under
-the metadata lock. Closing waits for either phase before releasing the device.
-The server drops its node admission locks before waiting, then rechecks
-authorization, placement and quotas before consuming the incoming payload.
-This does not introduce object revisions or parallel in-place writers.
+Private payload staging and physical durability fences release the metadata
+lock. A complete published image is readable before its durable ACK. Later
+bounded mutations use a separate overlay while an earlier image is being
+checkpointed; an old fence confirms only the image it wrote. Both WAL allocations
+and page images remain protected until completion. Closing rejects new
+publications before flushing the final overlay. See [write fences](write-fences.md)
+for acknowledgement ordering, Linux persistence primitives and resource bounds.
 
 `Volume.Stat` is an independent general metadata query. All other object access
 is exclusively through a handle from `Volume.Open(write bool)`; there is no
