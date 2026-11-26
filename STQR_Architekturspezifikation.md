@@ -967,6 +967,26 @@ Volume-Format **3** ergänzt die bestehende Formatfamilie `STQRVOL2` um Verwaltu
 - `Handle.WithReadView(key, offset, length, callback)` verleiht innerhalb des Callbacks geprüfte, **nur lesbare** Segmente. RAW-Daten referenzieren mmap-/RAM-Seiten; Sparse-Lücken werden als Nullbereiche ohne Payload-Puffer angegeben. Komprimierte Chunks werden bei Bedarf begrenzt dekodiert. Slices dürfen weder verändert noch nach Callback-Ende behalten werden. Der aktive Methodenaufruf verhindert paralleles Handle-Close und vorzeitiges Runtime-Cleanup. Callback-Reentry in Handle/Volume ist verboten. Ein View-Bereich ist nach EOF-Clipping auf `MaxBufferedRead` begrenzt; `CopyTo` streamt auch größere Objekte in begrenzten Views und verlangt keine Ganzobjekt-Allokation. `Get`/`GetRange` liefern weiterhin eigene veränderbare Kopien. Diese Strategie verändert weder Objekt-IDs noch das Volume-Format.
 - Index/Metadaten werden für schnellen Zugriff im RAM gecacht. Bei vielen kleinen Objekten wird ein **begrenzter Cache plus On-Volume-Index** verwendet; Lookup/Recovery dürfen keinen unbegrenzten Vollindex oder sämtliche Payloads in RAM verlangen. Der konkrete Library-Stand dokumentiert Cachegrenzen, Disk-Fallback, Checkpoint/Compaction und deren Tests.
 
+### 8.3.2 Verfügbarkeit während der Wiederherstellung
+
+Vor dem HTTP-Start werden Identität, WAL, System-Konfiguration sowie Membership-,
+Placement- und Range-Journale einschließlich Source-Fences und Target-Aktivierungen
+validiert. Danach stehen Authentifizierung, Dashboard, Konfiguration, Statistiken
+und GET auf eindeutig autoritativen Ranges bereits zur Verfügung. Ein fehlender
+Aggregat-Checkpoint löst höchstens einen Hintergrundlauf mit begrenzten Caches
+unter Read-Locks aus; er verschiebt den Listener nicht hinter einen Objektzensus.
+Ein abgeleiteter, exakt an Volume-Checkpoint und Ownership-Prädikat gebundener
+Zähler-Cache enthält nur Aggregate pro Bucket, keine Objektverzeichnisse.
+
+Bis Zähler, Import-Reserven und lokale Recovery vollständig rekonstruiert sind,
+bedeutet fehlender Verbrauch **unbekannt**, niemals null oder freies Kontingent.
+Schreibende Requests und Kapazitäts-/Placement-Änderungen erhalten vor einem
+Write-Lock HTTP-/Protokollstatus 503. Migration, Rebalancing und schreibende
+Housekeeping-Worker starten erst danach. Die Node meldet vorübergehend den
+Laufzeitzustand pausiert mit Reason-Bit 10 (Speicher-Wiederherstellung); daraus
+folgt weder ein persistierter Drain noch eine Membership-Änderung. Dashboard und
+Leser dürfen nicht hinter einem wartenden Cold-Startup-Writer blockiert werden.
+
 ### 8.4 VolumeIO
 
 ```go

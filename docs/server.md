@@ -33,6 +33,19 @@ corrupt data instead of resetting it. Cluster admission publishes this system
 graph through ALL/EVERYWHERE and the common system placement group. A known peer
 or `--connect` never bootstraps a second cluster.
 
+## Startup availability
+
+The listener starts after identity, WAL, committed system metadata and range
+fences/activations have been replayed. A missing derived accounting checkpoint
+warms bounded per-bucket counters in the background under shared volume locks.
+Authenticated configuration, statistics and authoritative object GET remain
+available. Missing usage is unknown: writes and management changes receive 503
+until counters, import reservations and recovery are complete. Runtime statistics
+mark the node paused with reason bit 10, without persisting drain intent. An
+exact checkpoint cache avoids object-record reads after a clean restart.
+`Server.WaitStorageReady(ctx)` is available to embedded callers requiring writes;
+the daemon does not wait on it before opening its HTTP listener.
+
 ## Startup parameters
 
 Only explicitly supplied flags override the configuration. Overrides are saved.

@@ -127,6 +127,10 @@ func (s *Server) Handler() http.Handler {
 			httpError(w, 403, errors.New("CSRF token required"))
 			return
 		}
+		if s.storageWarming.Load() && r.Method != "GET" && r.Method != "HEAD" && r.URL.Path != "/api/message" && r.URL.Path != "/api/session" {
+			httpError(w, 503, s.storageUnavailable())
+			return
+		}
 		switch {
 		case r.URL.Path == "/api/session":
 			switch r.Method {
@@ -159,7 +163,14 @@ func (s *Server) Handler() http.Handler {
 		case strings.HasPrefix(r.URL.Path, "/api/users/"):
 			s.serveS3Keys(w, r, p)
 		case r.URL.Path == "/api/health" && r.Method == "GET":
-			writeJSON(w, 200, map[string]string{"state": "active", "mode": "single-node"})
+			state := "active"
+			if s.storageWarming.Load() {
+				state = "warming"
+			}
+			if s.storageWarmError.Load() != nil {
+				state = "recovery-failed"
+			}
+			writeJSON(w, 200, map[string]string{"state": state})
 		case r.URL.Path == "/api/ws" && r.Method == "GET":
 			s.serveWebSocket(w, r, p)
 		case r.URL.Path == "/api/message" && r.Method == "POST":
