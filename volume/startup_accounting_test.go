@@ -69,7 +69,7 @@ func TestStartupAccountingColdSinglePassReadBudget(t *testing.T) {
 	// page crossings and the tree. A second census/repeated receipt decoding
 	// exceeds this bound even when the operating system has every page cached.
 	budget := uint64(4*n + 64)
-	if reads := after.ReadOps - before.ReadOps; reads > budget {
+	if reads := startupAccountingReadOps(after) - startupAccountingReadOps(before); reads > budget {
 		t.Fatalf("startup exceeded single-pass read budget: reads=%d budget=%d", reads, budget)
 	}
 	if predicateCalls != 0 {
@@ -91,7 +91,7 @@ func TestStartupAccountingColdSinglePassReadBudget(t *testing.T) {
 	if len(v.accounting) != 2 || len(v.owned) != 2 || len(v.cache.items) > 256 || len(v.nodes.items) > 256 {
 		t.Fatal("census retained an object-sized directory")
 	}
-	t.Logf("cold census: %d objects plus %d receipts, %d backend reads", n, n, after.ReadOps-before.ReadOps)
+	t.Logf("cold census: %d objects plus %d receipts, %d backend reads", n, n, startupAccountingReadOps(after)-startupAccountingReadOps(before))
 }
 
 func TestStartupAccountingOwnershipModesAndMutation(t *testing.T) {
@@ -184,7 +184,7 @@ func TestStartupAccountingOwnershipModesAndMutation(t *testing.T) {
 			if err = v.SetOwnershipFilter(stamp, include); err != nil {
 				t.Fatal(err)
 			}
-			if after := v.IOStats(); after.ReadOps != before.ReadOps {
+			if after := v.IOStats(); startupAccountingReadOps(after) != startupAccountingReadOps(before) {
 				t.Fatal("unchanged ownership recounted records")
 			}
 			// The initial proof still installs the actual future-write predicate.
@@ -229,8 +229,8 @@ func TestStartupAccountingFirstUniformFilterUsesAlreadyLoadedTotals(t *testing.T
 		if err = v.SetOwnershipFilter(startupOwnershipStamp{uniform: true, own: own}, func(Key, bool) bool { calls++; return own }); err != nil {
 			t.Fatal(err)
 		}
-		if after := v.IOStats(); after.ReadOps != before.ReadOps || calls != 0 {
-			t.Fatal("first uniform filter reread initialized totals", calls, after.ReadOps-before.ReadOps)
+		if after := v.IOStats(); startupAccountingReadOps(after) != startupAccountingReadOps(before) || calls != 0 {
+			t.Fatal("first uniform filter reread initialized totals", calls, startupAccountingReadOps(after)-startupAccountingReadOps(before))
 		}
 		h, _ := v.Open(false)
 		got, err := h.OwnedStorageUsage()
@@ -291,4 +291,15 @@ func TestStartupAccountingFailedCensusPublishesNoPartialTotals(t *testing.T) {
 	if err != nil || !reflect.DeepEqual(got, want) {
 		t.Fatal("retry used partial counters", got, want, err)
 	}
+}
+
+// The mmap extension adds a separate memory-view family. Keep this startup
+// oracle valid both before and after that extension is merged, without folding
+// memory accesses into the production positioned-I/O metric.
+func startupAccountingReadOps(s IOStats) uint64 {
+	n := s.ReadOps
+	if field := reflect.ValueOf(s).FieldByName("ViewReadOps"); field.IsValid() {
+		n += field.Uint()
+	}
+	return n
 }
