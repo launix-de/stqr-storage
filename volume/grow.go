@@ -95,6 +95,11 @@ func (v *Volume) adoptBackendSizeLocked() (uint64, error) {
 	if size == v.sb.Identity.Size {
 		return size, nil
 	}
+	if file, ok := v.dev.(*meteredIO).VolumeIO.(*FileIO); ok {
+		if err := file.remap(n); err != nil {
+			return 0, err
+		}
+	}
 	v.limit = size
 	t := v.transaction()
 	old := t.sb.Identity.Size
@@ -204,6 +209,10 @@ func (v *Volume) Shrink(sizeBytes int64) error {
 		}
 		d.mu.Unlock()
 	case *FileIO:
+		if e = d.remap(n); e != nil {
+			v.failed = e
+			return e
+		}
 		if e = d.file.Truncate(n); e == nil {
 			e = d.file.Sync()
 		}

@@ -23,9 +23,14 @@ import (
 //     Handle.Close, except that pinned checkpoints admit readers during I/O.
 //     Use defer Close; CopyTo does not release the handle. Never
 //     reenter Volume methods while holding a handle. Neither type may be copied.
-//   - Payloads are accessed in bounded blocks, never through a mandatory mmap.
-//     Metadata uses a bounded RAM cache and page-sized B+-trees. Neither opening nor looking up many objects requires a full RAM
-//     directory. In-flight operations can temporarily hold one object's metadata.
+//   - Linux files/devices use read-only, demand-paged mmap; private RAM devices
+//     borrow their existing sparse pages. No eager preload or complete object
+//     directory is required. Metadata caches and decompression remain bounded.
+//     Unsupported backends retain bounded positioned reads.
+//   - Borrowed read slices are read-only and valid only inside WithReadView's
+//     callback. The Handle and its private lock pin mapping/overlay lifetimes;
+//     Grow, Rescan, Shrink and Close cannot unmap an active read handle. An
+//     independently resized/truncated backing device violates exclusive ownership.
 //   - Checkpoint I/O runs against a pinned, immutable accepted-write buffer
 //     outside the metadata lock. Readers may continue; subsequent in-place
 //     writers use a separate bounded overlay until the WAL space is reusable.
@@ -146,7 +151,10 @@ func New(filename string, sizeBytes int64, class Class) (*Volume, error) {
 			d.Close()
 			return nil, err
 		}
-		d.size = n
+		if err = d.remap(n); err != nil {
+			d.Close()
+			return nil, err
+		}
 	}
 	v, e := Open(d, OpenOptions{})
 	if errors.Is(e, ErrUnformatted) {
