@@ -277,49 +277,75 @@ func (c *Catalog) ReadAt(ctx context.Context, m Metadata, dst []byte, off uint64
 	}
 	defer complete()
 	clear(dst)
-	for len(dst) > 0 {
-		index, at := off/StripeSize, off%StripeSize
+	parallel, ok := c.store.(interface{ ConcurrentObjectRequests() bool })
+	if !ok || !parallel.ConcurrentObjectRequests() {
+		for len(dst) > 0 {
+			at := off % StripeSize
+			n := min(uint64(len(dst)), StripeSize-at)
+			if err := c.readStripe(ctx, StripeID(m.ID, off/StripeSize), at, dst[:n]); err != nil {
+				return err
+			}
+			dst = dst[n:]
+			off += n
+		}
+		return nil
+	}
+	batch := newStripeReadScatter(ctx)
+	defer batch.cancel()
+	for len(dst) > 0 && batch.ctx.Err() == nil {
+		at := off % StripeSize
 		n := min(uint64(len(dst)), StripeSize-at)
-		id := StripeID(m.ID, index)
-		var data []byte
-		var info client.ObjectInfo
-		var e error
-		if at == 0 && n == StripeSize {
-			data, info, e = c.store.Get(ctx, id)
-		} else {
-			data, info, e = c.store.GetRange(ctx, id, at, n)
-			var status *client.StatusError
-			if errors.Is(e, client.ErrRange) || (errors.As(e, &status) && status.Status == 400) {
-				// Object ranges are bounded by payload length. Disk holes/tails are
-				// interpreted here, never by the storage server. No extra Stat is needed
-				// for ordinary reads within a populated stripe.
-				info, e = c.store.Stat(ctx, id)
-				if e == nil {
-					if info.Length > StripeSize {
-						return client.ErrProtocol
-					}
-					if at >= info.Length {
-						data = nil
-					} else {
-						data, info, e = c.store.GetRange(ctx, id, at, min(n, info.Length-at))
-					}
-				}
-			}
-		}
-		if e != nil && !errors.Is(e, client.ErrNotFound) {
-			return e
-		}
-		if e == nil {
-			if info.Length > StripeSize || uint64(len(data)) > n {
-				return client.ErrProtocol
-			}
-			copy(dst[:n], data)
-		}
+		id, part := StripeID(m.ID, off/StripeSize), dst[:n]
+		batch.run(func() error { return c.readStripe(batch.ctx, id, at, part) })
 		dst = dst[n:]
 		off += n
 	}
+	batch.work.Wait()
+	if batch.err != nil {
+		return batch.err
+	}
+	return batch.ctx.Err()
+}
+func (c *Catalog) readStripe(ctx context.Context, id client.ObjectID, at uint64, dst []byte) error {
+	n := uint64(len(dst))
+
+	var data []byte
+	var info client.ObjectInfo
+	var e error
+	if at == 0 && n == StripeSize {
+		data, info, e = c.store.Get(ctx, id)
+	} else {
+		data, info, e = c.store.GetRange(ctx, id, at, n)
+		var status *client.StatusError
+		if errors.Is(e, client.ErrRange) || (errors.As(e, &status) && status.Status == 400) {
+			// Object ranges are bounded by payload length. Disk holes/tails are
+			// interpreted here, never by the storage server. No extra Stat is needed
+			// for ordinary reads within a populated stripe.
+			info, e = c.store.Stat(ctx, id)
+			if e == nil {
+				if info.Length > StripeSize {
+					return client.ErrProtocol
+				}
+				if at >= info.Length {
+					data = nil
+				} else {
+					data, info, e = c.store.GetRange(ctx, id, at, min(n, info.Length-at))
+				}
+			}
+		}
+	}
+	if e != nil && !errors.Is(e, client.ErrNotFound) {
+		return e
+	}
+	if e == nil {
+		if info.Length > StripeSize || uint64(len(data)) > n {
+			return client.ErrProtocol
+		}
+		copy(dst[:n], data)
+	}
 	return nil
 }
+
 func (c *Catalog) WriteAt(ctx context.Context, m Metadata, data []byte, off uint64) error {
 	if off > m.Size || uint64(len(data)) > m.Size-off {
 		return client.ErrRange
