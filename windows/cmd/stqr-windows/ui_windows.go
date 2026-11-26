@@ -206,8 +206,8 @@ func runUIRPC() error {
 		defer close(finished)
 		ctx = context.WithValue(ctx, uiStateKey{}, func() { send(uiReply{Type: "mounted", Running: true}) })
 		send(uiReply{Type: "connecting"})
-		err = mount(ctx, c, request.Initialize, installation, request.Persist, !request.Persist)
-		if ctx.Err() != nil {
+		err = mountResult(ctx, mount(ctx, c, request.Initialize, installation, request.Persist, !request.Persist))
+		if err == nil {
 			send(uiReply{Type: "stopped"})
 			return nil
 		}

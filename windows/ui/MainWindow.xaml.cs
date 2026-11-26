@@ -199,7 +199,7 @@ public sealed partial class MainWindow : Window
     private async Task SmokeTest()
     {
         if (!Server.Focus(FocusState.Keyboard)) throw new Exception("Server field cannot receive keyboard focus");
-        if (!Microsoft.UI.Xaml.Input.FocusManager.TryMoveFocus(Microsoft.UI.Xaml.Input.FocusNavigationDirection.Next, new Microsoft.UI.Xaml.Input.FindNextElementOptions { SearchRoot = Root })) throw new Exception("Keyboard navigation failed");
+        if (!Microsoft.UI.Xaml.Input.FocusManager.TryMoveFocus(Microsoft.UI.Xaml.Input.FocusNavigationDirection.Next)) throw new Exception("Keyboard navigation failed");
         Server.Text = "invalid";
         try { ReadConfig(); throw new Exception("Invalid server was accepted"); }
         catch (InvalidOperationException) { }

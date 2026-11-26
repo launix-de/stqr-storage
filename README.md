@@ -164,7 +164,7 @@ those owners and migrates ranges as capacity and placement requirements change.
 | S3 | GET/HEAD/PUT/DELETE, ranges/conditions, listing, multipart, copy, bulk delete, checksums, SigV4, presigned URLs and private/public-read object ACLs |
 | Linux FUSE | Read/write and readonly mounts, permissions, sparse files, rename, symlinks, hardlinks, xattrs, FIFO/socket inodes, live capacity reporting and offline `--fsck` |
 | Linux kernel client | Standalone `kstqr` mounts sharing the normal native filesystem format, subscriptions, mmap/writeback and live capacity reporting; see [kernel documentation](kernel/kstqr/README.md) |
-| Windows client | WinFsp drive letters, setup GUI, encrypted saved profiles, per-user login startup and Explorer change notifications; see [windows/](windows/README.md) |
+| Windows client | WinUI configuration, WinFsp drive letters, native overlays, shared user attributes, encrypted profiles, login startup and Explorer notifications; see [windows/](windows/README.md) |
 | Native overlays | Partial-content copy-up, metadata overrides, whiteouts and persisted write whitelists |
 | Virtual disks | Named sparse block devices, QEMU-compatible NBD exports, ranged I/O, FLUSH/FUA and TRIM; no QEMU rebuild required |
 | Networkboot | Template installation/editing, boot-artifact publication, PXE gateway, per-machine writable sessions and PAM home activation |
@@ -236,7 +236,8 @@ builds. Individual targets keep their existing output paths:
 | `make nbd` | `qemu-plugin-nbd/bin/stqr-nbd`, native NBD client |
 | `make pam` | `networkboot/bin/pam_stqr.so` |
 | `make networkboot` | Boot tools/helpers, PAM module and kernel source archive in `networkboot/bin/` |
-| `make windows` | `windows/bin/stqr-windows.exe` (amd64 cross-build) |
+| `make windows` | Windows Go backend only: `windows/bin/stqr-windows.exe` (amd64 cross-build) |
+| `make windows-package` | Full self-contained WinUI + Go bundle; requires a Windows host, PowerShell and .NET 10 |
 
 The complete build requires GNU Make, Go 1.24+, a C11 compiler, OpenSSL development
 headers/libraries, static libc, PAM development headers/runtime (`libpam0g-dev`

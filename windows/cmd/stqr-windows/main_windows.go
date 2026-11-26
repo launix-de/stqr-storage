@@ -25,6 +25,15 @@ import (
 )
 
 var errMountUnavailable = errors.New("Windows mount unavailable")
+var errFinalSync = errors.New("final filesystem sync failed")
+
+// Cancellation may end a mount normally, but must never hide a failed barrier.
+func mountResult(ctx context.Context, err error) error {
+	if ctx.Err() != nil && !errors.Is(err, errFinalSync) {
+		return nil
+	}
+	return err
+}
 
 func run() error {
 	flags := flag.NewFlagSet("stqr-windows", flag.ContinueOnError)
@@ -155,10 +164,13 @@ func run() error {
 		defer log.Close()
 		for {
 			e = mount(ctx, c, false, installation, false, false)
-			if e == nil || ctx.Err() != nil {
+			if e == nil {
 				return nil
 			}
 			fmt.Fprintf(log, "%s %v\n", time.Now().Format(time.RFC3339), e)
+			if ctx.Err() != nil {
+				return mountResult(ctx, e)
+			}
 			if errors.Is(e, errMountUnavailable) {
 				return e
 			}
@@ -170,10 +182,7 @@ func run() error {
 		}
 	}
 	e = mount(ctx, c, *initialize, installation, *install, false)
-	if ctx.Err() != nil {
-		return nil
-	}
-	return e
+	return mountResult(ctx, e)
 }
 
 func mount(ctx context.Context, c mountConfig, initialize bool, installation installation, persist, forget bool) (result error) {
@@ -201,7 +210,9 @@ func mount(ctx context.Context, c mountConfig, initialize bool, installation ins
 	defer func() {
 		syncCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		result = errors.Join(result, conn.Sync(syncCtx))
+		if err := conn.Sync(syncCtx); err != nil {
+			result = errors.Join(result, fmt.Errorf("%w: %w", errFinalSync, err))
+		}
 	}()
 	options := client.FSOptions{Create: initialize, ReadOnly: c.ReadOnly}
 	if c.UID != nil {
