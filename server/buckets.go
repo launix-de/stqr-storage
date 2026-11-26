@@ -118,7 +118,8 @@ func (s *Server) publishBucket(d BucketDescription) {
 	defer s.bucketMu.Unlock()
 	b := s.bucketsByID[id]
 	if b == nil {
-		b = &Bucket{description: cloneBucketDescription(d), server: s}
+		b = bucketSnapshot(d)
+		b.server = s
 		s.bucketsByID[id] = b
 	} else {
 		b.mu.Lock()
@@ -130,7 +131,7 @@ func (s *Server) publishBucket(d BucketDescription) {
 		if s.bucketsByName[old.Name] == b {
 			delete(s.bucketsByName, old.Name)
 		}
-		b.description = cloneBucketDescription(d)
+		b.setDescription(d)
 		b.mu.Unlock()
 	}
 	if !d.DeletionComplete {
@@ -142,7 +143,7 @@ func (s *Server) Bucket(id volume.ID) (*Bucket, error) {
 	s.bucketMu.RLock()
 	b := s.bucketsByID[id]
 	s.bucketMu.RUnlock()
-	if b == nil || b.Describe().DeletionComplete {
+	if b == nil || b.storageDescription().DeletionComplete {
 		return nil, ErrBucketNotFound
 	}
 	return b, nil
