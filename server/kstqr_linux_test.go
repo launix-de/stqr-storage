@@ -470,6 +470,44 @@ func TestKSTQRVirtualMachine(t *testing.T) {
 		t.Fatal(e)
 	}
 	writebackFault.ranges.configure(windowLeaves)
+	var loopDigest string
+	if os.Getenv("STQR_KERNEL_LOOP") == "1" {
+		squashRoot := t.TempDir()
+		binaryData, e := os.ReadFile(busybox)
+		if e != nil {
+			t.Fatal(e)
+		}
+		if e = os.WriteFile(filepath.Join(squashRoot, "busybox"), binaryData, 0755); e != nil {
+			t.Fatal(e)
+		}
+		// Deterministic incompressible data spans multiple payload objects.
+		payload := make([]byte, 4<<20)
+		for i := 0; i < len(payload); i += 32 {
+			sum := sha256.Sum256([]byte(fmt.Sprintf("kstqr-loop-block-%d", i)))
+			copy(payload[i:], sum[:])
+		}
+		if e = os.WriteFile(filepath.Join(squashRoot, "payload"), payload, 0644); e != nil {
+			t.Fatal(e)
+		}
+		loopDigest = fmt.Sprintf("%x", sha256.Sum256(payload))
+		imagePath := filepath.Join(t.TempDir(), "loop.snap")
+		run("mksquashfs", squashRoot, imagePath, "-noappend", "-no-progress", "-processors", "1", "-comp", "xz")
+		imageBytes, e := os.ReadFile(imagePath)
+		if e != nil {
+			t.Fatal(e)
+		}
+		loopFile, e := fs.Create(ctx, client.FilesystemRootID(), "loop.snap", 0644, 0, 0, false)
+		if e != nil {
+			t.Fatal(e)
+		}
+		for offset := 0; offset < len(imageBytes); offset += 1 << 20 {
+			end := min(offset+(1<<20), len(imageBytes))
+			if _, e = fs.WriteAt(ctx, loopFile.ID, imageBytes[offset:end], int64(offset)); e != nil {
+				t.Fatal(e)
+			}
+		}
+		t.Logf("seeded %d-byte squashfs with executable and 4 MiB payload", len(imageBytes))
+	}
 	subscriptionFS = fs
 	readBenchmark := os.Getenv("STQR_KERNEL_BENCHMARK") == "1"
 	writeBenchmark := os.Getenv("STQR_KERNEL_WRITE_BENCHMARK") == "1"
@@ -692,6 +730,32 @@ rmmod kstqr
 		end := strings.Index(init, "if dmesg |")
 		script := `/mount.kstqr --uri ` + endpoint + ` --bucket ` + client.ID(b.ID()).String() + ` --credentials /readonly-credentials --readonly /readonly
 /read-window ` + endpoint + `
+cat /proc/self/mountstats
+umount /readonly
+rmmod kstqr
+`
+		init = init[:begin] + script + init[end:]
+	}
+
+	if os.Getenv("STQR_KERNEL_LOOP") == "1" {
+		begin := strings.Index(init, "for attempt in 1 2 3 4; do")
+		end := strings.Index(init, "if dmesg |")
+		script := `/mount.kstqr --uri ` + endpoint + ` --bucket ` + client.ID(b.ID()).String() + ` --credentials /readonly-credentials --readonly /readonly
+mkdir -p /squash
+for pass in 1 2; do
+    losetup -r /dev/loop0 /readonly/loop.snap
+    mount -t squashfs -o ro /dev/loop0 /squash
+    /squash/busybox echo KSTQR_SQUASHFS_EXEC_PASS
+    pids=""
+    for reader in 1 2 3 4; do
+        (sha256sum /squash/payload | grep '^` + loopDigest + ` ') &
+        pids="$pids $!"
+    done
+    for pid in $pids; do wait "$pid"; done
+    umount /squash
+    losetup -d /dev/loop0
+done
+echo KSTQR_SQUASHFS_PASS
 cat /proc/self/mountstats
 umount /readonly
 rmmod kstqr
@@ -1202,6 +1266,18 @@ poweroff -f
 
 		uc.Close()
 		t.Log("Native STOR/STOM kernel overlay, lazy range copy-up, whitelist, Go compatibility and boot lifetime passed")
+		return
+	}
+
+	if os.Getenv("STQR_KERNEL_LOOP") == "1" {
+		if !strings.Contains(string(output), "KSTQR_SQUASHFS_PASS") {
+			t.Fatal("loop/squashfs probe did not complete")
+		}
+		for _, line := range strings.Split(string(output), "\n") {
+			if strings.Contains(line, "KSTQR_SQUASHFS_") || strings.Contains(line, "stqr: cache_hits=") {
+				t.Log(strings.TrimSpace(line))
+			}
+		}
 		return
 	}
 
