@@ -280,7 +280,35 @@ func TestDaemonReplicaNodeReplacementPromotesAndPreservesQuota(t *testing.T) {
 		t.Fatalf("handoff retry %+v %v", retry, err)
 	}
 	growth := volume.Options{RequestID: volume.ID(client.NewRequestID())}
-	retryReplicaMutation(t, ctx, func() (volume.Result, error) { return primary.Append(ctx, actor, id, []byte("!?"), growth) })
+	retryReplicaMutation(t, ctx, func() (volume.Result, error) {
+		result, err := primary.Append(ctx, actor, id, []byte("!?"), growth)
+		if err != nil && statusOf(err) != 503 {
+			// Both quota admission and the volume allocator can return ErrFull.
+			// Preserve their state on failure without changing the retry contract.
+			t.Logf("replacement growth append failed: %v", err)
+			for _, node := range []*Server{source.node, target.node, third.node} {
+				node.opMu.Lock()
+				allowance, allowanceErr := node.quotaAllowance(client.ID(b.ID()))
+				copy, bucketErr := node.Bucket(b.ID())
+				var used, pending uint64
+				var usedErr, pendingErr error
+				if bucketErr == nil {
+					used, usedErr = copy.accountedUsage()
+					pending, pendingErr = node.pendingReplicaGrowth(b.ID())
+				}
+				node.opMu.Unlock()
+				t.Logf("growth failure node=%s allowance=%d (%v) used=%d (%v) pending=%d (%v) bucket=%v", node.control.ledger.node, allowance, allowanceErr, used, usedErr, pending, pendingErr, bucketErr)
+				node.quotas.mu.Lock()
+				demands := append([]quotaDemand(nil), node.quotas.demands...)
+				node.quotas.mu.Unlock()
+				t.Logf("quota allocation: %+v; demands: %+v", findQuota(node.currentSystem.Load(), client.ID(b.ID())), demands)
+			}
+			for _, store := range []*volume.Volume{retained, added} {
+				t.Logf("replica storage: %+v", store.Stats())
+			}
+		}
+		return result, err
+	})
 	for _, node := range []*Server{target.node, third.node} {
 		copy, _ := node.Bucket(b.ID())
 		data, _, err := copy.Get(ctx, actor, id)
