@@ -38,8 +38,9 @@ func (v *Volume) beginDeferred() error {
 	for {
 		start, length, chosen, err := t.findSpace(size, PageSize, false)
 		if err == nil {
-			// Use the aligned end of the selected extent, as in PR #45;
-			// respect exclusions for another in-flight checkpoint's journal.
+			// Keep the WAL at the free extent's aligned end to preserve a
+			// contiguous payload prefix. Recheck exclusions for an in-flight
+			// checkpoint; small volumes can reduce this reservation below.
 			if tail, ok := t.candidate(start, length, size, PageSize, (start+length-size)/PageSize*PageSize); ok {
 				chosen = tail
 			}

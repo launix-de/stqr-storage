@@ -126,7 +126,7 @@ func (s *Server) parseObject(m client.Message, ws *wsSession, p principal) (*obj
 		if _, err := b.authorize(p, permission); err != nil {
 			return nil, d, err
 		}
-		if err := s.checkObjectOwner(bucketID, oid, permission == BucketRead); err != nil && !bucketScoped {
+		if err := s.checkObjectOwner(bucketID, oid, permission == BucketRead && m.Opcode != client.ObjectSubscribe); err != nil && !bucketScoped {
 			return nil, d, err
 		}
 		patch, known := s.routingPatch(bucketID, oid)

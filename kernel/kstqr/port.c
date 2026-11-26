@@ -58,11 +58,17 @@ struct stqr_socket {
 static void sq_data_ready(struct sock *sk)
 {
 	struct stqr_socket *s;
+    void (*previous)(struct sock *) = NULL;
 	read_lock_bh(&sk->sk_callback_lock);
 	s = sk->sk_user_data;
-	if (s && s->ready)
-		s->ready(s->ready_arg);
+	if (s) {
+        previous=s->previous_ready;
+        if(s->ready)s->ready(s->ready_arg);
+    }
 	read_unlock_bh(&sk->sk_callback_lock);
+    /* Keep the normal socket wakeups: a fragmented frame or legacy wrapper
+     * can be blocked in kernel_recvmsg while the readiness worker is queued. */
+    if(previous)previous(sk);
 }
 void sq_set_readable(struct stqr_socket *s, void (*ready)(void *), void *arg)
 {

@@ -183,7 +183,7 @@ static int async_dispatch(stqr_client *c,unsigned kind,unsigned op,const stqr_u8
         if(!err) {
             struct sq_binding *binding=sq_alloc(sizeof(*binding));
             if(!binding)err=-ENOMEM;
-            else {binding->id=p->subscription;binding->channel=p->channel;binding->next=c->bindings;c->bindings=binding;*p->cursor=cursor;}
+            else {binding->id=p->subscription;binding->channel=p->channel;binding->next=c->bindings[binding_bucket(binding->id)];c->bindings[binding_bucket(binding->id)]=binding;*p->cursor=cursor;}
         }
     }
     else if(!err&&(p->op==0x100||p->op==0x101))err=async_decode_get(c,p,m,&data,&n,&info);
@@ -191,10 +191,8 @@ static int async_dispatch(stqr_client *c,unsigned kind,unsigned op,const stqr_u8
     else if(!err&&p->op==0x121){if(readnum(m,1)!=1)m->err=-EPROTO;err=done(m);}
     else if(!err&&p->op==0x106)err=done(m);
     else if(!err&&p->op==0x111){
-        struct sq_binding **at=&c->bindings;err=done(m);
-        while(!err&&*at){struct sq_binding *binding=*at;
-            if(!memcmp(binding->id.bytes,p->subscription.bytes,16)){*at=binding->next;sq_free(binding);break;}at=&binding->next;
-        }
+        struct sq_binding **at=binding_slot(c,p->subscription);err=done(m);
+        if(!err&&*at){struct sq_binding *binding=*at;*at=binding->next;sq_free(binding);}
     }
     else if(p->op==0x122){
         if(!err){const stqr_u8 *boot=take(m,16);readnum(m,8);if(done(m)||!boot||zero(boot,16))err=-EPROTO;}
@@ -226,8 +224,8 @@ int stqr_delete_async(stqr_client *c,stqr_object_id id,const stqr_options *o,stq
 int stqr_unsubscribe_async(stqr_client *c,stqr_id sid,stqr_completion cb,void *arg) {
     struct buf b={0};stqr_id rid;struct sq_async *p;int err;
     if(!c||!cb||zero(sid.bytes,16))return -EINVAL;
-    for(struct sq_binding *binding=c->bindings;binding;binding=binding->next)
-        if(!memcmp(binding->id.bytes,sid.bytes,16)){save_channel(c);load_channel(c,binding->channel);break;}
+    {struct sq_binding *binding=*binding_slot(c,sid);
+        if(binding){save_channel(c);load_channel(c,binding->channel);}}
     err=stqr_request_id(&rid);if(err)return err;
     put(&b,sid.bytes,16);err=async_submit(c,0x111,&b,rid,(stqr_object_id){{0}},0,0,0,0,cb,arg);drop(&b);
     if(!err){p=async_find(c,rid.bytes);p->subscription=sid;}
@@ -237,8 +235,7 @@ int stqr_subscribe_async(stqr_client *c,stqr_object_id id,stqr_id sid,stqr_u64 *
     struct buf b={0};stqr_id rid;struct sq_async *p;int err;
     if(!c||!cursor||!cb||zero(sid.bytes,16))return -EINVAL;
     if(!(c->capabilities&STQR_CAP_SUBSCRIPTIONS))return -EOPNOTSUPP;
-    for(struct sq_binding *binding=c->bindings;binding;binding=binding->next)
-        if(!memcmp(binding->id.bytes,sid.bytes,16))return -EBUSY;
+    if(*binding_slot(c,sid))return -EBUSY;
     err=stqr_request_id(&rid);if(err)return err;
     reference(c,&b,id);put(&b,sid.bytes,16);number(&b,0,1);
     number(&b,0,8);number(&b,0,8);number(&b,0,1);

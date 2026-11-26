@@ -164,6 +164,15 @@ func retryQuotaCall(call func() error) error {
 }
 
 func TestDaemonPhysicalQuotaHandoffPreservesCreditsAndRetries(t *testing.T) {
+	testPhysicalQuotaHandoff(t, false)
+}
+
+func TestDaemonPhysicalQuotaHandoffRecoversPendingCredits(t *testing.T) {
+	testPhysicalQuotaHandoff(t, true)
+}
+
+func testPhysicalQuotaHandoff(t *testing.T, pendingAfterRestart bool) {
+	t.Helper()
 	source, target := startAutomaticDaemonPair(t, false)
 	addTestVolume(t, source.node, "source", "hdd", 4<<20)
 	targetVolume := addTestVolume(t, target.node, "target", "hdd", 4<<20)
@@ -192,33 +201,117 @@ func TestDaemonPhysicalQuotaHandoffPreservesCreditsAndRetries(t *testing.T) {
 	if err = source.node.scopes.move(ctx, plan); err != nil {
 		t.Fatal("handoff", err)
 	}
-	check := func() {
+	check := func(seedPending bool) {
 		t.Helper()
-		var credits, used uint64
-		for _, n := range []*daemonTestNode{source, target} {
-			n.node.opMu.Lock()
-			b, _ := n.node.Bucket(b.ID())
-			u, e := b.physicalUsage()
-			a, ae := n.node.quotaAllowance(client.ID(b.ID()))
-			n.node.opMu.Unlock()
-			if e != nil || ae != nil || u > a {
-				t.Fatal("physical allowance invariant", n.node.cfg.Node.ID, "source", source.node.cfg.Node.ID, "used/credits", u, a, "allocation", findQuota(n.node.currentSystem.Load(), client.ID(b.ID())), "range image", n.node.quotaRanges.Load(), e, ae)
-			}
-			credits += a
-			used += u
+		nodes := []*daemonTestNode{source, target}
+		if nodes[1].node.cfg.Node.ID < nodes[0].node.cfg.Node.ID {
+			nodes[0], nodes[1] = nodes[1], nodes[0]
 		}
-		if credits != 600<<10 || used < 512<<10 || used > credits {
-			t.Fatal("global physical quota", used, credits)
+		type snapshot struct {
+			node                      string
+			allowance, used, sequence uint64
+			allocation                *quotaAllocation
+			ranges                    *quotaRangeImage
+			outgoing, incoming        []quotaTransfer
+		}
+		for {
+			var credits, used uint64
+			var snapshots []snapshot
+			func() {
+				// Observe both allowances at one instant. No peer calls or
+				// recovery waits run while either node's admission is held.
+				nodes[0].node.opMu.Lock()
+				defer nodes[0].node.opMu.Unlock()
+				nodes[1].node.opMu.Lock()
+				defer nodes[1].node.opMu.Unlock()
+				if seedPending {
+					seeded := false
+					for i, n := range nodes {
+						bucket, err := n.node.Bucket(b.ID())
+						if err != nil {
+							t.Fatal(err)
+						}
+						u, err := bucket.physicalUsage()
+						if err != nil {
+							t.Fatal(err)
+						}
+						a, err := n.node.quotaAllowance(client.ID(b.ID()))
+						if err != nil {
+							t.Fatal(err)
+						}
+						if a <= u {
+							continue
+						}
+						allocation := findQuota(n.node.currentSystem.Load(), client.ID(b.ID()))
+						_, err = n.node.quotas.ledger.debit(quotaGrant{ID: client.NewRequestID(), Bucket: client.ID(b.ID()), Epoch: allocation.Epoch, Source: n.node.quotas.ledger.node, Target: nodes[1-i].node.quotas.ledger.node, Bytes: 1}, a-u)
+						if err != nil {
+							t.Fatal(err)
+						}
+						seeded = true
+						break
+					}
+					if !seeded {
+						t.Fatal("no unused quota for pending-transfer fixture")
+					}
+				}
+				seedPending = false
+				for _, n := range nodes {
+					bucket, err := n.node.Bucket(b.ID())
+					if err != nil {
+						t.Fatal(err)
+					}
+					u, e := bucket.physicalUsage()
+					a, ae := n.node.quotaAllowance(client.ID(b.ID()))
+					state := snapshot{node: n.node.cfg.Node.ID, allowance: a, used: u, allocation: findQuota(n.node.currentSystem.Load(), client.ID(b.ID())), ranges: n.node.quotaRanges.Load()}
+					ledger := n.node.quotas.ledger
+					ledger.mu.Lock()
+					state.sequence = ledger.sequence
+					for _, transfer := range ledger.outgoing {
+						state.outgoing = append(state.outgoing, *transfer)
+					}
+					for _, transfer := range ledger.incoming {
+						state.incoming = append(state.incoming, *transfer)
+					}
+					ledger.mu.Unlock()
+					snapshots = append(snapshots, state)
+					if e != nil || ae != nil || u > a {
+						t.Fatal("physical allowance invariant", n.node.cfg.Node.ID, "source", source.node.cfg.Node.ID, "used/credits", u, a, "allocation", findQuota(n.node.currentSystem.Load(), client.ID(b.ID())), "range image", n.node.quotaRanges.Load(), e, ae)
+					}
+					credits += a
+					used += u
+				}
+			}()
+			dump := func() {
+				for _, state := range snapshots {
+					t.Logf("quota observation: node=%s allowance=%d used=%d sequence=%d allocation=%+v ranges=%+v outgoing=%+v incoming=%+v", state.node, state.allowance, state.used, state.sequence, state.allocation, state.ranges, state.outgoing, state.incoming)
+				}
+			}
+			if credits > 600<<10 || used < 512<<10 || used > credits {
+				dump()
+				t.Fatal("global physical quota", used, credits)
+			}
+			if credits == 600<<10 {
+				return
+			}
+			// Durable DEBIT precedes RECEIVE. Recovery may temporarily make
+			// credits unavailable, but must restore the entire budget within
+			// the test's original deadline, including after journal reopen.
+			select {
+			case <-ctx.Done():
+				dump()
+				t.Fatal("physical quota did not recover", used, credits, ctx.Err())
+			case <-time.After(10 * time.Millisecond):
+			}
 		}
 	}
-	check()
+	check(false)
 	again, err := c.Put(ctx, object, payload, client.PutOptions{RequestID: request})
 	if err != nil || again != first {
 		t.Fatal("receipt transfer", again, err)
 	}
 	target = restartDaemonTestNode(t, target)
 	source = restartDaemonTestNode(t, source)
-	check()
+	check(pendingAfterRestart)
 	got, _, err := c.Get(ctx, object)
 	if err != nil || !bytes.Equal(got, payload) {
 		t.Fatal("migrated payload", err)

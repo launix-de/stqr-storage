@@ -1170,3 +1170,17 @@ alias for old readers; new comparisons ignore it. A peer without the new field
 has an unknown protocol number. Existing per-opcode and wire-range checks still
 reject unsupported operations before decoding or mutation. The dashboard shows
 the manual protocol number separately from software build information.
+
+
+Dashboard deletions close their confirmation dialog immediately and remain marked
+as pending until the cluster confirms the metadata commit. Confirming more
+entries queues deletions locally without blocking navigation or list requests.
+Failures remain visible on the affected row and can be retried with the same
+operation ID. The server retains its ALL metadata commit and bounded dispatcher;
+physical bucket cleanup continues separately.
+
+Bucket deletion optionally removes non-admin ACL members who would have no other
+active or locked bucket. The dashboard enables this option by default. Users with
+another valid bucket, administrators and unrelated accounts remain unchanged.
+Legacy native `BUCKET_DELETE` requests omit the optional boolean and retain all
+accounts. Both account removal and the bucket deletion intent publish atomically.

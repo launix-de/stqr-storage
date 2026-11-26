@@ -272,6 +272,13 @@ func (b *Bucket) selectVolume(d BucketDescription, key volume.Key, request volum
 // even when the index cache cannot hold the bucket's complete object set.
 // Callers serialize quota decisions with the local mutation/admin lock.
 func (b *Bucket) scanLogicalUsage() (uint64, error) {
+	if used, exact, err := b.pinnedLogicalUsage(); exact || err != nil {
+		return used, err
+	}
+	return b.scanLogicalObjectUsage()
+}
+
+func (b *Bucket) scanLogicalObjectUsage() (uint64, error) {
 	var total uint64
 	description := b.Describe()
 	var after *volume.ObjectID

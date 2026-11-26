@@ -283,7 +283,7 @@ func (s *Server) reclaimBucketStep() bool {
 				return true
 			}
 			if !progress.objectsDone {
-				records, err := h.ScanBucketObjects(id, progress.objectAfter, 8)
+				records, err := h.ScanBucketObjects(id, progress.objectAfter, 32)
 				if err != nil {
 					return false
 				}
@@ -320,6 +320,8 @@ func (s *Server) reclaimBucketStep() bool {
 				}
 			}
 			if len(remove) > 0 {
+				// Capture the cleanup generation under the handle; its physical
+				// checkpoint runs after releasing node admission and volume locks.
 				generation, err := h.ForgetRequestsAccepted(remove)
 				if err != nil {
 					if errors.Is(err, volume.ErrBusy) || errors.Is(err, volume.ErrFull) {

@@ -259,17 +259,11 @@ func (s *Server) fulfillQuotaDemand(h quotaDemand) {
 		needed = h.growth - allowance
 	}
 	allAnswered := true
-	eligible := membershipIDs(view.manifest.Membership)
-	if b.Describe().Policy.PlacementGroup != "" {
-		eligible, _, err = s.pgMembers(b.Describe())
-		if err != nil {
-			return
-		}
-	}
+	// A range handoff transfers used credits, so a live cluster member can
+	// still hold unused credits after leaving this bucket's placement mask.
+	// Ask every current member; the donor checks the quota epoch and debits
+	// only its unused allowance. Object ownership remains checked above.
 	for _, member := range view.manifest.Membership.Members {
-		if !hasControlNode(eligible, member.ID) {
-			continue
-		}
 		if member.ID == q.ledger.node {
 			continue
 		}

@@ -374,8 +374,9 @@ func (ws *wsSession) requestLoop() {
 			}) {
 				continue
 			}
-			// Every storage operation gets its own goroutine. HELLO/PING and
-			// local placement-map lookup contain no storage and may finish inline.
+			// Global mutations serialize under the controller lock, never the
+			// socket reader. Storage headers run independently as well: transfer
+			// frames wait only for their own parent's headerReady, above.
 			if m.Opcode == client.Hello || m.Opcode == client.Ping {
 				ws.executeRequest(m, p)
 			} else {

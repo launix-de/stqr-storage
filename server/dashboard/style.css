@@ -34,3 +34,5 @@
 .grow-status{margin:16px 0}#grow-source{overflow-wrap:anywhere}#grow-validation:empty{display:none}
 @media(max-width:600px){.grow-summary{padding:12px;gap:8px}.grow-summary strong{font-size:13px}}
 #grow-slider{width:100%;accent-color:var(--accent)}
+
+.deletion-error{max-width:24rem;white-space:normal;overflow-wrap:anywhere}

@@ -200,6 +200,15 @@ func addReplicaThirdNode(t *testing.T, source *daemonTestNode) *daemonTestNode {
 }
 
 func TestDaemonReplicaNodeReplacementPromotesAndPreservesQuota(t *testing.T) {
+	testReplicaNodeReplacementQuota(t, false)
+}
+
+func TestDaemonQuotaBorrowsFromRetiredReplicaOwner(t *testing.T) {
+	testReplicaNodeReplacementQuota(t, true)
+}
+
+func testReplicaNodeReplacementQuota(t *testing.T, retireCredits bool) {
+	t.Helper()
 	source, target := startAutomaticDaemonPair(t, false)
 	third := addReplicaThirdNode(t, source)
 	old := addReplicaDataVolume(t, source.node, "data", "hdd", 8<<20)
@@ -275,12 +284,103 @@ func TestDaemonReplicaNodeReplacementPromotesAndPreservesQuota(t *testing.T) {
 		t.Fatal("retire old primary", err)
 	}
 	awaitPGVersion(t, target.node, group, 2)
+	if retireCredits {
+		// Reproduce the valid post-handoff balances independently of worker
+		// timing: only live bytes moved with the primary, while all unused
+		// current-epoch credits remain on a live node outside the new mask.
+		for _, donor := range []*Server{target.node, third.node} {
+			donor.opMu.Lock()
+			allowance, allowanceErr := donor.quotaAllowance(client.ID(b.ID()))
+			copy, bucketErr := donor.Bucket(b.ID())
+			if allowanceErr != nil || bucketErr != nil {
+				donor.opMu.Unlock()
+				t.Fatal("donor state", allowanceErr, bucketErr)
+			}
+			used, usedErr := copy.accountedUsage()
+			if usedErr != nil || used > allowance {
+				donor.opMu.Unlock()
+				t.Fatal("donor usage", used, allowance, usedErr)
+			}
+			free := allowance - used
+			if free == 0 {
+				donor.opMu.Unlock()
+				continue
+			}
+			allocation := findQuota(donor.currentSystem.Load(), client.ID(b.ID()))
+			grant, grantErr := donor.quotas.ledger.debit(quotaGrant{ID: client.NewRequestID(), Bucket: client.ID(b.ID()), Epoch: allocation.Epoch, Source: donor.control.ledger.node, Target: source.node.control.ledger.node, Bytes: free}, free)
+			donor.opMu.Unlock()
+			if grantErr != nil {
+				t.Fatal(grantErr)
+			}
+			wire, err := encodeQuotaGrant(grant)
+			if err != nil {
+				t.Fatal(err)
+			}
+			ack, err := source.node.quotaPeerMessage(client.Message{Kind: client.Request, Opcode: peerQuotaGrant, Body: wire}, grant.Source)
+			if err != nil {
+				t.Fatal(err)
+			}
+			proof, err := client.DecodeProof(ack)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := donor.quotas.ledger.settle(grant.ID, proof, grant.Target); err != nil {
+				t.Fatal(err)
+			}
+		}
+		for i, node := range []*Server{source.node, target.node, third.node} {
+			node.opMu.Lock()
+			allowance, err := node.quotaAllowance(client.ID(b.ID()))
+			node.opMu.Unlock()
+			want := []uint64{(64 << 10) - 9, 9, 0}[i]
+			if err != nil || allowance != want {
+				t.Fatalf("post-handoff node %d credits: got %d (%v), want %d", i, allowance, err, want)
+			}
+		}
+		members, _, err := target.node.pgMembers(primary.Describe())
+		if err != nil || hasControlNode(members, source.node.control.ledger.node) {
+			t.Fatal("retired quota holder is still a write-placement member", members, err)
+		}
+		retired, _ := source.node.Bucket(b.ID())
+		_, err = retired.Append(ctx, actor, id, []byte("forbidden"), volume.Options{RequestID: volume.ID(client.NewRequestID())})
+		if _, redirected := err.(*objectRedirect); !redirected {
+			t.Fatal("unused credits allowed the retired node to write", err)
+		}
+	}
 	retry, err := primary.Append(ctx, actor, id, []byte("confirmed"), request)
 	if err != nil || retry != original {
 		t.Fatalf("handoff retry %+v %v", retry, err)
 	}
 	growth := volume.Options{RequestID: volume.ID(client.NewRequestID())}
-	retryReplicaMutation(t, ctx, func() (volume.Result, error) { return primary.Append(ctx, actor, id, []byte("!?"), growth) })
+	retryReplicaMutation(t, ctx, func() (volume.Result, error) {
+		result, err := primary.Append(ctx, actor, id, []byte("!?"), growth)
+		if err != nil && statusOf(err) != 503 {
+			// Both quota admission and the volume allocator can return ErrFull.
+			// Preserve their state on failure without changing the retry contract.
+			t.Logf("replacement growth append failed: %v", err)
+			for _, node := range []*Server{source.node, target.node, third.node} {
+				node.opMu.Lock()
+				allowance, allowanceErr := node.quotaAllowance(client.ID(b.ID()))
+				copy, bucketErr := node.Bucket(b.ID())
+				var used, pending uint64
+				var usedErr, pendingErr error
+				if bucketErr == nil {
+					used, usedErr = copy.accountedUsage()
+					pending, pendingErr = node.pendingReplicaGrowth(b.ID())
+				}
+				node.opMu.Unlock()
+				t.Logf("growth failure node=%s allowance=%d (%v) used=%d (%v) pending=%d (%v) bucket=%v", node.control.ledger.node, allowance, allowanceErr, used, usedErr, pending, pendingErr, bucketErr)
+				node.quotas.mu.Lock()
+				demands := append([]quotaDemand(nil), node.quotas.demands...)
+				node.quotas.mu.Unlock()
+				t.Logf("quota allocation: %+v; demands: %+v", findQuota(node.currentSystem.Load(), client.ID(b.ID())), demands)
+			}
+			for _, store := range []*volume.Volume{retained, added} {
+				t.Logf("replica storage: %+v", store.Stats())
+			}
+		}
+		return result, err
+	})
 	for _, node := range []*Server{target.node, third.node} {
 		copy, _ := node.Bucket(b.ID())
 		data, _, err := copy.Get(ctx, actor, id)
@@ -291,6 +391,21 @@ func TestDaemonReplicaNodeReplacementPromotesAndPreservesQuota(t *testing.T) {
 	usage, err := primary.clusterUsageAs(ctx, actor, "logical")
 	if err != nil || usage != uint64(len("Confirmed!?")) {
 		t.Fatalf("logical usage counted replicas: %d %v", usage, err)
+	}
+	if retireCredits {
+		var total uint64
+		for _, node := range []*Server{source.node, target.node, third.node} {
+			node.opMu.Lock()
+			allowance, err := node.quotaAllowance(client.ID(b.ID()))
+			node.opMu.Unlock()
+			if err != nil {
+				t.Fatal(err)
+			}
+			total += allowance
+		}
+		if total != 64<<10 {
+			t.Fatal("borrowing changed the global quota", total)
+		}
 	}
 }
 

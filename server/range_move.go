@@ -277,6 +277,7 @@ func (r *rangeManager) cleanup(ctx context.Context, p rangePlan) error {
 	if p.ReplicaAdd || p.ReplicaRemove || p.ReplicaPromote || p.ReplicaRelocate {
 		return nil
 	}
+	const pageSize = 32
 	for _, v := range r.sourceVolumes(p) {
 		var after *volume.ObjectID
 		for {
@@ -287,7 +288,7 @@ func (r *rangeManager) cleanup(ctx context.Context, p rangePlan) error {
 			if err != nil {
 				return err
 			}
-			records, err := p.scanObjects(h, after, 64)
+			records, err := p.scanObjects(h, after, pageSize)
 			h.Close()
 			if err != nil {
 				return err
@@ -318,7 +319,7 @@ func (r *rangeManager) cleanup(ctx context.Context, p rangePlan) error {
 			if err != nil {
 				return err
 			}
-			records, err := h.ScanRequestRecords(cursor, 64)
+			records, err := h.ScanRequestRecords(cursor, 128)
 			h.Close()
 			if err != nil {
 				return err
@@ -344,10 +345,14 @@ func (r *rangeManager) cleanup(ctx context.Context, p rangePlan) error {
 	return nil
 }
 
+// Scope rebuild priority to one bounded page and revalidate authority under
+// opMu before every deletion, but checkpoint only after releasing both locks.
 func (r *rangeManager) cleanupBatch(ctx context.Context, p rangePlan, v *volume.Volume, objects []volume.ObjectRecord, ids []volume.ID) error {
-	// Match PR #44's page-scoped priority: unfinished bucket deletions
-	// receive a bounded turn after this page releases its locks and priority.
+	// Give unfinished bucket deletions a bounded turn between cleanup pages.
 	defer r.server.reclaimBucketStep()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	end, err := r.server.beginRebuildIO(ctx)
 	if err != nil {
 		return err
@@ -423,6 +428,8 @@ func (r *rangeManager) cleanupBatch(ctx context.Context, p rangePlan, v *volume.
 	}
 }
 
+// The scan is advisory. Recheck authority under opMu immediately before each
+// destructive write: an exclusion may have cancelled this worker meanwhile.
 func (r *rangeManager) cleanupAllowed(p rangePlan) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()

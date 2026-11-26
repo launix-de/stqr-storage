@@ -183,17 +183,20 @@ func (r *rangeManager) runPGWorker(group string, worker pgRebuildWorker) {
 func (r *rangeManager) pendingPGPlan(group string) (rangePlan, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	for id, p := range r.pgOffers {
-		if id.String() == group && p.Source == r.node {
-			return p, true
-		}
-	}
+	// Accepted work must resume before an older, unaccepted local proposal.
+	// A competing source may have won while that proposal was in flight.
 	for id, state := range r.pgStates {
 		if id.String() != group || state.Active == nil {
 			continue
 		}
 		p, err := decodeRangePlan(state.Active.Round.Plan)
 		if err == nil && p.Source == r.node {
+			return p, true
+		}
+		return rangePlan{}, false
+	}
+	for id, p := range r.pgOffers {
+		if id.String() == group && p.Source == r.node {
 			return p, true
 		}
 	}

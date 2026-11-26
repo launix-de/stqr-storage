@@ -6,6 +6,24 @@ the existing authenticated bucket connection; READ permission is required.
 No second listener process or per-read communication through stored objects is
 introduced.
 
+Subscriptions are owner-local, transient RAM state. The placement map routes
+SUBSCRIBE to the same primary that receives writes; ordinary GET may still read
+a replica. Registration, ACK and UNSUBSCRIBE do not broadcast descriptors to the
+cluster, persist them as objects, create snapshot spool files or force a disk
+checkpoint. The server indexes watchers by object and session/subscription ID;
+native clients index subscription IDs with hash tables. Native-sized (up to
+1-MiB) COW read-through captures also use bounded RAM rather than a disk spool;
+larger general-purpose COW preservation transfers retain their storage staging. LRU lists only choose
+cache entries to evict. Iteration over an object's actual watchers is necessary
+to deliver updates, and is not a global subscription search.
+
+Initial snapshot buffers reserve RAM before allocation. The node bounds concurrent
+snapshot payloads by its existing 1-GiB transfer staging budget and returns 507
+when that temporary budget is exhausted. The Go buffered subscription API retains
+its 16-MiB limit and receives streamed snapshots into RAM. Subscription routing
+retains accepted-write durability marks without flushing them; subsequent
+cross-owner writes or explicit SYNC must fence those dependencies.
+
 The initial response contains a consistent snapshot, a subscription ID and a cursor. Snapshot copying and listener registration use the
 same native volume read handle. Mutations publish their update under the write
 handle which committed them, so there is no GET-to-registration gap. Disk ACKs
