@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/launix-de/stqr-storage/client"
+	nbd "github.com/launix-de/stqr-storage/qemu-plugin-nbd"
 	"github.com/launix-de/stqr-storage/server"
 )
 
@@ -543,5 +544,58 @@ func TestBootCleanupRetainsMountedUpperUntilStorageConnectionCloses(t *testing.T
 	// Replaying cleanup after a lost result is safe once the namespace is gone.
 	if err = removeBootSession(ctx, cfg, session.User, session.Upper, session.Lower); err != nil {
 		t.Fatal("cleanup not retryable", err)
+	}
+}
+
+func TestInstallationCommandsKeepCanonicalBucketAfterNameReuse(t *testing.T) {
+	cfg, _, _ := imageTestNode(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	original, err := create(ctx, cfg, "ubuntu-bd")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rename := client.Encoder{}
+	rename.ID(original)
+	rename.Text("original-installation")
+	if _, err = control(ctx, cfg, client.BucketRename, rename.B); err != nil {
+		t.Fatal(err)
+	}
+	replacement, err := create(ctx, cfg, "ubuntu-bd")
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "credentials.json")
+	raw, _ := json.Marshal(cfg)
+	if err = os.WriteFile(path, raw, 0600); err != nil {
+		t.Fatal(err)
+	}
+	invoke := func(command, selector string) error {
+		previous := os.Args
+		defer func() { os.Args = previous }()
+		os.Args = []string{"stqr-bootctl", "--config", path, "--size", "1048576", command, selector}
+		return run()
+	}
+	if err = invoke("init-disk", original.String()); err != nil {
+		t.Fatal("canonical installation identity was re-resolved as a name", err)
+	}
+	if err = invoke("check-install-disk", original.String()); err != nil {
+		t.Fatal("canonical installation could not be resumed", err)
+	}
+	other, err := connect(ctx, cfg, replacement.String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer other.Close()
+	// A real successful initialisation publishes this descriptor. The new
+	// bucket which took the original label must remain empty.
+	if _, err = other.Stat(ctx, nbd.MetadataID("disk.raw")); !errors.Is(err, client.ErrNotFound) {
+		t.Fatal("name-reusing replacement was initialised", err)
+	}
+	if err = invoke("delete", original.String()); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := resolve(ctx, cfg, "ubuntu-bd"); err != nil || got != replacement {
+		t.Fatal("cleanup deleted the replacement", got, err)
 	}
 }

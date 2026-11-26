@@ -105,8 +105,8 @@ func TestNetworkbootNBDWithQEMU(t *testing.T) {
 			t.Fatalf("%v: %v %s", args, err, out)
 		}
 	}
-	run("create", "nbd-image")
-	run("--size", "4194304", "init-disk", "nbd-image")
+	run("create", "nbd-image-bd")
+	run("--size", "4194304", "init-disk", "nbd-image-bd")
 	nbdBinary := filepath.Join(dir, "stqr-nbd")
 	buildNBD := exec.Command("go", "build", "-buildvcs=false", "-race", "-o", nbdBinary, "./qemu-plugin-nbd/cmd/stqr-nbd")
 	buildNBD.Dir = ".."
@@ -115,7 +115,7 @@ func TestNetworkbootNBDWithQEMU(t *testing.T) {
 	}
 	nbdCLI := func(args ...string) {
 		t.Helper()
-		out, err := exec.Command(nbdBinary, append([]string{"--config", cfg, "--bucket", "nbd-image"}, args...)...).CombinedOutput()
+		out, err := exec.Command(nbdBinary, append([]string{"--config", cfg, "--bucket", "nbd-image-bd"}, args...)...).CombinedOutput()
 		if err != nil {
 			t.Fatalf("NBD CLI: %v %s", err, out)
 		}
@@ -155,7 +155,7 @@ func TestNetworkbootNBDWithQEMU(t *testing.T) {
 			}
 			time.Sleep(20 * time.Millisecond)
 		}
-		if bucket == "nbd-image" && write {
+		if bucket == "nbd-image-bd" && write {
 			// Keep one device connected while QEMU opens a different named export.
 			hold, err := net.DialTimeout("unix", socket, time.Second)
 			if err != nil {
@@ -226,9 +226,9 @@ func TestNetworkbootNBDWithQEMU(t *testing.T) {
 		time.Sleep(100 * time.Millisecond)
 	}
 
-	serve("nbd-image", true)
+	serve("nbd-image-bd", true)
 
-	b, err := s.BucketByName("nbd-image")
+	b, err := s.BucketByName("nbd-image-bd")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -324,6 +324,10 @@ with tempfile.TemporaryDirectory(prefix='stqr-gateway-') as work:
 	if err := json.Unmarshal(manifestRaw, &nativeManifest); err != nil || nativeManifest.Schema != 2 {
 		t.Fatal("native manifest", err)
 	}
+	image, err := s.BucketByName("nbd-image")
+	if err != nil || nativeManifest.RootBucket != client.ID(image.ID()) || image.ID() == b.ID() {
+		t.Fatal("published filesystem must own its root independently of the installation BD", err)
+	}
 	ctx := context.Background()
 	lower, err := client.Dial(ctx, host.URL, a.Username, a.Password, nativeManifest.RootBucket, "fs")
 	if err != nil {
@@ -348,9 +352,11 @@ with tempfile.TemporaryDirectory(prefix='stqr-gateway-') as work:
 	lower.Close()
 
 	run("create", "nbd-clone")
-	run("clone", "nbd-image", "nbd-clone")
+	run("clone", "nbd-image-bd", "nbd-clone")
 	serve("nbd-clone", false)
 	run("clear", "nbd-clone")
+	run("delete", "nbd-image-bd")
+	run("check-image", "nbd-image") // Temporary disk cleanup preserves the image.
 
 	// Exercise per-MAC allocation, the scoped TCP proxy and disconnect cleanup
 	// without exposing DHCP or an NBD listener outside loopback.

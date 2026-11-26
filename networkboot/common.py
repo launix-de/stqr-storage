@@ -91,15 +91,17 @@ def installation_record(config, bucket):
     base = preparation_record(config, bucket)
     return base.with_name('installation-' + base.name)
 
-def remember_installation(config, target, disk):
-    if disk != temporary_installation_name(target):
-        raise ValueError('installation disk must be named [image]-bd')
+def remember_installation(config, target, disk_id):
+    if (not isinstance(disk_id, str) or not re.fullmatch('[0-9a-f]{32}', disk_id)
+            or disk_id == '0' * 32):
+        raise ValueError('temporary installation requires its canonical bucket ID')
     record = installation_record(config, target)
     record.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     fd, temporary = tempfile.mkstemp(prefix='.install-', dir=record.parent)
     try:
         with os.fdopen(fd, 'w') as out:
-            json.dump({'target': target, 'disk': disk}, out)
+            json.dump({'target': target, 'disk': temporary_installation_name(target),
+                       'id': disk_id}, out)
             out.flush()
             os.fsync(out.fileno())
         os.replace(temporary, record)
@@ -112,9 +114,16 @@ def installed_disk(config, target):
         if record.is_symlink() or record.stat().st_uid != os.getuid() or record.stat().st_mode & 0o077:
             raise RuntimeError('unsafe installation state file')
         data = json.loads(record.read_text())
-        if data['target'] != target or not isinstance(data['disk'], str) or data['disk'] != temporary_installation_name(target):
+        if (not isinstance(data, dict) or data.get('target') != target
+                or data.get('disk') != temporary_installation_name(target)):
             raise RuntimeError('invalid installation state')
-        return data['disk']
+        disk_id = data.get('id')
+        if (not isinstance(disk_id, str) or not re.fullmatch('[0-9a-f]{32}', disk_id)
+                or disk_id == '0' * 32):
+            raise RuntimeError('installation state lacks a canonical bucket ID; inspect '
+                               f'{record} and recover the original disk identity manually; '
+                               'a reused bucket name is not proof of ownership')
+        return disk_id
     except FileNotFoundError:
         return None
 

@@ -64,14 +64,14 @@ func TestClusterNetworkbootNBDWithQEMU(t *testing.T) {
 		}
 	}
 	run("check-exclusive", "image")
-	run("create", "image")
-	run("--size", "4194304", "init-disk", "image")
-	run("--size", "4194304", "check-install-disk", "image")
-	if out, e := invoke("--size", "8388608", "check-install-disk", "image"); e == nil || !bytes.Contains(out, []byte("requested")) {
+	run("create", "image-bd")
+	run("--size", "4194304", "init-disk", "image-bd")
+	run("--size", "4194304", "check-install-disk", "image-bd")
+	if out, e := invoke("--size", "8388608", "check-install-disk", "image-bd"); e == nil || !bytes.Contains(out, []byte("requested")) {
 		t.Fatal("resume must reject a different disk size", e, string(out))
 	}
 	socket := filepath.Join(dir, "disk.sock")
-	cmd := exec.CommandContext(ctx, binary, "--config", cfg, "--socket", socket, "nbd", "image")
+	cmd := exec.CommandContext(ctx, binary, "--config", cfg, "--socket", socket, "nbd", "image-bd")
 	var logs bytes.Buffer
 	cmd.Stdout = &logs
 	cmd.Stderr = &logs
@@ -146,13 +146,15 @@ func TestClusterNetworkbootNBDWithQEMU(t *testing.T) {
 		t.Fatal(e)
 	}
 	run("publish", "image", artifacts)
-	if out, e := invoke("--size", "4194304", "check-install-disk", "image"); e == nil || !bytes.Contains(out, []byte("already published")) {
-		t.Fatal("resume must reject a published image", e, string(out))
+	if out, e := invoke("--size", "4194304", "check-install-disk", "image"); e == nil || !bytes.Contains(out, []byte("format")) {
+		t.Fatal("resume must reject a filesystem image as an installation BD", e, string(out))
 	}
 	run("gc", "image")
 	run("fetch", "image", filepath.Join(dir, "fetched"))
-	run("create", "copy")
-	run("clone", "image", "copy")
+	run("clone-image", "image", "copy")
+	run("check-image", "copy")
 	run("clear", "copy")
 	run("delete", "copy")
+	run("delete", "image-bd")
+	run("check-image", "image")
 }

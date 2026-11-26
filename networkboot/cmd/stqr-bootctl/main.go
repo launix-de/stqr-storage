@@ -503,7 +503,10 @@ func run() error {
 		}
 		return json.NewEncoder(os.Stdout).Encode(result)
 	case "init-disk", "check-install-disk", "nbd":
-		id, err := resolve(ctx, c, name)
+		id, err := parseBootID(name)
+		if err != nil {
+			id, err = resolve(ctx, c, name)
+		}
 		if err != nil {
 			return err
 		}

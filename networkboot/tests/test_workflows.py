@@ -23,6 +23,12 @@ def load(name):
     return module
 
 class Workflows(unittest.TestCase):
+    disk_id = '01' * 16
+
+    def remember_disk(self):
+        import common
+        common.remember_installation('stqr.yaml', 'ubuntu', self.disk_id)
+
     def setUp(self):
         state = tempfile.TemporaryDirectory()
         self.addCleanup(state.cleanup)
@@ -31,6 +37,7 @@ class Workflows(unittest.TestCase):
         self.addCleanup(env.stop)
 
     def test_bucket_only_resumes_failed_publication_without_reextracting(self):
+        self.remember_disk()
         import common
         script = load('prepare-system')
         with tempfile.TemporaryDirectory() as directory:
@@ -206,11 +213,11 @@ class Workflows(unittest.TestCase):
             @contextlib.contextmanager
             def disk(*args):
                 yield Path(directory)/'disk.sock'
-            with patch.object(sys,'argv',['prepare-system','ubuntu',str(image),'--work-dir',directory]),patch.object(script,'require'),patch.object(script,'ctl') as ctl,patch.object(script,'nbd',side_effect=disk),patch.object(script,'qemu') as qemu,patch.object(script,'extract'),contextlib.redirect_stdout(io.StringIO()):
+            with patch.object(sys,'argv',['prepare-system','ubuntu',str(image),'--work-dir',directory]),patch.object(script,'require'),patch.object(script,'ctl',return_value=self.disk_id) as ctl,patch.object(script,'nbd',side_effect=disk),patch.object(script,'qemu') as qemu,patch.object(script,'extract'),contextlib.redirect_stdout(io.StringIO()):
                 script.main()
-            ctl.assert_any_call('stqr.yaml','create','ubuntu-bd')
+            ctl.assert_any_call('stqr.yaml','create','ubuntu-bd',capture=True)
             ctl.assert_any_call('stqr.yaml','publish','ubuntu',unittest.mock.ANY)
-            ctl.assert_any_call('stqr.yaml','delete','ubuntu-bd')
+            ctl.assert_any_call('stqr.yaml','delete',self.disk_id)
             self.assertEqual(qemu.call_args.args[1].memory,4096)
 
     def test_edit_mounts_published_fs_directly_and_cow_clone_is_optional(self):
@@ -264,6 +271,7 @@ class Workflows(unittest.TestCase):
             script.main()
             ctl.assert_any_call('stqr.yaml','resolve','ubuntu')
     def test_resume_preserves_existing_installation_disk(self):
+        self.remember_disk()
         script = load('prepare-system')
         with tempfile.TemporaryDirectory() as directory:
             image = Path(directory) / 'ubuntu.iso'
@@ -273,9 +281,10 @@ class Workflows(unittest.TestCase):
                 yield Path(directory) / 'disk.sock'
             with patch.object(sys, 'argv', ['prepare-system', '--resume', 'ubuntu', str(image)]), patch.object(script, 'require'), patch.object(script, 'ctl') as ctl, patch.object(script, 'nbd', side_effect=disk), patch.object(script, 'qemu'), patch.object(script, 'extract'), contextlib.redirect_stdout(io.StringIO()):
                 script.main()
-            ctl.assert_any_call('stqr.yaml', '--size', str(32 << 30), 'check-install-disk', 'ubuntu-bd')
+            ctl.assert_any_call('stqr.yaml', '--size', str(32 << 30), 'check-install-disk', self.disk_id)
             self.assertFalse(any('create' in call.args or 'init-disk' in call.args for call in ctl.call_args_list))
     def test_publish_only_never_recreates_disk_or_starts_vm(self):
+        self.remember_disk()
         script = load('prepare-system')
         @contextlib.contextmanager
         def disk(*args):
@@ -288,6 +297,7 @@ class Workflows(unittest.TestCase):
         self.assertFalse(any('create' in call.args or 'init-disk' in call.args for call in ctl.call_args_list))
 
     def test_temporary_disk_cleanup_failure_reports_image_already_published(self):
+        self.remember_disk()
         script = load('prepare-system')
         @contextlib.contextmanager
         def disk(*args):
@@ -298,6 +308,41 @@ class Workflows(unittest.TestCase):
         with patch.object(sys, 'argv', ['prepare-system', '--publish-only', 'ubuntu']), patch.object(script, 'staging', side_effect=disk), patch.object(script, 'require'), patch.object(script, 'ctl', side_effect=command), patch.object(script, 'nbd', side_effect=disk), patch.object(script, 'extract'), contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()), self.assertRaisesRegex(RuntimeError, 'ubuntu is published, but temporary installation disk cleanup failed'):
             script.main()
 
+    def test_installation_uses_pinned_id_after_bucket_name_is_reused(self):
+        script = load('prepare-system')
+        original, replacement = '01' * 16, '02' * 16
+        names, attached, deleted = {'ubuntu-bd': original}, [], []
+        with tempfile.TemporaryDirectory() as directory:
+            iso = Path(directory) / 'installer.iso'
+            iso.write_bytes(b'installer')
+            def command(config, *args, **kwargs):
+                op = args[0]
+                if op == 'create':
+                    return original
+                if 'init-disk' in args:
+                    # Another administrator renames the original and reuses
+                    # its visible name while the long installation continues.
+                    names['ubuntu-bd'] = replacement
+                if op == 'delete':
+                    deleted.append(names.get(args[1], args[1]))
+                return ''
+            @contextlib.contextmanager
+            def disk(config, selector, work):
+                selected = names.get(selector, selector)
+                attached.append(selected)
+                self.assertEqual(selected, original,
+                                 'replacement disk attached through reused name')
+                yield Path(work) / 'disk.sock'
+            def extract(socket, work, version, config):
+                for name in ('rootfs.tar', 'vmlinuz', 'initrd.img', 'release.json'):
+                    Path(work, name).write_bytes(b'prepared')
+            argv = ['prepare-system', 'ubuntu', str(iso), '--work-dir', directory]
+            with patch.object(sys, 'argv', argv), patch.object(script, 'require'), patch.object(script, 'ctl', side_effect=command), patch.object(script, 'nbd', side_effect=disk), patch.object(script, 'qemu'), patch.object(script, 'extract', side_effect=extract), contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                script.main()
+            self.assertEqual(attached, [original])
+            self.assertEqual(deleted, [original])
+            self.assertEqual(names['ubuntu-bd'], replacement)
+
     def test_installer_disk_is_temporary_and_named_image_is_never_deleted(self):
         import common
         script = load('prepare-system')
@@ -306,18 +351,18 @@ class Workflows(unittest.TestCase):
             iso.write_bytes(b'installer')
             @contextlib.contextmanager
             def disk(*args):
-                self.assertEqual(args[1], 'ubuntu-bd')
+                self.assertEqual(args[1], self.disk_id)
                 yield Path(directory) / 'disk.sock'
             def extract(socket, work, version, config):
                 for name in ('rootfs.tar', 'vmlinuz', 'initrd.img', 'release.json'):
                     Path(work, name).write_bytes(b'prepared')
             argv = ['prepare-system', 'ubuntu', str(iso), '--work-dir', directory]
-            with patch.object(sys, 'argv', argv), patch.object(script, 'temporary_installation_name', return_value='ubuntu-bd'), patch.object(script, 'require'), patch.object(script, 'ctl') as ctl, patch.object(script, 'nbd', side_effect=disk), patch.object(script, 'qemu') as qemu, patch.object(script, 'extract', side_effect=extract), contextlib.redirect_stdout(io.StringIO()):
+            with patch.object(sys, 'argv', argv), patch.object(script, 'temporary_installation_name', return_value='ubuntu-bd'), patch.object(script, 'require'), patch.object(script, 'ctl', return_value=self.disk_id) as ctl, patch.object(script, 'nbd', side_effect=disk), patch.object(script, 'qemu') as qemu, patch.object(script, 'extract', side_effect=extract), contextlib.redirect_stdout(io.StringIO()):
                 script.main()
-            ctl.assert_any_call('stqr.yaml', 'create', 'ubuntu-bd')
-            ctl.assert_any_call('stqr.yaml', '--size', str(32 << 30), 'init-disk', 'ubuntu-bd')
+            ctl.assert_any_call('stqr.yaml', 'create', 'ubuntu-bd', capture=True)
+            ctl.assert_any_call('stqr.yaml', '--size', str(32 << 30), 'init-disk', self.disk_id)
             ctl.assert_any_call('stqr.yaml', 'publish', 'ubuntu', unittest.mock.ANY)
-            ctl.assert_any_call('stqr.yaml', 'delete', 'ubuntu-bd')
+            ctl.assert_any_call('stqr.yaml', 'delete', self.disk_id)
             self.assertFalse(any(c.args[1] in ('delete', 'gc', 'clear') and c.args[2] == 'ubuntu' for c in ctl.call_args_list))
             self.assertIsNone(common.installed_disk('stqr.yaml', 'ubuntu'))
             qemu.assert_called_once()
@@ -331,13 +376,37 @@ class Workflows(unittest.TestCase):
             for name in ('rootfs.tar', 'vmlinuz', 'initrd.img', 'release.json'):
                 (work / name).write_bytes(b'prepared')
             common.remember_preparation('stqr.yaml', 'ubuntu', work, 'published')
-            common.remember_installation('stqr.yaml', 'ubuntu', 'ubuntu-bd')
+            common.remember_installation('stqr.yaml', 'ubuntu', self.disk_id)
             with patch.object(sys, 'argv', ['prepare-system', 'ubuntu']), patch.object(script, 'require'), patch.object(script, 'ctl') as ctl, patch.object(script, 'nbd') as nbd, contextlib.redirect_stdout(io.StringIO()):
                 script.main()
             nbd.assert_not_called()
-            ctl.assert_any_call('stqr.yaml', 'delete', 'ubuntu-bd')
+            ctl.assert_any_call('stqr.yaml', 'delete', self.disk_id)
             self.assertFalse(any(c.args[1] in ('publish', 'gc', 'clear') for c in ctl.call_args_list))
             self.assertIsNone(common.installed_disk('stqr.yaml', 'ubuntu'))
+
+    def test_resume_without_identity_record_does_not_adopt_a_name(self):
+        script = load('prepare-system')
+        with tempfile.TemporaryDirectory() as directory:
+            iso = Path(directory) / 'installer.iso'
+            iso.write_bytes(b'installer')
+            for args in (['ubuntu', '--publish-only'],
+                         ['--resume', 'ubuntu', str(iso)]):
+                with patch.object(sys, 'argv', ['prepare-system', *args]), patch.object(script, 'require'), patch.object(script, 'ctl') as ctl, patch.object(script, 'nbd') as nbd, self.assertRaisesRegex(RuntimeError, 'no canonical installation record'):
+                    script.main()
+                nbd.assert_not_called()
+                self.assertFalse(any(op in call.args for call in ctl.call_args_list
+                                     for op in ('resolve', 'create', 'delete', 'init-disk', 'check-install-disk')))
+
+    def test_legacy_name_only_installation_record_is_retained_for_manual_recovery(self):
+        import common
+        record = common.installation_record('stqr.yaml', 'ubuntu')
+        record.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        original = json.dumps({'target': 'ubuntu', 'disk': 'ubuntu-bd'})
+        record.write_text(original)
+        record.chmod(0o600)
+        with self.assertRaisesRegex(RuntimeError, 'lacks a canonical bucket ID'):
+            common.installed_disk('stqr.yaml', 'ubuntu')
+        self.assertEqual(record.read_text(), original)
 
     def test_installation_state_cannot_select_published_image_for_deletion(self):
         import common
