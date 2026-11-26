@@ -50,7 +50,7 @@ def remember_preparation(config, bucket, work, phase='prepared'):
         return
     record = preparation_record(config, bucket)
     record.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    data = json.dumps({'work': str(work), 'phase': phase, 'login_setup': 1})
+    data = json.dumps({'work': str(work), 'phase': phase, 'login_setup': 1, 'image_layout': 2})
     marker = work / '.stqr-preparation.json'
     marker.write_text(str(record))
     marker.chmod(0o600)
@@ -82,12 +82,52 @@ def prepared_release(config, bucket):
     except (OSError, ValueError, KeyError, TypeError):
         return None
 
+def temporary_installation_name(bucket):
+    if not bucket or len((bucket + '-bd').encode()) > 255:
+        raise ValueError('image name is too long for its installation bucket')
+    return bucket + '-bd'
+
+def installation_record(config, bucket):
+    base = preparation_record(config, bucket)
+    return base.with_name('installation-' + base.name)
+
+def remember_installation(config, target, disk):
+    if disk != temporary_installation_name(target):
+        raise ValueError('installation disk must be named [image]-bd')
+    record = installation_record(config, target)
+    record.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    fd, temporary = tempfile.mkstemp(prefix='.install-', dir=record.parent)
+    try:
+        with os.fdopen(fd, 'w') as out:
+            json.dump({'target': target, 'disk': disk}, out)
+            out.flush()
+            os.fsync(out.fileno())
+        os.replace(temporary, record)
+    finally:
+        Path(temporary).unlink(missing_ok=True)
+
+def installed_disk(config, target):
+    record = installation_record(config, target)
+    try:
+        if record.is_symlink() or record.stat().st_uid != os.getuid() or record.stat().st_mode & 0o077:
+            raise RuntimeError('unsafe installation state file')
+        data = json.loads(record.read_text())
+        if data['target'] != target or not isinstance(data['disk'], str) or data['disk'] != temporary_installation_name(target):
+            raise RuntimeError('invalid installation state')
+        return data['disk']
+    except FileNotFoundError:
+        return None
+
+def forget_installation(config, target):
+    installation_record(config, target).unlink(missing_ok=True)
+
 def forget_preparation(config, bucket):
     preparation_record(config, bucket).unlink(missing_ok=True)
 
-def ctl(config, *args, capture=False):
+def ctl(config, *args, capture=False, timeout=None):
     result = run(BIN / 'stqr-bootctl', '--config', config, *args,
-                 stdout=subprocess.PIPE if capture else None, text=True)
+                 stdout=subprocess.PIPE if capture else None, text=True,
+                 **({'timeout': timeout} if timeout is not None else {}))
     return result.stdout.strip() if capture else None
 
 def require(*programs):

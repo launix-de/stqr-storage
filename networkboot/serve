@@ -3,6 +3,7 @@
 """Serve Proxy-DHCP/TFTP and a native kstqr boot initramfs over HTTP."""
 import argparse
 import hashlib
+import gzip
 import fcntl
 import http.server
 import ipaddress
@@ -68,6 +69,29 @@ tftp-root={tftp}
 '''
 
 
+def editor_initrd(path):
+    """Append the current plain-filesystem mount helper to a cached initramfs.
+
+    Linux unpacks concatenated compressed newc archives. Only the editor's
+    private cached initrd changes; the published image and its kernel stay put.
+    This also permits editing an image prepared before editor mount mode existed.
+    """
+    helper = (BIN / 'stqr-boot-root').read_bytes()
+    archive = bytearray()
+    def entry(name, data, mode):
+        encoded = name.encode() + b'\0'
+        values = [1, mode, 0, 0, 1, 0, len(data), 0, 0, 0, 0, len(encoded), 0]
+        archive.extend(b'070701' + ''.join(f'{v:08x}' for v in values).encode() + encoded)
+        archive.extend(b'\0' * (-len(archive) % 4))
+        archive.extend(data)
+        archive.extend(b'\0' * (-len(archive) % 4))
+    entry('usr/bin/stqr-boot-root', helper, 0o100755)
+    entry('TRAILER!!!', b'', 0)
+    with path.open('ab') as output:
+        output.write(gzip.compress(archive, compresslevel=1, mtime=0))
+    return hashlib.sha256(helper).digest()
+
+
 def cache_release(args):
     with tempfile.TemporaryDirectory(prefix='release-', dir=args.cache) as temporary:
         work = Path(temporary)
@@ -81,7 +105,10 @@ def cache_release(args):
             lower = bytes(lower).hex()
         if not isinstance(lower, str) or len(lower) != 32 or any(c not in '0123456789abcdef' for c in lower):
             raise RuntimeError('Invalid native root bucket')
-        digest = hashlib.sha256((work / 'manifest.json').read_bytes()).hexdigest()
+        identity = (work / 'manifest.json').read_bytes()
+        if getattr(args, 'edit', False):
+            identity += b'\0edit\0' + editor_initrd(work / 'initrd.img')
+        digest = hashlib.sha256(identity).hexdigest()
         release = args.cache / digest
         if not release.exists():
             os.rename(work, release)
@@ -104,6 +131,8 @@ def main():
     p.add_argument('--no-dhcp', action='store_true', help='use externally configured DHCP/TFTP')
     p.add_argument('--upper-gib', type=int, default=16, help='temporary root quota per boot in GiB (default: 16)')
     p.add_argument('--max-sessions', type=int, default=64)
+    p.add_argument('--edit', action='store_true', help=argparse.SUPPRESS)
+    p.add_argument('--ready-file', type=Path, help=argparse.SUPPRESS)
     p.add_argument('--check', action='store_true', help='validate dependencies/config without starting services')
     args = p.parse_args()
     if args.bucket and args.base_bucket:
@@ -118,7 +147,9 @@ def main():
     require(*([] if args.no_dhcp else ['dnsmasq']))
     if not args.no_dhcp and not all(f.is_file() for f in [args.bios_loader, args.efi_loader]):
         p.error('supply standalone iPXE BIOS and EFI loaders (not QEMU ROM files)')
-    if not all(1 <= port <= 65535 for port in [args.http_port]):
+    if args.edit and not args.no_dhcp:
+        p.error('writable editing requires a private --no-dhcp gateway')
+    if not (0 <= args.http_port <= 65535) or args.http_port == 0 and not args.no_dhcp:
         p.error('invalid port')
     print(f'Boot network: {args.interface}, server {args.server}, clients {args.clients}', flush=True)
     config = dnsmasq_config(args.server, args.interface, args.clients, '/TFTP', args.http_port)
@@ -135,7 +166,7 @@ def main():
         p.error('cache must belong to the gateway user and not be writable by other users')
     lockfile = (args.cache / 'gateway.lock').open('w')
     fcntl.flock(lockfile, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    sessions = NativeSessions(args.config, args.cache / 'uppers', args.upper_gib, args.max_sessions, server=args.server)
+    sessions = NativeSessions(args.config, args.cache / 'uppers', args.upper_gib, 1 if args.edit else args.max_sessions, server=args.server, edit=args.edit, image_name=args.base_bucket)
     children = []
     stop = threading.Event()
     reload_release = threading.Event()
@@ -207,6 +238,7 @@ def main():
                     with f.open('rb') as source:shutil.copyfileobj(source,self.wfile)
                 else:self.send_error(404)
         httpd = http.server.ThreadingHTTPServer((args.server, args.http_port), Handler)
+        args.http_port = httpd.server_port
         httpd.daemon_threads = True
         thread = threading.Thread(target=httpd.serve_forever, daemon=True)
         thread.start()
@@ -216,7 +248,10 @@ def main():
                 conf.write_text(dnsmasq_config(args.server, args.interface, args.clients, tftp, args.http_port))
                 run('dnsmasq', '--test', '--conf-file=' + str(conf))
                 children.append(subprocess.Popen(['dnsmasq', '--keep-in-foreground', '--conf-file=' + str(conf), '--pid-file=']))
-            print(f'Serving {args.base_bucket}, immutable release {digest}; PXE ready at http://{args.server}:{args.http_port}/boot.ipxe', flush=True)
+            print(f'Serving {args.base_bucket}, boot artifacts {digest}; PXE ready at http://{args.server}:{args.http_port}/boot.ipxe', flush=True)
+            if args.ready_file:
+                args.ready_file.write_text(json.dumps({'url': f'http://{args.server}:{args.http_port}/boot.ipxe'}))
+                args.ready_file.chmod(0o600)
             while not stop.wait(.5):
                 if reload_release.is_set():
                     reload_release.clear()
@@ -230,6 +265,8 @@ def main():
                 if any(child.poll() is not None for child in children):
                     raise RuntimeError('a boot service stopped unexpectedly')
         finally:
+            if args.ready_file:
+                args.ready_file.unlink(missing_ok=True)
             httpd.shutdown(); httpd.server_close(); thread.join()
             if sessions:
                 sessions.close()

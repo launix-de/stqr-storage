@@ -1,50 +1,85 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-3.0-only
+"""Boot a published native rootfs writable, optionally using STQR COW first."""
 import argparse
+import contextlib
+import json
+from pathlib import Path
 import subprocess
-from common import (cli, ctl, extract, nbd, qemu, require, staging,
-                    forget_preparation, remember_preparation)
+import time
+from common import HERE, cli, ctl, require, run, staging
+
+
+@contextlib.contextmanager
+def editor_gateway(config, bucket, work):
+    ready = Path(work) / 'ready.json'
+    command = [str(HERE / 'serve'), '--config', str(Path(config).resolve()),
+               bucket, '--edit', '--no-dhcp', '--http-port', '0',
+               '--cache', str(Path(work) / 'gateway'), '--ready-file', str(ready)]
+    process = subprocess.Popen(command)
+    try:
+        deadline = time.monotonic() + 900
+        while not ready.exists():
+            if process.poll() is not None:
+                raise RuntimeError('editor boot gateway failed')
+            if time.monotonic() >= deadline:
+                raise RuntimeError('editor boot gateway startup timed out')
+            time.sleep(.1)
+        yield json.loads(ready.read_text())['url']
+    finally:
+        if process.poll() is None:
+            process.terminate()
+        try:
+            process.wait(timeout=120)
+            if list((Path(work) / 'gateway' / 'uppers').glob('*.json')):
+                raise RuntimeError('editor cleanup incomplete; private recovery records retained in ' + str(work))
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait()
+            raise RuntimeError('editor gateway cleanup timed out; inspect its private recovery records')
+
 
 def main():
-    p = argparse.ArgumentParser(description='Boot an existing bucket disk in QEMU; optionally clone before editing')
-    p.add_argument('--config', default='stqr.yaml', help='STQR YAML (default: ./stqr.yaml) or private credentials JSON')
-    p.add_argument('bucket_name', nargs='?', help='base bucket')
+    p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument('--config', default='stqr.yaml', help='STQR YAML or private credentials JSON')
+    p.add_argument('bucket_name', nargs='?', help='filesystem image to edit')
     p.add_argument('--bucket', help=argparse.SUPPRESS)
-    p.add_argument('--to-bucket', help='new destination bucket; original remains unchanged')
+    p.add_argument('--copy-from', help='create this new image through STQR COW from another image')
+    p.add_argument('--to-bucket', help='compatibility spelling: edit SOURCE --to-bucket NEW')
     p.add_argument('--memory', type=int, default=4096)
     p.add_argument('--cpus', type=int, default=2)
-    p.add_argument('--uefi')
-    p.add_argument('--kernel-version')
-    p.add_argument('--work-dir', default='/var/tmp', help='local archive staging directory; needs disk space')
+    p.add_argument('--uefi', help='optional OVMF firmware file')
+    p.add_argument('--work-dir', default='/var/tmp', help='private gateway artifact cache directory')
     args = p.parse_args()
     if args.bucket_name and args.bucket:
         p.error('specify the bucket only once')
-    args.bucket = args.bucket_name or args.bucket
-    if not args.bucket:
+    target = args.bucket_name or args.bucket
+    if not target:
         p.error('bucket name required')
-    require('qemu-system-x86_64', 'guestfish', 'sort', 'lsinitramfs')
-    ctl(args.config, 'check-exclusive', args.bucket)
-    if args.memory<512 or args.cpus<1:
-        p.error("memory must be at least 512 MiB and CPU count positive")
-    target = args.to_bucket or args.bucket
     if args.to_bucket:
-        ctl(args.config, 'create', target)
-        ctl(args.config, 'clone', args.bucket, target)
+        if args.copy_from:
+            p.error('--copy-from and --to-bucket cannot be combined')
+        args.copy_from, target = target, args.to_bucket
+    if args.memory < 512 or args.cpus < 1:
+        p.error('memory must be at least 512 MiB and CPU count positive')
+    require('qemu-system-x86_64')
+    if args.copy_from:
+        ctl(args.config, 'clone-image', args.copy_from, target)
+    # The server validates format/root on connection. No installation disk,
+    # export/import, offline maintenance lease, or filesystem-wide lock is used.
+    ctl(args.config, 'check-image', target, capture=True)
     with staging(args.work_dir, 'stqr-edit-') as work:
-        with nbd(args.config, target, work) as socket:
-            forget_preparation(args.config, target)
-            qemu(socket, args)
-            extract(socket, work, args.kernel_version, args.config)
-        remember_preparation(args.config, target, work)
-        ctl(args.config, 'publish', target, work)
-        remember_preparation(args.config, target, work, 'published')
-        print('Published', target, flush=True)
-        try:
-            ctl(args.config, 'gc', target)
-        except subprocess.CalledProcessError:
-            raise RuntimeError(f'Image {target} is published, but cleanup failed. Disconnect bucket clients and retry: networkboot/prepare-system {target}') from None
-    forget_preparation(args.config, target)
-    print('Cleanup complete', flush=True)
+        with editor_gateway(args.config, target, work) as url:
+            command = ['qemu-system-x86_64', '-name', 'STQR image editor: ' + target,
+                       '-machine', 'accel=kvm:tcg', '-m', str(args.memory),
+                       '-smp', str(args.cpus), '-boot', 'n',
+                       '-nic', 'user,model=virtio-net-pci,bootfile=' + url]
+            if args.uefi:
+                command += ['-bios', str(Path(args.uefi).resolve())]
+            print('Editing', target, 'directly; shut down the guest to finish.', flush=True)
+            run(*command)
+    print('Saved', target, flush=True)
+
 
 if __name__ == '__main__':
     cli(main)
