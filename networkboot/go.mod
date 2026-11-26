@@ -13,7 +13,10 @@ require (
 	github.com/cyphar/filepath-securejoin v0.2.5 // indirect
 	github.com/gorilla/websocket v1.5.3 // indirect
 	github.com/hanwen/go-fuse/v2 v2.12.1 // indirect
+	github.com/pierrec/lz4/v4 v4.1.26 // indirect
 	github.com/rasky/go-xdr v0.0.0-20170124162913-1a41d1a06c93 // indirect
+	github.com/ulikunitz/xz v0.5.15 // indirect
+	golang.org/x/crypto v0.37.0 // indirect
 	golang.org/x/sys v0.32.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
