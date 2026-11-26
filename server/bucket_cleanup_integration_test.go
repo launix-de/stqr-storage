@@ -9,10 +9,10 @@ import (
 	"github.com/launix-de/stqr-storage/volume"
 )
 
-// PR48 returns backpressure instead of implicitly flushing a full accepted
-// group. PR49's shared scheduler must retain its durability obligation while
-// flushing that generation outside the handle, for either cleanup lane.
-func TestCleanupFullAcceptedGroupIntegration(t *testing.T) {
+// Accepted writes may exceed the former fixed group budget without fencing.
+// Explicit bucket deletion must still checkpoint its cleanup before reporting
+// completion and retain a failed fence obligation for either cleanup lane.
+func TestCleanupLargeAcceptedGroupIntegration(t *testing.T) {
 	for _, receipts := range []bool{false, true} {
 		for _, failFence := range []bool{false, true} {
 			name := "objects"
@@ -37,6 +37,7 @@ func TestCleanupFullAcceptedGroupIntegration(t *testing.T) {
 						t.Fatal(err)
 					}
 				}
+				before := v.IOStats().SyncOps
 				keep := volume.Key{Bucket: volume.ID{250}, Object: volume.ObjectID{1}}
 				payload := bytes.Repeat([]byte("k"), 1<<20)
 				for i := byte(1); i <= 2; i++ {
@@ -45,10 +46,10 @@ func TestCleanupFullAcceptedGroupIntegration(t *testing.T) {
 						t.Fatal(err)
 					}
 				}
+				generation, err := h.Generation()
 				h.Close()
-				generation, pending := v.PendingCheckpoint(true, 0)
-				if !pending || generation == 0 {
-					t.Fatal("positive control: accepted group did not reach cleanup backpressure")
+				if err != nil || generation == 0 || v.IsDurableThrough(generation) || v.IOStats().SyncOps != before {
+					t.Fatal("positive control: large accepted group must remain unconfirmed without an implicit fence", err)
 				}
 				s.cleanupReceiptTurn = receipts
 				if failFence {
@@ -59,7 +60,7 @@ func TestCleanupFullAcceptedGroupIntegration(t *testing.T) {
 				s.reclaimBucketStep()
 				job := s.cleanupJobs[doomed.Bucket]
 				if failFence {
-					if job.done || job.volumes[0].checkpoint != generation {
+					if job.done || job.volumes[0].checkpoint < generation {
 						t.Fatal("lost the captured failed-checkpoint obligation", job)
 					}
 					return
@@ -68,7 +69,7 @@ func TestCleanupFullAcceptedGroupIntegration(t *testing.T) {
 					s.reclaimBucketStep()
 				}
 				if !job.done || !v.IsDurableThrough(generation) {
-					t.Fatal("cleanup did not resume after full-group checkpoint", job)
+					t.Fatal("cleanup did not confirm the large accepted group", job)
 				}
 				h, err = v.Open(false)
 				if err != nil {

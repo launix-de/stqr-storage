@@ -27,11 +27,16 @@ func TestAcceptedCleanupReleasesClosedVolumesWhilePeerPending(t *testing.T) {
 		}
 		g := connectionTestPut(t, v, volume.Key{Bucket: bucket, Object: volume.ObjectID{n}}, "closed")
 		s.recordAccepted(bucket, v, g)
+		// Close is not a durability request. This positive control retires an
+		// explicitly checkpointed generation before testing pruning.
+		if err := v.CheckpointThrough(g); err != nil {
+			t.Fatal(err)
+		}
 		if err := v.Close(); err != nil {
 			t.Fatal(err)
 		}
 		if !v.TryIsDurableThrough(g) {
-			t.Fatal("closed volume did not checkpoint accepted data")
+			t.Fatal("explicitly checkpointed closed volume lost durability confirmation")
 		}
 		stats[v] = v.IOStats()
 	}
@@ -80,5 +85,34 @@ func TestAcceptedCleanupReleasesClosedVolumesWhilePeerPending(t *testing.T) {
 	s.durability.mu.Unlock()
 	if retained != 0 {
 		t.Fatalf("retained %d checkpointed devices", retained)
+	}
+}
+
+// Unrequested tails discarded at close are not proof of durable completion.
+func TestAcceptedCleanupDoesNotConfirmDiscardedClosedTail(t *testing.T) {
+	s := testServer(t)
+	bucket := volume.ID(client.NewRequestID())
+	v, err := volume.NewRAM(16 << 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	generation := connectionTestPut(t, v, volume.Key{Bucket: bucket, Object: volume.ObjectID{1}}, "unconfirmed")
+	s.recordAccepted(bucket, v, generation)
+	before := v.IOStats()
+	if err := v.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if v.TryIsDurableThrough(generation) || v.IOStats().SyncOps != before.SyncOps {
+		t.Fatal("ordinary close confirmed or persisted an unrequested tail")
+	}
+	s.pruneDurability()
+	if _, pending := s.acceptedMark(bucket); !pending {
+		t.Fatal("pruning confirmed a discarded tail")
+	}
+	s.durability.mu.Lock()
+	retained := s.durability.buckets[bucket].volumes[v]
+	s.durability.mu.Unlock()
+	if retained != generation || v.IOStats() != before {
+		t.Fatal("pruning lost an uncertain dependency or performed storage I/O")
 	}
 }
