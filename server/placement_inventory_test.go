@@ -316,7 +316,7 @@ func TestPlacementPendingDiffUsesRAMWithoutIO(t *testing.T) {
 		}
 	}
 	after := v.IOStats()
-	if after.ReadOps != before.ReadOps || after.WriteOps != before.WriteOps || after.SyncOps != before.SyncOps {
+	if testStorageReadOps(after) != testStorageReadOps(before) || after.WriteOps != before.WriteOps || after.SyncOps != before.SyncOps {
 		t.Fatal("pending difference read persistent metadata", before, after)
 	}
 	r.server.quotaUsage.Store(nil)
@@ -349,7 +349,7 @@ func TestPlacementInPlaceCodecUsesRetainedAccounting(t *testing.T) {
 	if err != nil || same != 0 {
 		t.Fatal("unchanged retained copy was charged again", same, err)
 	}
-	if after := v.IOStats(); after.ReadOps != before.ReadOps || after.WriteOps != before.WriteOps || after.SyncOps != before.SyncOps {
+	if after := v.IOStats(); testStorageReadOps(after) != testStorageReadOps(before) || after.WriteOps != before.WriteOps || after.SyncOps != before.SyncOps {
 		t.Fatal("retained codec estimate touched storage", before, after)
 	}
 }
@@ -385,7 +385,7 @@ func TestPlacementMissingSourceIsUnknownButKnownEmptyIsZero(t *testing.T) {
 	if err != nil || cost != 0 || count != 0 {
 		t.Fatal("known complete snapshot omitted an empty bucket", cost, count, err)
 	}
-	if after := v.IOStats(); after.ReadOps != before.ReadOps || after.WriteOps != before.WriteOps {
+	if after := v.IOStats(); testStorageReadOps(after) != testStorageReadOps(before) || after.WriteOps != before.WriteOps {
 		t.Fatal("empty estimate read storage", before, after)
 	}
 }
@@ -415,7 +415,7 @@ func TestPlacementRangeCostBoundsAtCounterLimit(t *testing.T) {
 		}
 		prior = physical
 	}
-	if after := v.IOStats(); after.ReadOps != before.ReadOps || after.WriteOps != before.WriteOps || after.SyncOps != before.SyncOps {
+	if after := v.IOStats(); testStorageReadOps(after) != testStorageReadOps(before) || after.WriteOps != before.WriteOps || after.SyncOps != before.SyncOps {
 		t.Fatal("counter bound estimate touched storage", before, after)
 	}
 }

@@ -69,8 +69,8 @@ func TestStartupAccountingColdSinglePassReadBudget(t *testing.T) {
 	// page crossings and the tree. A second census/repeated receipt decoding
 	// exceeds this bound even when the operating system has every page cached.
 	budget := uint64(4*n + 64)
-	if reads := after.ReadOps - before.ReadOps; reads > budget {
-		t.Fatalf("startup exceeded single-pass read budget: reads=%d budget=%d", reads, budget)
+	if reads := testReadWorkOps(after) - testReadWorkOps(before); reads == 0 || reads > budget {
+		t.Fatalf("startup outside single-pass read budget: reads=%d budget=%d", reads, budget)
 	}
 	if predicateCalls != 0 {
 		t.Fatal("uniform ownership ignored per-bucket proof", predicateCalls)
@@ -91,7 +91,17 @@ func TestStartupAccountingColdSinglePassReadBudget(t *testing.T) {
 	if len(v.accounting) != 2 || len(v.owned) != 2 || len(v.cache.items) > 256 || len(v.nodes.items) > 256 {
 		t.Fatal("census retained an object-sized directory")
 	}
-	t.Logf("cold census: %d objects plus %d receipts, %d backend reads", n, n, after.ReadOps-before.ReadOps)
+	t.Logf("cold census: %d objects plus %d receipts, %d read operations (%d positioned, %d views)", n, n, testReadWorkOps(after)-testReadWorkOps(before), after.ReadOps-before.ReadOps, after.ViewReadOps-before.ViewReadOps)
+	// A real second walk is the negative control: the budget must distinguish
+	// repeated metadata work even when all data is in mapped/RAM pages.
+	if _, _, err := v.scanAccounting(nil, nil, false); err != nil {
+		t.Fatal(err)
+	}
+	doubled := testReadWorkOps(v.IOStats()) - testReadWorkOps(before)
+	if doubled <= budget {
+		t.Fatal("read budget cannot detect a repeated census", doubled, budget)
+	}
+	t.Logf("negative control: repeated census reached %d read operations against budget %d", doubled, budget)
 }
 
 func TestStartupAccountingOwnershipModesAndMutation(t *testing.T) {
@@ -184,7 +194,7 @@ func TestStartupAccountingOwnershipModesAndMutation(t *testing.T) {
 			if err = v.SetOwnershipFilter(stamp, include); err != nil {
 				t.Fatal(err)
 			}
-			if after := v.IOStats(); after.ReadOps != before.ReadOps {
+			if after := v.IOStats(); testReadWorkOps(after) != testReadWorkOps(before) {
 				t.Fatal("unchanged ownership recounted records")
 			}
 			// The initial proof still installs the actual future-write predicate.
@@ -229,8 +239,8 @@ func TestStartupAccountingFirstUniformFilterUsesAlreadyLoadedTotals(t *testing.T
 		if err = v.SetOwnershipFilter(startupOwnershipStamp{uniform: true, own: own}, func(Key, bool) bool { calls++; return own }); err != nil {
 			t.Fatal(err)
 		}
-		if after := v.IOStats(); after.ReadOps != before.ReadOps || calls != 0 {
-			t.Fatal("first uniform filter reread initialized totals", calls, after.ReadOps-before.ReadOps)
+		if after := v.IOStats(); testReadWorkOps(after) != testReadWorkOps(before) || calls != 0 {
+			t.Fatal("first uniform filter reread initialized totals", calls, testReadWorkOps(after)-testReadWorkOps(before))
 		}
 		h, _ := v.Open(false)
 		got, err := h.OwnedStorageUsage()
