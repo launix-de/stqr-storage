@@ -16,7 +16,7 @@ administrator rights are needed for this per-user setup. This is not a system
 service or a drive available before anyone has logged in.
 
 The setup copies both executables into `%LOCALAPPDATA%\STQR` using versioned
-filenames, registers one `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`
+bundle directories, registers one `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`
 entry per drive, and stores an encrypted profile under `HKCU\Software\STQR\Mounts`.
 The profile, including the password, is protected with **Windows DPAPI in user
 scope**. No plaintext password is written into files, startup arguments or the
@@ -32,7 +32,7 @@ already exist on the server.
 Open the EXE again and select a saved drive. **“Trennen”** unmounts it;
 **“Verbindung entfernen”** also removes the startup entry and saved credentials
 after confirmation.
-Installed executable versions are kept so removing one drive cannot break
+Installed bundle versions are kept so removing one drive cannot break
 another configured drive. Use `--setup --saved-drive T:` to edit another saved
 profile. Removing a profile never deletes its server-side bucket or data.
 
@@ -114,7 +114,9 @@ make windows-package
 ```
 
 The build publishes a self-contained WinUI 3 frontend (Windows App SDK 2.7) and
-Go/WinFsp backend into `windows/bin`. Keep the two EXEs together. WinUI requires
+Go/WinFsp backend into `windows/bin`. Keep both EXEs together with their original names; WinUI resource activation
+requires the frontend basename to remain stable. Installations use versioned
+directories so updates do not replace a running program. WinUI requires
 Windows 10 version 1809 or newer; supported deployments also require an OS still
 covered by Microsoft support. The XAML compiler requires a Windows host.
 

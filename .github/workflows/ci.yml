@@ -195,17 +195,22 @@ jobs:
         shell: pwsh
         run: |
           $env:STQR_UI_SMOKE_DIR = (Resolve-Path bin).Path
-          Copy-Item bin/stqr-windows.exe bin/stqr-windows-installed.exe
-          Copy-Item bin/stqr-windows.ui.exe bin/stqr-windows-installed.ui.exe
-          foreach ($frontend in @('stqr-windows.ui.exe', 'stqr-windows-installed.ui.exe')) {
+          $bundle = Join-Path $env:RUNNER_TEMP 'stqr-deployment-check'
+          New-Item -ItemType Directory -Force -Path $bundle | Out-Null
+          Copy-Item bin/stqr-windows.exe (Join-Path $bundle 'stqr-windows.exe')
+          Copy-Item bin/stqr-windows.ui.exe (Join-Path $bundle 'stqr-windows.ui.exe')
+          $installed = Join-Path $bundle 'versioned-installation'
+          New-Item -ItemType Directory -Force -Path $installed | Out-Null
+          Copy-Item (Join-Path $bundle '*.exe') $installed
+          foreach ($directory in @($bundle, $installed)) {
             Remove-Item bin/winui-smoke.txt -ErrorAction SilentlyContinue
-            $ui = Start-Process (Join-Path bin $frontend) -ArgumentList '--smoke-test' -PassThru
-            if (!$ui.WaitForExit(90000)) { $ui.Kill(); throw "WinUI smoke test timed out: $frontend" }
+            $ui = Start-Process (Join-Path $directory stqr-windows.ui.exe) -WorkingDirectory $directory -ArgumentList '--smoke-test' -PassThru
+            if (!$ui.WaitForExit(90000)) { $ui.Kill(); throw "WinUI smoke test timed out: $directory" }
             if ($ui.ExitCode -ne 0) {
               if (Test-Path bin/winui-smoke-error.txt) { Get-Content bin/winui-smoke-error.txt }
-              throw "WinUI smoke test failed: $frontend ($($ui.ExitCode))"
+              throw "WinUI smoke test failed: $directory ($($ui.ExitCode))"
             }
-            if (!(Test-Path bin/winui-smoke.txt)) { throw "Missing WinUI smoke evidence: $frontend" }
+            if (!(Test-Path bin/winui-smoke.txt)) { throw "Missing WinUI smoke evidence: $directory" }
             Get-Content bin/winui-smoke.txt
           }
       - name: Retain the complete Windows bundle and actual UI screenshot
