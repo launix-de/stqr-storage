@@ -157,6 +157,23 @@ func connect(ctx context.Context, c config, name string) (*client.Client, error)
 	return client.DialBucket(ctx, c.URI, c.Username, c.Password, name, "bd")
 }
 
+// Published images are native filesystem buckets. The installation disk lives
+// in a different temporary BD bucket; boot artifacts use reserved object IDs in
+// the filesystem bucket and must be protected by filesystem-aware collection.
+func connectImage(ctx context.Context, c config, name string, createMissing bool) (*client.Client, error) {
+	conn, err := client.DialBucket(ctx, c.URI, c.Username, c.Password, name, "fs")
+	if err == nil || !createMissing || !errors.Is(err, client.ErrNotFound) {
+		return conn, err
+	}
+	if _, e := parseBootID(name); e == nil {
+		return nil, err
+	}
+	if _, e := create(ctx, c, name); e != nil {
+		return nil, e
+	}
+	return client.DialBucket(ctx, c.URI, c.Username, c.Password, name, "fs")
+}
+
 func publish(ctx context.Context, c config, bucket, dir string) error {
 	release, err := lockPublication(dir)
 	if err != nil {
@@ -164,7 +181,7 @@ func publish(ctx context.Context, c config, bucket, dir string) error {
 	}
 	defer release()
 
-	conn, err := connect(ctx, c, bucket)
+	conn, err := connectImage(ctx, c, bucket, true)
 	if err != nil {
 		return err
 	}
@@ -183,7 +200,7 @@ func publish(ctx context.Context, c config, bucket, dir string) error {
 		}
 	}
 	m := manifest{Schema: 2, Files: map[string]artifact{}}
-	m.RootBucket, err = publishNativeRoot(ctx, c, dir)
+	m.RootBucket, err = publishNativeRoot(ctx, c, dir, conn.BucketID())
 	if err != nil {
 		return err
 	}
@@ -224,11 +241,16 @@ func publish(ctx context.Context, c config, bucket, dir string) error {
 	if manifestAbsent {
 		opt.Absent = true
 	}
-	_, err = conn.CAS(ctx, manifestID, 0, old, raw, opt)
-	return err
+	if bytes.Equal(old, raw) {
+		return nil
+	}
+	if _, err = conn.CAS(ctx, manifestID, 0, old, raw, opt); err != nil {
+		return err
+	}
+	return conn.Sync(ctx)
 }
-func fetch(ctx context.Context, c config, bucket, dir string, native bool) error {
-	conn, err := connect(ctx, c, bucket)
+func fetch(ctx context.Context, c config, bucket, dir string) error {
+	conn, err := connectImage(ctx, c, bucket, false)
 	if err != nil {
 		return err
 	}
@@ -238,12 +260,10 @@ func fetch(ctx context.Context, c config, bucket, dir string, native bool) error
 		return err
 	}
 	var m manifest
-	if err = json.Unmarshal(raw, &m); err != nil || (m.Schema != 1 && m.Schema != 2) {
+	if err = json.Unmarshal(raw, &m); err != nil || m.Schema != 2 || m.RootBucket != conn.BucketID() {
 		return client.ErrProtocol
 	}
-	if native && (m.Schema != 2 || m.RootBucket == (client.ID{})) {
-		return errors.New("legacy boot release: run prepare-system --publish-only BUCKET")
-	}
+
 	if err = os.MkdirAll(dir, 0700); err != nil {
 		return err
 	}
@@ -286,8 +306,9 @@ func run() error {
 	device := flags.String("device", "disk.raw", "named block device/default export")
 	ro := flags.Bool("readonly", false, "readonly NBD export")
 	record := flags.String("session-record", "", "private boot-session recovery record")
+	imageName := flags.String("image-name", "", "image label used for private session bucket names")
 	flags.Usage = func() {
-		fmt.Fprintln(flags.Output(), "Usage: stqr-bootctl --config FILE [--size BYTES|--socket PATH] COMMAND BUCKET [ARG]\nCommands: prepare-logins OUTPUT_JSON, resolve, manifest, create, clear, delete, clone SOURCE DEST, publish BUCKET DIRECTORY, fetch BUCKET DIRECTORY, init-disk, nbd, gc, boot-session-create ROOT_BUCKET, boot-session-delete USER_ID UPPER_ID LOWER_ID")
+		fmt.Fprintln(flags.Output(), "Usage: stqr-bootctl --config FILE [--size BYTES|--socket PATH] COMMAND BUCKET [ARG]\nCommands: prepare-logins OUTPUT_JSON, resolve, manifest, create, clear, delete, clone SOURCE DEST, clone-image SOURCE NEW, check-image BUCKET, publish BUCKET DIRECTORY, fetch BUCKET DIRECTORY, init-disk, nbd, gc, boot-session-create ROOT_BUCKET, edit-session-create IMAGE, boot-session-delete USER_ID UPPER_ID LOWER_ID, edit-session-delete USER_ID IMAGE_ID IMAGE_ID")
 		flags.PrintDefaults()
 	}
 	if err := flags.Parse(os.Args[1:]); err != nil {
@@ -310,12 +331,28 @@ func run() error {
 		ctx, cancel := context.WithTimeout(ctx, 10*time.Minute)
 		defer cancel()
 		return prepareLogins(ctx, c, name)
-	case "boot-session-create", "boot-session-delete":
+	case "boot-session-create", "boot-session-delete", "edit-session-create", "edit-session-delete":
 		ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 		defer cancel()
-		return nativeCommand(ctx, c, cmd, args[1:], *size, *record)
+		return nativeCommand(ctx, c, cmd, args[1:], *size, *record, *imageName)
+	case "clone-image":
+		if len(args) != 3 {
+			return errors.New("clone-image requires source and new destination names")
+		}
+		return cloneImage(ctx, c, name, args[2])
+	case "check-image":
+		conn, err := connectImage(ctx, c, name, false)
+		if err != nil {
+			return err
+		}
+		defer conn.Close()
+		if err = validateImage(ctx, conn); err != nil {
+			return err
+		}
+		fmt.Println(conn.BucketID().String())
+		return nil
 	case "manifest":
-		conn, err := connect(ctx, c, name)
+		conn, err := connectImage(ctx, c, name, false)
 		if err != nil {
 			return err
 		}
@@ -340,6 +377,22 @@ func run() error {
 		if err == nil {
 			fmt.Println(id.String())
 		}
+		return err
+	case "rename":
+		if len(args) != 3 {
+			return errors.New("rename requires existing bucket and new name")
+		}
+		id, err := parseBootID(name)
+		if err != nil {
+			id, err = resolve(ctx, c, name)
+		}
+		if err != nil {
+			return err
+		}
+		e := client.Encoder{}
+		e.ID(id)
+		e.Text(args[2])
+		_, err = control(ctx, c, client.BucketRename, e.B)
 		return err
 	case "delete":
 		id, err := parseBootID(name)
@@ -384,9 +437,9 @@ func run() error {
 		if cmd == "publish" {
 			return publish(ctx, c, name, args[2])
 		}
-		return fetch(ctx, c, name, args[2], cmd == "fetch-native")
+		return fetch(ctx, c, name, args[2])
 	case "gc":
-		conn, err := connect(ctx, c, name)
+		conn, err := connectImage(ctx, c, name, false)
 		if err != nil {
 			return err
 		}
@@ -399,7 +452,7 @@ func run() error {
 			return err
 		}
 		var m manifest
-		if err = json.Unmarshal(raw, &m); err != nil || (m.Schema != 1 && m.Schema != 2) {
+		if err = json.Unmarshal(raw, &m); err != nil || m.Schema != 2 || m.RootBucket != conn.BucketID() {
 			return client.ErrProtocol
 		}
 		roots := []client.ObjectID{manifestID}
@@ -420,13 +473,21 @@ func run() error {
 			}
 			roots = append(roots, a.ID)
 		}
-		result, err := nbd.NewCatalog(conn).Collect(ctx, roots)
+		if _, err := conn.Stat(ctx, importStateID); err == nil {
+			roots = append(roots, importStateID)
+		} else if !errors.Is(err, client.ErrNotFound) {
+			return err
+		}
+		result, err := conn.CheckFilesystemWithOpaqueRoots(ctx, roots)
 		if err != nil {
 			return err
 		}
 		return json.NewEncoder(os.Stdout).Encode(result)
 	case "init-disk", "check-install-disk", "nbd":
-		id, err := resolve(ctx, c, name)
+		id, err := parseBootID(name)
+		if err != nil {
+			id, err = resolve(ctx, c, name)
+		}
 		if err != nil {
 			return err
 		}

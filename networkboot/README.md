@@ -1,7 +1,7 @@
 # Network boot with STQR
 
 This directory contains the tools for installing a Linux template in QEMU,
-maintaining it as a writable VM, and booting diskless machines from STQR over
+finishing an interrupted installation, and booting diskless machines from STQR over
 PXE. A separate gateway provides the boot services; the storage nodes continue
 running the normal STQR daemon.
 
@@ -16,9 +16,6 @@ You do not need object IDs or temporary-directory names for the normal workflow.
 # Create a template: complete the installation in the QEMU window.
 ./networkboot/prepare-system ubuntu /path/to/ubuntu.iso
 
-# Later: boot the installed system read/write, change it, and shut it down.
-./networkboot/edit-image ubuntu
-
 # Start a gateway for a local diskless QEMU test.
 sudo ./networkboot/serve ubuntu --no-dhcp
 
@@ -30,19 +27,19 @@ sudo ./networkboot/serve ubuntu --no-dhcp
 sudo ./networkboot/serve ubuntu
 ```
 
-Preparation and editing publish automatically after the VM exits. Wait for
+Initial preparation publishes automatically after the installer VM exits. Subsequent edits mount the published filesystem directly and save in place. Wait for
 `Published ubuntu` and `Cleanup complete` before starting or reloading the gateway.
 These are distinct storage roles:
 
 | Role | Contents and lifetime |
 | --- | --- |
-| Template bucket (`ubuntu`) | Persistent installer disk (`disk.raw`) plus boot artifacts and the current release manifest. This is what `edit-image` boots read/write. |
-| Native release bucket | Automatically created, read-only STFS root filesystem. Each publication creates a new release; existing clients keep their old release. |
+| Image bucket (`ubuntu`) | The STFS root filesystem, boot artifacts and manifest, all in the named bucket. PXE mounts it read-only; the editor mounts it writable. Its manifest refers to this bucket itself. It is not temporary. |
+| Installation disk (`ubuntu-bd`) | Temporary NBD disk used only for installation/extraction. Its canonical ID is recorded for retries; renaming it or reusing its label cannot redirect installation or cleanup. It is deleted after successful image publication. |
 | Per-boot upper bucket | Automatically created STOR/STOM overlay for one boot session. The hard logical quota defaults to 16 GiB (`serve --upper-gib`); space is consumed as written. Root writes are temporary and the upper is scheduled for deletion when the client disconnects. |
 | Personal home (`alice_home`) | Automatically provisioned persistent filesystem bucket, mounted at login by PAM. |
 
 Changing files on a PXE client's temporary root does **not** update the template.
-Use `edit-image` for persistent system changes. Logging out does not reset a
+The installation disk is not retained after successful publication. Build a new named image for a different system installation. Logging out does not reset a
 running client's root; shutting down/rebooting ends that boot session.
 
 ## 1. Prepare the host and storage
@@ -74,15 +71,14 @@ does not need recompilation. See [kstqr](../docs/kstqr.md) and
 [the NBD frontend](../qemu-plugin-nbd/README.md) for their separate interfaces.
 
 Configure storage volumes on the STQR nodes before installing an OS. Allow room
-for the VM disk, a native release tree, old releases still used by clients, and
+for the temporary VM disk, the named native filesystem image, and
 rebuild/metadata overhead. The host also needs local export space, by default
 in `/var/tmp`; `--work-dir PATH` selects another disk. SDK spools use this work
 directory too. The template bucket itself is created by `prepare-system`.
 
 All admitted cluster members must be reachable and support exclusive maintenance
 for builder/editor, clone and cleanup operations. Other users must disconnect
-from the affected template disk. Normal PXE clients read a separate immutable
-release bucket, so they do not hold the template disk open.
+from the temporary installation disk. Normal PXE clients read the named filesystem image read-only and write only to their own private upper buckets.
 
 `stqr.yaml` stays private and is **not copied into the image**. An optional
 `--config PATH` selects another node YAML or private credentials JSON. Run retry
@@ -100,7 +96,7 @@ start dnsmasq, or mount any host filesystem.
 ./networkboot/prepare-system ubuntu /path/to/ubuntu.iso
 ```
 
-The tool creates `ubuntu`, starts an exclusive NBD export and opens the installer
+The tool creates the temporary `ubuntu-bd` disk, starts an exclusive NBD export and opens the installer
 in QEMU. Defaults are a sparse **32-GiB disk**, **4 GiB RAM**, **two vCPUs** and
 legacy BIOS. The installer sees an ordinary writable virtual disk (usually
 `/dev/vda`). Partition and format that virtual disk normally, for example with
@@ -114,7 +110,7 @@ for completing the installation and syncing its disk.
 
 The installed system needs `mkinitramfs` from `initramfs-tools-core`, and headers
 for the kernel that will be published. If they are missing, the disk is retained:
-boot it with `./networkboot/edit-image ubuntu`, then install the required packages
+resume the recorded installation with `./networkboot/prepare-system --resume ubuntu /path/to/ubuntu.iso`, then finish installing the required packages
 inside that VM. For a running installed Ubuntu kernel, for example:
 
 ```sh
@@ -143,12 +139,11 @@ After the VM exits, the tool automatically:
 4. Exports the root tree, preserving numeric ownership, modes, timestamps,
    xattrs/capabilities, symlinks, hardlinks and FIFOs. Runtime trees and `/home/*`
    are excluded. Unsupported ACLs and device nodes cause an error.
-5. Imports the root into a fresh native filesystem bucket, syncs and locks it,
-   then atomically publishes its manifest and checksummed kernel/initramfs.
-6. Cleans obsolete artifacts and orphan stripes from the template bucket.
+5. Imports the root into the requested image bucket, explicitly syncs the import stream, and stores the checksummed kernel/initramfs and manifest in that same bucket. PXE users receive read-only grants; the filesystem remains available for an authorized editor.
+6. Deletes only the recorded temporary installation-disk bucket. No second permanent rootfs bucket is created; filesystem-aware `gc` retains both the reachable tree and the manifest/artifact objects.
 
 The published root uses a network-root fstab. The original disk fstab is restored
-on the builder disk, allowing it to boot normally for later edits. The root is
+on the temporary builder disk, allowing an unfinished build to be resumed. The root is
 served directly by kstqr; there is no SquashFS conversion or NFS root export.
 
 ### Continue after an interruption
@@ -164,6 +159,9 @@ export when available; otherwise it extracts the existing disk. It never opens
 the installer or creates a replacement disk. A recorded successful publication
 retries cleanup without importing the root again. Work records live in the
 current user's XDG state directory; internal staging paths are managed by the tool.
+The installation record pins the original disk's canonical ID for resume, NBD
+access and deletion even if its visible name changes. Missing or older name-only
+records stop for manual recovery; a familiar bucket name cannot prove ownership.
 
 If the **installation itself** is incomplete and has not been published:
 
@@ -171,50 +169,35 @@ If the **installation itself** is incomplete and has not been published:
 ./networkboot/prepare-system --resume ubuntu /path/to/ubuntu.iso
 ```
 
-This opens the installer against the existing disk, after checking its size.
+This opens the installer against the existing disk, after checking its size. The installation bucket is `ubuntu-bd`.
 Use the same `--disk-gib` if you overrode the default. Use `edit-image` for an
 already installed system. A failed extraction/publication leaves the previous
 published release in place.
 
-## 3. Boot the template read/write and maintain it
+## 3. Edit a published filesystem image
 
 ```sh
 ./networkboot/edit-image ubuntu
+# Create a separate copy-before-write image, then edit that copy:
+./networkboot/edit-image ubuntu-next --copy-from=ubuntu
 ```
 
-This boots the **persistent builder disk** as a normal writable QEMU VM. Log in
-with an account created by the installer. Install software, change system
-configuration, configure login/home integration, or apply distribution updates:
+The editor starts a loopback-only private boot gateway and boots QEMU with `ubuntu` mounted
+writable directly as its native filesystem. Its generated URLs use the host alias
+inside QEMU user networking; the writable editor endpoint is not exposed on the LAN. No installation blockdevice is
+required or recreated. Shut down the guest normally to flush its changes.
+The image and its stable object IDs remain in place; only the editor's temporary
+login is removed afterward. A failed cleanup retains a private recovery record.
 
-```sh
-# Inside the VM:
-sudo apt-get update
-sudo apt-get upgrade
-# Ensure headers for the kernel to be published are installed.
-sudo poweroff
-```
+`--copy-from` requires a new destination name. It uses STQR's server-side COW
+clone, including for a clone of a clone. The source remains unchanged and the
+new image's manifest points to the new bucket itself. There is no rootfs export
+or client-side payload copy. `edit-image ubuntu --to-bucket ubuntu-next` is a
+compatibility spelling for the same operation.
 
-For STQR logins and persistent homes, perform the setup in [step 7](#7-configure-stqr-logins-and-persistent-homes-in-the-template)
-inside this writable VM before production rollout.
-
-Wait for the editor to export and publish the new release. There is no separate
-manual mount, extraction, bucket-ID lookup or publish command. If publication
-fails after editing, retry with `./networkboot/prepare-system ubuntu`.
-
-To preserve the original and edit a copy:
-
-```sh
-./networkboot/edit-image ubuntu --to-bucket ubuntu-next
-```
-
-`ubuntu-next` must be a new destination. The tool creates and clones the builder
-bucket, then edits and publishes the copy. It retains the destination's own
-policies/grants; this is not a clone of user permissions. Use separate named
-templates when you want to retain a known working release for rollback.
-
-Do not maintain a published release by write-mounting its native root bucket:
-those buckets are immutable. A write in a PXE client's root affects only that
-client's temporary upper and is discarded after the boot session.
+The editor uses the image's published kernel and initramfs. It patches only its
+private cached mount helper to select the writable mount; this does not replace
+the published artifacts or automatically select a newly installed guest kernel.
 
 ## 4. Test diskless boot locally
 
@@ -251,8 +234,8 @@ Proxy-DHCP/TFTP.
 ## 5. Enable physical PXE clients on the LAN
 
 Stop the HTTP-only test gateway before starting the LAN gateway on the same
-port. Do this when its clients have shut down: stopping a gateway revokes its
-active temporary boot sessions.
+port. Existing mounted clients continue using their native storage connections;
+the replacement gateway is needed for new boot sessions and deferred cleanup.
 
 ```sh
 sudo ./networkboot/serve ubuntu
@@ -333,21 +316,21 @@ administrator credentials into the template.
 ## 6. Activate updates and roll back
 
 For an update to the same template, finish `./networkboot/edit-image ubuntu`,
-then reload the gateway service:
+then reboot clients which should use the edited rootfs. To reload changed boot artifacts, reload the gateway service:
 
 ```sh
 sudo systemctl reload stqr-networkboot
 ```
 
 Reload fetches and verifies the new manifest/kernel/initramfs before switching
-new boot sessions. Existing and already-started boot sessions retain their
-pinned release, including matching versioned HTTP artifact URLs. A failed reload
+new boot sessions. Existing sessions retain their selected artifact URLs. Direct edits change the
+shared filesystem image in place; they are not a versioned root snapshot. A failed reload
 keeps the old active release. Reload does not update the root of a running client;
 reboot that client when it should use the new system.
 
-A foreground gateway also accepts SIGHUP. Restart it only after clients have
-shut down, since a restart revokes active boot sessions. To promote a separately
-prepared `ubuntu-next`, change the service's bucket name and restart during a
+A foreground gateway also accepts SIGHUP. Gateway restart does not prove that
+mounted clients are idle and does not revoke their working storage connections.
+To promote a separately prepared `ubuntu-next`, change the service's bucket name and restart during a
 maintenance window. To roll back, select the retained known working template in
 the same way. There is no automatic rollback CLI.
 
@@ -358,7 +341,7 @@ for administrative cleanup; their IDs are diagnostics, not normal CLI inputs.
 
 ## 7. Configure STQR logins and persistent homes in the template
 
-`prepare-system` and `edit-image` automatically configure STQR logins in the
+`prepare-system` configures STQR logins in the
 prepared Debian/Ubuntu image. They query the STQR user list with the host's admin
 configuration, skip disabled and temporary boot-session accounts, provision a
 `username_home` bucket and grant its user filesystem access. Existing homes must
@@ -383,7 +366,7 @@ architecture/libc ABI for the host-built helpers.
 
 At PXE boot, the same installer applies the payload to the private upper before
 PID1 starts. This also permits an initrd-only login hotpatch while retaining an
-existing immutable lower. A loopback daemon address in the build configuration
+existing read-only lower. A loopback daemon address in the build configuration
 is replaced with `stqr.server`; explicitly configured remote addresses are kept.
 No administrator credentials or user passwords enter the image or initrd. Home
 bucket IDs are pinned in root-owned configuration, preventing a renamed/replaced
@@ -449,10 +432,13 @@ removes its private credential file and exits. The kernel retains reconnect
 credentials. A separate control socket is held by the upper superblock until
 unmount; no resident client helper is needed. Object I/O goes directly to STQR.
 
-On disconnect the gateway revokes the lower grant, deletes the temporary user
-(closing authenticated connections), then schedules deletion of the upper.
-The cluster persists that intent and purges its data in batches; an extra
-object-by-object clear is unnecessary. Unclaimed
+After a claim disconnect, the helper first acquires cluster-wide maintenance to
+prove that the image/upper has no active storage clients. It then deletes the
+temporary user, releases maintenance, revokes the lower ACL entry and schedules
+deletion of a disposable upper. Editor cleanup retains the image itself. Busy,
+unavailable or uncertain participants retain the private recovery record and
+credentials remain valid for a still-mounted guest. The cluster persists deletion
+intent and purges data in batches; an extra object-by-object clear is unnecessary. Unclaimed
 sessions expire after an hour; `--max-sessions` defaults to 64. Cleanup failures
 or gateway crashes leave password-free, private JSON recovery markers in
 `CACHE/uppers`. To retry a recorded cleanup:
@@ -470,7 +456,8 @@ attestation are separate deployment work.
 Logout does not clear a running machine's root. Shutdown/reboot releases its
 upper; personal homes remain persistent and independent. Machine ID, random seed
 and SSH host keys are regenerated in the private upper. Use SIGHUP for release
-updates: restarting the gateway deliberately revokes its active boot sessions.
+updates. A restarted gateway retries only its recorded private session identities,
+and retains sessions while cluster-wide inactivity cannot be proved.
 Keep old native release buckets while clients still use them.
 
 ## Storage and administration reference
@@ -564,7 +551,7 @@ existing published release remain available.
 | --- | --- |
 | `required control participant is offline`, maintenance unavailable, or an operation waiting for a peer | Restore connectivity to every admitted cluster member. Retry `prepare-system ubuntu` after the cluster is stable. |
 | Missing headers or `mkinitramfs` | Use `edit-image ubuntu` to install the target kernel's headers and `initramfs-tools-core`, then shut the VM down. |
-| Legacy boot release/schema error | Run `prepare-system ubuntu` with current tools to publish a native release, then restart an old gateway process with the new code. |
+| Image format/manifest mismatch | The named bucket must be the FS image itself and contain a self-referencing boot manifest. Migrate existing split BD/root images before using these tools. |
 | iPXE download fails or `test-boot` keeps waiting | Check the gateway terminal/service journal for `PXE ready`, its selected address and HTTP port. Verify client routing/firewall access. |
 | Physical firmware never finds the boot offer | Check NIC PXE settings, broadcast/VLAN layout, standalone loader files, competing PXE services and Proxy-DHCP/TFTP traffic. A QEMU HTTP-only success does not test these. |
 | STQR login works but the desktop/home does not | Check the Unix/NSS account, numeric ownership, bucket grant, client-reachable URI and actual service's PAM ordering. Reprepare the image to synchronize accounts; inspect the guest PAM/helper errors if a home mount fails. |
@@ -589,3 +576,21 @@ control-socket lifetime through unmount. Fixtures use disposable servers/buckets
 no LAN DHCP or host PAM configuration is used. The older NFS fixture is retained
 only as a legacy regression test. A full desktop login/PAM home lifecycle remains
 a deployment acceptance test with the site's Unix accounts and grants.
+
+### Automatic cleanup of temporary boots
+
+The gateway records each allocated temporary user and upper privately before
+provisioning it. Claim EOF and unclaimed-session expiry trigger cleanup; startup
+and a periodic retry also process leftover records from failed allocations,
+interrupted cleanup, or a previous gateway process. Records contain IDs and
+mount mode, never passwords. No bucket is selected for deletion merely because
+its name looks temporary.
+
+Before revoking a normal boot user, STQR must grant exclusive maintenance on
+its upper across the cluster. An upper with a live storage connection is kept,
+even if its gateway died. Once the VM disconnects, a subsequent retry removes
+its temporary account and bucket. Editor records revoke only the temporary
+editor user; their image bucket is never deleted. The same maintenance guard
+retains an orphan editor account while any client still has its image open;
+automatic retries finish that cleanup once the image becomes idle. Stop the gateway and keep its
+private cache if a member is unavailable; remaining records allow later retry.
