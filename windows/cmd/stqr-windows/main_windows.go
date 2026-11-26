@@ -262,7 +262,13 @@ func mount(ctx context.Context, c mountConfig, initialize bool, installation ins
 	if c.LowerBucket == "" {
 		fs, e = client.OpenFilesystem(ctx, store, options)
 	} else {
-		lowerID, err := nbd.ResolveBucket(ctx, nbd.Config{URL: c.httpURI(), Username: c.Username, Password: c.Password}, c.LowerBucket)
+		var lowerID client.ID
+		var err error
+		if decoded, decodeErr := hex.DecodeString(c.LowerBucket); decodeErr == nil && len(decoded) == len(lowerID) {
+			copy(lowerID[:], decoded)
+		} else {
+			lowerID, err = nbd.ResolveBucket(ctx, nbd.Config{URL: c.httpURI(), Username: c.Username, Password: c.Password}, c.LowerBucket)
+		}
 		if err != nil {
 			return err
 		}

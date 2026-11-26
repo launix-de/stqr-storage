@@ -187,7 +187,7 @@ jobs:
       - name: Real WinFsp mount through native Windows file APIs
         env:
           STQR_TEST_WINFSP: '1'
-        run: go test . -run '^TestWindowsMountedFilesystem$' -count=1 -v -timeout=3m
+        run: go test . -run '^TestWindowsMounted(Filesystem|NativeOverlay)$' -count=1 -v -timeout=3m
       - name: Publish self-contained WinUI application and Go backend
         shell: pwsh
         run: ./build.ps1

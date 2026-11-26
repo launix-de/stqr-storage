@@ -483,3 +483,69 @@ func TestOverlayRenameInheritedSymlinkPreservesInlineTarget(t *testing.T) {
 		t.Fatal(string(target), err)
 	}
 }
+
+type readonlyOverlayStore struct {
+	*MemoryFilesystemStore
+	mutations int
+}
+
+func (s *readonlyOverlayStore) CAS(context.Context, ObjectID, uint64, []byte, []byte, CASOptions) (ObjectInfo, error) {
+	s.mutations++
+	return ObjectInfo{}, ErrUnauthorized
+}
+func (s *readonlyOverlayStore) PutRange(context.Context, ObjectID, uint64, []byte, PutOptions) (ObjectInfo, error) {
+	s.mutations++
+	return ObjectInfo{}, ErrUnauthorized
+}
+func (s *readonlyOverlayStore) Delete(context.Context, ObjectID, DeleteOptions) error {
+	s.mutations++
+	return ErrUnauthorized
+}
+func TestOverlayReadOnlyNeverMutates(t *testing.T) {
+	ctx, root := context.Background(), FilesystemRootID()
+	_, _, lower, upper, conf, _ := overlayFixture(t, []string{"conf.json", "new", "fop-files/"})
+	guard := &readonlyOverlayStore{MemoryFilesystemStore: upper}
+	ro, err := OpenOverlayFilesystem(ctx, lower, guard, OverlayOptions{ReadOnly: true, LowerBucketID: BucketID{1}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := string(readOverlayFile(t, ro, conf.ID)); got != "base-config" {
+		t.Fatal(got)
+	}
+	mode := uint32(0600)
+	checks := map[string]func() error{
+		"create":     func() error { _, e := ro.Create(ctx, root, "new", 0600, 0, 0, false); return e },
+		"write":      func() error { _, e := ro.WriteAt(ctx, conf.ID, []byte("X"), 0); return e },
+		"append":     func() error { _, e := ro.Append(ctx, conf.ID, []byte("X")); return e },
+		"truncate":   func() error { _, e := ro.Truncate(ctx, conf.ID, 0); return e },
+		"attributes": func() error { _, e := ro.SetAttributes(ctx, conf.ID, FSAttributes{Mode: &mode}); return e },
+		"unlink":     func() error { return ro.Unlink(ctx, root, "conf.json") },
+		"rmdir":      func() error { return ro.Rmdir(ctx, root, "fop-files") },
+		"rename":     func() error { return ro.RenameWithFlags(ctx, root, "conf.json", root, "new", 0) },
+		"prepare":    func() error { return ro.PrepareWrite(ctx, conf.ID) },
+		"check":      func() error { return ro.CheckWrite(ctx, conf.ID) },
+	}
+	for name, check := range checks {
+		t.Run(name, func(t *testing.T) {
+			if e := check(); !errors.Is(e, syscall.EROFS) {
+				t.Fatal("readonly mutation was not rejected locally", e)
+			}
+		})
+	}
+	token, err := ro.Retain(ctx, conf.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ro.Release(ctx, conf.ID, token); err != nil {
+		t.Fatal(err)
+	}
+	if err := ro.CollectOrphans(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if guard.mutations != 0 {
+		t.Fatal("readonly view issued backend mutations", guard.mutations)
+	}
+	if _, err := OpenOverlayFilesystem(ctx, lower, guard, OverlayOptions{Create: true, ReadOnly: true, LowerBucketID: BucketID{1}}); !errors.Is(err, syscall.EINVAL) {
+		t.Fatal("readonly initialization accepted", err)
+	}
+}
