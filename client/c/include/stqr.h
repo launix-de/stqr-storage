@@ -51,6 +51,11 @@ typedef struct {
  */
 int stqr_dial(stqr_client **out, const char *url, const char *username,
               const char *password, stqr_id bucket, const char *format, unsigned timeout_ms);
+/* Resolve a name or hexadecimal ID once at authenticated upgrade. name: forces
+ * literal name lookup. Owner routing/reconnect retain the canonical ID. */
+int stqr_dial_bucket(stqr_client **out,const char *url,const char *username,
+                    const char *password,const char *bucket,const char *format,unsigned timeout_ms);
+int stqr_bucket_id(const stqr_client *,stqr_id *out);
 void stqr_close(stqr_client *client);
 int stqr_reconnect(stqr_client *client);
 int stqr_status(const stqr_client *client);

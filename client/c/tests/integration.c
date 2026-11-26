@@ -42,6 +42,15 @@ int main(void) {
     if (!url) { puts("local API validation passed; network tests run through STQR_TEST_C=1 go test ./server"); return 0; }
     CHECK(!stqr_parse_id(getenv("STQR_TEST_BUCKET"), &bucket));
     CHECK(!stqr_parse_object_id("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", &id));
+    if(mode && !strcmp(mode,"named")) {
+        stqr_id canonical;
+        CHECK(!stqr_dial_bucket(&c,url,getenv("STQR_TEST_USER"),getenv("STQR_TEST_PASSWORD"),"c-client-named","fs",3000));
+        CHECK(!stqr_bucket_id(c,&canonical) && !memcmp(canonical.bytes,bucket.bytes,16));
+        CHECK(!stqr_reconnect(c));
+        memset(&o,0,sizeof(o));CHECK(!stqr_request_id(&o.request_id));CHECK(!stqr_put(c,id,"named",5,&o,&info));
+        CHECK(!stqr_get(c,id,&data,&n,&info) && n==5 && !memcmp(data,"named",5));
+        stqr_free(data);stqr_close(c);puts("named connection canonicalization and reconnect passed");return 0;
+    }
     CHECK(!stqr_dial(&c, url, getenv("STQR_TEST_USER"), getenv("STQR_TEST_PASSWORD"), bucket,"fs", 3000));
     if (mode && !strcmp(mode,"references")) {
         stqr_client *other=NULL;

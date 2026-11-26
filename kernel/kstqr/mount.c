@@ -14,11 +14,11 @@
 #include <unistd.h>
 static void usage(FILE *out)
 {
-    fputs("Usage: mount.kstqr --uri URI --bucket ID --credentials FILE [--init] [--readonly] "
+    fputs("Usage: mount.kstqr --uri URI --bucket NAME_OR_ID --credentials FILE [--init] [--readonly] "
           "MOUNTPOINT\n"
-          "       mount -t kstqr URI MOUNTPOINT -o bucket=ID,credentials=FILE[,init][,ro]\n"
+          "       mount -t kstqr URI MOUNTPOINT -o bucket=NAME_OR_ID,credentials=FILE[,init][,ro]\n"
           "Options: --timeout-ms N; --metadata-cache-bytes N (default 8388608, 0 disables).\n"
-          "Overlay: --readonly-bucket LOWER_ID [--whitelist paths].\n"
+          "Overlay: --readonly-bucket LOWER_NAME_OR_ID [--whitelist paths].\n"
           "Block devices: --bd [--device NAME], or -o bd[,device=NAME].\n"
           "Credentials file: username=... and password=... on separate lines, mode 0600.\n"
           "This helper exits after mounting; the kernel maintains the connection.\n",
@@ -243,8 +243,8 @@ int main(int argc, char **argv)
     if (argc - optind == 1)
         target = argv[optind];
     if(lower&&!bucket){bucket=lower;lower=NULL;readonly=1;}
-    if (!uri || !bucket || !path || !target || strlen(bucket) != 32 || (create && readonly) ||
-        (lower && strlen(lower) != 32) || (whitelist && !lower) ||
+    if (!uri || !bucket || !path || !target || !strlen(bucket) || strlen(bucket)>260 || (create && readonly) ||
+        (lower && (!*lower || strlen(lower)>260)) || (whitelist && !lower) ||
         (device && (!bd || !*device)) ||
         (bd && (create || lower || whitelist || (attrs & MOUNT_ATTR_NODEV)))) {
         usage(stderr);

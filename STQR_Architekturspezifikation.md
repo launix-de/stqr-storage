@@ -2193,7 +2193,7 @@ app, err := conn.Append(ctx, logObjectID, logRecord,
     client.AppendOptions{RequestID: client.NewRequestID()})
 ```
 
-**URL, Username, Passwort und Bucket-ID sind Pflichtparameter des Konstruktors.** Die erzeugte Verbindung kann ausschließlich Objekte innerhalb dieses einen Buckets lesen/schreiben: `Get`, `GetRange`, `Put`, `PutRange`, `Append`, `Trunc`, `Delete`, `Stat`, `CAS` und deren nötige `io.Reader`-/`io.Writer`-Varianten. `Close` beendet sie. `CheckFilesystem(ctx)` ist der zusätzliche Offline-Wartungseinstieg für einen dedizierten Dateisystem-Bucket und erfordert READ+DELETE; die dafür verwendete separate Verbindung bleibt bis `Close` exklusiv. Keine globale Multi-Bucket-Verbindung, kein `Bucket(name)`-/`BucketByID`-Umschalten, keine zweite `GetObject(bucket, ...)`-API und keine Admin-/Statistikfunktionen am öffentlichen Verbindungsobjekt. Eine andere Bucket-ID erfordert eine andere Verbindung. Der FUSE-/S3-/Blockdevice-Layer erhält eine bereits gebundene Objektschnittstelle und speichert eigene Metadaten in diesem Bucket. Benutzerzugangsdaten erlauben keine Administration.
+**URL, Username, Passwort und Bucket-Selektor (Name oder ID) sind Pflichtparameter des Konstruktors.** Beim authentifizierten Öffnen wird der Selektor einmalig an die feste Bucket-ID gebunden. Die erzeugte Verbindung kann ausschließlich Objekte innerhalb dieses einen Buckets lesen/schreiben: `Get`, `GetRange`, `Put`, `PutRange`, `Append`, `Trunc`, `Delete`, `Stat`, `CAS` und deren nötige `io.Reader`-/`io.Writer`-Varianten. `Close` beendet sie. `CheckFilesystem(ctx)` ist der zusätzliche Offline-Wartungseinstieg für einen dedizierten Dateisystem-Bucket und erfordert READ+DELETE; die dafür verwendete separate Verbindung bleibt bis `Close` exklusiv. Keine globale Multi-Bucket-Verbindung, kein `Bucket(name)`-/`BucketByID`-Umschalten, keine zweite `GetObject(bucket, ...)`-API und keine Admin-/Statistikfunktionen am öffentlichen Verbindungsobjekt. Eine andere Bucket-ID erfordert eine andere Verbindung. Der FUSE-/S3-/Blockdevice-Layer erhält eine bereits gebundene Objektschnittstelle und speichert eigene Metadaten in diesem Bucket. Benutzerzugangsdaten erlauben keine Administration.
 
 Native 256-Bit-Objekt-IDs werden unverändert übertragen. Eine fachliche Namens-/Key-Abbildung ist Aufgabe des Frontends, keine zusätzliche Server-Namespace- oder SDK-Bucketauflösung. Routing/partielle Maps, Verbindungswiederverwendung, korrelierte Requests, endliche Sende-/Empfangsbudgets, Streaming und Request-ID-Retry bleiben interne Protokollaufgaben. Ein Peer-Ausfall löst keine Membership-Änderung aus; nur der aufrufende Context beendet wartende Aufrufe. Nach unbekanntem Mutationsergebnis wird dieselbe Request-ID weiterverwendet. Ein Redirect darf Zugangsdaten nicht ungeprüft an beliebige HTTP-Ziele weiterreichen.
 
@@ -2855,7 +2855,7 @@ und die gemeinsame Unterbrechungs-/Fortsetzungsphase optionaler Arbeiten. Die
 bestehende seitenweise Bucket-Bereinigung erfüllt bereits die Entkopplung vom
 Generationsabschluss; daraus folgt noch keine vollständige Erfüllung dieses Vertrags.
 
-Das Storage-Dashboard verwaltet keine virtuellen Disks und interpretiert keine FS-, BD- oder sonstigen Bucket-Inhalte. Es zeigt ausschließlich den vom Client festgelegten Formatstring an. Formatspezifische Verwaltung bleibt Aufgabe externer Clients.
+Derzeit zeigt das Storage-Dashboard die opaque Formatkennung an und bietet keine formatspezifische Verwaltung. Für eine spätere Version sind optionale clientseitige Format-Hooks mit Vorschau, Verwaltung und Copy-and-paste-Kommandos vorgesehen (siehe „Spätere Erweiterung: Format-Hooks im Dashboard“). Der Storage-Datenpfad bleibt formatunabhängig.
 
 
 ### Bedienbare Löschvorgänge im Dashboard
@@ -2881,3 +2881,37 @@ atomar durch denselben ALL-Adminentscheid veröffentlicht. Physische Bereinigung
 bleibt nachgelagert. Bei ausgeschalteter Option oder fehlendem optionalem Bool
 (ältere Clients) werden keine Accounts mitgelöscht. Die Operation nutzt manuell
 vergebene Opcode-Semantikrevision 3; Revision 2 bleibt empfangsseitig lesbar.
+
+
+### Bucket-Verbindungen per Name und kopierbare Kennungen
+
+Beim authentifizierten HTTP/WebSocket-Upgrade akzeptiert `X-STQR-Bucket` sowohl
+Bucket-Namen als auch die bisherige 32-stellige Hex-ID. Gültige Hex-IDs haben
+Vorrang; `name:NAME` erzwingt eine wörtliche Namensauflösung. Erfolgreiche
+Bucket-Verbindungen erhalten die kanonische Hex-ID im gleichnamigen Antwortheader.
+ACL-, Format-, System-Bucket- und Lease-Prüfungen gelten unverändert. Die Node
+fixiert die aufgelöste ID vor einer eventuell wartenden Formatbindung. Danach
+werden ausschließlich diese ID und die Placement-Map benutzt, auch bei Reconnect
+und Owner-Wechsel; Umbenennen oder Wiederverwenden eines Namens darf laufende
+Verbindungen nicht auf einen anderen Bucket umlenken.
+
+Go- und native Client-Libraries bieten dafür einen zusätzlichen Konstruktor mit
+Name/ID-Selektor, während ID-basierte Aufrufe kompatibel bleiben. FUSE, Kernel-Mount
+(einschließlich Lower-Bucket und Blockdevices), Windows und NBD-Werkzeuge können
+Namen verwenden. FUSE dokumentiert GNU-Langoptionen mit `--` und bietet
+`--password-file=PFAD` alternativ zu Passwortargument oder Standardinput an.
+Im Dashboard sind Bucket-IDs markierbar und ausdrücklich kopierbar; das Kopieren
+muss auch ohne Clipboard-API bei normalem Intranet-HTTP funktionieren.
+
+### Spätere Erweiterung: Format-Hooks im Dashboard
+
+Geplant ist eine optionale Registry von Dashboard-Hooks je opaque Formatkennung.
+Sie kann pro Bucket ein formatspezifisches Menü ergänzen, beispielsweise
+Blockdevices verwalten, Filesystem-Dateien ansehen oder S3-Inhalte auflisten.
+Zusätzlich sollen passende Copy-and-paste-Kommandos zum Mounten sowie zum Starten
+einer VM mit einem BD als Festplatte angeboten werden. Diese Adapter benutzen
+die jeweiligen Client-Formate und die autorisierten normalen Objektoperationen;
+Volume-Format, Placement und der Storage-Server interpretieren deren interne
+Strukturen weiterhin nicht. Unbekannte Formate behalten die allgemeine
+Bucket-Ansicht. Diese Hooks und Format-Menüs sind hier nur vorgeplant und noch
+nicht Bestandteil dieses Bedienbarkeits-PRs.

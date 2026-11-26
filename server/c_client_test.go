@@ -50,6 +50,15 @@ func TestCClient(t *testing.T) {
 			t.Fatalf("C client: %v\n%s", err, out)
 		}
 	}
+	t.Run("named", func(t *testing.T) {
+		s := testServer(t)
+		addTestVolume(t, s, "c-client-named", "hdd", 8<<20)
+		b, _ := createProtocolBucket(t, s, "c-client-named")
+		host := httptest.NewServer(s.Handler())
+		defer host.Close()
+		a := s.cfg.Auth.BootstrapAdmin
+		run(t, host.URL, a.Username, a.Password, b.ID().String(), "named")
+	})
 	t.Run("objects", func(t *testing.T) {
 		s := testServer(t)
 		addTestVolume(t, s, "c-client", "hdd", 32<<20)

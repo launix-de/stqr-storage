@@ -20,6 +20,7 @@ struct stqr_client {
     char host[256], authority[272];
     char *authorization;
     char format[256];
+ char bucket_selector[261];
     size_t authorization_len;
     unsigned port, timeout;
     stqr_id bucket, runtime, lease;
@@ -314,21 +315,22 @@ static void disconnect_channels(stqr_client *c) {
     if (notify && c->update) c->update(c->update_arg,NULL);
 }
 static int handshake(stqr_client *c) {
-    char key[25], expected[29], combined[61], bucket[33], lease[80] = {0}, token[33];
+    char key[25], expected[29], combined[61], bucket[261], lease[80] = {0}, token[33];
     char *request = NULL, *headers = NULL, *line, *next;
     stqr_u8 random[16], digest[20];
     size_t n = 0, capacity;
-    int err, accept = 0, protocol = 0, upgrade = 0, connection = 0;
+    int err, accept = 0, protocol = 0, upgrade = 0, connection = 0, bucket_header=0;
     if ((err = sq_random(random, 16))) return err;
     base64(random, 16, key);
     snprintf(combined, sizeof(combined), "%s258EAFA5-E914-47DA-95CA-C5AB0DC85B11", key);
     if ((err = sq_hash(160, combined, strlen(combined), digest))) return err;
-    base64(digest, 20, expected); hex(c->bucket.bytes, 16, bucket);
+    base64(digest, 20, expected);
+ if(zero(c->bucket.bytes,16)) memcpy(bucket,c->bucket_selector,strlen(c->bucket_selector)+1); else hex(c->bucket.bytes, 16, bucket);
     if (!zero(c->lease.bytes, 16)) {
         hex(c->lease.bytes, 16, token);
         snprintf(lease, sizeof(lease), "X-STQR-Maintenance: %s\r\n", token);
     }
-    capacity = c->authorization_len + 1024;
+    capacity = c->authorization_len + 2048;
     request = sq_alloc(capacity); headers = sq_alloc(16385);
     if (!request || !headers) { err = -ENOMEM; goto out; }
     n = (size_t)snprintf(request, capacity,
@@ -353,6 +355,11 @@ static int handshake(stqr_client *c) {
         if (!value) { err = -EPROTO; goto out; }
         *value++ = 0; while (*value == ' ' || *value == '\t') value++;
         tail = value+strlen(value); while (tail > value && (tail[-1] == ' ' || tail[-1] == '\t')) *--tail = 0;
+        if(samecase(line,"X-STQR-Bucket")) {
+            stqr_id resolved;
+            if(bucket_header++ || unhex(value,&resolved,16) || zero(resolved.bytes,16) || (!zero(c->bucket.bytes,16) && memcmp(c->bucket.bytes,resolved.bytes,16))) {err=-EPROTO;goto out;}
+            c->bucket=resolved;
+        }
         if (samecase(line, "Sec-WebSocket-Accept")) { if (accept || strcmp(value, expected)) { err = -EPROTO; goto out; } accept = 1; }
         if (samecase(line, "Sec-WebSocket-Protocol")) { if (protocol || strcmp(value, "stqr.v2")) { err = -EPROTO; goto out; } protocol = 1; }
         if (samecase(line, "Upgrade")) upgrade = samecase(value, "websocket");
@@ -360,7 +367,7 @@ static int handshake(stqr_client *c) {
         if (samecase(line, "Sec-WebSocket-Extensions")) { err = -EPROTO; goto out; }
         line = next;
     }
-    err = accept && protocol && upgrade && connection ? 0 : -EPROTO;
+    err = accept && protocol && upgrade && connection && !zero(c->bucket.bytes,16) ? 0 : -EPROTO;
 out:
     sq_secret_free(request, capacity); sq_free(headers); return err;
 }
@@ -748,17 +755,18 @@ int stqr_reconnect(stqr_client *c) {
     disconnect_channels(c);
     return reconnect_active(c);
 }
-int stqr_dial(stqr_client **out, const char *url, const char *user, const char *password, stqr_id bucket, const char *format, unsigned timeout) {
+static int dial_bucket(stqr_client **out, const char *url, const char *user, const char *password, stqr_id bucket, const char *selector, const char *format, unsigned timeout) {
     stqr_client *c; char *plain; size_t u, p, n; int err;
     if (!out) return -EINVAL;
     *out = NULL;
-    if (!user || !password || !*user || !*password || strchr(user, ':') || zero(bucket.bytes, 16) || !timeout || timeout > 3600000) return -EINVAL;
+    if (!user || !password || !*user || !*password || strchr(user, ':') || (zero(bucket.bytes, 16) && !selector) || !timeout || timeout > 3600000) return -EINVAL;
     if (!format || !*format || strlen(format) > 255 || format[0] == ' ' || format[strlen(format)-1] == ' ') return -EINVAL;
     for (n = 0; format[n]; n++) if ((unsigned char)format[n] < 32 || (unsigned char)format[n] == 127) return -EINVAL;
     u = strlen(user); p = strlen(password);
     if (u > 4096 || p > 4096) return -E2BIG;
     c = sq_alloc(sizeof(*c)); if (!c) return -ENOMEM;
     c->bucket = bucket; c->timeout = timeout;
+ if(selector) memcpy(c->bucket_selector,selector,strlen(selector)+1);
     memcpy(c->format, format, strlen(format)+1);
     if ((err = parse_url(c, url))) { sq_free(c); return err; }
     n = u+p+1; plain = sq_alloc(n);
@@ -770,6 +778,27 @@ int stqr_dial(stqr_client **out, const char *url, const char *user, const char *
     if (err) { stqr_close(c); return err; }
     *out = c; return 0;
 }
+int stqr_dial(stqr_client **out,const char *url,const char *user,const char *password,stqr_id bucket,const char *format,unsigned timeout) {
+ return dial_bucket(out,url,user,password,bucket,NULL,format,timeout);
+}
+int stqr_dial_bucket(stqr_client **out,const char *url,const char *user,const char *password,const char *selector,const char *format,unsigned timeout) {
+ stqr_id id={{0}};
+ if(!out)return -EINVAL;
+ *out=NULL;
+ if(!selector || !*selector || strlen(selector)>260)return -EINVAL;
+ for(size_t i=0;selector[i];i++)if((unsigned char)selector[i]<32 || (unsigned char)selector[i]==127)return -EINVAL;
+ if(!unhex(selector,&id,16)) {
+  if(zero(id.bytes,16))return -EINVAL;
+  return dial_bucket(out,url,user,password,id,NULL,format,timeout);
+ }
+ memset(&id,0,sizeof(id));
+ return dial_bucket(out,url,user,password,id,selector,format,timeout);
+}
+int stqr_bucket_id(const stqr_client *c,stqr_id *out) {
+ if(!c || !out)return -EINVAL;
+ *out=c->bucket;return 0;
+}
+
 void stqr_close(stqr_client *c) {
     if (!c) return;
     disconnect_channels(c);

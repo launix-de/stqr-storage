@@ -5,7 +5,6 @@ package main
 
 import (
 	"context"
-	"encoding/hex"
 	"errors"
 	"flag"
 	"fmt"
@@ -17,7 +16,6 @@ import (
 	"time"
 
 	"github.com/launix-de/stqr-storage/client"
-	nbd "github.com/launix-de/stqr-storage/qemu-plugin-nbd"
 	winfs "github.com/launix-de/stqr-storage/windows"
 	"github.com/winfsp/cgofuse/fuse"
 	"golang.org/x/term"
@@ -204,17 +202,7 @@ func mount(ctx context.Context, c mountConfig, initialize bool, installation ins
 	if err := ensureWinFsp(); err != nil {
 		return err
 	}
-	var e error
-	var id client.ID
-	if decoded, err := hex.DecodeString(c.Bucket); err == nil && len(decoded) == len(id) {
-		copy(id[:], decoded)
-	} else {
-		id, e = nbd.ResolveBucket(ctx, nbd.Config{URL: c.httpURI(), Username: c.Username, Password: c.Password}, c.Bucket)
-		if e != nil {
-			return e
-		}
-	}
-	conn, e := client.Dial(ctx, c.URI, c.Username, c.Password, id, "fs")
+	conn, e := client.DialBucket(ctx, c.URI, c.Username, c.Password, c.Bucket, "fs")
 	if e != nil {
 		return e
 	}

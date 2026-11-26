@@ -154,12 +154,9 @@ func loadConfig(path string) (config, error) {
 	return config{URI: c.URL, Username: c.Username, Password: c.Password}, err
 }
 func connect(ctx context.Context, c config, name string) (*client.Client, error) {
-	id, err := resolve(ctx, c, name)
-	if err != nil {
-		return nil, err
-	}
-	return client.Dial(ctx, c.URI, c.Username, c.Password, id, "bd")
+	return client.DialBucket(ctx, c.URI, c.Username, c.Password, name, "bd")
 }
+
 func publish(ctx context.Context, c config, bucket, dir string) error {
 	release, err := lockPublication(dir)
 	if err != nil {

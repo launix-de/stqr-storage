@@ -163,6 +163,7 @@ echo KSTQR_BLOCK_VM_PASS
 trap - EXIT
 poweroff -f
 `, guest, client.ID(bucket.ID()).String(), client.ID(empty.ID()).String(), client.ID(bad.ID()).String())
+	init = strings.ReplaceAll(init, "--bucket "+bucket.ID().String()+" ", "--bucket kernel-blocks ")
 	if err = os.WriteFile(filepath.Join(dir, "init"), []byte(init), 0755); err != nil {
 		t.Fatal(err)
 	}

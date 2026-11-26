@@ -24,6 +24,7 @@
 #define KS_MAGIC 0x53545152
 struct ks_context {
 	char *url, *username, *password;
+ char *bucket_name,*lower_name;
 	stqr_id bucket, lower;
 	char *whitelist, *device;
 	struct file *boot_lifetime;
@@ -1517,10 +1518,26 @@ static int ks_fill_super(struct super_block *sb, struct fs_context *fc)
 	struct inode *inode;
 	int err;
 	unsigned saved;
-	if (!c->url || !c->username || !c->password || !memcmp(c->bucket.bytes, (u8[16]){0}, 16))
+	if (!c->url || !c->username || !c->password || (!c->bucket_name && !memcmp(c->bucket.bytes, (u8[16]){0}, 16)))
 		return -EINVAL;
 	if (current->nsproxy->net_ns != &init_net)
 		return -EOPNOTSUPP;
+    // Name resolution is connection bootstrap only. Persisted filesystem and
+    // block metadata and all owner sessions continue to use canonical IDs.
+    if(c->bucket_name || c->lower_name) {
+        stqr_client *resolver=NULL;
+        if(c->bucket_name) {
+            err=stqr_dial_bucket(&resolver,c->url,c->username,c->password,c->bucket_name,c->bd?"bd":"fs",c->timeout);
+            if(err)return err;
+            stqr_bucket_id(resolver,&c->bucket);stqr_close(resolver);
+        }
+        if(c->lower_name) {
+            if(c->bd)return -EINVAL;
+            err=stqr_dial_bucket(&resolver,c->url,c->username,c->password,c->lower_name,"fs",c->timeout);
+            if(err)return err;
+            stqr_bucket_id(resolver,&c->lower);stqr_close(resolver);
+        }
+    }
 	if (c->bd) {
 		if (c->create || c->whitelist || c->boot_lifetime ||
 		    memcmp(c->lower.bytes, (u8[16]){0}, 16))
@@ -1762,12 +1779,17 @@ static int ks_parse(struct fs_context *fc, struct fs_parameter *param)
 		c->url = param->string;
 		param->string = NULL;
 		break;
-	case Opt_bucket:
-		return stqr_parse_id(param->string, &c->bucket);
-	case Opt_lower: {
-		int err = stqr_parse_id(param->string, &c->lower);
-		return err ? err : memcmp(c->lower.bytes, (u8[16]){0}, 16) ? 0 : -EINVAL;
-	}
+    case Opt_bucket:
+    case Opt_lower: {
+        stqr_id *id=opt==Opt_bucket?&c->bucket:&c->lower;
+        char **name=opt==Opt_bucket?&c->bucket_name:&c->lower_name;
+        kfree(*name);*name=NULL;memset(id,0,sizeof(*id));
+        if(!stqr_parse_id(param->string,id))return memcmp(id->bytes,(u8[16]){0},16)?0:-EINVAL;
+        memset(id,0,sizeof(*id));
+        if(!*param->string || strlen(param->string)>260)return -EINVAL;
+        *name=param->string;param->string=NULL;
+        break;
+    }
 	case Opt_whitelist:
 		kfree(c->whitelist);
 		c->whitelist = param->string;
@@ -1816,6 +1838,7 @@ static void ks_free_context(struct fs_context *fc)
 	struct ks_context *c = fc->fs_private;
 	if (c) {
 		kfree(c->url);
+ kfree(c->bucket_name);kfree(c->lower_name);
 		kfree(c->whitelist);
 		kfree(c->device);
 		if (c->boot_lifetime)
