@@ -4,6 +4,7 @@ package main
 import (
 	"fmt"
 	"net/url"
+	"strconv"
 	"strings"
 )
 
@@ -61,3 +62,42 @@ func (c mountConfig) httpURI() string {
 	u := strings.Replace(c.URI, "wss://", "https://", 1)
 	return strings.Replace(u, "ws://", "http://", 1)
 }
+
+// Follow Go flag parsing: values and positional arguments are never mode
+// switches. Keep this list aligned with run's actual command-line options.
+func cliBoolFlag(args []string, wanted string) bool {
+	selected := false
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if arg == "--" || !strings.HasPrefix(arg, "-") || arg == "-" {
+			break
+		}
+		name, value, assigned := strings.Cut(strings.TrimPrefix(strings.TrimPrefix(arg, "-"), "-"), "=")
+		switch name {
+		case "setup", "readonly", "init", "password-stdin", "install", "background":
+			enabled := true
+			if assigned {
+				var err error
+				enabled, err = strconv.ParseBool(value)
+				if err != nil {
+					return false
+				}
+			}
+			if name == wanted {
+				selected = enabled
+			}
+		case "uri", "username", "bucket", "lower-bucket", "writable-paths", "uid", "gid", "uninstall", "saved-drive":
+			if !assigned {
+				i++
+				if i >= len(args) {
+					return false
+				}
+			}
+		default:
+			// Let run report help/unknown options instead of opening the UI.
+			return false
+		}
+	}
+	return selected
+}
+func hasSetupFlag(args []string) bool { return cliBoolFlag(args, "setup") }

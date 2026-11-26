@@ -26,3 +26,42 @@ func TestMountConfiguration(t *testing.T) {
 		t.Fatal(c.httpURI())
 	}
 }
+
+func TestSetupFlagDoesNotInterpretCLIValuesAsModes(t *testing.T) {
+	for _, args := range [][]string{
+		{"--bucket", "setup", "S:"},
+		{"--username", "setup", "--bucket", "documents", "S:"},
+		{"--bucket", "--setup", "S:"},
+		{"--saved-drive", "setup", "--background"},
+		{"--writable-paths", "setup", "S:"},
+		{"--", "--setup"},
+		{"S:", "--setup"},
+		{"--setup", "--setup=false"},
+		{"--setup=false"},
+		{"-h", "--setup"},
+	} {
+		if hasSetupFlag(args) {
+			t.Fatalf("headless arguments incorrectly selected UI: %q", args)
+		}
+	}
+	for _, args := range [][]string{
+		{"--setup"}, {"-setup=true"}, {"--setup=TRUE"},
+		{"--setup", "--saved-drive", "T:"},
+		{"--saved-drive", "T:", "--setup"},
+	} {
+		if !hasSetupFlag(args) {
+			t.Fatalf("explicit setup mode not selected: %q", args)
+		}
+	}
+}
+
+func TestBackgroundFlagDoesNotInterpretCLIValuesAsModes(t *testing.T) {
+	for _, args := range [][]string{{"--username", "background"}, {"--bucket", "--background"}, {"--background=false"}, {"S:", "--background"}} {
+		if cliBoolFlag(args, "background") {
+			t.Fatalf("CLI value hid its console: %q", args)
+		}
+	}
+	if !cliBoolFlag([]string{"--background", "--saved-drive", "S:"}, "background") {
+		t.Fatal("explicit background invocation lost its mode")
+	}
+}

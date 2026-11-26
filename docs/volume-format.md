@@ -351,6 +351,37 @@ Callbacks must not acquire node/config/range locks or reenter volumes. The serve
 uses immutable accounting/range images to preserve the statistics lock order.
 The optional post-commit observer receives immutable All/Owned snapshots.
 
+Startup can instead call `ConfigureAccounting(AccountingOptions{CachePath, Stamp,
+Include, Admission, Observer})`: this never traverses object records. A validated
+empty index root provides an immediate constant-time bootstrap proof. Otherwise
+an optional private sidecar restores all five counters per bucket against the
+SHA-256 of the **exact durable encoded superblock**, volume UUID, cache schema
+and checksum. Owned counters additionally require an immutable
+`OwnershipCheckpointKey() [32]byte` covering the actual normalized ownership
+predicate (node, volume, ranges and recovery/import masks). An unrelated user
+configuration edit must not change this key. Matching global counters can be
+restored independently when the ownership key changes.
+
+Missing, stale, truncated, oversized or corrupt sidecars are only cache misses;
+they cannot turn unknown counters into zero quota or hide corrupt canonical
+records. `AccountingReady()` is lock-free. Servers expose reads and general
+`Stats` while cold, and reject mutations/control **before** queuing a write lock.
+`WarmAccounting(ctx)` runs a background census under a shared lock into private
+bounded page/object caches and O(buckets) counters. It checks cancellation before
+every backend page read/index entry and takes the exclusive lock only for final
+publication/observer notification. Errors leave ownership/accounting unknown;
+`OwnedStorageUsage` returns `ErrAccountingNotReady` until ready. Compatibility
+`SetAdmission`/`SetOwnershipFilter` remain synchronous for unconfigured callers.
+
+`SaveAccountingCache()` only snapshots an already durable generation; it does
+not flush an accepted write tail. Warm completion and clean close save a cache
+best-effort. Explicit maintenance may save after an existing checkpoint. The
+32-MiB bounded, mode-0600 cache is atomically replaced; no userdata Sync or cache
+fsync is introduced, and no cache operation occurs for each counter increment.
+Interrupted/lost cache writes simply require another census. Cache failure never
+fails an acknowledged user mutation or clean close. RAM buckets never save this
+cache. The volume format and object IDs are unchanged.
+
 Admission inspects the completed allocation plan before WAL publication and can
 reject it without publishing bytes, index entries, a request receipt or counters.
 It returns the required physical guarantee remainder; import allowances remain

@@ -3,7 +3,6 @@ package server
 
 import (
 	"context"
-	"errors"
 	"github.com/launix-de/stqr-storage/client"
 	"github.com/launix-de/stqr-storage/volume"
 
@@ -101,7 +100,9 @@ func TestAcceptedInvalidIncarnation(t *testing.T) {
 	}
 }
 
-func TestAcceptedVolumeSwitchOrdering(t *testing.T) {
+// Accepted writes may touch several volumes without making earlier writes
+// durable. Only an explicit fence gives the caller a durability guarantee.
+func TestAcceptedCleanupDoesNotStartCheckpoint(t *testing.T) {
 	s := testServer(t)
 	a, err := volume.NewRAM(16 << 20)
 	if err != nil {
@@ -114,56 +115,79 @@ func TestAcceptedVolumeSwitchOrdering(t *testing.T) {
 	}
 	defer b.Close()
 	bucket := volume.ID(client.NewRequestID())
-	key := volume.Key{Bucket: bucket, Object: volume.ObjectID{1}}
-	switchTo := func(target *volume.Volume) error {
-		for {
-			s.opMu.Lock()
-			err := s.switchAcceptedVolume(bucket, target, true)
-			s.opMu.Unlock()
-			var wait *acceptedCheckpoint
-			if !errors.As(err, &wait) {
-				return err
-			}
-			if err = wait.volume.CheckpointThrough(wait.generation); err != nil {
-				return err
-			}
+	generations := map[*volume.Volume]uint64{}
+	before := map[*volume.Volume]volume.IOStats{}
+	for _, v := range []*volume.Volume{a, b} {
+		h, err := v.Open(true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = h.Put(volume.Key{Bucket: bucket, Object: volume.ObjectID{1}}, []byte("accepted"), volume.Options{Accepted: true})
+		gen, genErr := h.Generation()
+		h.Close()
+		if err != nil || genErr != nil {
+			t.Fatalf("put: %v generation: %v", err, genErr)
+		}
+		s.recordAccepted(bucket, v, gen)
+		generations[v] = gen
+		before[v] = v.IOStats()
+	}
+	// Optional cleanup must also skip an actively held write handle instead of
+	// queuing behind it and delaying every other bucket's cleanup.
+	busy, err := a.Open(true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan struct{})
+	go func() { s.pruneDurability(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		busy.Close()
+		t.Fatal("cleanup waited for a busy volume")
+	}
+	busy.Close()
+	for range 3 {
+		s.pruneDurability()
+	}
+	for v, gen := range generations {
+		if v.IsDurableThrough(gen) {
+			t.Fatal("cleanup unexpectedly made accepted data durable")
+		}
+		if got := v.IOStats(); got != before[v] {
+			t.Fatalf("cleanup performed storage I/O: before=%+v after=%+v", before[v], got)
 		}
 	}
-	if err = switchTo(a); err != nil {
+	if _, pending := s.acceptedMark(bucket); !pending {
+		t.Fatal("unflushed mark was lost")
+	}
+	// A real checkpoint is the positive control: cleanup must now prune the
+	// references, but one persisted volume must not confirm the other volume.
+	if err := a.CheckpointThrough(generations[a]); err != nil {
 		t.Fatal(err)
 	}
-	h, err := a.Open(true)
-	if err != nil {
+	s.pruneDurability()
+	if _, pending := s.acceptedMark(bucket); !pending {
+		t.Fatal("partially persisted bucket confirmed")
+	}
+	if err := b.CheckpointThrough(generations[b]); err != nil {
 		t.Fatal(err)
 	}
-	if _, err = h.Put(key, []byte("dependency"), volume.Options{Accepted: true}); err != nil {
-		t.Fatal(err)
+	before[a], before[b] = a.IOStats(), b.IOStats()
+	s.pruneDurability()
+	if _, pending := s.acceptedMark(bucket); pending {
+		t.Fatal("persisted mark not confirmed")
 	}
-	gen, err := h.Generation()
-	h.Close()
-	if err != nil {
-		t.Fatal(err)
+	for _, v := range []*volume.Volume{a, b} {
+		if v.IOStats() != before[v] {
+			t.Fatal("pruning persisted references performed I/O")
+		}
 	}
-	s.recordAccepted(bucket, a, gen)
-	if err = switchTo(b); err != nil {
-		t.Fatal(err)
-	}
-	syncs := a.IOStats().SyncOps
-	if err = a.CheckpointThrough(gen); err != nil {
-		t.Fatal(err)
-	}
-	if a.IOStats().SyncOps != syncs {
-		t.Fatal("volume switch did not checkpoint dependency")
-	}
-	// A confirmed detached store must not block the next destination.
-	if err = switchTo(a); err != nil {
-		t.Fatal(err)
-	}
-	if err = a.Close(); err != nil {
-		t.Fatal(err)
-	}
-	if err = switchTo(b); err != nil {
-		t.Fatal(err)
+	s.durability.mu.Lock()
+	retained := len(s.durability.buckets[bucket].volumes)
+	s.durability.mu.Unlock()
+	if retained != 0 {
+		t.Fatalf("retained %d persisted volume references", retained)
 	}
 }
 

@@ -2,6 +2,7 @@
 package volume
 
 import (
+	"bytes"
 	"errors"
 	"hash/crc32"
 	"io"
@@ -80,7 +81,8 @@ func (view ReadView) WriteTo(dst io.Writer) (int64, error) {
 
 // WithReadView lends checked, read-only segments during fn. The requested range
 // is clipped at EOF and must fit MaxBufferedRead after clipping. Sparse runs do
-// not allocate payload, and compressed chunks use at most BlockSize scratch.
+// not allocate payload. Each compressed chunk decodes at most BlockSize bytes;
+// a view may retain several owned chunks. Partial chunks retain only selected bytes.
 //
 // Software contract: fn must not modify/retain segment bytes, close/reenter this
 // handle or call management methods on its volume. The handle's operation lock
@@ -224,6 +226,17 @@ func readSegmentsCRC(parts []ReadSegment) uint32 {
 	return crc
 }
 
+// A partial owned slice must not retain a whole decoded chunk/page. Many small
+// imported slices can otherwise pin BlockSize bytes per returned byte. Whole
+// chunks keep their existing buffer; borrowed mmap/RAM data is never copied.
+func sliceOwnedReadData(data []byte, offset, length uint64) []byte {
+	selected := data[offset : offset+length : offset+length]
+	if offset == 0 && length == uint64(len(data)) {
+		return selected
+	}
+	return bytes.Clone(selected)
+}
+
 func sliceReadSegments(parts []ReadSegment, offset, length uint64) []ReadSegment {
 	var out []ReadSegment
 	for _, part := range parts {
@@ -236,7 +249,11 @@ func sliceReadSegments(parts []ReadSegment, offset, length uint64) []ReadSegment
 		}
 		n := min(length, part.Length-offset)
 		if part.Data != nil {
-			part.Data = part.Data[offset : offset+n : offset+n]
+			if part.Borrowed {
+				part.Data = part.Data[offset : offset+n : offset+n]
+			} else {
+				part.Data = sliceOwnedReadData(part.Data, offset, n)
+			}
 		}
 		part.Length = n
 		out = append(out, part)
@@ -288,7 +305,7 @@ func (v *Volume) spanReadView(span dataSpan, offset, length uint64) ([]ReadSegme
 			if err != nil {
 				return nil, err
 			}
-			data := raw[span.Skip+offset : span.Skip+offset+length : span.Skip+offset+length]
+			data := sliceOwnedReadData(raw, span.Skip+offset, length)
 			return []ReadSegment{{Data: data, Length: length}}, nil
 		}
 		decoded := uint64(span.Checksums >> 32)

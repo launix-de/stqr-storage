@@ -89,8 +89,8 @@ help:
 		'make nbd                Build the NBD server and native boot client' \
 		'make pam                Build networkboot/bin/pam_stqr.so' \
 		'make networkboot        Build networkboot tools, boot helpers, PAM and source archive' \
-		'make windows            Cross-compile the Windows Go backend (amd64)' \
-		'make windows-package    Build the complete WinUI bundle on a Windows host' \
+		'make windows            Cross-compile the development Windows backend (amd64)' \
+		'make windows-package    Build one complete Windows EXE on a Windows host' \
 		'make windows-resources  Update the Windows resource when its sources changed (LLVM)' \
 		'make deb VERSION=...    Build a Debian package (DEB_OUT=dist by default)' \
 		'make clean              Remove generated build artifacts; preserve packages in dist/'

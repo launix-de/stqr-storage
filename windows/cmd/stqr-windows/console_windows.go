@@ -6,7 +6,6 @@ package main
 import (
 	"golang.org/x/sys/windows"
 	"os"
-	"strings"
 	"syscall"
 )
 
@@ -28,10 +27,8 @@ func attachCLIConsole() {
 	if len(os.Args) == 1 || hasSetupFlag(os.Args[1:]) {
 		return
 	}
-	for _, a := range os.Args[1:] {
-		if strings.TrimLeft(a, "-") == "background" || strings.TrimLeft(a, "-") == "background=true" {
-			return
-		}
+	if cliBoolFlag(os.Args[1:], "background") {
+		return
 	}
 	attached, _, _ := windows.NewLazySystemDLL("kernel32.dll").NewProc("AttachConsole").Call(0xffffffff)
 	if attached == 0 {

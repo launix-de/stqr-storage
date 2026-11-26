@@ -15,6 +15,12 @@ try{
  await page.locator('[data-view="buckets"]').click();
  await page.waitForFunction(id=>{const cell=document.querySelector(`[data-bucket-throughput="${id}"]`);return cell&&!cell.textContent.includes('—')&&!cell.textContent.includes(' 0 B/s')},config.bucket);
  await page.screenshot({path:'/tmp/stqr-throughput-buckets.png'});
+ const occupancy=page.locator(`[data-bucket="${config.bucket}"] .bucket-usage`);
+ await occupancy.waitFor();
+ const occupiedText=await occupancy.innerText();
+ if(!occupiedText.includes('Unbegrenzt')||!occupiedText.includes('Physisch belegt')||occupiedText.includes('Belegung nicht verfügbar'))throw Error('Unlimited bucket occupancy missing: '+occupiedText);
+ if(await occupancy.locator('[role="progressbar"]').count())throw Error('Unlimited bucket displays a fabricated capacity percentage');
+
  const lateID=await page.evaluate(async source=>{
   const session=await(await fetch('/api/session')).json();const {NodeConnection,newID}=await import('/assets/protocol.js');
   return new Promise((resolve,reject)=>{const c=new NodeConnection(session.csrf_token,()=>{},()=>{});c.onOpen=async()=>{try{const original=(await c.listBuckets()).buckets.find(b=>b.id===source);const id=newID();await c.createBucket({...original,id,name:'late-created-bucket',grants:[]});resolve(id)}catch(e){reject(e)}finally{c.stop()}}});
@@ -26,7 +32,11 @@ try{
  await page.waitForFunction(()=>{const rows=[...document.querySelectorAll('#user-rows [data-user-throughput]')];return rows.length===4&&rows.every(r=>!r.textContent.includes('—'))});
  const admin=page.locator(`[data-user="${config.user}"]`);
  if((await admin.locator('[data-user-throughput]').innerText()).includes('Schreiben 0 B/s'))throw Error('Active user throughput missing');
+
+ await page.waitForFunction(()=>['read','write'].every(key=>{const text=document.querySelector('#user-metric-'+key).textContent;return text!=='—'&&text!=='0 B/s'}));
+ if(await page.locator('#user-metric-count').textContent()!=='4')throw Error('User summary has the wrong total count');
+ for(const key of ['read','write'])if((await page.locator('#user-metric-'+key+'-total').textContent())==='—')throw Error('Cumulative user '+key+' total is missing');
  await page.screenshot({path:'/tmp/stqr-throughput-users.png'});
  if(errors.length)throw Error(errors.join('\n'));
- console.log('Nonzero volume storage-access read/write and logical bucket/user read/write rates render correctly; labels distinguish RAM/mmap from disk I/O.');
+ console.log('Nonzero volume storage-access and logical bucket/user rates, unlimited occupancy and all-user summaries render correctly; labels distinguish RAM/mmap from disk I/O.');
 }finally{await browser.close()}

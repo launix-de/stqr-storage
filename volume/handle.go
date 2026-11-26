@@ -49,6 +49,9 @@ type handleLease struct {
 // callers do not need to retry transient internal admission contention.
 // The returned handle is the only supported way to compose locked operations.
 func (v *Volume) Open(write bool) (*Handle, error) {
+	if write && !v.AccountingReady() {
+		return nil, ErrAccountingNotReady
+	}
 	if write {
 		v.mu.Lock()
 		// Blocking admission waits for exclusive allocator maintenance/private
@@ -68,6 +71,9 @@ func (v *Volume) Open(write bool) (*Handle, error) {
 // TryOpen is for idle maintenance: busy volumes are skipped instead of queuing
 // a background writer ahead of foreground requests. acquired=false is not an error.
 func (v *Volume) TryOpen(write bool) (h *Handle, acquired bool, err error) {
+	if write && !v.AccountingReady() {
+		return nil, false, ErrAccountingNotReady
+	}
 	if write {
 		acquired = v.mu.TryLock()
 	} else {

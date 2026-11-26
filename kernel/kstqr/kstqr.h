@@ -113,7 +113,7 @@ struct ks_fs {
 };
 struct ks_inode {
 	/* Volatile continuous subscription coverage, never an on-disk version. */
-	struct ks_cache_stamp data_stamp;
+	struct ks_cache_stamp data_stamp, page_stamp;
 	struct ks_directory_proof directory_proof;
 	struct mutex metadata_lock;
     struct mutex writeback_publish_lock;
@@ -121,7 +121,7 @@ struct ks_inode {
 	u64 invalidated_generation;
 	stqr_proof proof;
 	stqr_proof upper_absent;
-	bool invalidate;
+	bool invalidate, revalidate;
 	stqr_object_id id;
 	struct inode inode;
 };
