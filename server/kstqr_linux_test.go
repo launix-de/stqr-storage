@@ -94,6 +94,7 @@ func TestKSTQRVirtualMachine(t *testing.T) {
 	run("cc", "-static", "-std=c11", "-Wall", "-Wextra", "-Werror", "-O2", "-o", filepath.Join(initrdRoot, "coherence"), filepath.Join(root, "tests/coherence.c"))
 	run("cc", "-static", "-std=c11", "-Wall", "-Wextra", "-Werror", "-O2", "-o", filepath.Join(initrdRoot, "cache-capacity"), filepath.Join(root, "tests/cache_capacity.c"))
 	run("cc", "-static", "-std=c11", "-Wall", "-Wextra", "-Werror", "-O2", "-o", filepath.Join(initrdRoot, "throughput"), filepath.Join(root, "tests/throughput.c"))
+	run("cc", "-static", "-std=c11", "-Wall", "-Wextra", "-Werror", "-O2", "-o", filepath.Join(initrdRoot, "read-window"), filepath.Join(root, "tests/read_window.c"))
 	run("cc", "-static", "-std=c11", "-Wall", "-Wextra", "-Werror", "-O2", "-o", filepath.Join(initrdRoot, "writeback"), filepath.Join(root, "tests/writeback.c"))
 	run("cc", "-static", "-std=c11", "-Wall", "-Wextra", "-Werror", "-O2", "-o", filepath.Join(initrdRoot, "crash-reconnect"), filepath.Join(root, "tests/crash_reconnect.c"))
 	run("cc", "-static", "-std=c11", "-Wall", "-Wextra", "-Werror", "-O2", "-o", filepath.Join(initrdRoot, "mmap-test"), filepath.Join(root, "tests/mmap.c"), "-lsqlite3", "-lm", "-ldl", "-lpthread")
@@ -129,6 +130,14 @@ func TestKSTQRVirtualMachine(t *testing.T) {
 	host := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/ws" {
 			writebackFault.proxy(w, r, upstream.URL)
+			return
+		}
+		if r.URL.Path == "/__kstqr_test/read-window" {
+			if err := writebackFault.ranges.verify(); err != nil {
+				http.Error(w, err.Error(), 500)
+			} else {
+				w.WriteHeader(200)
+			}
 			return
 		}
 		if strings.HasPrefix(r.URL.Path, "/__kstqr_test/writeback-") {
@@ -414,6 +423,53 @@ func TestKSTQRVirtualMachine(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Seed a valid, immutable STFS/STIX file with many independent leaves
+	// inside one page-cache window. Holes and nonzero payload offsets exercise
+	// placement-independent slice addressing, not only dense whole objects.
+	windowFile, e := fs.Create(ctx, client.FilesystemRootID(), "read-window", 0644, 0, 0, false)
+	if e != nil {
+		t.Fatal(e)
+	}
+	index := client.Encoder{B: []byte("STIX")}
+	index.U16(1)
+	index.U32(64)
+	var windowLeaves []client.ObjectID
+	for i := 0; i < 64; i++ {
+		var leaf client.ObjectID
+		if i%8 != 7 {
+			leaf = sha256.Sum256([]byte(fmt.Sprintf("native-window-leaf-%d", i)))
+			if _, e = conn.Put(ctx, leaf, bytes.Repeat([]byte{byte(i + 1)}, 16384+13), client.PutOptions{}); e != nil {
+				t.Fatal(e)
+			}
+			windowLeaves = append(windowLeaves, leaf)
+		}
+		index.U64(16384)
+		index.B = append(index.B, leaf[:]...)
+		if leaf == (client.ObjectID{}) {
+			index.U32(0)
+		} else {
+			index.U32(13)
+		}
+	}
+	indexID := client.ObjectID(sha256.Sum256(index.B))
+	if _, e = conn.Put(ctx, indexID, index.B, client.PutOptions{}); e != nil {
+		t.Fatal(e)
+	}
+	node := client.Encoder{B: []byte("STFS")}
+	node.U16(1)
+	node.U8(1)
+	node.U32(0644)
+	node.U32(0)
+	node.U32(0)
+	node.U64(1)
+	node.U64(1 << 20)
+	node.U8(1)
+	node.U8(1)
+	node.B = append(node.B, indexID[:]...)
+	if _, e = conn.Put(ctx, windowFile.ID, node.B, client.PutOptions{}); e != nil {
+		t.Fatal(e)
+	}
+	writebackFault.ranges.configure(windowLeaves)
 	subscriptionFS = fs
 	readBenchmark := os.Getenv("STQR_KERNEL_BENCHMARK") == "1"
 	writeBenchmark := os.Getenv("STQR_KERNEL_WRITE_BENCHMARK") == "1"
@@ -602,6 +658,7 @@ insmod /kstqr.ko
 /mount.kstqr --uri @@URL@@ --bucket @@BUCKET@@ --credentials /readonly-credentials --readonly /readonly
 test "$(cat /readonly/kernel.txt)" = 'written by kstqr'
 /mmap-test verify
+/read-window @@URL@@
 umount /readonly
 rmmod kstqr
 if dmesg | grep -E 'BUG:|WARNING:|Oops:|KASAN:'; then exit 1; fi
@@ -627,6 +684,18 @@ umount /mnt
 rmmod kstqr
 `
 		}
+		init = init[:begin] + script + init[end:]
+	}
+
+	if os.Getenv("STQR_KERNEL_READ_WINDOW") == "1" {
+		begin := strings.Index(init, "for attempt in 1 2 3 4; do")
+		end := strings.Index(init, "if dmesg |")
+		script := `/mount.kstqr --uri ` + endpoint + ` --bucket ` + client.ID(b.ID()).String() + ` --credentials /readonly-credentials --readonly /readonly
+/read-window ` + endpoint + `
+cat /proc/self/mountstats
+umount /readonly
+rmmod kstqr
+`
 		init = init[:begin] + script + init[end:]
 	}
 
@@ -1133,6 +1202,15 @@ poweroff -f
 
 		uc.Close()
 		t.Log("Native STOR/STOM kernel overlay, lazy range copy-up, whitelist, Go compatibility and boot lifetime passed")
+		return
+	}
+
+	if os.Getenv("STQR_KERNEL_READ_WINDOW") == "1" {
+		for _, line := range strings.Split(string(output), "\n") {
+			if strings.Contains(line, "KSTQR_READ_WINDOW_") || strings.Contains(line, "stqr: cache_hits=") {
+				t.Log(strings.TrimSpace(line))
+			}
+		}
 		return
 	}
 
