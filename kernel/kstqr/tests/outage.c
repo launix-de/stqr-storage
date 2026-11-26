@@ -37,14 +37,44 @@ static void control(const char *base, const char *path) {
 }
 int main(int argc, char **argv) {
   CHECK(argc == 2);
+  control(argv[1], "busy-read");
+  int busy = open("/mnt/busy-cold", O_RDONLY);
+  CHECK(busy >= 0);
+  char byte;
+  CHECK(pread(busy, &byte, 1, 32768) == 1 && byte == 'B');
+  CHECK(!close(busy));
+  control(argv[1], "check-busy");
   int fd = open("/mnt/outage-cold", O_RDONLY);
   CHECK(fd >= 0);
   volatile unsigned char *p = mmap(NULL, 65536, PROT_READ, MAP_SHARED, fd, 0);
   CHECK(p != MAP_FAILED);
+  int fds[12];
+  for (int i = 0; i < 12; i++) {
+    char name[128];
+    snprintf(name, sizeof(name), "/mnt/parallel-cold-%d", i);
+    fds[i] = open(name, O_RDONLY);
+    CHECK(fds[i] >= 0);
+  }
   control(argv[1], "offline");
+  pid_t children[12];
+  for (int i = 0; i < 12; i++) {
+    children[i] = fork();
+    CHECK(children[i] >= 0);
+    if (!children[i]) {
+      char value;
+      _exit(pread(fds[i], &value, 1, 0) == 1 && value == 'P' ? 0 : 1);
+    }
+  }
   double started = now();
   CHECK(p[32768] == 'R');
   CHECK(now() - started >= 1.0);
+  for (int i = 0; i < 12; i++) {
+    int status;
+    CHECK(waitpid(children[i], &status, 0) == children[i]);
+    CHECK(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+    CHECK(!close(fds[i]));
+  }
+  control(argv[1], "check-recovery");
   CHECK(!munmap((void *)p, 65536));
   CHECK(!close(fd));
   int append = open("/mnt/append-once", O_RDWR | O_APPEND);

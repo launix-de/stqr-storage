@@ -877,8 +877,36 @@ poweroff -f
 		if e = conn.Sync(ctx); e != nil {
 			t.Fatal(e)
 		}
+		busyCold, e := fs.Create(ctx, client.FilesystemRootID(), "busy-cold", 0644, 0, 0, false)
+		if e != nil {
+			t.Fatal(e)
+		}
+		if _, e = fs.WriteAt(ctx, busyCold.ID, bytes.Repeat([]byte("B"), 65536), 0); e != nil {
+			t.Fatal(e)
+		}
+		if e = conn.Sync(ctx); e != nil {
+			t.Fatal(e)
+		}
+		for i := 0; i < 12; i++ {
+			file, err := fs.Create(ctx, client.FilesystemRootID(), fmt.Sprintf("parallel-cold-%d", i), 0644, 0, 0, false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err = fs.WriteAt(ctx, file.ID, bytes.Repeat([]byte("P"), 4096), 0); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if e = conn.Sync(ctx); e != nil {
+			t.Fatal(e)
+		}
 		native, control, fixture := startKernelOutageFixture(t, s)
 		t.Cleanup(func() {
+			if !fixture.recoveryChecked.Load() {
+				t.Error("parallel readers did not coalesce transport recovery")
+			}
+			if !fixture.busyChecked.Load() {
+				t.Error("transient 503 did not preserve the live owner connection")
+			}
 			if fixture.pauses.Load() != 2 || fixture.drops.Load() != 1 {
 				t.Errorf("outage fixture did not exercise both failures: pauses=%d dropped_replies=%d", fixture.pauses.Load(), fixture.drops.Load())
 			}

@@ -18,18 +18,25 @@ import (
 )
 
 type kernelOutageFixture struct {
-	mu          sync.Mutex
-	handler     http.Handler
-	listener    net.Listener
-	server      *http.Server
-	address     string
-	connections map[*kernelOutageConnection]bool
-	ctx         context.Context
-	cancel      context.CancelFunc
-	workers     sync.WaitGroup
-	armed       atomic.Bool
-	drops       atomic.Int32
-	pauses      atomic.Int32
+	mu               sync.Mutex
+	handler          http.Handler
+	listener         net.Listener
+	server           *http.Server
+	address          string
+	connections      map[*kernelOutageConnection]bool
+	ctx              context.Context
+	cancel           context.CancelFunc
+	workers          sync.WaitGroup
+	armed            atomic.Bool
+	drops            atomic.Int32
+	pauses           atomic.Int32
+	accepted         atomic.Int32
+	busyArmed        atomic.Bool
+	busyReplies      atomic.Int32
+	busyBaseline     atomic.Int32
+	busyChecked      atomic.Bool
+	recoveryBaseline atomic.Int32
+	recoveryChecked  atomic.Bool
 }
 type kernelOutageListener struct {
 	net.Listener
@@ -41,6 +48,7 @@ func (l kernelOutageListener) Accept() (net.Conn, error) {
 	if e != nil {
 		return nil, e
 	}
+	l.fixture.accepted.Add(1)
 	wrapped := &kernelOutageConnection{Conn: c, fixture: l.fixture}
 	l.fixture.mu.Lock()
 	l.fixture.connections[wrapped] = true
@@ -70,6 +78,19 @@ func (c *kernelOutageConnection) Write(p []byte) (int, error) {
 		}
 		if length < 126 && len(p) == offset+length || offset == 4 && len(p) == offset+length {
 			m, e := client.DecodeMessage(p[offset:])
+			// GET is side-effect free: replace one completed snapshot with a
+			// transient rejection, retaining the socket and other in-flight work.
+			if e == nil && m.Kind == client.Response && (m.Opcode == 0x0100 || m.Opcode == 0x0101) && c.fixture.busyArmed.CompareAndSwap(true, false) {
+				m.Body = client.ResponseBody(503, nil, "test temporarily busy")
+				payload := client.EncodeMessage(m)
+				frame := []byte{0x82, byte(len(payload))}
+				frame = append(frame, payload...)
+				if _, e := c.Conn.Write(frame); e != nil {
+					return 0, e
+				}
+				c.fixture.busyReplies.Add(1)
+				return len(p), nil
+			}
 			if e == nil && m.Kind == client.Response && (m.Opcode == 0x108 || m.Opcode == 0x118) {
 				d := client.Decoder{B: m.Body}
 				status := d.V()
@@ -146,7 +167,23 @@ func startKernelOutageFixture(t *testing.T, s *Server) (string, string, *kernelO
 	}
 	control := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
+		case "/busy-read":
+			f.busyBaseline.Store(f.accepted.Load())
+			f.busyArmed.Store(true)
+		case "/check-busy":
+			if f.busyReplies.Load() != 1 || f.accepted.Load() != f.busyBaseline.Load() {
+				http.Error(w, "503 caused shared transport reconnect", 500)
+				return
+			}
+			f.busyChecked.Store(true)
+		case "/check-recovery":
+			if got := f.accepted.Load() - f.recoveryBaseline.Load(); got != 1 {
+				http.Error(w, "parallel readers did not share one reconnect", 500)
+				return
+			}
+			f.recoveryChecked.Store(true)
 		case "/offline":
+			f.recoveryBaseline.Store(f.accepted.Load())
 			if e := f.pause(); e != nil {
 				http.Error(w, e.Error(), 500)
 				return

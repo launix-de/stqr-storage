@@ -22,6 +22,7 @@ struct ks_rpc {
 	stqr_client *client;
 	struct work_struct receive;
 	bool receive_started;
+	u64 reconnect_epoch; /* Protected by lock; coalesces concurrent recovery. */
 };
 void ks_rpc_start(struct ks_rpc *, struct ks_fs *);
 void ks_rpc_stop(struct ks_rpc *);

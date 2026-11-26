@@ -53,7 +53,10 @@ static void ks_rpc_receive(struct work_struct *work)
      * existing event worker so an idle mmap can regain coverage without a new
      * application read and without introducing another socket or polling loop. */
     if(result<0 && rpc->fs && !READ_ONCE(rpc->fs->stopping))
+    {
+        rpc->reconnect_epoch++;
         ks_reconnect_wait(rpc->fs,rpc->client);
+    }
 	mutex_unlock(&rpc->lock);
 }
 static void ks_rpc_readable(void *arg)
@@ -152,6 +155,30 @@ int ks_reconnect_wait(struct ks_fs *f, stqr_client *client)
 		pause = min(pause * 2, 1000U);
 	}
 }
+/* Software contract: a completed 503 rejects just this request, not the
+ * transport. Retry it with the same identity after yielding outside framing.
+ * A lost shared connection may fail many callers: only the first caller for
+ * that incarnation reconnects. Later completions must never tear down its
+ * replacement and abort the next burst of otherwise independent requests.
+ * Caller holds rpc->lock on entry and return; epoch is captured before submit.
+ */
+static int ks_rpc_retry(struct ks_fs *f, struct ks_rpc *rpc, u64 epoch, int status)
+{
+    if (READ_ONCE(f->stopping))
+        return -ESHUTDOWN;
+    if (fatal_signal_pending(current))
+        return -EINTR;
+    if (status == 503) {
+        mutex_unlock(&rpc->lock);
+        msleep(50);
+        mutex_lock(&rpc->lock);
+        return 0;
+    }
+    if (epoch != rpc->reconnect_epoch)
+        return 0;
+    rpc->reconnect_epoch++;
+    return ks_reconnect_wait(f, rpc->client);
+}
 int ks_object_reference(struct ks_fs *f, stqr_object_id id, stqr_id token, unsigned action)
 {
 	struct ks_rpc *rpc = ks_rpc_lock(f, id);
@@ -168,20 +195,22 @@ int ks_object_reference(struct ks_fs *f, stqr_object_id id, stqr_id token, unsig
 	}
 	bool auth_retry = false;
 	for (;;) {
+        u64 epoch = rpc->reconnect_epoch;
+        int status = 0;
 		if(rpc->receive_started) {
             struct ks_async_result result={0};init_completion(&result.done);
             err=stqr_object_reference_async(rpc->client,id,token,action,ks_async_completed,&result);
             mutex_unlock(&rpc->lock);
-            if(!err){wait_for_completion(&result.done);err=result.error;}
+            if(!err){wait_for_completion(&result.done);err=result.error;status=result.status;}
             sq_free(result.data);mutex_lock(&rpc->lock);
-        }else err = operation(rpc->client, id, token);
+        }else { err = operation(rpc->client, id, token); status = stqr_status(rpc->client); }
 		if (err == -EACCES && !auth_retry)
 			auth_retry = true;
-		else if (!ks_transport_retryable(rpc->client, err))
+		else if (!(err == -EAGAIN ? (status == 0 || status == 503) : ks_transport_retryable(NULL, err)))
 			break;
 		/* Tokens are idempotent across reconnect; only an explicit kernel
          * sync promises their persistence across server restart. */
-		err = ks_reconnect_wait(f, rpc->client);
+		err = ks_rpc_retry(f, rpc, epoch, status);
 		if (err)
 			break;
 	}
@@ -193,13 +222,14 @@ static int get_object_locked(struct ks_fs *f, struct ks_rpc *rpc, stqr_object_id
 {
 	int err;
 	for (;;) {
+        u64 epoch = rpc->reconnect_epoch;
 		err = stqr_get(rpc->client, id, p, n, info);
 		if (!ks_transport_retryable(rpc->client, err))
 			break;
 		sq_free(*p);
 		*p = NULL;
 		*n = 0;
-		err = ks_reconnect_wait(f, rpc->client);
+		err = ks_rpc_retry(f, rpc, epoch, stqr_status(rpc->client));
 		if (err)
 			break;
 	}
@@ -209,11 +239,13 @@ static int get_object(struct ks_fs *f, stqr_object_id id, void **p, size_t *n, s
 {
 	struct ks_rpc *rpc;
 	int err;
+    u64 epoch;
 	atomic64_inc(&f->rpc_gets);
 	for (;;) {
 		struct ks_async_result result = {0};
 		init_completion(&result.done);
 		rpc = ks_rpc_lock(f, id);
+        epoch = rpc->reconnect_epoch;
 		if (!rpc->receive_started) {
 			err = get_object_locked(f, rpc, id, p, n, info);
 			mutex_unlock(&rpc->lock);
@@ -233,7 +265,7 @@ static int get_object(struct ks_fs *f, stqr_object_id id, void **p, size_t *n, s
 		if (!(err==-EAGAIN ? (result.status==0||result.status==503) :
               ks_transport_retryable(NULL,err)))return err;
 		mutex_lock(&rpc->lock);
-		err = ks_reconnect_wait(f, rpc->client);
+		err = ks_rpc_retry(f, rpc, epoch, result.status);
 		mutex_unlock(&rpc->lock);
 		if (err)
 			return err;
@@ -264,6 +296,8 @@ static int cas_object(struct ks_fs *f, stqr_object_id id, const void *p, size_t 
 	bool auth_retry = false, replayed = false;
     int status=0;
 	for (;;) {
+        u64 epoch = rpc->reconnect_epoch;
+        status = 0;
 		if (rpc->receive_started) {
             struct ks_async_result result = {0};
             init_completion(&result.done);
@@ -293,10 +327,11 @@ static int cas_object(struct ks_fs *f, stqr_object_id id, const void *p, size_t 
 		else if (!(err==-EAGAIN ? (status==0||status==503) : ks_transport_retryable(NULL,err)))
 			break;
 		// Retain the same request identity throughout a temporary outage.
-		err = ks_reconnect_wait(f, rpc->client);
+		err = ks_rpc_retry(f, rpc, epoch, status);
 		if (err)
 			break;
-		replayed = true;
+		if (status != 503)
+            replayed = true;
 	}
 	ks_cache_forget(f, id);
 	mutex_unlock(&rpc->lock);
@@ -1008,23 +1043,27 @@ static int index_read(struct ks_fs *f, const struct ks_node *view, stqr_object_i
 			rpc = ks_rpc_lock(store, p->id);
 			atomic64_inc(&f->rpc_ranges);
 			for (;;) {
+                u64 epoch = rpc->reconnect_epoch;
+                int status = 0;
 				if (rpc->receive_started) {
                     struct ks_async_result result = {0};
                     init_completion(&result.done);
                     err = stqr_get_range_async(rpc->client, p->id, p->offset + offset,
                                               n, ks_async_completed, &result);
                     mutex_unlock(&rpc->lock);
-                    if (!err) { wait_for_completion(&result.done); err = result.error; }
+                    if (!err) { wait_for_completion(&result.done); err = result.error; status = result.status; }
                     data = result.data; actual = result.length; info = result.info;
                     mutex_lock(&rpc->lock);
-                } else
+                } else {
                     err = stqr_get_range(rpc->client, p->id, p->offset + offset, n,
                                          &data, &actual, &info);
-				if (!ks_transport_retryable(rpc->client, err))
+                    status = stqr_status(rpc->client);
+                }
+				if (!(err == -EAGAIN ? (status == 0 || status == 503) : ks_transport_retryable(NULL, err)))
 					break;
 				sq_free(data);
 				data = NULL;
-				err = ks_reconnect_wait(store, rpc->client);
+				err = ks_rpc_retry(store, rpc, epoch, status);
 				if (err)
 					break;
 			}
