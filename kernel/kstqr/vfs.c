@@ -302,6 +302,12 @@ static int ks_iterate(struct file *file, struct dir_context *ctx)
 			struct inode *ci;
 			saved = enter_fs(f);
 			err = ks_snapshot(f, entries[k].id, &child);
+			if (err == -ENOENT) {
+				leave_fs(f, saved);
+				err = 0;
+				ctx->pos = k + 3;
+				continue;
+			}
 			if (err) {
 				leave_fs(f, saved);
 				break;

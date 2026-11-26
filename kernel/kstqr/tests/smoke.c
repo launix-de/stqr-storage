@@ -41,6 +41,17 @@ int main(void)
     struct stat st;
     char *mapped;
     setvbuf(stdout, NULL, _IOLBF, 0);
+    puts("kstqr: setgid directory inheritance");
+    REQUIRE(!mkdir("/mnt/setgid", 0777));
+    REQUIRE(!chown("/mnt/setgid", 0, 45678));
+    REQUIRE(!chmod("/mnt/setgid", 02777));
+    save("/mnt/setgid/file", "group inheritance");
+    REQUIRE(!stat("/mnt/setgid/file", &st) && st.st_gid == 45678);
+    REQUIRE(!mkdir("/mnt/setgid/child", 0755));
+    REQUIRE(!stat("/mnt/setgid/child", &st) && st.st_gid == 45678 && (st.st_mode & S_ISGID));
+    REQUIRE(!unlink("/mnt/setgid/file"));
+    REQUIRE(!rmdir("/mnt/setgid/child"));
+    REQUIRE(!rmdir("/mnt/setgid"));
     puts("kstqr: Go-format read and cross-mount visibility");
     fd = open("/mnt/go.txt", O_RDWR);
     REQUIRE(fd >= 0);
