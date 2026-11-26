@@ -41,7 +41,8 @@ func TestDaemonExplicitExclusionMarksLostAndPurgesStaleCopies(t *testing.T) {
 		t.Fatal(err)
 	}
 	requestID := client.NewRequestID()
-	if _, err := c.Put(ctx, right, rightData, client.PutOptions{RequestID: requestID}); err != nil {
+	// APPEND has a durable retry receipt; ordinary PUT intentionally does not.
+	if _, err := c.Append(ctx, right, rightData, client.AppendOptions{RequestID: requestID}); err != nil {
 		t.Fatal(err)
 	}
 	before, _ := source.node.routingPatch(draft.ID(), volume.ObjectID(right))

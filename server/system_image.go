@@ -508,6 +508,19 @@ func (s *Server) validateSystemProposal(view *systemView, proposal controlPropos
 	if m.Cluster != proposal.Claim.Base.Membership.Cluster || m.Sequence != proposal.Claim.Base.Sequence+1 || !equalControlMembership(m.Membership, membership) || m.Generation != proposal.Claim.Base.Generation || m.Revision != proposal.Claim.Base.MapRevision {
 		return volume.ErrCorrupt
 	}
+	if current := s.currentSystem.Load(); current != nil && !s.joinPending() {
+		before := current
+		if before.root != volume.ObjectID(proposal.Claim.Base.SystemImage) {
+			var err error
+			before, err = s.loadSystemView(volume.ObjectID(proposal.Claim.Base.SystemImage))
+			if err != nil {
+				return err
+			}
+		}
+		if err := validateNewCloneReferenceEvidence(before.descriptions, view.descriptions); err != nil {
+			return err
+		}
+	}
 	if hasControlNode(membershipIDs(membership), node) {
 		store, err := s.metadataStore()
 		if err != nil {

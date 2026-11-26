@@ -67,6 +67,11 @@ func TestOverlayNegativeCacheSurvivesCopyUpAndUnlink(t *testing.T) {
 	if _, err = second.WriteAt(ctx, conf.ID, []byte("new"), 0); err != nil {
 		t.Fatal(err)
 	}
+	openRef, err := first.Retain(ctx, conf.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer first.Release(ctx, conf.ID, openRef)
 	if got := string(readOverlayFile(t, first, conf.ID)); got[:3] != "new" {
 		t.Fatal("negative upper cache hid copy-up", got)
 	}

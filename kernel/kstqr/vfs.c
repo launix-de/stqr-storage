@@ -457,6 +457,7 @@ static int remove_common(struct inode *parent, struct dentry *d, bool dir)
 	if (!err) {
 		refresh_inode(d_inode(d));
 		refresh_inode(parent);
+		ks_schedule_orphans(f);
 	}
 	leave_fs(f, saved);
 	return err;
@@ -519,6 +520,7 @@ static int ks_rename_vfs(struct mnt_idmap *idmap, struct inode *old, struct dent
 		refresh_inode(old);
 		if (new != old)
 			refresh_inode(new);
+		ks_schedule_orphans(f);
 	}
 	leave_fs(f, saved);
 	sq_free(paths);
@@ -1016,13 +1018,116 @@ static int ks_fsync(struct file *file, loff_t start, loff_t end, int datasync)
 	int err = file_write_and_wait_range(file, start, end);
 	return err ? err : ks_checkpoint(file_inode(file)->i_sb->s_fs_info);
 }
+struct ks_file_reference {
+	stqr_id upper, lower;
+	bool upper_pinned, lower_pinned;
+};
+static int ks_open_file(struct inode *inode, struct file *file)
+{
+	struct ks_fs *f = inode->i_sb->s_fs_info;
+	struct ks_file_reference *ref;
+	struct ks_snapshot snapshot = {0};
+	stqr_object_id id = KS_I(inode)->id;
+	unsigned saved;
+	int err = generic_file_open(inode, file);
+	if (err)
+		return err;
+	ref = kzalloc(sizeof(*ref), GFP_NOFS);
+	if (!ref)
+		return -ENOMEM;
+	saved = enter_fs(f);
+	err = 0;
+	if (f->references) {
+		err = stqr_request_id(&ref->upper);
+		if (!err)
+			err = ks_object_reference(f, id, ref->upper, 0);
+		ref->upper_pinned = !err;
+	}
+	if (!err && f->lower && f->lower->references) {
+		err = stqr_request_id(&ref->lower);
+		if (!err)
+			err = ks_object_reference(f->lower, id, ref->lower, 0);
+		ref->lower_pinned = !err;
+	}
+	if (!err) {
+		ks_cache_forget(f, id);
+		if (f->lower)
+			ks_cache_forget(f->lower, id);
+		err = ks_snapshot(f, id, &snapshot);
+	}
+	if (!err && (snapshot.node.removed || !snapshot.node.links))
+		err = -ENOENT;
+	ks_snapshot_free(&snapshot);
+	if (err) {
+		if (ref->lower_pinned)
+			ks_object_reference(f->lower, id, ref->lower, 1);
+		if (ref->upper_pinned)
+			ks_object_reference(f, id, ref->upper, 1);
+		kfree(ref);
+	} else
+		file->private_data = ref;
+	leave_fs(f, saved);
+	return err;
+}
+static int ks_release_file(struct inode *inode, struct file *file)
+{
+	struct ks_fs *f = inode->i_sb->s_fs_info;
+	struct ks_file_reference *ref = file->private_data;
+	stqr_object_id id = KS_I(inode)->id;
+	unsigned saved;
+	int err, next;
+	if (!ref)
+		return 0;
+	/* VMAs retain struct file, so this also runs only after the final mmap,
+	 * dup and fork reference has gone. Never reclaim dirty unmapped data. */
+	err = file_write_and_wait_range(file, 0, LLONG_MAX);
+	saved = enter_fs(f);
+	if (!err && ref->lower_pinned)
+		err = ks_object_reference(f->lower, id, ref->lower, 1);
+	if (!err && ref->upper_pinned) {
+		next = ks_object_reference(f, id, ref->upper, 1);
+		if (next)
+			err = next;
+	}
+	if (err)
+		pr_warn_ratelimited("kstqr: retaining durable open reference after close error: %d\n", err);
+	else
+		ks_schedule_orphans(f);
+	leave_fs(f, saved);
+	file->private_data = NULL;
+	kfree(ref);
+	return err;
+}
+void ks_schedule_orphans(struct ks_fs *f)
+{
+	if (f->references && !f->readonly && !READ_ONCE(f->stopping))
+		queue_delayed_work(system_unbound_wq, &f->orphan_work, 0);
+}
+static void ks_orphan_worker(struct work_struct *work)
+{
+	struct ks_fs *f = container_of(to_delayed_work(work), struct ks_fs, orphan_work);
+	bool pending = false;
+	unsigned saved;
+	int err;
+	if (READ_ONCE(f->stopping))
+		return;
+	saved = enter_fs(f);
+	err = ks_collect_orphans(f, &pending);
+	leave_fs(f, saved);
+	if (err)
+		pr_warn_ratelimited("kstqr: orphan cleanup deferred: %d\n", err);
+	if ((pending || (err && err != -EACCES && err != -EOPNOTSUPP)) &&
+	    !READ_ONCE(f->stopping))
+		queue_delayed_work(system_unbound_wq, &f->orphan_work, HZ);
+}
 static const struct address_space_operations ks_aops = {.read_folio = ks_read_folio,
 							.readahead = ks_readahead,
 							.writepages = ks_writepages,
 							.dirty_folio = filemap_dirty_folio};
 static const struct file_operations ks_file_fops = {
     .owner = THIS_MODULE,
-    .open = generic_file_open,
+    .open = ks_open_file,
+    .release = ks_release_file,
     .llseek = generic_file_llseek,
     .read_iter = ks_read_iter,
     .splice_read = filemap_splice_read,
@@ -1033,7 +1138,8 @@ static const struct file_operations ks_file_fops = {
 };
 static const struct file_operations ks_dir_fops = {
     .owner = THIS_MODULE,
-    .open = generic_file_open,
+    .open = ks_open_file,
+    .release = ks_release_file,
     .llseek = generic_file_llseek,
     .read = generic_read_dir,
     .iterate_shared = ks_iterate,
@@ -1281,6 +1387,8 @@ static void ks_put_super(struct super_block *sb)
 	struct ks_fs *f = sb->s_fs_info;
 	if (!f)
 		return;
+	WRITE_ONCE(f->stopping, true);
+	cancel_delayed_work_sync(&f->orphan_work);
  if (f->read_queue) {
   destroy_workqueue(f->read_queue);
   f->read_queue = NULL;
@@ -1433,6 +1541,7 @@ static int ks_fill_super(struct super_block *sb, struct fs_context *fc)
 	spin_lock_init(&f->inode_lock);
 	INIT_LIST_HEAD(&f->inodes);
 	INIT_WORK(&f->invalidation_work, ks_invalidation_worker);
+	INIT_DELAYED_WORK(&f->orphan_work, ks_orphan_worker);
 	f->sb = sb;
 	sb->s_bdi->ra_pages = (1U << 20) / PAGE_SIZE;
 	f->readonly = c->readonly || !!(fc->sb_flags & SB_RDONLY);
@@ -1472,6 +1581,8 @@ static int ks_fill_super(struct super_block *sb, struct fs_context *fc)
 		err = stqr_dial(&f->rpc[slot].client, c->url, c->username, c->password, c->bucket, "fs",
 				c->timeout);
 	if (!err)
+		f->references = !!(stqr_capabilities(f->rpc[0].client) & STQR_CAP_OBJECT_REFERENCES);
+	if (!err)
 		err = ks_cache_start(f, c->username, c->password, c->timeout);
 	if (!err && memcmp(c->lower.bytes, (u8[16]){0}, 16)) {
 		if (!memcmp(c->lower.bytes, c->bucket.bytes, 16))
@@ -1499,6 +1610,9 @@ static int ks_fill_super(struct super_block *sb, struct fs_context *fc)
 					err =
 					    stqr_dial(&lower->rpc[slot].client, c->url, c->username,
 						      c->password, c->lower, "fs", c->timeout);
+				if (!err)
+					lower->references = !!(stqr_capabilities(lower->rpc[0].client) &
+							      STQR_CAP_OBJECT_REFERENCES);
 				if (!err)
 					err = ks_cache_start(lower, c->username, c->password,
 							     c->timeout);
@@ -1539,6 +1653,8 @@ static int ks_fill_super(struct super_block *sb, struct fs_context *fc)
 	leave_fs(f, saved);
 	if (err)
 		ks_put_super(sb);
+	else
+		ks_schedule_orphans(f);
 	return err;
 }
 enum {

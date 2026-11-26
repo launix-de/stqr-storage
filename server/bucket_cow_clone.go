@@ -163,6 +163,7 @@ func (s *Server) cloneCow(ctx context.Context, m client.Message, p principal) ([
 		receipt.Running = false
 		receipt.Status = 200
 		receipt.Objects = 0
+		a.Receipts = append(a.Receipts, receipt) // both endpoints retain external-reference sharing evidence
 		b.Receipts = append(b.Receipts, receipt)
 		return target.buckets.saveBatch([]BucketDescription{a, b})
 	}
@@ -178,6 +179,15 @@ func (s *Server) cloneCow(ctx context.Context, m client.Message, p principal) ([
 				return nil, fail(409, "previous clone failed")
 			}
 			return result.B, nil
+		}
+		for _, id := range []volume.ID{source, destination} {
+			b, err := s.Bucket(id)
+			if err != nil {
+				return nil, err
+			}
+			if b.underMaintenance() {
+				return nil, fail(409, "clone conflicts with bucket maintenance")
+			}
 		}
 		page, _, err := s.cowPhysicalPage(ctx, destination, nil, 1)
 		if err != nil {

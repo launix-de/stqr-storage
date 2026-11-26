@@ -418,6 +418,42 @@ func (o *OverlayFilesystem) subscribed(id ObjectID, proof SnapshotProof) bool {
 func (c *SubscriptionStore) EnableAcceptedWrites()          { c.accepted = true }
 func (c *SubscriptionStore) Sync(ctx context.Context) error { return c.client.Sync(ctx) }
 
+func (c *SubscriptionStore) PinObject(ctx context.Context, id ObjectID, token ID) error {
+	return c.client.PinObject(ctx, id, token)
+}
+func (c *SubscriptionStore) ObjectReferencesSupported() bool {
+	return c.client.ObjectReferencesSupported()
+}
+func (c *SubscriptionStore) PinObjectDependency(ctx context.Context, id ObjectID, token ID) error {
+	return c.client.PinObjectDependency(ctx, id, token)
+}
+func (c *SubscriptionStore) UnpinObjectDependency(ctx context.Context, id ObjectID, token ID) error {
+	return c.client.UnpinObjectDependency(ctx, id, token)
+}
+func (c *SubscriptionStore) ReadObjectDependencies(ctx context.Context) ([]ObjectID, error) {
+	return c.client.ReadObjectDependencies(ctx)
+}
+func (c *SubscriptionStore) ResetAbandonedObjectReferences(ctx context.Context) error {
+	return c.client.ResetAbandonedObjectReferences(ctx)
+}
+func (c *SubscriptionStore) CanReclaimDependencies(ctx context.Context) (bool, error) {
+	if proof, ok := any(c.client).(interface {
+		CanReclaimDependencies(context.Context) (bool, error)
+	}); ok {
+		return proof.CanReclaimDependencies(ctx)
+	}
+	return false, nil
+}
+func (c *SubscriptionStore) UnpinObject(ctx context.Context, id ObjectID, token ID) error {
+	return c.client.UnpinObject(ctx, id, token)
+}
+func (c *SubscriptionStore) ClaimObjectRetirement(ctx context.Context, id ObjectID, token ID) error {
+	return c.client.ClaimObjectRetirement(ctx, id, token)
+}
+func (c *SubscriptionStore) ReleaseObjectRetirement(ctx context.Context, id ObjectID, token ID) error {
+	return c.client.ReleaseObjectRetirement(ctx, id, token)
+}
+
 // Payload mutations retain their stable OID. Only inode/index snapshots belong
 // in this cache; ranged writes use the native path and durable REDO ordering.
 func (c *SubscriptionStore) PutRange(ctx context.Context, id ObjectID, off uint64, data []byte, opt PutOptions) (ObjectInfo, error) {

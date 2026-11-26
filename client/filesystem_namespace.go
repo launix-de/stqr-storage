@@ -51,11 +51,18 @@ func (f *Filesystem) Rmdir(ctx context.Context, parent ObjectID, name string) er
 		}
 		removed := child.node
 		removed.removed = true
-		committed, err := f.transact(ctx, []fsTxMember{fsMember(p, next), fsMember(child, removed)})
+		members, err := f.withOrphan(ctx, []fsTxMember{fsMember(p, next), fsMember(child, removed)}, child.id)
+		if err != nil {
+			return err
+		}
+		committed, err := f.transact(ctx, members)
 		if err != nil {
 			return err
 		}
 		if committed {
+			if err := f.CollectOrphans(ctx); err != nil && !errors.Is(err, ErrUnauthorized) {
+				return err
+			}
 			return nil
 		}
 	}
@@ -120,6 +127,9 @@ func (f *Filesystem) RenameWithFlags(ctx context.Context, parent ObjectID, name 
 			return err
 		}
 		if committed {
+			if err := f.CollectOrphans(ctx); err != nil && !errors.Is(err, ErrUnauthorized) {
+				return err
+			}
 			return nil
 		}
 	}
@@ -307,6 +317,12 @@ func (f *Filesystem) planRename(ctx context.Context, parent ObjectID, name strin
 			n = s.node
 		}
 		members = append(members, fsMember(s, n))
+	}
+	if j >= 0 && flags != FSRenameExchange && fsLinks(replacements[target.id]) == 0 {
+		members, err = f.withOrphan(ctx, members, target.id)
+		if err != nil {
+			return nil, false, err
+		}
 	}
 	return members, false, nil
 }

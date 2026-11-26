@@ -21,6 +21,7 @@ import (
 // wireObjectPeer is an independent protocol fixture, not a second volume engine.
 // It validates the exact bucket/reference/precondition/transfer field ordering.
 type wireObjectPeer struct {
+	helloCaps        atomic.Uint64
 	stallHandshake   atomic.Bool
 	handshakeStarted chan struct{}
 	handshakeGate    chan struct{}
@@ -170,7 +171,7 @@ func (p *wireObjectPeer) serve(w http.ResponseWriter, r *http.Request) {
 			}
 			result := Encoder{}
 			result.U16(2)
-			result.U64(0)
+			result.U64(p.helloCaps.Load())
 			result.ID(ID{1})
 			result.ID(ID{2})
 			result.U64(1)

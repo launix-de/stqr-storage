@@ -3,6 +3,7 @@
  * native Go/FUSE wire format, not a second overlay representation. */
 #include <linux/dcache.h>
 #include <linux/refcount.h>
+static int ov_lower_reference_attr(struct ks_node *, stqr_id, struct buf *);
 struct ov_dir {
 	stqr_object_id id, lower;
 	bool opaque, metadata;
@@ -19,11 +20,15 @@ struct ks_overlay_state {
 	unsigned policies;
 	struct ov_dir **dirs;
 	size_t count;
+	struct member orphan_member;
+	stqr_object_id orphan_id;
+	bool orphan, orphan_has_inode;
 };
 static void ov_put(struct ks_overlay_state *s)
 {
 	if (!s || !refcount_dec_and_test(&s->refs))
 		return;
+	member_free(&s->orphan_member);
 	for (size_t i = 0; i < s->count; i++) {
 		drop(&s->dirs[i]->image);
 		sq_free(s->dirs[i]->entries);
@@ -504,16 +509,38 @@ static int ov_publish(struct ks_fs *f, struct ks_overlay_state *s)
 		blob(&root, node.p, node.n);
 		if (root.err)
 			err = root.err;
-		else if (content.edits && s->root_head.n) {
-			struct member m = {.id = ks_root_id};
-			put(&m.before, s->root_head.p, s->root_head.n);
-			put(&m.after, root.p, root.n);
-			encode_edits(&m.writes, &content);
-			err = transact(f, &m, 1);
-			member_free(&m);
-		} else
+		else if ((content.edits || s->orphan || f->references) && s->root_head.n) {
+			struct member *m = sq_alloc(3 * sizeof(*m));
+			unsigned count = 1;
+			if (!m) {
+				err = -ENOMEM;
+				goto done;
+			}
+			m[0].id = ks_root_id;
+			put(&m[0].before, s->root_head.p, s->root_head.n);
+			put(&m[0].after, root.p, root.n);
+			encode_edits(&m[0].writes, &content);
+			if (s->orphan_has_inode) {
+				m[count] = s->orphan_member;
+				memset(&s->orphan_member, 0, sizeof(s->orphan_member));
+				count++;
+			}
+			if (s->orphan) {
+				bool queued;
+				err = orphan_member(f, s->orphan_id, true, &m[count], &queued);
+				if (!err && queued)
+					count++;
+			}
+			if (!err) {
+				err = transact(f, m, count);
+			}
+			for (unsigned i = 0; i < 3; i++)
+				member_free(&m[i]);
+			sq_free(m);
+		} else {
 			err = cas_object(f, ks_root_id, root.p, root.n, s->root_head.p,
 					 s->root_head.n, !s->root_head.n);
+		}
 	}
 done:
 	edits_free(content.edits);
@@ -684,38 +711,71 @@ static int ov_dir(struct ks_fs *f, struct ks_overlay_state *s, stqr_object_id id
 {
 	struct ov_dir *d = ov_find(s, id);
 	int err;
-	struct ks_snapshot base;
+	struct ks_snapshot base = {0};
+	stqr_id temporary = {{0}}, anchor = {{0}};
+	bool pinned = false;
+	struct buf attrs = {0};
 	if (d) {
 		if (d->node.removed)
 			return -ENOENT;
 		*out = d;
 		return 0;
 	}
+	if (f->lower->references) {
+		err = stqr_request_id(&temporary);
+		if (!err)
+			err = ks_object_reference(f->lower, id, temporary, 0);
+		if (err)
+			return err;
+		pinned = true;
+	}
+	ks_cache_forget(f->lower, id);
 	err = ks_plain_snapshot(f->lower, id, &base);
 	if (err)
-		return err;
+		goto fail;
 	if (base.node.kind != 2 || base.node.removed) {
-		ks_snapshot_free(&base);
-		return -ENOTDIR;
+		err = -ENOTDIR;
+		goto fail;
 	}
 	d = sq_alloc(sizeof(*d));
 	if (!d) {
-		ks_snapshot_free(&base);
-		return -ENOMEM;
+		err = -ENOMEM;
+		goto fail;
 	}
 	d->id = id;
 	d->lower = id;
-	err = ov_node(d, &base.node);
+	if (pinned) {
+		err = anchor_reserve(f, id, id, &anchor);
+		if (!err)
+			err = ks_object_reference(f->lower, id, anchor, 4);
+		if (!err)
+			err = ov_lower_reference_attr(&base.node, anchor, &attrs);
+	}
+	else
+		err = 0;
+	if (!err)
+		err = ov_node(d, &base.node);
+	if (pinned)
+		d->metadata = true;
 	ks_snapshot_free(&base);
 	if (!err)
 		err = ov_add_dir(s, d);
 	if (err) {
 		drop(&d->image);
 		sq_free(d);
-		return err;
+		goto fail;
 	}
+	if (pinned)
+		ks_object_reference(f->lower, id, temporary, 1);
+	drop(&attrs);
 	*out = d;
 	return 0;
+fail:
+	ks_snapshot_free(&base);
+	drop(&attrs);
+	if (pinned)
+		ks_object_reference(f->lower, id, temporary, 1);
+	return err;
 }
 static int ov_inode_match(struct inode *, void *);
 static bool ov_absent(struct ks_fs *f, stqr_object_id id, stqr_proof proof)
@@ -1173,22 +1233,85 @@ static int ov_destination(struct ks_fs *f, struct ks_overlay_state *s, stqr_obje
 	*out = path;
 	return 0;
 }
+static int ov_lower_reference_attr(struct ks_node *node, stqr_id token, struct buf *attrs)
+{
+	static const char name[] = "trusted.stqr.lower-reference";
+	struct buf old = {.p = (u8 *)node->xattrs, .n = node->xattrs_size};
+	unsigned count = old.p ? readnum(&old, 4) : 0;
+	bool exists = false, inserted = false;
+	for (unsigned i = 0; i < count; i++) {
+		size_t kn, vn;
+		const u8 *key = readblob(&old, &kn);
+		readblob(&old, &vn);
+		if (kn == sizeof(name) - 1 && !memcmp(key, name, kn))
+			exists = true;
+	}
+	if (old.err || (!exists && count >= 128))
+		return old.err ? old.err : -ENOSPC;
+	number(attrs, count + !exists, 4);
+	old.pos = old.p ? 4 : 0;
+	for (unsigned i = 0; i < count; i++) {
+		size_t kn, vn;
+		const u8 *key = readblob(&old, &kn), *value = readblob(&old, &vn);
+		int cmp = memcmp(name, key, min_t(size_t, sizeof(name) - 1, kn));
+		if (!cmp)
+			cmp = (sizeof(name) - 1 > kn) - (sizeof(name) - 1 < kn);
+		if (!inserted && cmp <= 0) {
+			blob(attrs, name, sizeof(name) - 1);
+			blob(attrs, token.bytes, 16);
+			inserted = true;
+		}
+		if (cmp) {
+			blob(attrs, key, kn);
+			blob(attrs, value, vn);
+		}
+	}
+	if (!inserted) {
+		blob(attrs, name, sizeof(name) - 1);
+		blob(attrs, token.bytes, 16);
+	}
+	if (attrs->err)
+		return attrs->err;
+	node->xattrs = attrs->p;
+	node->xattrs_size = attrs->n;
+	return 0;
+}
 static int ov_copy_inode(struct ks_fs *f, stqr_object_id id, const char *path, bool data_write)
 {
-	struct ks_snapshot upper = {0}, base = {0};
+	struct ks_snapshot *images = sq_alloc(2 * sizeof(*images));
+	struct ks_snapshot *upper = images, *base = images ? images + 1 : NULL;
 	struct ks_node n;
-	struct buf raw = {0};
-	int err = ks_plain_snapshot(f, id, &upper);
+	struct buf raw = {0}, attrs = {0};
+	stqr_id anchor = {{0}}, temporary = {{0}};
+	bool pinned = false;
+	int err;
+	if (!images)
+		return -ENOMEM;
+	err = ks_plain_snapshot(f, id, upper);
 	if (!err) {
-		ks_snapshot_free(&upper);
+		ks_snapshot_free(upper);
+		sq_free(images);
 		return 0;
 	}
-	if (err != -ENOENT)
+	if (err != -ENOENT) {
+		sq_free(images);
 		return err;
-	err = ks_plain_snapshot(f->lower, id, &base);
+	}
+	if (f->lower->references) {
+		err = stqr_request_id(&temporary);
+		if (!err)
+			err = ks_object_reference(f->lower, id, temporary, 0);
+		if (err) {
+			sq_free(images);
+			return err;
+		}
+		pinned = true;
+	}
+	ks_cache_forget(f->lower, id);
+	err = ks_plain_snapshot(f->lower, id, base);
 	if (err)
-		return err;
-	n = base.node;
+		goto done;
+	n = base->node;
 	if (n.kind == 2 || (n.kind == 1 && n.links > 1) || (data_write && n.kind != 1)) {
 		err = -EOPNOTSUPP;
 		goto done;
@@ -1199,17 +1322,98 @@ static int ov_copy_inode(struct ks_fs *f, stqr_object_id id, const char *path, b
 		n.lower = true;
 	if (n.lower) {
 		n.lower_owner = id;
-		err = lower_fingerprint(&base.node, n.lower_digest);
+		err = lower_fingerprint(&base->node, n.lower_digest);
 		if (err)
 			goto done;
+		if (pinned) {
+			err = anchor_reserve(f, id, id, &anchor);
+			if (!err)
+				err = ks_object_reference(f->lower, id, anchor, 4);
+			if (!err)
+				err = ov_lower_reference_attr(&n, anchor, &attrs);
+			if (err)
+				goto done;
+		}
 	}
 	encode_node(&raw, &n);
 	err = raw.err ? raw.err : cas_object(f, id, raw.p, raw.n, NULL, 0, true);
 	if (err == -EAGAIN)
 		err = 0;
 done:
+	/* An inherited token may have been copied into bucket COW snapshots.
+	 * Keep published anchor pins until graph-aware offline recovery. */
+	if (pinned)
+		ks_object_reference(f->lower, id, temporary, 1);
 	drop(&raw);
-	ks_snapshot_free(&base);
+	drop(&attrs);
+	ks_snapshot_free(base);
+	ks_snapshot_free(upper);
+	sq_free(images);
+	return err;
+}
+static int ov_mark_orphan(struct ks_fs *f, struct ks_overlay_state *s,
+			  stqr_object_id id, bool virtual_directory)
+{
+	struct ks_snapshot *old;
+	struct ks_node next;
+	int err;
+	if (!f->references)
+		return 0;
+	if (virtual_directory) {
+		s->orphan = true;
+		s->orphan_id = id;
+		return 0;
+	}
+	old = sq_alloc(sizeof(*old));
+	if (!old)
+		return -ENOMEM;
+	ks_cache_forget(f, id);
+	err = ks_plain_snapshot(f, id, old);
+	if (err == -ENOENT)
+		err = 0; /* lower-only whiteouts own no upper payload */
+	else if (!err) {
+		next = old->node;
+		next.links = 0;
+		next.ctime = ktime_get_real_ns();
+		err = member_set(&s->orphan_member, old, &next);
+		if (!err) {
+			s->orphan = s->orphan_has_inode = true;
+			s->orphan_id = id;
+		}
+	}
+	ks_snapshot_free(old);
+	sq_free(old);
+	return err;
+}
+static int ks_overlay_prune_orphan(struct ks_fs *f, stqr_object_id id)
+{
+	int err = -EAGAIN;
+	mutex_lock(&f->overlay_lock);
+	for (unsigned attempt = 0; attempt < 128; attempt++) {
+		struct ks_overlay_state *s = NULL;
+		err = ov_edit(f, &s);
+		if (err)
+			break;
+		for (size_t i = 0; i < s->count; i++) {
+			struct ov_dir *d = s->dirs[i];
+			if (!eqid(d->id, id) || !d->node.removed)
+				continue;
+			/* Only the specifically claimed, removed virtual directory is
+			 * pruned. Keep parent whiteouts and all other namespace entries. */
+			drop(&d->image);
+			sq_free(d->entries);
+			sq_free(d);
+			memmove(s->dirs + i, s->dirs + i + 1,
+				(s->count - i - 1) * sizeof(*s->dirs));
+			s->count--;
+			err = ov_publish(f, s);
+			break;
+		}
+		ov_put(s);
+		if (err != -EAGAIN)
+			break;
+	}
+	mutex_unlock(&f->overlay_lock);
 	return err;
 }
 int ks_overlay_copyup(struct ks_fs *f, stqr_object_id id)
@@ -1463,6 +1667,8 @@ int ks_overlay_remove(struct ks_fs *f, stqr_object_id parent, const char *name, 
 		if (!err)
 			err = ov_touch(f, d);
 		if (!err)
+			err = ov_mark_orphan(f, s, id, dir);
+		if (!err)
 			err = ov_publish(f, s);
 	end:
 		ks_snapshot_free(&child);
@@ -1592,6 +1798,8 @@ int ks_overlay_rename(struct ks_fs *f, stqr_object_id from, const char *name, st
 			d->metadata = true;
 			err = ov_node(d, &removed);
 		}
+		if (!err && exists && !(flags & RENAME_EXCHANGE))
+			err = ov_mark_orphan(f, s, other, dest.node.kind == 2);
 		if (!err)
 			err = ov_touch(f, left);
 		if (!err && left != right)

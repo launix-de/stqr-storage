@@ -97,10 +97,17 @@ A second run completes a partially interrupted sweep and leaves a clean graph
 unchanged. Missing/malformed roots are never created or repaired automatically.
 
 Removed bytes count object payload, not shrinking the underlying volume file.
-Tombstones, retry receipts and their metadata are retained by the native volume;
-they are not filesystem orphans. Both server and client must support maintenance
-opcodes 0x0115/0x0116. The SDK entrypoint is `Client.CheckFilesystem(ctx)` on a
-dedicated connection, which must be closed after the call.
+The cross-client lifetime and allocation-reuse contract is described in
+[Object lifetime and allocation reuse](reclamation.md).
+
+Both server and client must support maintenance opcodes 0x0115/0x0116.
+Reference-aware peers additionally negotiate capability bit 18 and opcode 0x0121
+for cooperative holder lifetime and offline metadata reclamation. Successful fsck
+ends retention of eligible tombstones and old retry results after the graph sweep;
+all old operations must be finished or abandoned and must not be replayed afterward.
+Persistent lower dependencies and clone/lost-range deletion masks remain protected.
+The SDK entrypoint is `Client.CheckFilesystem(ctx)` on a dedicated connection,
+which must be closed after the call. Older peers retain conservative metadata.
 
 Empty-directory removal, cross-directory rename and compatible replacement are
 implemented through durable multi-inode CAS intents. Rename also supports

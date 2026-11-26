@@ -4,6 +4,7 @@ package server
 import (
 	"context"
 	"errors"
+	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -117,4 +118,40 @@ func TestDaemonInventoryMergesTombstonesAndWaitsOnlyForOwners(t *testing.T) {
 	}
 	target = restartDaemonTestNode(t, target)
 	check()
+}
+
+func TestInventoryPeerDisconnectKeepsCallerCancellationDistinct(t *testing.T) {
+	target := testServer(t)
+	source := peerTestNode(t, target.cfg)
+	host := httptest.NewServer(target.Handler())
+	defer host.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	node, _ := parseID(target.cfg.Node.ID)
+	peer, err := source.dialPeer(ctx, host.URL, client.ID(node))
+	if err != nil {
+		t.Fatal(err)
+	}
+	verifyPeerPing(t, peer)
+	peer.close()
+	_, transportErr := peer.request(ctx, peerBucketInventory, nil)
+	if !errors.Is(transportErr, context.Canceled) || ctx.Err() != nil {
+		t.Fatal("expected owner transport cancellation with a live caller", transportErr, ctx.Err())
+	}
+	if err := inventoryCallError(ctx, transportErr); objectStatus(err) != 503 {
+		t.Fatal("lost inventory peer must request retry", objectStatus(err), err)
+	}
+	cancel()
+	if err := inventoryCallError(ctx, transportErr); !errors.Is(err, context.Canceled) || objectStatus(err) != 499 {
+		t.Fatal("caller cancellation lost its identity", err)
+	}
+	deadline, stop := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer stop()
+	if err := inventoryCallError(deadline, transportErr); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatal("caller deadline lost its identity", err)
+	}
+	other := errors.New("independent storage failure")
+	if inventoryCallError(context.Background(), other) != other {
+		t.Fatal("inventory masked an unrelated failure")
+	}
 }

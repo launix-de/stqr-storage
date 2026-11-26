@@ -39,6 +39,18 @@ int main(int argc, char **argv)
     struct stat st; char content[4096] = "before";
     int fd, ro;
     REQUIRE(argc == 2);
+    /* No offline collector runs here: a readonly open must keep concrete
+     * inode/data/index objects alive until its final close. */
+    fd = open("/mnt/online-orphan", O_RDWR); REQUIRE(fd >= 0);
+    ro = test_open_eventually("/readonly/online-orphan", O_RDONLY); REQUIRE(ro >= 0);
+    REQUIRE(!unlink("/mnt/online-orphan") && !close(fd));
+    control(argv[1], "online-retained");
+    REQUIRE(pread(ro, content, sizeof(content), 0) == sizeof(content));
+    for (size_t i = 0; i < sizeof(content); i++) REQUIRE(content[i] == 'R');
+    REQUIRE(!close(ro));
+    control(argv[1], "online-reclaimed");
+    memset(content, 0, sizeof(content)); strcpy(content, "before");
+    puts("kstqr: last readonly close reclaims inode/data/index without fsck");
     /* Exercise the 1 MiB durable write path and an unaligned replacement. */
     char *large = malloc(2U << 20); REQUIRE(large); memset(large,'L',2U << 20);
     fd = open("/mnt/subscription-large",O_CREAT|O_TRUNC|O_RDWR,0600); REQUIRE(fd >= 0);
