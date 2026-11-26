@@ -110,7 +110,7 @@ The module reads and writes the normal Go/FUSE filesystem format: `STFS` inodes,
 `STDR` directories, `STIX` segment indexes and `STFT`/`STFL` namespace
 intents. No import/conversion is needed between upgraded normal FUSE and kernel mounts.
 STFS v7 includes node types, link counts, xattrs and read-only lower references:
-**upgrade all clients before writing v6 metadata**. See the [format and semantics guide](filesystem-posix.md).
+**upgrade all clients before writing v7 metadata**. See the [format and semantics guide](filesystem-posix.md).
 
 Implemented operations include regular files, directories, symlinks, hardlinks,
 FIFO/Unix-socket nodes, user/trusted xattrs, lookup/readdir,
@@ -121,9 +121,10 @@ CAS intents. Destination ancestry is validated and enrolled when moving director
 so competing clients cannot silently introduce a directory cycle. Pending intents
 can be helped after interruption without recursive kernel-stack traversal.
 
-Data and index objects are immutable. A byte-compared inode CAS under the volume write lock publishes each
-new content image. Partial writes preserve unmodified segment references; sparse
-extensions store zero spans. Open-unlinked files remain usable until close.
+Ordinary data and index objects retain their IDs and are edited in place under
+recoverable inode intents. A byte-compared inode CAS publishes the decided
+metadata image. Partial writes preserve unaffected data; sparse extensions store
+zero spans. Read-only lower references remain protected by the overlay protocol. Open-unlinked files remain usable until close.
 Successful `write`/`pwrite` chunks are atomically accepted by the server before
 returning; on capable nodes their persistence can be deferred until a barrier.
 `fsync`, `fdatasync`, `msync(MS_SYNC)`, synchronous writes and waiting `syncfs`

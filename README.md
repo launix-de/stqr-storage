@@ -219,10 +219,38 @@ kernel; no C libfuse linkage is required.
 ```sh
 git clone https://github.com/launix-de/stqr-storage.git
 cd stqr-storage
-go build -o stqr .
-go build -o stqr-fuse ./cmd/stqr-fuse
+make server fuse
 ./stqr
 ```
+
+Use the root Makefile for every component. `make` or `make all` builds all
+production components on a Linux build host; `make -j4 all` enables parallel
+builds. Individual targets keep their existing output paths:
+
+| Target | Output |
+| --- | --- |
+| `make server` | `stqr` |
+| `make fuse` | `stqr-fuse` |
+| `make c-client` | `client/c/libstqr.a`, `client/c/libstqr.so` |
+| `make kernel` | `kernel/kstqr/kstqr.ko`, `kernel/kstqr/mount.kstqr` |
+| `make nbd` | `qemu-plugin-nbd/bin/stqr-nbd`, native NBD client |
+| `make pam` | `networkboot/bin/pam_stqr.so` |
+| `make networkboot` | Boot tools/helpers, PAM module and kernel source archive in `networkboot/bin/` |
+| `make windows` | `windows/bin/stqr-windows.exe` (amd64 cross-build) |
+
+The complete build requires GNU Make, Go 1.24+, a C11 compiler, OpenSSL development
+headers/libraries, static libc, PAM development headers/runtime (`libpam0g-dev`
+on Debian/Ubuntu) and Python 3.12+. The kernel module requires
+Linux 7.0 headers; `make kernel KDIR=/path/to/kernel/build` selects the target
+kernel's headers. `make windows-resources` updates the checked-in Windows resource
+when its manifest/resource script changes and requires `llvm-rc` and `llvm-cvtres`;
+the Windows target also checks that dependency automatically.
+
+`make c-integration` builds the C integration test executable.
+`make deb VERSION=1.0.0` creates a Debian package in `dist/` (requires Debian
+packaging tools; override `DEB_OUT` for another directory). `make clean` removes build
+outputs while retaining packages in `dist/`. `make help` lists all targets.
+`GO`, `GOFLAGS`, `CC`, `CFLAGS` and `KDIR` can be overridden for the build.
 
 Open <http://localhost:7419>. On first start, the daemon creates `stqr.yaml`;
 the initial credentials are under `auth.bootstrap_admin`. Keep this file private.
@@ -354,7 +382,7 @@ sparsely through the library or `stqr-nbd resize`, including through a running
 exporter's private control socket. Reconnect NBD clients to discover the new size.
 
 ```sh
-make -C qemu-plugin-nbd
+make nbd
 qemu-plugin-nbd/bin/stqr-nbd --bucket vm-disks --size 34359738368 create system
 qemu-plugin-nbd/bin/stqr-nbd --bucket vm-disks --socket "$PWD/vm-disks.sock" serve
 ```
@@ -404,7 +432,7 @@ multi-object transaction. See [subscriptions](docs/object-subscriptions.md).
 
 The [native C library](client/c/README.md) offers object operations, subscriptions,
 capacity queries and Sync as static/shared libraries. Build it with
-`make -C client/c`. It uses authenticated bucket-bound connections directly,
+`make c-client`. It uses authenticated bucket-bound connections directly,
 without a Go helper. Reads and mutations, including chunked uploads, follow
 range-owner redirects. Callers preserve retry IDs
 across reconnects. See the C guide for routing and transport limits.
@@ -513,7 +541,7 @@ compatibility, authentication, checksums, multipart recovery and reclamation.
 Real kernel mounts are opt-in:
 
 ```sh
-go build -race -o stqr-fuse ./cmd/stqr-fuse
+make fuse GOFLAGS=-race
 STQR_TEST_FUSE=1 STQR_FUSE_BINARY="$PWD/stqr-fuse" go test -race ./... -count=1
 ```
 

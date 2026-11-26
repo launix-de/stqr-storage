@@ -90,6 +90,21 @@ func (f *Filesystem) writable() error {
 	}
 	return nil
 }
+
+func (f *Filesystem) creationOwner(parent client.ObjectID, mode uint32, directory bool) (uint32, uint32, error) {
+	info, err := f.Volume.Stat(f.Context, parent)
+	if err != nil {
+		return 0, 0, err
+	}
+	gid := f.GID
+	if info.Mode&syscall.S_ISGID != 0 {
+		gid = info.GID
+		if directory {
+			mode |= syscall.S_ISGID
+		}
+	}
+	return gid, mode, nil
+}
 func (f *Filesystem) Open(p string, o OpenOptions, mode uint32) (uint64, error) {
 	if o.Write || o.Create || o.Truncate {
 		if e := f.writable(); e != nil {
@@ -105,7 +120,11 @@ func (f *Filesystem) Open(p string, o OpenOptions, mode uint32) (uint64, error) 
 		if err != nil {
 			return 0, err
 		}
-		info, e = f.Volume.Create(f.Context, parent, name, mode, f.UID, f.GID, false)
+		gid, inheritedMode, err := f.creationOwner(parent, mode, false)
+		if err != nil {
+			return 0, err
+		}
+		info, e = f.Volume.Create(f.Context, parent, name, inheritedMode, f.UID, gid, false)
 		if errors.Is(e, syscall.EEXIST) && !o.Exclusive {
 			info, e = f.Lookup(p)
 		}
@@ -307,7 +326,11 @@ func (f *Filesystem) Mkdir(p string, mode uint32) error {
 	if e != nil {
 		return e
 	}
-	_, e = f.Volume.Create(f.Context, parent, name, mode, f.UID, f.GID, true)
+	gid, mode, e := f.creationOwner(parent, mode, true)
+	if e != nil {
+		return e
+	}
+	_, e = f.Volume.Create(f.Context, parent, name, mode, f.UID, gid, true)
 	return e
 }
 func (f *Filesystem) Remove(p string, directory bool) error {
@@ -386,6 +409,10 @@ func (f *Filesystem) Symlink(target, p string) error {
 	if e != nil {
 		return e
 	}
-	_, e = f.Volume.Symlink(f.Context, parent, name, target, f.UID, f.GID)
+	gid, _, e := f.creationOwner(parent, 0777, false)
+	if e != nil {
+		return e
+	}
+	_, e = f.Volume.Symlink(f.Context, parent, name, target, f.UID, gid)
 	return e
 }

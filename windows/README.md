@@ -67,7 +67,8 @@ exclusive filesystem check. The adapter does not sweep unrelated bucket objects
 or expose a separate raw PUT/CAS API.
 
 New inodes inherit the filesystem root's Unix UID/GID unless `--uid` or `--gid`
-overrides them. WinFsp presents the drive to the mounting Windows user; this is
+overrides them. Within a setgid directory, new children inherit that directory's
+GID and new directories also inherit its setgid bit, matching Linux. WinFsp presents the drive to the mounting Windows user; this is
 not a Unix-to-Windows identity directory or a full Windows ACL implementation.
 
 The namespace is case-sensitive. Files created on Linux with names that Windows
@@ -90,14 +91,15 @@ client's `--fsck`.
 
 ## Build and verification
 
-From this directory, `make` cross-compiles an amd64 executable into
-`bin/stqr-windows.exe`; no C compiler is required. The WinFsp runtime is required
+From the repository root, `make windows` cross-compiles an amd64 executable into
+`windows/bin/stqr-windows.exe`; no C compiler is required. The WinFsp runtime is required
 on the Windows machine, not on the build host. The adapter uses cgofuse's Windows
 binding with `CGO_ENABLED=0`. The executable uses the Windows GUI subsystem,
 Segoe UI and themed controls with DPI scaling. Its application manifest is a
-checked-in resource; `make resources` regenerates it using LLVM resource tools.
+checked-in resource; `make windows-resources` regenerates it using LLVM resource
+tools when its sources changed; `make windows` checks that dependency as well.
 
-`make all check` tests the portable filesystem layer and builds Windows callback
+`make -C windows check` tests the portable filesystem layer and builds Windows callback
 tests. These cover open handles across rename/unlink, sparse and segmented I/O,
 concurrent append, readonly rejection and metadata callbacks. The setup tests
 cover DPAPI roundtrips and tamper rejection, executable copying, startup quoting,

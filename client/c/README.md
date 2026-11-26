@@ -13,7 +13,7 @@ for `statfs`/`df`; see [capacity reporting](../../docs/space.md).
 Build with a C11 compiler, make and OpenSSL development headers:
 
 ```sh
-make -C client/c
+make c-client
 make -C client/c check
 STQR_TEST_C=1 STQR_C_SANITIZE=1 go test ./server -run '^TestCClient$' -count=1
 ```

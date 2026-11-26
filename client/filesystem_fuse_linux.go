@@ -364,6 +364,9 @@ func (n *FSNode) Readdir(ctx context.Context) (fusefs.DirStream, syscall.Errno) 
 	list := make([]fuse.DirEntry, 0, len(entries))
 	for _, entry := range entries {
 		info, err := n.filesystem.Stat(ctx, entry.ID)
+		if errors.Is(err, ErrNotFound) || errors.Is(err, syscall.ENOENT) {
+			continue
+		}
 		if err != nil {
 			return nil, fsErrno(err)
 		}
@@ -377,8 +380,27 @@ func fsCaller(ctx context.Context) (uint32, uint32) {
 	}
 	return uint32(os.Getuid()), uint32(os.Getgid())
 }
-func (n *FSNode) Mkdir(ctx context.Context, name string, mode uint32, out *fuse.EntryOut) (*fusefs.Inode, syscall.Errno) {
+
+// Match VFS creation semantics, including group inheritance from setgid parents.
+func (n *FSNode) creationOwner(ctx context.Context, mode uint32, directory bool) (uint32, uint32, uint32, error) {
 	uid, gid := fsCaller(ctx)
+	parent, err := n.filesystem.Stat(ctx, n.id)
+	if err != nil {
+		return 0, 0, 0, err
+	}
+	if parent.Mode&syscall.S_ISGID != 0 {
+		gid = parent.GID
+		if directory {
+			mode |= syscall.S_ISGID
+		}
+	}
+	return uid, gid, mode, nil
+}
+func (n *FSNode) Mkdir(ctx context.Context, name string, mode uint32, out *fuse.EntryOut) (*fusefs.Inode, syscall.Errno) {
+	uid, gid, mode, err := n.creationOwner(ctx, mode, true)
+	if err != nil {
+		return nil, fsErrno(err)
+	}
 	info, err := n.filesystem.Create(ctx, n.id, name, mode, uid, gid, true)
 	if err != nil {
 		return nil, fsErrno(err)
@@ -386,7 +408,10 @@ func (n *FSNode) Mkdir(ctx context.Context, name string, mode uint32, out *fuse.
 	return n.child(ctx, info, out), 0
 }
 func (n *FSNode) Create(ctx context.Context, name string, flags, mode uint32, out *fuse.EntryOut) (*fusefs.Inode, fusefs.FileHandle, uint32, syscall.Errno) {
-	uid, gid := fsCaller(ctx)
+	uid, gid, mode, err := n.creationOwner(ctx, mode, false)
+	if err != nil {
+		return nil, nil, 0, fsErrno(err)
+	}
 	info, err := n.filesystem.Create(ctx, n.id, name, mode, uid, gid, false)
 	if errors.Is(err, syscall.EEXIST) && flags&syscall.O_EXCL == 0 {
 		info, err = n.filesystem.Lookup(ctx, n.id, name)

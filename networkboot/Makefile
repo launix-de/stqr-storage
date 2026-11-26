@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-only
+GO ?= go
 CC ?= cc
 PAM_CFLAGS ?=
 PAM_LIBS ?= -l:libpam.so.0
@@ -8,8 +9,8 @@ DESTDIR ?=
 .PHONY: all pam check clean install
 all: pam
 	mkdir -p bin
-	CGO_ENABLED=0 go build -buildvcs=false -o bin/stqr-bootctl ./cmd/stqr-bootctl
-	CGO_ENABLED=0 go build -buildvcs=false -o bin/stqr-boot-nfs ./cmd/stqr-boot-nfs
+	CGO_ENABLED=0 $(GO) build -buildvcs=false -o bin/stqr-bootctl ./cmd/stqr-bootctl
+	CGO_ENABLED=0 $(GO) build -buildvcs=false -o bin/stqr-boot-nfs ./cmd/stqr-boot-nfs
 	$(MAKE) -C ../qemu-plugin-nbd all
 	install -m 0755 ../qemu-plugin-nbd/bin/stqr-nbd-client bin/
 	$(CC) -std=c11 -Wall -Wextra -Werror -O2 -static -o bin/stqr-boot-root linux-client/boot-root.c
@@ -20,7 +21,7 @@ pam:
 	$(CC) -std=c11 -Wall -Wextra -Werror -fPIC -shared -O2 $(PAM_CFLAGS) -o bin/pam_stqr.so pam/pam_stqr.c $(PAM_LIBS)
 check:
 	$(MAKE) -C ../qemu-plugin-nbd check
-	go test -race ./...
+	$(GO) test -race ./...
 	python3 -m unittest discover -s tests -v
 	sh -n initramfs/hooks/stqr initramfs/scripts/stqr
 install: all pam

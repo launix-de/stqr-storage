@@ -27,3 +27,19 @@ __pycache__/
 
 # Debian build output.
 /dist/
+
+# C SDK and Linux kernel build outputs.
+/client/c/src/*.o
+/client/c/libstqr.a
+/client/c/libstqr.so
+/client/c/tests/integration
+/kernel/kstqr/*.o
+/kernel/kstqr/*.ko
+/kernel/kstqr/*.mod
+/kernel/kstqr/*.mod.c
+/kernel/kstqr/Module.symvers
+/kernel/kstqr/modules.order
+/kernel/kstqr/.*.cmd
+/kernel/kstqr/.*.d
+/kernel/kstqr/.tmp_versions/
+/kernel/kstqr/mount.kstqr

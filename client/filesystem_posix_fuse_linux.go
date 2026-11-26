@@ -16,7 +16,10 @@ func (n *FSNode) Symlink(ctx context.Context, target, name string, out *fuse.Ent
 	if !ok {
 		return nil, syscall.EOPNOTSUPP
 	}
-	uid, gid := fsCaller(ctx)
+	uid, gid, _, err := n.creationOwner(ctx, 0777, false)
+	if err != nil {
+		return nil, fsErrno(err)
+	}
 	info, err := f.Symlink(ctx, n.id, name, target, uid, gid)
 	if err != nil {
 		return nil, fsErrno(err)
@@ -66,7 +69,10 @@ func (n *FSNode) Mknod(ctx context.Context, name string, mode, dev uint32, out *
 	if dev != 0 {
 		return nil, syscall.EOPNOTSUPP
 	}
-	uid, gid := fsCaller(ctx)
+	uid, gid, mode, err := n.creationOwner(ctx, mode, false)
+	if err != nil {
+		return nil, fsErrno(err)
+	}
 	info, err := f.Mknod(ctx, n.id, name, kind, mode, uid, gid)
 	if err != nil {
 		return nil, fsErrno(err)
