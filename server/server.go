@@ -80,6 +80,10 @@ type Server struct {
 	cleanupView            *systemView
 	cleanupOrder           []volume.ID
 	cleanupCursor          int
+	cleanupReceipts        map[volume.ID]*cleanupReceiptSweep
+	cleanupLast            time.Time
+	cleanupReceiptTurn     bool
+	cleanupVolumeCursor    int
 	peerStatsMu            sync.RWMutex
 	peerStats              map[client.ID]*peerObservation
 	peerManagers           map[string]bool

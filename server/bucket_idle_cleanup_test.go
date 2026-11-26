@@ -49,6 +49,9 @@ func TestDeletingBucketDoesNotHoldGenerationAndRespectsIOPriorities(t *testing.T
 		}
 		n.ioPriority.users.Store(1)
 		n.ioPriority.rebuilds.Store(0)
+		n.cleanupMu.Lock()
+		n.cleanupLast = time.Now().Add(time.Hour)
+		n.cleanupMu.Unlock()
 		if n.reclaimBucketStep() {
 			t.Fatal("priority 3 ran during priority 1")
 		}
@@ -67,8 +70,11 @@ func TestDeletingBucketDoesNotHoldGenerationAndRespectsIOPriorities(t *testing.T
 	if err != nil || string(got) != "foreground" {
 		t.Fatal("unrelated read", err)
 	}
-	// Even an idle reclaimer must skip a read-locked volume rather than wait.
+	// Freeze aging in this test: a fresh idle reclaimer must skip a read-locked volume rather than wait.
 	source.node.ioPriority.users.Store(0)
+	source.node.cleanupMu.Lock()
+	source.node.cleanupLast = time.Now().Add(time.Hour)
+	source.node.cleanupMu.Unlock()
 	h, err := src.Open(false)
 	if err != nil {
 		t.Fatal(err)
@@ -83,6 +89,11 @@ func TestDeletingBucketDoesNotHoldGenerationAndRespectsIOPriorities(t *testing.T
 	}
 	h.Close()
 	target.node.ioPriority.users.Store(0)
+	for _, n := range []*Server{source.node, target.node} {
+		n.cleanupMu.Lock()
+		n.cleanupLast = time.Now()
+		n.cleanupMu.Unlock()
+	}
 	deadline := time.Now().Add(15 * time.Second)
 	for {
 		_, err := source.node.Bucket(doomed.ID())

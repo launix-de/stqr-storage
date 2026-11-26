@@ -6,6 +6,7 @@ import (
 	"errors"
 	"github.com/launix-de/stqr-storage/client"
 	"github.com/launix-de/stqr-storage/volume"
+	"runtime"
 	"sort"
 	"time"
 )
@@ -127,7 +128,11 @@ func (s *Server) purgeDeletedBucket(body []byte, actor client.ID) ([]byte, error
 	if desc.State != BucketDeleting || desc.Revision != revision || len(desc.ClonePeers) > 0 {
 		return nil, errControlConflict
 	}
-	s.cleanupMu.Lock()
+	// Status must never wait for a physical cleanup fence while the caller
+	// holds cluster-controller admission. Retry the observation next tick.
+	if !s.cleanupMu.TryLock() {
+		return nil, fail(503, "bucket cleanup status is busy")
+	}
 	job := s.cleanupJobs[bucket]
 	done := job != nil && job.done
 	s.cleanupMu.Unlock()
@@ -137,18 +142,27 @@ func (s *Server) purgeDeletedBucket(body []byte, actor client.ID) ([]byte, error
 	return nil, nil
 }
 
+// Cursors are advisory; the committed DELETING description remains the durable
+// intent. A returned generation is confirmed before any cursor/completion moves.
 type cleanupVolumeProgress struct {
-	id           volume.ID
-	objectsDone  bool
-	objectAfter  *volume.ObjectID
-	requestAfter *volume.ID
-	checkpoint   uint64
+	id                        volume.ID
+	objectsDone, requestsDone bool
+	objectAfter               *volume.ObjectID
+	checkpoint                uint64
 }
 type bucketCleanupJob struct {
 	volumes []cleanupVolumeProgress
-	next    int
 	done    bool
 }
+
+// A sweep freezes its participant set. Newly deleting buckets join the next
+// sweep, so receipts before the current cursor cannot be missed.
+type cleanupReceiptSweep struct {
+	after   *volume.ID
+	buckets map[volume.ID]*cleanupVolumeProgress
+}
+
+const cleanupMaxWait = 250 * time.Millisecond
 
 func (s *Server) startBucketReclaimer() {
 	if s.metadataPreview || s.controller == nil {
@@ -166,23 +180,106 @@ func (s *Server) startBucketReclaimer() {
 			}
 			begin := time.Now()
 			worked := s.reclaimBucketStep()
+			runtime.Gosched()
 			delay = 5 * time.Millisecond
 			if !worked {
-				delay = 250 * time.Millisecond
+				delay = 25 * time.Millisecond
 			}
-			// A busy foreground stream is never held behind an entire bucket purge.
 			if s.ioPriority.users.Load() > 0 {
-				delay = max(delay, 9*time.Since(begin))
+				delay = min(cleanupMaxWait, max(delay, 9*time.Since(begin)))
 			}
 		}
 	}()
 }
 
-// One bounded page per call. TryLock/TryOpen never queue idle work ahead of
-// users or a rebuilding range. Cursors are RAM hints; the catalog intent is
-// persistent and a restart safely reconstructs cleanup from the indexes.
-func (s *Server) reclaimBucketStep() bool {
-	if !s.cleanupIdle() {
+func (s *Server) refreshCleanupJobs(view *systemView) {
+	if s.cleanupJobs == nil {
+		s.cleanupJobs = map[volume.ID]*bucketCleanupJob{}
+	}
+	if s.cleanupReceipts == nil {
+		s.cleanupReceipts = map[volume.ID]*cleanupReceiptSweep{}
+	}
+	if s.cleanupView == view {
+		return
+	}
+	pending := map[volume.ID]bool{}
+	s.cleanupOrder = nil
+	for _, desc := range view.descriptions {
+		if desc.State != BucketDeleting || desc.DeletionComplete || len(desc.ClonePeers) > 0 {
+			continue
+		}
+		id := newVolumeID(desc.ID)
+		pending[id] = true
+		s.cleanupOrder = append(s.cleanupOrder, id)
+		if s.cleanupJobs[id] != nil {
+			continue
+		}
+		job := &bucketCleanupJob{}
+		s.mu.RLock()
+		for _, v := range s.volumes {
+			if !v.config.System {
+				job.volumes = append(job.volumes, cleanupVolumeProgress{id: v.store.Identity().VolumeID})
+			}
+		}
+		s.mu.RUnlock()
+		sort.Slice(job.volumes, func(i, j int) bool { return job.volumes[i].id.String() < job.volumes[j].id.String() })
+		s.cleanupJobs[id] = job
+	}
+	sort.Slice(s.cleanupOrder, func(i, j int) bool { return s.cleanupOrder[i].String() < s.cleanupOrder[j].String() })
+	for id := range s.cleanupJobs {
+		if !pending[id] {
+			delete(s.cleanupJobs, id)
+		}
+	}
+	for volumeID, sweep := range s.cleanupReceipts {
+		for id := range sweep.buckets {
+			if !pending[id] {
+				delete(sweep.buckets, id)
+			}
+		}
+		if len(sweep.buckets) == 0 {
+			delete(s.cleanupReceipts, volumeID)
+		}
+	}
+	// Keep existing sweeps/cursors across unrelated catalog edits. Removed
+	// participants are revalidated against the current description before work.
+	s.cleanupView = view
+}
+
+// DELETING is an irreversible committed fence: admin updates and clone creation
+// reject that state. Physical cleanup therefore needs only the volume lock and
+// a fresh description check, never node admission across I/O. Waiting for a
+// starved volume happens without any node lock.
+func (s *Server) openCleanupVolume(id volume.ID, overdue bool) (*volume.Handle, *volume.Volume) {
+	s.mu.RLock()
+	managed := s.volumes[id.String()]
+	s.mu.RUnlock()
+	if managed == nil {
+		return nil, nil
+	}
+	var h *volume.Handle
+	var err error
+	if overdue {
+		h, err = managed.store.Open(true)
+	} else {
+		h, _, err = managed.store.TryOpen(true)
+	}
+	if err != nil {
+		return nil, managed.store
+	}
+	return h, managed.store
+}
+func (s *Server) cleanupBucketValid(id volume.ID) bool {
+	b, err := s.Bucket(id)
+	if err != nil {
+		return false
+	}
+	d := b.Describe()
+	return d.State == BucketDeleting && !d.DeletionComplete && len(d.ClonePeers) == 0
+}
+
+func (s *Server) reclaimBucketStep(preferObjects ...bool) bool {
+	if s.ioPriority.rebuilds.Load() > 0 {
 		return false
 	}
 	view := s.currentSystem.Load()
@@ -191,83 +288,116 @@ func (s *Server) reclaimBucketStep() bool {
 	}
 	s.cleanupMu.Lock()
 	defer s.cleanupMu.Unlock()
-	if s.cleanupJobs == nil {
-		s.cleanupJobs = make(map[volume.ID]*bucketCleanupJob)
+	if s.cleanupLast.IsZero() {
+		s.cleanupLast = time.Now()
 	}
-	if s.cleanupView != view {
-		pending := make(map[volume.ID]bool)
-		s.cleanupOrder = nil
-		for _, desc := range view.descriptions {
-			if desc.State != BucketDeleting || desc.DeletionComplete || len(desc.ClonePeers) > 0 {
-				continue
-			}
-			id := newVolumeID(desc.ID)
-			pending[id] = true
-			s.cleanupOrder = append(s.cleanupOrder, id)
-			if s.cleanupJobs[id] != nil {
-				continue
-			}
-			job := &bucketCleanupJob{}
-			s.mu.RLock()
-			for _, v := range s.volumes {
-				if !v.config.System {
-					job.volumes = append(job.volumes, cleanupVolumeProgress{id: v.store.Identity().VolumeID})
-				}
-			}
-			s.mu.RUnlock()
-			sort.Slice(job.volumes, func(i, j int) bool { return job.volumes[i].id.String() < job.volumes[j].id.String() })
-			s.cleanupJobs[id] = job
-		}
-		for id := range s.cleanupJobs {
-			if !pending[id] {
-				delete(s.cleanupJobs, id)
-			}
-		}
-		s.cleanupView = view
+	overdue := time.Since(s.cleanupLast) >= cleanupMaxWait
+	if s.ioPriority.users.Load() > 0 && !overdue {
+		return false
 	}
+	s.refreshCleanupJobs(view)
+	defer func() { s.cleanupReceiptTurn = !s.cleanupReceiptTurn }()
+	receiptFirst := s.cleanupReceiptTurn && !(len(preferObjects) > 0 && preferObjects[0])
+	try := func(wait bool) bool {
+		if receiptFirst && s.cleanupReceiptPage(wait) {
+			return true
+		}
+		if s.cleanupObjectPage(wait) {
+			return true
+		}
+		return !receiptFirst && s.cleanupReceiptPage(wait)
+	}
+	// Try every runnable candidate before allowing an overdue writer to queue.
+	// Queueing once eventually excludes a continuous stream of readers as well.
+	worked := try(false)
+	if !worked && overdue {
+		worked = try(true)
+	}
+	if worked {
+		s.cleanupLast = time.Now()
+	}
+	for _, job := range s.cleanupJobs {
+		if job.done {
+			continue
+		}
+		done := true
+		for _, p := range job.volumes {
+			if !p.objectsDone || !p.requestsDone || p.checkpoint != 0 {
+				done = false
+				break
+			}
+		}
+		if done {
+			job.done = true
+			s.notifyStats()
+		}
+	}
+	return worked
+}
+
+// Even an empty index can be an accepted view of a previously durable record.
+// Confirm the generation observed under this handle before recording absence.
+// Later accepted writes do not change this captured durability obligation.
+func checkpointCleanupView(h *volume.Handle, v *volume.Volume, progress ...*cleanupVolumeProgress) error {
+	generation, err := h.Generation()
+	if err == nil {
+		for _, p := range progress {
+			p.checkpoint = generation
+		}
+	}
+	h.Close()
+	if err != nil {
+		return err
+	}
+	if err := v.CheckpointThrough(generation); err != nil {
+		return err
+	}
+	for _, p := range progress {
+		p.checkpoint = 0
+	}
+	return nil
+}
+
+func (s *Server) cleanupObjectPage(overdue bool) bool {
 	for i := 0; i < len(s.cleanupOrder); i++ {
 		s.cleanupCursor = (s.cleanupCursor + 1) % len(s.cleanupOrder)
 		id := s.cleanupOrder[s.cleanupCursor]
 		job := s.cleanupJobs[id]
-		if job.done {
+		if job.done || !s.cleanupBucketValid(id) {
 			continue
 		}
-		if job.next == len(job.volumes) {
-			job.done = true
-			s.notifyStats()
-			continue
-		}
-		if !s.cleanupIdle() || !s.opMu.TryLock() {
-			return false
-		}
-		var checkpointVolume *volume.Volume
-		var checkpointGeneration uint64
-		var checkpointProgress *cleanupVolumeProgress
-		worked := func() bool {
-			defer s.opMu.Unlock()
-			if !s.cleanupIdle() {
-				return false
+		for j := range job.volumes {
+			p := &job.volumes[j]
+			if p.objectsDone && p.checkpoint == 0 {
+				continue
 			}
-			progress := &job.volumes[job.next]
 			s.mu.RLock()
-			managed := s.volumes[progress.id.String()]
+			managed := s.volumes[p.id.String()]
 			s.mu.RUnlock()
 			if managed == nil {
-				job.next++
+				p.objectsDone = true
+				p.requestsDone = true
+				p.checkpoint = 0
 				return true
 			}
-			if generation, pending := managed.store.PendingCheckpoint(true, 0); pending || progress.checkpoint != 0 {
-				checkpointVolume, checkpointGeneration, checkpointProgress = managed.store, max(generation, progress.checkpoint), progress
-				return true
+			if p.checkpoint != 0 {
+				if err := managed.store.CheckpointThrough(p.checkpoint); err != nil {
+					continue
+				}
+				p.checkpoint = 0
 			}
-			h, acquired, err := managed.store.TryOpen(true)
-			if !acquired || err != nil {
-				return false
+			h, v := s.openCleanupVolume(p.id, overdue)
+			if h == nil {
+				continue
 			}
-			defer h.Close()
+			if !s.cleanupBucketValid(id) {
+				h.Close()
+				continue
+			}
 			usage, err := h.StorageUsage()
 			if err != nil {
-				return false
+				h.Close()
+				continue
 			}
 			found := false
 			for _, u := range usage {
@@ -276,76 +406,201 @@ func (s *Server) reclaimBucketStep() bool {
 					break
 				}
 			}
-			// Maintained accounting includes tombstones, receipts and import shadows.
-			// An absent bucket cannot require a sweep through unrelated retry records.
 			if !found {
-				job.next++
-				return true
-			}
-			if !progress.objectsDone {
-				records, err := h.ScanBucketObjects(id, progress.objectAfter, 32)
-				if err != nil {
+				if err := checkpointCleanupView(h, v, p); err != nil {
 					return false
 				}
-				if len(records) == 0 {
-					progress.objectsDone = true
-					return true
-				}
-				generation, err := h.PurgeBatchAccepted(records)
-				if err != nil {
-					if errors.Is(err, volume.ErrBusy) || errors.Is(err, volume.ErrFull) {
-						generation, _ = h.Generation()
-						checkpointVolume, checkpointGeneration, checkpointProgress = managed.store, generation, progress
-					}
-					return false
-				}
-				progress.checkpoint = generation
-				checkpointVolume, checkpointGeneration, checkpointProgress = managed.store, generation, progress
-				next := records[len(records)-1].Key.Object
-				progress.objectAfter = &next
+				p.objectsDone = true
+				p.requestsDone = true
 				return true
 			}
-			records, err := h.ScanRequestRecords(progress.requestAfter, 128)
+			records, err := h.ScanBucketObjects(id, p.objectAfter, 32)
 			if err != nil {
-				return false
+				h.Close()
+				continue
 			}
 			if len(records) == 0 {
-				job.next++
-				return true
-			}
-			var remove []volume.ID
-			for _, record := range records {
-				if record.Key.Bucket == id {
-					remove = append(remove, record.ID)
-				}
-			}
-			if len(remove) > 0 {
-				// Capture the cleanup generation under the handle; its physical
-				// checkpoint runs after releasing node admission and volume locks.
-				generation, err := h.ForgetRequestsAccepted(remove)
-				if err != nil {
-					if errors.Is(err, volume.ErrBusy) || errors.Is(err, volume.ErrFull) {
-						generation, _ = h.Generation()
-						checkpointVolume, checkpointGeneration, checkpointProgress = managed.store, generation, progress
-					}
+				if err := checkpointCleanupView(h, v, p); err != nil {
 					return false
 				}
-				progress.checkpoint = generation
-				checkpointVolume, checkpointGeneration, checkpointProgress = managed.store, generation, progress
+				p.objectsDone = true
+				return true
 			}
-			next := records[len(records)-1].ID
-			progress.requestAfter = &next
-			return true
-		}()
-		// DELETING remains durable until all reclaimed pages are checkpointed.
-		// No node admission or volume lock is held during physical writeback.
-		if checkpointVolume != nil {
-			if err := checkpointVolume.CheckpointThrough(checkpointGeneration); err != nil {
+			generation, err := h.PurgeBatchAccepted(records)
+			if errors.Is(err, volume.ErrBusy) || errors.Is(err, volume.ErrFull) {
+				// The current accepted group may fill the metadata budget. Capture
+				// its generation while locked, then flush without a handle before
+				// retrying this page. A failed fence retains the obligation.
+				generation, _ = h.Generation()
+				p.checkpoint = generation
+				h.Close()
+				if err := v.CheckpointThrough(generation); err != nil {
+					return false
+				}
+				p.checkpoint = 0
 				return false
 			}
-			checkpointProgress.checkpoint = 0
+			h.Close()
+			if err != nil {
+				continue
+			}
+			p.checkpoint = generation
+			if err = v.CheckpointThrough(generation); err != nil {
+				return false
+			}
+			p.checkpoint = 0
+			next := records[len(records)-1].Key.Object
+			p.objectAfter = &next
+			return true
 		}
-		return worked
+	}
+	return false
+}
+
+func (s *Server) cleanupReceiptPage(overdue bool) bool {
+	// One traversal serves all deleting buckets on the same volume, even while
+	// their object pages are still being removed. Deleted namespaces cannot add
+	// fresh client receipts. The participant set is fixed until end-of-index.
+	volumes := map[volume.ID]bool{}
+	for _, job := range s.cleanupJobs {
+		for _, p := range job.volumes {
+			if !p.requestsDone {
+				volumes[p.id] = true
+			}
+		}
+	}
+	ids := make([]volume.ID, 0, len(volumes))
+	for id := range volumes {
+		ids = append(ids, id)
+	}
+	sort.Slice(ids, func(i, j int) bool { return ids[i].String() < ids[j].String() })
+	for i := 0; i < len(ids); i++ {
+		s.cleanupVolumeCursor = (s.cleanupVolumeCursor + 1) % len(ids)
+		vid := ids[s.cleanupVolumeCursor]
+		sweep := s.cleanupReceipts[vid]
+		if sweep == nil {
+			sweep = &cleanupReceiptSweep{buckets: map[volume.ID]*cleanupVolumeProgress{}}
+			for id, job := range s.cleanupJobs {
+				if s.cleanupBucketValid(id) {
+					for i := range job.volumes {
+						p := &job.volumes[i]
+						if p.id == vid && !p.requestsDone {
+							sweep.buckets[id] = p
+						}
+					}
+				}
+			}
+			s.cleanupReceipts[vid] = sweep
+		}
+		h, v := s.openCleanupVolume(vid, overdue)
+		if v == nil {
+			for _, p := range sweep.buckets {
+				p.requestsDone = true
+			}
+			delete(s.cleanupReceipts, vid)
+			return true
+		}
+		if h == nil {
+			continue
+		}
+		// Maintained physical accounting includes receipts and tombstones. Empty
+		// buckets on this volume need no traversal through unrelated retry records.
+		if sweep.after == nil {
+			usage, err := h.StorageUsage()
+			if err != nil {
+				h.Close()
+				continue
+			}
+			present := map[volume.ID]bool{}
+			for _, u := range usage {
+				if u.Physical > 0 {
+					present[u.Bucket] = true
+				}
+			}
+			var absent []*cleanupVolumeProgress
+			for id, p := range sweep.buckets {
+				if !present[id] {
+					absent = append(absent, p)
+				}
+			}
+			if len(absent) > 0 {
+				if err := checkpointCleanupView(h, v, absent...); err != nil {
+					return false
+				}
+				for id, p := range sweep.buckets {
+					if !present[id] {
+						p.objectsDone = true
+						p.requestsDone = true
+						delete(sweep.buckets, id)
+					}
+				}
+				if len(sweep.buckets) == 0 {
+					delete(s.cleanupReceipts, vid)
+				}
+				return true
+			}
+		}
+		records, err := h.ScanRequestRecords(sweep.after, 128)
+		if err != nil {
+			h.Close()
+			continue
+		}
+		if len(records) == 0 {
+			var participants []*cleanupVolumeProgress
+			for _, p := range sweep.buckets {
+				participants = append(participants, p)
+			}
+			if err := checkpointCleanupView(h, v, participants...); err != nil {
+				return false
+			}
+			for _, p := range participants {
+				p.requestsDone = true
+			}
+			delete(s.cleanupReceipts, vid)
+			return true
+		}
+		var remove []volume.ID
+		for _, record := range records {
+			if _, ok := sweep.buckets[record.Key.Bucket]; ok && s.cleanupBucketValid(record.Key.Bucket) {
+				remove = append(remove, record.ID)
+			}
+		}
+		var generation uint64
+		if len(remove) > 0 {
+			generation, err = h.ForgetRequestsAccepted(remove)
+		}
+		if errors.Is(err, volume.ErrBusy) || errors.Is(err, volume.ErrFull) {
+			generation, _ = h.Generation()
+			for _, p := range sweep.buckets {
+				p.checkpoint = generation
+			}
+			h.Close()
+			if err := v.CheckpointThrough(generation); err != nil {
+				return false
+			}
+			for _, p := range sweep.buckets {
+				p.checkpoint = 0
+			}
+			return false
+		}
+		h.Close()
+		if err != nil {
+			continue
+		}
+		if generation != 0 {
+			for _, p := range sweep.buckets {
+				p.checkpoint = generation
+			}
+			if err = v.CheckpointThrough(generation); err != nil {
+				return false
+			}
+			for _, p := range sweep.buckets {
+				p.checkpoint = 0
+			}
+		}
+		next := records[len(records)-1].ID
+		sweep.after = &next
+		return true
 	}
 	return false
 }
