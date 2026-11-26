@@ -95,6 +95,8 @@ int main(void) {
         memset(result,0,sizeof(result));
         for(unsigned i=0;i<N;i++)CHECK(!stqr_get_async(c,ids[i],async_completed,&result[i]));
         CHECK(stqr_async_pending(c)==N);
+        /* A legacy blocking wrapper must dispatch unrelated completed IDs. */
+        CHECK(!stqr_stat(c,ids[0],&info));
         async_wait(c,result,N);
         for(unsigned i=0;i<N;i++) {
             unsigned char payload[128];memset(payload,(int)i,sizeof(payload));
@@ -110,6 +112,22 @@ int main(void) {
         async_wait(c,result,N);
         for(unsigned i=0;i<N;i++)CHECK(!result[i].error);
         CHECK(!stqr_sync(c));
+        {
+            stqr_id sid[8];stqr_u64 cursor[8];
+            memset(result,0,sizeof(result));
+            for(unsigned i=0;i<8;i++) {
+                CHECK(!stqr_request_id(&sid[i]));cursor[i]=0;
+                CHECK(!stqr_subscribe_async(c,ids[i],sid[i],&cursor[i],async_completed,&result[i]));
+            }
+            async_wait(c,result,8);
+            for(unsigned i=0;i<8;i++) {
+                CHECK(!result[i].error&&cursor[i]&&result[i].size==128);
+                CHECK(((unsigned char *)result[i].data)[0]==i+1);stqr_free(result[i].data);
+            }
+            memset(result,0,sizeof(result));
+            for(unsigned i=0;i<8;i++)CHECK(!stqr_unsubscribe_async(c,sid[i],async_completed,&result[i]));
+            async_wait(c,result,8);for(unsigned i=0;i<8;i++)CHECK(!result[i].error);
+        }
         /* A rejected no-ACK write must remain visible at its connection fence. */
         o=fresh();o.absent=1;CHECK(!stqr_put_async(c,ids[0],"wrong",5,&o));
         memset(&fence,0,sizeof(fence));CHECK(!stqr_connection_sync_async(c,async_completed,&fence));
@@ -261,8 +279,8 @@ int main(void) {
             CHECK(!stqr_sync(c));
         }
         {
-            /* Routing a subscription must retain, not checkpoint, an accepted
-             * dependency. The subsequent cross-owner publication fences it. */
+            /* Routing a subscription retains an accepted dependency. The format
+             * client explicitly fences before publishing on another owner. */
             stqr_object_id left={{1}},right={{0x81}};
             stqr_id sid; stqr_u64 cursor; stqr_commit_mark before,after; stqr_fence *retained=NULL;
             o=fresh();o.accepted=1;CHECK(!stqr_put(c,left,"volatile",8,&o,&info));
@@ -272,7 +290,9 @@ int main(void) {
             CHECK(!stqr_fence_capture(c,&retained) && stqr_fence_count(retained)==1);
             stqr_fence_close(retained);
             CHECK(!stqr_unsubscribe(c,sid));
+            CHECK(!stqr_sync(c));
             o=fresh();CHECK(!stqr_put(c,right,"dependent",9,&o,&info));
+            CHECK(!stqr_sync(c));
             CHECK(!stqr_pending_mark(c,&after) && !after.sequence);
         }
         {

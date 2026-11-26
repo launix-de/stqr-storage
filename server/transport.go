@@ -396,7 +396,7 @@ func (ws *wsSession) executeRequest(m client.Message, p principal) {
 	if m.Opcode >= 0x0100 && m.Opcode <= 0x0108 || m.Opcode == client.ObjectSubscribe || m.Opcode == client.ObjectAccepted || m.Opcode == client.BucketObjectLease || m.Opcode == client.BucketMaintenanceEnd || m.Opcode == client.BucketStatFS || m.Opcode == client.BucketSync || m.Opcode == client.BucketMaintenance || m.Opcode == client.BucketScan {
 		ws.releaseObjectContext(m.ID)
 	}
-	if m.Kind == client.Request || m.Kind == client.FireAndForget && (status >= 300 || m.Opcode == 0x0100 || m.Opcode == 0x0101 || m.Opcode == 0x0107 || m.Opcode == client.ConnectionSync) {
+	if m.Kind == client.Request || m.Kind == client.FireAndForget && ws.connectionFenceCap.Load() && (status >= 300 || m.Opcode == 0x0100 || m.Opcode == 0x0101 || m.Opcode == 0x0107 || m.Opcode == client.ConnectionSync) {
 		b := client.EncodeMessage(client.Message{Kind: client.Response, Opcode: m.Opcode, ID: m.ID, Body: body})
 		select {
 		case ws.responses <- b:

@@ -514,6 +514,7 @@ export PATH=/bin
 /bin/busybox --install -s /bin
 trap 'echo KSTQR_VM_FAIL; poweroff -f' EXIT
 mount -t proc proc /proc
+echo 30 > /proc/sys/kernel/hung_task_timeout_secs
 mount -t sysfs sys /sys
 mount -t devtmpfs dev /dev
 ip link set lo up
@@ -689,6 +690,7 @@ export PATH=/bin
 /bin/busybox --install -s /bin
 trap 'echo KSTQR_VM_FAIL; poweroff -f' EXIT
 mount -t proc proc /proc
+echo 30 > /proc/sys/kernel/hung_task_timeout_secs
 mount -t sysfs sys /sys
 mount -t devtmpfs dev /dev
 ip link set lo up
@@ -827,6 +829,7 @@ export PATH=/bin
 /bin/busybox --install -s /bin
 trap 'echo KSTQR_VM_FAIL; poweroff -f' EXIT
 mount -t proc proc /proc
+echo 30 > /proc/sys/kernel/hung_task_timeout_secs
 mount -t sysfs sys /sys
 mount -t devtmpfs dev /dev
 ip link set lo up
@@ -874,6 +877,7 @@ export PATH=/bin
 /bin/busybox --install -s /bin
 trap 'echo KSTQR_VM_FAIL; poweroff -f' EXIT
 mount -t proc proc /proc
+echo 30 > /proc/sys/kernel/hung_task_timeout_secs
 mount -t sysfs sys /sys
 mount -t devtmpfs dev /dev
 ip link set lo up

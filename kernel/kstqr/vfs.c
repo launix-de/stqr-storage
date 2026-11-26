@@ -869,8 +869,16 @@ static void ks_write_batch_worker(struct work_struct *work)
  struct address_space *mapping = i->i_mapping;
  struct ks_fs *f = i->i_sb->s_fs_info;
  u64 position = batch->start, started = ktime_get_ns();
- unsigned saved = enter_fs(f);
- int err = ks_write(f, KS_I(i)->id, &position, batch->data, batch->length, false);
+ unsigned saved;
+ int err;
+ /* Separate sparse batches share one inode head and REDO claim graph. Only
+  * that genuine publication dependency is serialized; sockets and other files
+  * remain fully concurrent. Never take inode_lock: callers can wait writeback
+  * while holding it. */
+ mutex_lock(&KS_I(i)->writeback_publish_lock);
+ saved = enter_fs(f);
+ err = ks_write(f, KS_I(i)->id, &position, batch->data, batch->length, false);
+ mutex_unlock(&KS_I(i)->writeback_publish_lock);
  leave_fs(f, saved);
  atomic64_add(ktime_get_ns() - started, &f->writeback_ns);
  if (err) { atomic64_inc(&f->writeback_errors); mapping_set_error(mapping, err); }
@@ -1412,6 +1420,7 @@ static struct inode *ks_alloc_inode(struct super_block *sb)
 	if (!i)
 		return NULL;
 	mutex_init(&i->metadata_lock);
+    mutex_init(&i->writeback_publish_lock);
 	INIT_LIST_HEAD(&i->mount_list);
 	inode_init_once(&i->inode);
 	return &i->inode;

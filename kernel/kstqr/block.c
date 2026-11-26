@@ -145,7 +145,8 @@ static int ks_bd_sync_locked(struct ks_bd *b)
 {
  struct ks_bd_result r={0};u64 cut=b->pending_sequence;
  struct ks_bd_pending *p;struct hlist_node *tmp;unsigned bucket;int err;
- if(!(stqr_capabilities(b->rpc.client)&STQR_CAP_CONNECTION_SYNC))return stqr_sync(b->rpc.client);
+ if(!b->rpc.receive_started || !(stqr_capabilities(b->rpc.client)&STQR_CAP_CONNECTION_SYNC))
+  return stqr_sync(b->rpc.client);
  init_completion(&r.done);
  err=stqr_connection_sync_async(b->rpc.client,ks_bd_completed,&r);
  mutex_unlock(&b->rpc.lock);
@@ -386,8 +387,13 @@ static void ks_bd_put_super(struct super_block *sb)
 	if (b->queue) {
 		destroy_workqueue(b->queue);
 		b->queue = NULL;
-		if (!b->readonly && b->rpc.client && stqr_sync(b->rpc.client))
-			pr_err("kstqr: block export final sync failed\n");
+		if (!b->readonly && b->rpc.client) {
+            int err;
+            mutex_lock(&b->rpc.lock);
+            err=ks_bd_sync_locked(b);
+            mutex_unlock(&b->rpc.lock);
+            if(err)pr_err("kstqr: block export final sync failed\n");
+        }
 	}
 	list_for_each_entry_safe(d, next, &b->disks, list)
 	{
@@ -405,7 +411,7 @@ static int ks_bd_sync_fs(struct super_block *sb, int wait)
 		return 0;
 	flush_workqueue(b->queue);
 	mutex_lock(&b->rpc.lock);
-	err = b->failed ? -EIO : stqr_sync(b->rpc.client);
+	err = b->failed ? -EIO : ks_bd_sync_locked(b);
 	mutex_unlock(&b->rpc.lock);
 	return err;
 }
@@ -548,13 +554,13 @@ int ks_bd_fill_super(struct super_block *sb, const char *url, const char *user,
 	err = stqr_dial(&b->rpc.client, url, user, password, bucket, "bd", timeout);
 	if (err)
 		return err;
-	ks_rpc_start(&b->rpc);
-    err = ks_bd_claim(b->rpc.client, readonly);
+	err = ks_bd_claim(b->rpc.client, readonly);
 	if (err)
 		return err;
 	err = stqr_stat(b->rpc.client, ks_root_id, &info);
 	if (err != -ENOENT)
 		return err ? err : -EINVAL;
+    ks_rpc_start(&b->rpc);
 	root = new_inode(sb);
 	if (!root)
 		return -ENOMEM;

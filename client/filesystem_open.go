@@ -161,6 +161,7 @@ func (f *Filesystem) helpPinnedTransaction(ctx context.Context, id ObjectID, dep
 				return false, ErrFSFormat
 			}
 			index := uint64(0)
+			var external []fsExternalWrite
 			for _, m := range current.members {
 				head, _, err := f.store.Get(ctx, m.id)
 				if errors.Is(err, ErrNotFound) && current.state == fsTxAborted {
@@ -172,12 +173,13 @@ func (f *Filesystem) helpPinnedTransaction(ctx context.Context, id ObjectID, dep
 				owns := bytes.Equal(head, marker)
 				for _, w := range m.writes {
 					if owns && current.state == fsTxCommitted {
-						if err := f.applyPinnedWrite(ctx, id, index, w); err != nil {
-							return false, err
-						}
+						external = append(external, fsExternalWrite{m.id, index, w})
 					}
 					index++
 				}
+			}
+			if err := f.applyExternalWrites(ctx, id, external, true); err != nil {
+				return false, err
 			}
 			for _, m := range current.members {
 				for {

@@ -336,6 +336,7 @@ func (f *Filesystem) helpTransaction(ctx context.Context, id ObjectID, depth int
 		}
 		if tx.state != fsTxPending {
 			writeIndex := uint64(0)
+			var external []fsExternalWrite
 			if tx.state == fsTxCommitted {
 				for _, m := range tx.members {
 					current, _, e := f.store.Get(ctx, m.id)
@@ -345,18 +346,16 @@ func (f *Filesystem) helpTransaction(ctx context.Context, id ObjectID, depth int
 					owns := bytes.Equal(current, marker)
 					for _, w := range m.writes {
 						if owns {
-							if e = f.applyFSWrite(ctx, id, writeIndex, w); e != nil {
-								// A delayed helper cannot modify a newer inode.
-								head, _, readErr := f.store.Get(ctx, m.id)
-								if readErr != nil || bytes.Equal(head, marker) {
-									return false, e
-								}
-							}
+							external = append(external, fsExternalWrite{m.id, writeIndex, w})
 						}
 						writeIndex++
 					}
 				}
+				if err := f.applyExternalWrites(ctx, id, external, false); err != nil {
+					return false, err
+				}
 			}
+
 			// Final state is durable before removing any marker. A concurrent
 			// writer may already have changed an inode after another helper
 			// removed its marker; only our own markers can be replaced here.

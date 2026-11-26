@@ -338,7 +338,12 @@ func (b *Bucket) getRange(ctx context.Context, p principal, id volume.ObjectID, 
 	if err := b.server.checkObjectBinding(ctx, b.ID(), id, true); err != nil {
 		return nil, volume.Info{}, err
 	}
-	return h.GetRange(volume.Key{Bucket: b.ID(), Object: id}, offset, length)
+	data, info, err := h.GetRange(volume.Key{Bucket: b.ID(), Object: id}, offset, length)
+	if err == nil {
+		generation, _ := h.Generation()
+		touchConnectionVolume(ctx, v, generation)
+	}
+	return data, info, err
 }
 
 // CopyTo captures a bounded local snapshot before invoking the caller writer.
@@ -445,7 +450,19 @@ func (b *Bucket) Stat(ctx context.Context, p principal, id volume.ObjectID) (vol
 	if err := b.server.checkObjectOwner(b.ID(), id, true); err != nil {
 		return volume.Info{}, err
 	}
-	_, info, _, err := b.selectVolume(d, volume.Key{Bucket: b.ID(), Object: id}, volume.ID{}, false)
+	v, info, _, err := b.selectVolume(d, volume.Key{Bucket: b.ID(), Object: id}, volume.ID{}, false)
+	if err == nil && v != nil {
+		h, openErr := v.Open(false)
+		if openErr != nil {
+			return volume.Info{}, openErr
+		}
+		info, err = h.Stat(volume.Key{Bucket: b.ID(), Object: id})
+		if err == nil {
+			generation, _ := h.Generation()
+			touchConnectionVolume(ctx, v, generation)
+		}
+		h.Close()
+	}
 	if bindingErr := b.server.checkObjectBinding(ctx, b.ID(), id, true); bindingErr != nil {
 		err = bindingErr
 	}

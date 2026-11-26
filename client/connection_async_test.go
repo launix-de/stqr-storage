@@ -448,3 +448,209 @@ func TestConnectionAsyncCloseDoesNotFence(t *testing.T) {
 	}
 	close(gate)
 }
+
+type queuedFSWrite struct {
+	id   ObjectID
+	data []byte
+}
+type queuedFSBurstStore struct {
+	*MemoryFilesystemStore
+	mu            sync.Mutex
+	entered       chan struct{}
+	releaseWrites chan struct{}
+	fenceStarted  chan struct{}
+	releaseFence  chan struct{}
+	queued        []queuedFSWrite
+	fences        int
+	failFence     error
+	references    bool
+}
+
+func (s *queuedFSBurstStore) ObjectReferencesSupported() bool { return s.references }
+func (s *queuedFSBurstStore) ConcurrentObjectRequests() bool  { return true }
+func (s *queuedFSBurstStore) Put(ctx context.Context, id ObjectID, data []byte, opt PutOptions) (ObjectInfo, error) {
+	if !opt.Accepted {
+		return ObjectInfo{}, errors.New("external burst requested per-object durable write")
+	}
+	s.entered <- struct{}{}
+	select {
+	case <-s.releaseWrites:
+	case <-ctx.Done():
+		return ObjectInfo{}, ctx.Err()
+	}
+	s.mu.Lock()
+	s.queued = append(s.queued, queuedFSWrite{id, bytes.Clone(data)})
+	s.mu.Unlock()
+	return ObjectInfo{Length: uint64(len(data))}, nil
+}
+func (s *queuedFSBurstStore) Sync(ctx context.Context) error {
+	s.mu.Lock()
+	s.fences++
+	failure := s.failFence
+	s.mu.Unlock()
+	s.fenceStarted <- struct{}{}
+	select {
+	case <-s.releaseFence:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	if failure != nil {
+		return failure
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, w := range s.queued {
+		before, _, err := s.MemoryFilesystemStore.Get(ctx, w.id)
+		absent := errors.Is(err, ErrNotFound)
+		if err != nil && !absent {
+			return err
+		}
+		if _, err = s.MemoryFilesystemStore.CAS(ctx, w.id, 0, before, w.data, CASOptions{Scope: CASObject, MutationOptions: MutationOptions{Absent: absent}}); err != nil {
+			return err
+		}
+	}
+	s.queued = nil
+	return nil
+}
+func TestFilesystemExternalBurstFencesBeforePublishingInode(t *testing.T) {
+	for _, references := range []bool{false, true} {
+		name := "legacy"
+		if references {
+			name = "pinned"
+		}
+		t.Run(name, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			s := &queuedFSBurstStore{MemoryFilesystemStore: NewMemoryFilesystemStore(), entered: make(chan struct{}, 8), releaseWrites: make(chan struct{}), fenceStarted: make(chan struct{}, 8), releaseFence: make(chan struct{}), references: references}
+			f, err := OpenFilesystem(ctx, s, FSOptions{Create: true})
+			if err != nil {
+				t.Fatal(err)
+			}
+			snap, err := f.snapshot(ctx, FilesystemRootID())
+			if err != nil {
+				t.Fatal(err)
+			}
+			next := snap.node
+			next.mode = 0711
+			next.edits = []fsBlockWrite{{id: ObjectID{61}, full: true, data: []byte("one")}, {id: ObjectID{62}, full: true, data: []byte("two")}}
+			done := make(chan error, 1)
+			go func() {
+				ok, err := f.transact(ctx, []fsTxMember{fsMember(snap, next)})
+				if err == nil && !ok {
+					err = errors.New("transaction aborted")
+				}
+				done <- err
+			}()
+			for i := 0; i < 2; i++ {
+				select {
+				case <-s.entered:
+				case <-ctx.Done():
+					t.Fatal("independent mutable payloads serialized", ctx.Err())
+				}
+			}
+			close(s.releaseWrites)
+			select {
+			case <-s.fenceStarted:
+			case <-ctx.Done():
+				t.Fatal("missing dependency fence", ctx.Err())
+			}
+			head, _, err := s.MemoryFilesystemStore.Get(ctx, FilesystemRootID())
+			if err != nil {
+				t.Fatal(err)
+			}
+			txID, locked, err := fsLockID(head)
+			if err != nil || !locked {
+				t.Fatal("inode published before payload fence", err)
+			}
+			if _, _, err = s.MemoryFilesystemStore.Get(ctx, txID); err != nil {
+				t.Fatal("recovery intent absent before publication", err)
+			}
+			for _, w := range next.edits {
+				if _, _, err = s.MemoryFilesystemStore.Get(ctx, w.id); !errors.Is(err, ErrNotFound) {
+					t.Fatal("test payload escaped checkpoint", err)
+				}
+			}
+			close(s.releaseFence)
+			if err = <-done; err != nil {
+				t.Fatal(err)
+			}
+			info, err := f.Stat(ctx, FilesystemRootID())
+			if err != nil || info.Mode != 0711 {
+				t.Fatal("inode publication failed", info, err)
+			}
+			for _, w := range next.edits {
+				raw, _, err := s.MemoryFilesystemStore.Get(ctx, w.id)
+				if err != nil || !bytes.Equal(raw, w.data) {
+					t.Fatal("published inode lost payload", string(raw), err)
+				}
+			}
+			if s.fences != 1 {
+				t.Fatal("expected one dependency fence for two payloads", s.fences)
+			}
+		})
+	}
+}
+
+func TestFilesystemExternalBurstFailedFenceKeepsRecoverableMarker(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	release := make(chan struct{})
+	close(release)
+	failure := errors.New("checkpoint failed")
+	s := &queuedFSBurstStore{MemoryFilesystemStore: NewMemoryFilesystemStore(), entered: make(chan struct{}, 16), releaseWrites: release, fenceStarted: make(chan struct{}, 16), releaseFence: release, failFence: failure, references: true}
+	f, err := OpenFilesystem(ctx, s, FSOptions{Create: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snap, err := f.snapshot(ctx, FilesystemRootID())
+	if err != nil {
+		t.Fatal(err)
+	}
+	next := snap.node
+	next.mode = 0711
+	next.edits = []fsBlockWrite{{id: ObjectID{71}, full: true, data: []byte("recover")}, {id: ObjectID{72}, full: true, data: []byte("also")}}
+	if _, err = f.transact(ctx, []fsTxMember{fsMember(snap, next)}); !errors.Is(err, failure) {
+		t.Fatal("checkpoint failure lost", err)
+	}
+	head, _, err := s.MemoryFilesystemStore.Get(ctx, FilesystemRootID())
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, locked, err := fsLockID(head)
+	if err != nil || !locked {
+		t.Fatal("failed fence published final inode", err)
+	}
+	if _, _, err = s.MemoryFilesystemStore.Get(ctx, id); err != nil {
+		t.Fatal("failed fence removed recovery intent", err)
+	}
+	s.failFence = nil
+	if ok, err := f.helpTransaction(ctx, id, 0); err != nil || !ok {
+		t.Fatal("redo did not recover failed burst", ok, err)
+	}
+	for _, w := range next.edits {
+		raw, _, err := s.MemoryFilesystemStore.Get(ctx, w.id)
+		if err != nil || !bytes.Equal(raw, w.data) {
+			t.Fatal("recovery lost payload", string(raw), err)
+		}
+	}
+	info, err := f.Stat(ctx, FilesystemRootID())
+	if err != nil || info.Mode != 0711 {
+		t.Fatal(info, err)
+	}
+}
+func TestFilesystemExternalBurstRepeatedObjectHasDependencyFence(t *testing.T) {
+	ctx := context.Background()
+	release := make(chan struct{})
+	close(release)
+	s := &queuedFSBurstStore{MemoryFilesystemStore: NewMemoryFilesystemStore(), entered: make(chan struct{}, 8), releaseWrites: release, fenceStarted: make(chan struct{}, 8), releaseFence: release}
+	f := &Filesystem{store: s}
+	id := ObjectID{73}
+	jobs := []fsExternalWrite{{index: 0, write: fsBlockWrite{id: id, full: true, data: []byte("first")}}, {index: 1, write: fsBlockWrite{id: id, full: true, data: []byte("last")}}}
+	if err := f.applyExternalWrites(ctx, ObjectID{74}, jobs, true); err != nil {
+		t.Fatal(err)
+	}
+	raw, _, err := s.MemoryFilesystemStore.Get(ctx, id)
+	if err != nil || string(raw) != "last" || s.fences != 2 {
+		t.Fatal("dependent writes reordered", string(raw), s.fences, err)
+	}
+}

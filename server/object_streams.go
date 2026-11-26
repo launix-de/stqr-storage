@@ -128,7 +128,7 @@ func (ws *wsSession) finishUpload(u *serverObjectUpload, result []byte, status i
 		body = client.ResponseBody(status, result, detail)
 	}
 	defer ws.completeConnectionMessage(u.op.message, status, body)
-	if u.op.message.Kind != client.Request && status < 300 {
+	if u.op.message.Kind != client.Request && (!ws.connectionFenceCap.Load() || status < 300) {
 		return nil
 	}
 	return ws.sendMessage(client.Message{Kind: client.Response, Opcode: u.op.message.Opcode, ID: u.op.message.ID, Body: body})

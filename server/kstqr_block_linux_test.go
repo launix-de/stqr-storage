@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/http/httptest"
 	"net/url"
 	"os"
@@ -119,6 +120,7 @@ export PATH=/bin
 /bin/busybox --install -s /bin
 trap 'echo KSTQR_BLOCK_VM_FAIL; poweroff -f' EXIT
 mount -t proc proc /proc
+echo 30 > /proc/sys/kernel/hung_task_timeout_secs
 mount -t sysfs sys /sys
 mount -t devtmpfs dev /dev
 ip link set lo up
@@ -185,10 +187,22 @@ poweroff -f
 	if os.Getenv("STQR_KERNEL_TCG") != "1" {
 		args = append(args, "-enable-kvm", "-cpu", "host")
 	}
-	output, err := exec.CommandContext(ctx, "qemu-system-x86_64", args...).CombinedOutput()
-	if p := os.Getenv("STQR_KERNEL_LOG"); p != "" {
-		os.WriteFile(p, output, 0600)
+	cmd := exec.CommandContext(ctx, "qemu-system-x86_64", args...)
+	var captured bytes.Buffer
+	var serial *os.File
+	if path := os.Getenv("STQR_KERNEL_LOG"); path != "" {
+		serial, err = os.OpenFile(path, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0600)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer serial.Close()
+		cmd.Stdout = io.MultiWriter(&captured, serial)
+	} else {
+		cmd.Stdout = &captured
 	}
+	cmd.Stderr = cmd.Stdout
+	err = cmd.Run()
+	output := captured.Bytes()
 	if err != nil || !strings.Contains(string(output), "KSTQR_BLOCK_VM_PASS") || strings.Contains(string(output), "KSTQR_BLOCK_VM_FAIL") {
 		t.Fatalf("kernel block VM: %v\n%s", err, output)
 	}

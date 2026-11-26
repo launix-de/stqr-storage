@@ -113,6 +113,7 @@ struct ks_inode {
 	struct ks_cache_stamp data_stamp;
 	struct ks_directory_proof directory_proof;
 	struct mutex metadata_lock;
+    struct mutex writeback_publish_lock;
 	struct list_head mount_list;
 	u64 invalidated_generation;
 	stqr_proof proof;

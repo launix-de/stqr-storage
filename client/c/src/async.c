@@ -75,6 +75,10 @@ static int async_send(stqr_client *c,struct sq_async *p) {
     int err;
     if(p->mutation && any_lost(c))return -ESTALE;
     err=ensure_channel(c);if(err)return err;
+    /* A redirect may reach an older peer after the original negotiation. Such
+     * a peer cannot certify a no-ACK prefix; surface this instead of returning
+     * a false successful legacy fence. */
+    if(p->fire && !(c->capabilities&STQR_CAP_CONNECTION_SYNC))return -EOPNOTSUPP;
     p->wire_op=p->op;
     if(p->mutation>1 && (c->capabilities&STQR_CAP_DURABILITY)) {
         if(body->n<80)return -EINVAL;
@@ -82,6 +86,7 @@ static int async_send(stqr_client *c,struct sq_async *p) {
         body=&wrapped;p->wire_op=0x118;
     }
     p->channel=c->active;
+    p->channel->submitted=p->sequence;
     err=message_send(c,p->fire?0:1,p->wire_op,p->id,body);
     drop(&wrapped);save_channel(c);
     if(err) {if(p->fire)c->durability_lost=1;return p->mutation?-EINPROGRESS:err;}
@@ -196,7 +201,13 @@ static int async_dispatch(stqr_client *c,unsigned kind,unsigned op,const stqr_u8
     }
     else if(p->op==0x122){
         if(!err){const stqr_u8 *boot=take(m,16);readnum(m,8);if(done(m)||!boot||zero(boot,16))err=-EPROTO;}
-        if(!err && p->mark.sequence) {
+        /* Notices already queued before this ACK are covered too. If another
+         * request was submitted meanwhile retain its potentially newer mark. */
+        if(!err && p->channel->submitted==p->sequence) {
+            c->synced_mark=c->pending_mark;
+            memset(&c->pending_mark,0,sizeof(c->pending_mark));
+        }
+        else if(!err && p->mark.sequence) {
             c->synced_mark=p->mark;
             if(!memcmp(c->pending_mark.boot.bytes,p->mark.boot.bytes,16) &&
                c->pending_mark.sequence<=p->mark.sequence)memset(&c->pending_mark,0,sizeof(c->pending_mark));

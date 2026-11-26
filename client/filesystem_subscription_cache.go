@@ -320,7 +320,9 @@ func (c *SubscriptionStore) CAS(ctx context.Context, id ObjectID, off uint64, ex
 		return ObjectInfo{}, err
 	}
 	defer release()
-	if durable, _ := ctx.Value(fsDurableKey{}).(bool); durable {
+	if batch, _ := ctx.Value(fsAcceptedBurstKey{}).(bool); batch {
+		opt.Accepted = true
+	} else if durable, _ := ctx.Value(fsDurableKey{}).(bool); durable {
 		opt.Accepted = false
 	} else {
 		opt.Accepted = opt.Accepted || c.accepted
@@ -462,7 +464,9 @@ func (c *SubscriptionStore) PutRange(ctx context.Context, id ObjectID, off uint6
 		return ObjectInfo{}, err
 	}
 	defer release()
-	if durable, _ := ctx.Value(fsDurableKey{}).(bool); durable {
+	if batch, _ := ctx.Value(fsAcceptedBurstKey{}).(bool); batch {
+		opt.Accepted = true
+	} else if durable, _ := ctx.Value(fsDurableKey{}).(bool); durable {
 		opt.Accepted = false
 	} else {
 		opt.Accepted = opt.Accepted || c.accepted

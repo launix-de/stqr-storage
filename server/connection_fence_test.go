@@ -308,3 +308,93 @@ func TestAsyncConnectionBurstAndDeferredCASFailure(t *testing.T) {
 		}
 	}
 }
+
+func TestConnectionFenceDisconnectDiscardsWithoutCheckpoint(t *testing.T) {
+	s := testServer(t)
+	addTestVolume(t, s, "close-fixture", "hdd", 16<<20)
+	b, _ := createProtocolBucket(t, s, "close-fixture")
+	c := connectionTestRaw(t, s, b)
+	s.wsMu.Lock()
+	var ws *wsSession
+	for socket := range s.sockets {
+		if socket.authorization.bucket == b {
+			ws = socket
+			break
+		}
+	}
+	s.wsMu.Unlock()
+	if ws == nil {
+		t.Fatal("missing connection")
+	}
+	// The independently owned volume has no background worker: any checkpoint
+	// would therefore be caused by this socket's teardown, not timer timing.
+	mem, err := volume.NewMemory(16 << 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	v, err := volume.Format(mem, volume.FormatOptions{Class: volume.HDD})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer v.Close()
+	generation := connectionTestPut(t, v, volume.Key{Object: volume.ObjectID{1}}, "volatile")
+	if v.IsDurableThrough(generation) {
+		t.Fatal("fixture unexpectedly durable")
+	}
+	ws.observeConnectionVolume(v, generation)
+	if err = c.Close(); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		ws.fenceMu.Lock()
+		discarded := ws.connectionTouches == nil
+		ws.fenceMu.Unlock()
+		if discarded {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("disconnect retained connection touch map")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if v.IsDurableThrough(generation) {
+		t.Fatal("disconnect issued implicit checkpoint")
+	}
+}
+
+func TestConnectionFenceReadDependencies(t *testing.T) {
+	for _, statOnly := range []bool{false, true} {
+		t.Run(map[bool]string{false: "get", true: "stat"}[statOnly], func(t *testing.T) {
+			s := testServer(t)
+			addTestVolume(t, s, "dependency", "hdd", 16<<20)
+			b, _ := createProtocolBucket(t, s, "dependency")
+			v := b.allVolumes()[0]
+			oid := volume.ObjectID{7}
+			generation := connectionTestPut(t, v, volume.Key{Bucket: b.ID(), Object: oid}, "observed")
+			ws := connectionTestSession(s)
+			m := connectionTestMessage(0x0100, client.Request)
+			ws.admitConnectionMessage(m)
+			ctx := ws.connectionContext(context.Background(), m.ID)
+			p := quotaPrincipal(t, s)
+			var err error
+			if statOnly {
+				_, err = b.Stat(ctx, p, oid)
+			} else {
+				_, _, err = b.Get(ctx, p, oid)
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			ws.completeConnectionMessage(m, 200, nil)
+			fence := connectionTestMessage(client.ConnectionSync, client.Request)
+			ws.admitConnectionMessage(fence)
+			if _, status := ws.executeConnectionSync(ctx, fence); status != 200 {
+				t.Fatal(status)
+			}
+			if !v.IsDurableThrough(generation) {
+				t.Fatal("read dependency not checkpointed")
+			}
+		})
+	}
+}

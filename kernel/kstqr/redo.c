@@ -188,13 +188,50 @@ static int redo_request(stqr_object_id tx, u64 index, stqr_id *rid)
 	drop(&b);
 	return err;
 }
+/* Only independent object edits form a no-ACK burst. Repeated edits of one
+ * object retain their explicit data dependency even though the wire transport
+ * is free to execute independent messages in any order. */
+struct ks_edit_key { struct hlist_node hash; stqr_object_id id; };
+static bool edits_independent(const struct buf *encoded,bool legacy)
+{
+ DECLARE_HASHTABLE(keys,6);
+ struct buf d=*encoded;
+ unsigned count=readnum(&d,4),i;
+ struct ks_edit_key *entries;
+ bool independent=true;
+ if(d.err||count>d.n/44)return false;
+ entries=kcalloc(count,sizeof(*entries),GFP_NOFS);
+ if(!entries)return false;
+ hash_init(keys);
+ for(i=0;i<count;i++) {
+  const u8 *id=take(&d,32);struct ks_edit_key *prior;size_t ignored;u32 key;
+  if(!id){independent=false;break;}
+  memcpy(entries[i].id.bytes,id,32);memcpy(&key,id,sizeof(key));
+  hash_for_each_possible(keys,prior,hash,key)if(eqid(prior->id,entries[i].id)){independent=false;break;}
+  if(!independent)break;
+  hash_add(keys,&entries[i].hash,key);
+  if(legacy)readnum(&d,8);
+  boolean(&d);boolean(&d);boolean(&d);readnum(&d,8);readblob(&d,&ignored);
+  if(!legacy)readblob(&d,&ignored);
+  if(d.err){independent=false;break;}
+ }
+ kfree(entries);return independent&&!done(&d);
+}
+struct ks_edit_completion {
+ struct ks_async_result result;
+ stqr_object_id id;
+ const void *data;
+ size_t size;
+ bool submitted;
+};
 static int apply_edits(struct ks_fs *f, stqr_object_id tx, const struct buf *encoded, bool legacy,
 		       u64 *index)
 {
 	struct buf d = *encoded;
 	unsigned count = readnum(&d, 4), i;
-    bool queued=false;
+    bool queued=false, independent=edits_independent(encoded,legacy);
 	int err = 0;
+    struct ks_edit_completion *results = independent ? kcalloc(count,sizeof(*results),GFP_NOFS) : NULL;
 	for (i = 0; i < count; i++) {
 		stqr_object_id id;
 		stqr_options opt = {0};
@@ -204,8 +241,7 @@ static int apply_edits(struct ks_fs *f, stqr_object_id tx, const struct buf *enc
 		size_t n;
 		bool full, remove;
 		u64 off;
-		if (!p)
-			return -EUCLEAN;
+		if (!p) {err=-EUCLEAN;goto complete;}
 		memcpy(id.bytes, p, 32);
 		if (legacy)
 			readnum(&d, 8); /* obsolete counter: decode only */
@@ -218,22 +254,30 @@ static int apply_edits(struct ks_fs *f, stqr_object_id tx, const struct buf *enc
 			size_t ignored;
 			readblob(&d, &ignored);
 		}
-		if (d.err)
-			return -EUCLEAN;
+		if (d.err) {err=-EUCLEAN;goto complete;}
 		err = redo_request(tx, (*index)++, &opt.request_id);
-		if (err)
-			return err;
+		if (err)goto complete;
 		rpc = ks_rpc_lock(f, id);
 		ks_cache_forget(f, id);
         /* The durable intent and marked heads already protect this burst.
          * Existing payload/index edits can be submitted without individual
          * fsync/ACK; final publication remains behind the owner fences. */
-        if(!remove && !opt.absent &&
+        if(results && !remove && opt.absent && full &&
+           (stqr_capabilities(rpc->client)&STQR_CAP_CONNECTION_SYNC)) {
+            struct ks_edit_completion *job=&results[i];
+            init_completion(&job->result.done);job->id=id;job->data=data;job->size=n;
+            opt.accepted=1;
+            err=stqr_cas_async(rpc->client,id,1,0,NULL,0,data,n,&opt,ks_async_completed,&job->result);
+            mutex_unlock(&rpc->lock);
+            if(err)goto complete;
+            job->submitted=true;queued=true;continue;
+        }
+        if(independent && !remove && !opt.absent &&
            (stqr_capabilities(rpc->client)&STQR_CAP_CONNECTION_SYNC)) {
             err=full?stqr_put_async(rpc->client,id,data,n,&opt):
                      stqr_put_range_async(rpc->client,id,off,data,n,&opt);
             mutex_unlock(&rpc->lock);
-            if(err)return err;
+            if(err)goto complete;
             queued=true;continue;
         }
 		bool auth_retry = false;
@@ -270,10 +314,22 @@ static int apply_edits(struct ks_fs *f, stqr_object_id tx, const struct buf *enc
 		ks_cache_forget(f, id);
 		if (remove && err == -ENOENT)
 			err = 0;
-		if (err)
-			return err;
+		if (err)goto complete;
 	}
     err=done(&d);
+complete:
+    if(results)for(unsigned j=0;j<count;j++)if(results[j].submitted) {
+        struct ks_edit_completion *job=&results[j];int result;
+        wait_for_completion(&job->result.done);result=job->result.error;
+        if(result==-EAGAIN && job->result.status==412 && f->references) {
+            void *observed=NULL;size_t size=0;stqr_info info;
+            int check=get_object(f,job->id,&observed,&size,&info);
+            result=!check&&size==job->size&&!memcmp(observed,job->data,size)?0:-EIO;
+            sq_free(observed);
+        }
+        sq_free(job->result.data);if(!err)err=result;
+    }
+    kfree(results);
     if(queued) {int fenced=ks_checkpoint(f);if(!err)err=fenced;}
     return err;
 }

@@ -10,7 +10,7 @@ struct sq_channel {
     char host[256], authority[272];
     unsigned port;
     stqr_id runtime;
-    stqr_u64 capabilities, used;
+    stqr_u64 capabilities, used, submitted;
     stqr_commit_mark pending, synced;
     int lost;
 };
@@ -709,7 +709,7 @@ static int request_payload(stqr_client *c, unsigned op, struct buf *body, stqr_i
     /* Reads/subscriptions may change channels without a durability fence.
      * Fence their retained causal dependencies only when publishing a write
      * on a different owner, or when the caller explicitly requests SYNC. */
-    if (mutation) {
+    if (mutation && !(c->capabilities&STQR_CAP_CONNECTION_SYNC)) {
         for (struct sq_channel *channel=c->channels;channel;channel=channel->next)
             if (channel!=c->active && channel->pending.sequence) {
                 err=stqr_sync(c); if (err) return err;
@@ -728,6 +728,7 @@ static int request_payload(stqr_client *c, unsigned op, struct buf *body, stqr_i
             put(&wrapped,body->p,80); number(&wrapped,op,2); put(&wrapped,body->p+80,body->n-80);
             wire_op=0x118; wire_body=&wrapped;
         }
+        if(c->active)c->active->submitted=++c->async_sequence;
         err=message_send(c,1,wire_op,id,wire_body);
         if (!err && payload) err=send_payload(c,id,payload,size,hash);
         if (!err) err=reply(c,wire_op,id,result,s);

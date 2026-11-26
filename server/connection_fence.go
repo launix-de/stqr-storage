@@ -123,7 +123,7 @@ func (ws *wsSession) completeConnectionMessage(m client.Message, status int, bod
 	if job == nil {
 		return
 	}
-	if m.Kind == client.FireAndForget && status >= 300 {
+	if m.Kind == client.FireAndForget && ws.connectionFenceCap.Load() && status >= 300 {
 		detail := "asynchronous object request failed"
 		d := client.Decoder{B: body}
 		d.V()

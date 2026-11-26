@@ -12,6 +12,12 @@ import (
 const fsMaxIntentBytes = 128 << 20
 
 type fsDurableKey struct{}
+type fsAcceptedBurstKey struct{}
+type fsExternalWrite struct {
+	owner ObjectID
+	index uint64
+	write fsBlockWrite
+}
 
 func encodeFSWrites(e *Encoder, writes []fsBlockWrite) {
 	e.U32(uint32(len(writes)))
@@ -154,7 +160,8 @@ func fsRedoRequest(id ObjectID, index uint64) RequestID {
 	return out
 }
 func (f *Filesystem) applyFSWrite(ctx context.Context, txID ObjectID, index uint64, w fsBlockWrite) error {
-	opt := MutationOptions{RequestID: fsRedoRequest(txID, index)}
+	accepted, _ := ctx.Value(fsAcceptedBurstKey{}).(bool)
+	opt := MutationOptions{RequestID: fsRedoRequest(txID, index), Accepted: accepted}
 	if w.absent {
 		opt.Absent = true
 	}
@@ -162,7 +169,7 @@ func (f *Filesystem) applyFSWrite(ctx context.Context, txID ObjectID, index uint
 		if d, ok := f.store.(interface {
 			Delete(context.Context, ObjectID, DeleteOptions) error
 		}); ok {
-			err := d.Delete(ctx, w.id, DeleteOptions{RequestID: opt.RequestID})
+			err := d.Delete(ctx, w.id, DeleteOptions{RequestID: opt.RequestID, Accepted: accepted})
 			if errors.Is(err, ErrNotFound) {
 				return nil
 			}
@@ -337,6 +344,54 @@ func (f *Filesystem) objectBurst(ctx context.Context, count int, run func(contex
 		if err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+// applyExternalWrites runs only after the durable REDO decision and marker
+// ownership checks. Distinct objects are independent; a repeated object starts
+// another wave. Every accepted wave is fenced before a later wave or any inode
+// can publish its final image, so helpers can recover an interrupted burst.
+func (f *Filesystem) applyExternalWrites(ctx context.Context, txID ObjectID, writes []fsExternalWrite, pinned bool) error {
+	parallel, ok := f.store.(interface{ ConcurrentObjectRequests() bool })
+	syncer, canSync := f.store.(interface{ Sync(context.Context) error })
+	accepted := ok && parallel.ConcurrentObjectRequests() && canSync
+	if accepted {
+		ctx = context.WithValue(ctx, fsAcceptedBurstKey{}, true)
+	}
+	for len(writes) > 0 {
+		seen := map[ObjectID]bool{}
+		end := 0
+		for end < len(writes) && !seen[writes[end].write.id] {
+			seen[writes[end].write.id] = true
+			end++
+		}
+		wave := writes[:end]
+		err := f.objectBurst(ctx, len(wave), func(ctx context.Context, i int) error {
+			item := wave[i]
+			if pinned {
+				return f.applyPinnedWrite(ctx, txID, item.index, item.write)
+			}
+			err := f.applyFSWrite(ctx, txID, item.index, item.write)
+			if err != nil {
+				head, _, readErr := f.store.Get(ctx, item.owner)
+				if readErr == nil && !bytes.Equal(head, fsLock(txID)) {
+					return nil
+				}
+			}
+			return err
+		})
+		// Checkpoint successes even when another independent operation failed. Keep
+		// all inode markers and REDO payload on either operation or fence failure.
+		if accepted {
+			if fenceErr := syncer.Sync(ctx); err == nil {
+				err = fenceErr
+			}
+		}
+		if err != nil {
+			return err
+		}
+		writes = writes[end:]
 	}
 	return nil
 }

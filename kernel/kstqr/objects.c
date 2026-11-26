@@ -2,6 +2,7 @@
 /* Included after core.c: reuse its checked canonical codec, not another ABI. */
 #include "kstqr.h"
 #include <linux/ktime.h>
+#include <linux/hashtable.h>
 #include <linux/delay.h>
 #include <linux/sched/signal.h>
 #include <linux/completion.h>
