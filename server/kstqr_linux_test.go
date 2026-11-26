@@ -646,6 +646,18 @@ rmmod kstqr
 	var nativeUpperID client.ID
 	var watcher *client.Client
 	if os.Getenv("STQR_KERNEL_OVERLAY") == "1" {
+		// Keep mapped lower files larger than the deliberately tiny cache used
+		// by overlay-cache-quiet. Eviction must not refill that same cache from
+		// an all-inode invalidation worker while the guest is otherwise idle.
+		for n := 0; n < 32; n++ {
+			file, err := fs.Create(ctx, client.FilesystemRootID(), fmt.Sprintf("lower-cache-pressure-%d", n), 0644, 0, 0, false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err = fs.WriteAt(ctx, file.ID, bytes.Repeat([]byte("L"), 4096), 0); err != nil {
+				t.Fatal(err)
+			}
+		}
 		if _, err := fs.Create(ctx, client.FilesystemRootID(), "live-directory", 0755, 0, 0, true); err != nil {
 			t.Fatal(err)
 		}
@@ -803,7 +815,7 @@ if mkdir /fresh/other; then exit 1; fi
 /mount.kstqr --uri %[1]s --bucket %[2]s --readonly-bucket %[3]s --credentials /credentials /mnt
 /overlay-test
 umount /mnt
-/mount.kstqr --uri %[1]s --bucket %[2]s --readonly-bucket %[3]s --credentials /credentials --metadata-cache-bytes 2048 /mnt
+/mount.kstqr --uri %[1]s --bucket %[2]s --readonly-bucket %[3]s --credentials /credentials --metadata-cache-bytes 8192 /mnt
 /mount.kstqr --uri %[1]s --bucket %[2]s --readonly-bucket %[3]s --credentials /credentials /other
 /overlay-cache-quiet
 umount /other

@@ -97,6 +97,7 @@ static void update_inode(struct inode *i, const struct ks_node *n, const stqr_in
 		inode_set_atime_to_ts(i, ns_to_timespec64(n->atime));
 		inode_set_ctime_to_ts(i, ns_to_timespec64(n->ctime));
 	}
+	WRITE_ONCE(KS_I(i)->revalidate, false);
 	i->i_blocks = DIV_ROUND_UP_ULL(n->size, 512);
 	mutex_unlock(&KS_I(i)->metadata_lock);
 }
@@ -110,15 +111,18 @@ static int inode_set(struct inode *i, void *data)
 	spin_unlock(&f->inode_lock);
 	return 0;
 }
+static unsigned long ks_inode_hash(stqr_object_id id)
+{
+	unsigned long hash = 0;
+	for (unsigned k = 0; k < 32; k++)
+		hash = hash * 31 + id.bytes[k];
+	return hash;
+}
 static struct inode *get_inode(struct super_block *sb, stqr_object_id id, const struct ks_node *n,
 			       const stqr_info *info)
 {
 	struct inode *i;
-	unsigned long hash = 0;
-	unsigned k;
-	for (k = 0; k < 32; k++)
-		hash = hash * 31 + id.bytes[k];
-	i = iget5_locked(sb, hash, inode_match, inode_set, id.bytes);
+	i = iget5_locked(sb, ks_inode_hash(id), inode_match, inode_set, id.bytes);
 	if (!i)
 		return ERR_PTR(-ENOMEM);
 	if (inode_state_read_once(i) & I_NEW) {
@@ -583,6 +587,25 @@ out_resize:
 /* Refresh ordinary reads without discarding locally dirty mmap data. No RPC
  * mutex is held while waiting for writeback or locking page-cache folios.
  */
+/* Metadata refreshes may precede a read (for example dentry revalidation).
+ * page_stamp describes the bytes actually allowed into the page cache and is
+ * only advanced after those bytes are discarded, never by a metadata lookup. */
+static bool ks_pages_still_covered(struct inode *i)
+{
+	struct ks_fs *f = i->i_sb->s_fs_info;
+	struct ks_inode *ki = KS_I(i);
+	bool covered;
+	mutex_lock(&ki->metadata_lock);
+	covered = !memcmp(&ki->page_stamp, &ki->data_stamp, sizeof(ki->page_stamp)) &&
+		(ks_cache_stamp_current(f, ki->id, &ki->data_stamp) ||
+		 (f->lower && ks_cache_stamp_current(f->lower, ki->id, &ki->data_stamp)));
+	if (covered) {
+		WRITE_ONCE(ki->invalidate, false);
+		WRITE_ONCE(ki->revalidate, false);
+	}
+	mutex_unlock(&ki->metadata_lock);
+	return covered;
+}
 static int ks_revalidate_cache(struct file *file)
 {
 	struct inode *i = file_inode(file);
@@ -596,7 +619,7 @@ static int ks_revalidate_cache(struct file *file)
 	saved = enter_fs(f);
 	err = refresh_inode(i);
 	leave_fs(f, saved);
-	if (err || !READ_ONCE(KS_I(i)->invalidate))
+	if (err || ks_pages_still_covered(i))
 		return err;
 	inode_lock(i);
 	filemap_invalidate_lock(mapping);
@@ -605,14 +628,20 @@ static int ks_revalidate_cache(struct file *file)
 		truncate_inode_pages(mapping, 0);
 		saved = enter_fs(f);
 		err = refresh_inode(i);
-		if (!err)
+		if (!err) {
+			mutex_lock(&KS_I(i)->metadata_lock);
+			KS_I(i)->page_stamp = KS_I(i)->data_stamp;
 			WRITE_ONCE(KS_I(i)->invalidate, false);
+			WRITE_ONCE(KS_I(i)->revalidate, false);
+			mutex_unlock(&KS_I(i)->metadata_lock);
+		}
 		leave_fs(f, saved);
 	}
 	filemap_invalidate_unlock(mapping);
 	inode_unlock(i);
 	return err;
 }
+
 static ssize_t ks_read_iter(struct kiocb *iocb, struct iov_iter *to)
 {
 	int err;
@@ -1042,7 +1071,8 @@ out:
 static vm_fault_t ks_filemap_fault(struct vm_fault *vmf)
 {
 	struct file *file = vmf->vma->vm_file;
-	if (READ_ONCE(KS_I(file_inode(file))->invalidate)) {
+	if (READ_ONCE(KS_I(file_inode(file))->invalidate) ||
+	    READ_ONCE(KS_I(file_inode(file))->revalidate)) {
 		int err = ks_revalidate_cache(file);
 		if (err)
 			return vmf_error(err);
@@ -1051,7 +1081,8 @@ static vm_fault_t ks_filemap_fault(struct vm_fault *vmf)
 }
 static vm_fault_t ks_filemap_map_pages(struct vm_fault *vmf, pgoff_t start, pgoff_t end)
 {
-	if (READ_ONCE(KS_I(file_inode(vmf->vma->vm_file))->invalidate))
+	if (READ_ONCE(KS_I(file_inode(vmf->vma->vm_file))->invalidate) ||
+	    READ_ONCE(KS_I(file_inode(vmf->vma->vm_file))->revalidate))
 		return 0;
 	return filemap_map_pages(vmf, start, end);
 }
@@ -1197,13 +1228,22 @@ static const struct address_space_operations ks_aops = {.read_folio = ks_read_fo
 							.readahead = ks_readahead,
 							.writepages = ks_writepages,
 							.dirty_folio = filemap_dirty_folio};
+/* sendfile/splice bypass read_iter but must obey the same foreground metadata
+ * fence before reusing clean page-cache bytes after a notification. */
+static ssize_t ks_splice_read(struct file *file, loff_t *pos, struct pipe_inode_info *pipe,
+			      size_t length, unsigned int flags)
+{
+	int err = ks_revalidate_cache(file);
+	return err ? err : filemap_splice_read(file, pos, pipe, length, flags);
+}
+
 static const struct file_operations ks_file_fops = {
     .owner = THIS_MODULE,
     .open = ks_open_file,
     .release = ks_release_file,
     .llseek = generic_file_llseek,
     .read_iter = ks_read_iter,
-    .splice_read = filemap_splice_read,
+    .splice_read = ks_splice_read,
     .splice_write = iter_file_splice_write,
     .write_iter = ks_write_iter,
     .fsync = ks_fsync,
@@ -1291,7 +1331,11 @@ static const struct inode_operations ks_symlink_ops = {.get_link = ks_get_link,
 void ks_queue_invalidation(struct ks_fs *f, const stqr_object_id *id)
 {
 	if (f->parent) {
-		ks_queue_invalidation(f->parent, NULL);
+		/* A lower inode keeps its stable ID in the overlay. Losing one
+		 * leaf's coverage must not invalidate every unrelated mapped file.
+		 * Only lower-root/disconnect changes lose namespace-wide proofs. */
+		ks_queue_invalidation(f->parent,
+				      id && memcmp(id->bytes, ks_root_id.bytes, 32) ? id : NULL);
 		return;
 	}
 	if (f->lower && id && !memcmp(id->bytes, ks_root_id.bytes, 32))
@@ -1328,39 +1372,39 @@ static bool ks_cached_data_unchanged(struct inode *i, const struct ks_snapshot *
 	mutex_unlock(&KS_I(i)->metadata_lock);
 	return same;
 }
+/* Never refill subscriptions from invalidation. Under pressure a refill evicts
+ * another entry and can keep this worker generating network traffic forever.
+ * A missing namespace proof only unmaps cached pages: the next ordinary read
+ * or mmap fault refreshes metadata and keeps their bytes if the exact data
+ * subscription is still current. Changed/lost data coverage is discarded by
+ * that same foreground path before the bytes can be observed again. */
 static void ks_invalidate_one(struct inode *i)
 {
 	struct address_space *mapping = i->i_mapping;
 	struct ks_snapshot snapshot;
 	int err = ks_snapshot_cached(i->i_sb->s_fs_info, KS_I(i)->id, &snapshot);
-	/* An overlay-root update can invalidate namespace proofs without changing
-	 * this file. Resolve it before taking the mapping lock, otherwise unrelated
-	 * creates repeatedly discard executable pages. This worker runs outside the
-	 * subscription callback/wire lock; never move the RPC under the mapping lock.
-	 * An unavailable or changed snapshot still takes the conservative path. */
-	if (err && S_ISREG(i->i_mode) && READ_ONCE(mapping->nrpages))
-		err = ks_snapshot(i->i_sb->s_fs_info, KS_I(i)->id, &snapshot);
+	bool changed = false;
 	if (!err) {
 		bool same = ks_cached_data_unchanged(i, &snapshot);
 		ks_snapshot_free(&snapshot);
 		if (same)
 			return;
+		changed = true;
 	}
-	/* Do not publish asynchronously copied metadata here: a foreground refresh
-	 * may already have observed a newer truncate. Leave refresh pending until
-	 * foreground access checks the current size before filemap_fault tests EOF.
-	 */
-	WRITE_ONCE(KS_I(i)->invalidate, true);
+	mutex_lock(&KS_I(i)->metadata_lock);
+	WRITE_ONCE(KS_I(i)->revalidate, true);
+	if (changed)
+		WRITE_ONCE(KS_I(i)->invalidate, true);
+	mutex_unlock(&KS_I(i)->metadata_lock);
 	if (S_ISREG(i->i_mode)) {
 		filemap_invalidate_lock(mapping);
 		if (!mapping_tagged(mapping, PAGECACHE_TAG_DIRTY) &&
-		    !mapping_tagged(mapping, PAGECACHE_TAG_WRITEBACK)) {
+		    !mapping_tagged(mapping, PAGECACHE_TAG_WRITEBACK))
 			unmap_mapping_range(mapping, 0, 0, 0);
-			truncate_inode_pages(mapping, 0);
-		}
 		filemap_invalidate_unlock(mapping);
 	}
 }
+
 static void ks_invalidation_worker(struct work_struct *work)
 {
 	struct ks_fs *f = container_of(work, struct ks_fs, invalidation_work);
@@ -1385,6 +1429,21 @@ static void ks_invalidation_worker(struct work_struct *work)
 		if (!count && !all) {
 			kfree(ids);
 			return;
+		}
+		if (!all) {
+			/* The VFS already indexes our stable object IDs. A single leaf
+			 * eviction must not scan every cached inode in a large rootfs. */
+			for (unsigned k = 0; k < count; k++) {
+				struct inode *i = ilookup5(f->sb, ks_inode_hash(ids[k]),
+							       inode_match, ids[k].bytes);
+				if (!i)
+					continue;
+				if (!(inode_state_read_once(i) & I_NEW))
+					ks_invalidate_one(i);
+				iput(i);
+			}
+			cond_resched();
+			continue;
 		}
 		for (;;) {
 			struct inode *batch[32];
@@ -1526,6 +1585,10 @@ static int ks_show_stats(struct seq_file *m, struct dentry *root)
 		   atomic64_read(&f->writeback_ns), atomic64_read(&f->write_snapshot_ns),
 		   atomic64_read(&f->write_prepare_ns), atomic64_read(&f->write_publish_ns),
 		   atomic64_read(&f->write_retries));
+	if (f->lower)
+		seq_printf(m, "\tstqr_lower: lower_cache_hits=%lld lower_cache_misses=%lld lower_rpc_get=%lld lower_rpc_range=%lld\n",
+			   atomic64_read(&f->lower->cache_hits), atomic64_read(&f->lower->cache_misses),
+			   atomic64_read(&f->lower->rpc_gets), atomic64_read(&f->lower->rpc_ranges));
 	return 0;
 }
 static int ks_statfs(struct dentry *d, struct kstatfs *s)
