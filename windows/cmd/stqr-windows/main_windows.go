@@ -333,7 +333,7 @@ func main() {
 		}
 		return
 	}
-	if len(os.Args) == 1 || hasSetupFlag(os.Args[1:]) {
+	if len(os.Args) == 1 || hasSetupFlag(os.Args[1:]) || len(os.Args) == 2 && os.Args[1] == "--ui-smoke-test" {
 		if err := launchWinUI(); err != nil {
 			messageBox(0, "STQR", err.Error(), 0x10)
 			os.Exit(1)
@@ -349,12 +349,4 @@ func main() {
 		}
 		os.Exit(1)
 	}
-}
-func hasSetupFlag(args []string) bool {
-	for _, a := range args {
-		if strings.TrimLeft(a, "-") == "setup" || strings.TrimLeft(a, "-") == "setup=true" {
-			return true
-		}
-	}
-	return false
 }
