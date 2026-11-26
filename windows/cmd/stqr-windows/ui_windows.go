@@ -46,8 +46,10 @@ type uiReply struct {
 	Running  bool         `json:"running"`
 	Saved    bool         `json:"saved"`
 	WinFsp   bool         `json:"winfsp"`
+	ReadOnly bool         `json:"readonly"`
 }
 type uiStateKey struct{}
+type uiAccessKey struct{}
 
 func readUIRequest(input io.Reader) (uiRequest, error) {
 	var request uiRequest
@@ -213,6 +215,7 @@ func runUIRPC() error {
 		defer closeSession()
 		defer close(finished)
 		ctx = context.WithValue(ctx, uiStateKey{}, func() { send(uiReply{Type: "mounted", Running: true}) })
+		ctx = context.WithValue(ctx, uiAccessKey{}, func(readonly bool) { send(uiReply{Type: "access", ReadOnly: readonly}) })
 		send(uiReply{Type: "connecting"})
 		err = mountResult(ctx, mount(ctx, c, request.Initialize, installation, request.Persist, !request.Persist))
 		if err == nil {

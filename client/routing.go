@@ -9,6 +9,9 @@ import (
 )
 
 func objectMessage(m Message) bool {
+	if m.Opcode == BucketInfoGet {
+		return false
+	}
 	return (m.Opcode >= 0x0100 && m.Opcode <= 0x0110 || m.Opcode == BucketObjectList || m.Opcode == ObjectReference) && len(m.Body) >= 80
 }
 

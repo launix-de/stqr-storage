@@ -27,6 +27,14 @@ initialize an empty bucket; it rejects buckets containing other application data
 Readonly mounts never initialize a filesystem. The bucket and user grants must
 already exist on the server.
 
+**Schreibzugriff** is enabled by default: enabled means read/write, disabled
+means read-only. Before opening the filesystem, the client queries the
+authenticated bucket permissions without probing them with a write. A missing
+write grant or a locked bucket forces read-only access and the dialog explains
+the effective mode. This automatic restriction is not saved as a user-selected
+read-only preference, so a later reconnect can use newly granted write access.
+Servers predating the bound-ID metadata query require the bucket name here.
+
 Open the EXE again and select a saved drive. **“Trennen”** unmounts it;
 **“Verbindung entfernen”** also removes the startup entry and saved credentials
 after confirmation.

@@ -94,7 +94,9 @@ func (s *Server) bucketInfo(m client.Message, p principal) ([]byte, error) {
 	if p.connection != nil && p.connection.bucket != nil {
 		auth := p.connection
 		description := auth.bucket.storageDescription()
-		if auth.invalid.Load() || name != description.Name {
+		// A bound client may have opened by ID and never learned the name.
+		// Both selectors remain confined to this authenticated namespace.
+		if auth.invalid.Load() || name != description.Name && name != description.ID {
 			return nil, ErrBucketForbidden
 		}
 		return (BucketInfo{description: description, Permissions: auth.permissions}).MarshalBinary()

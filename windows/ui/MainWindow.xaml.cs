@@ -92,11 +92,13 @@ public sealed partial class MainWindow : Window
         Disconnect.IsEnabled = !profileLoading && (active || pending);
         Forget.IsEnabled = !profileLoading && loadedDrive == SelectedDrive && !pending && workerDrive is null;
         Busy.IsActive = pending; Busy.Visibility = pending ? Visibility.Visible : Visibility.Collapsed;
+        if (!active && !pending) AccessMode.Text = "Mit Schreibberechtigung verbinden wir lesend und schreibend, sonst schreibgeschützt.";
+        else if (pending) AccessMode.Text = "Die Zugriffsrechte werden beim Server geprüft.";
         StatusIcon.Glyph = active ? "\uE73E" : "\uE8B7";
         StatusTitle.Text = pending ? "Verbindung wird aufgebaut" : active ? $"{SelectedDrive} ist verbunden" : "Bereit zum Verbinden";
         StatusDetail.Text = pending ? "STQR öffnet das Dateisystem. Du kannst den Vorgang jederzeit trennen." : active ? "Deine Dateien stehen im Explorer bereit. Beim Trennen werden ausstehende Änderungen synchronisiert." : "Deine Dateien erscheinen als eigenes Laufwerk im Explorer.";
         Server.IsEnabled = Username.IsEnabled = Password.IsEnabled = Bucket.IsEnabled = !active && !pending;
-        ReadOnly.IsEnabled = Remember.IsEnabled = Overlay.IsEnabled = UID.IsEnabled = GID.IsEnabled = !active && !pending;
+        WriteAccess.IsEnabled = Remember.IsEnabled = Overlay.IsEnabled = UID.IsEnabled = GID.IsEnabled = !active && !pending;
         LowerBucket.IsEnabled = WritablePaths.IsEnabled = !active && !pending;
         Drive.IsEnabled = SavedProfiles.IsEnabled = !pending && workerDrive is null;
     }
@@ -130,13 +132,13 @@ public sealed partial class MainWindow : Window
             if (reply.Config is { } config)
             {
                 Server.Text = config.URI; Username.Text = config.Username; Password.Password = config.Password;
-                Bucket.Text = config.Bucket; ReadOnly.IsOn = config.ReadOnly; Remember.IsChecked = reply.Saved;
+                Bucket.Text = config.Bucket; WriteAccess.IsOn = !config.ReadOnly; Remember.IsChecked = reply.Saved;
                 Overlay.IsOn = !string.IsNullOrEmpty(config.LowerBucket); LowerBucket.Text = config.LowerBucket;
                 WritablePaths.Text = string.Join(Environment.NewLine, config.Whitelist ?? []);
                 UID.Value = config.UID is { } uid ? uid : double.NaN;
                 GID.Value = config.GID is { } gid ? gid : double.NaN;
             }
-            else Remember.IsChecked = false;
+            else { Remember.IsChecked = false; WriteAccess.IsOn = true; }
             Forget.Visibility = reply.Saved ? Visibility.Visible : Visibility.Collapsed;
             DriverNotice.IsOpen = !reply.WinFsp;
             loadedDrive = drive;
@@ -179,7 +181,7 @@ public sealed partial class MainWindow : Window
             return (uint)value;
         }
         return new MountConfig { URI = Server.Text.Trim(), Username = Username.Text.Trim(), Password = Password.Password,
-            Bucket = Bucket.Text.Trim(), Drive = SelectedDrive, ReadOnly = ReadOnly.IsOn,
+            Bucket = Bucket.Text.Trim(), Drive = SelectedDrive, ReadOnly = !WriteAccess.IsOn,
             LowerBucket = Overlay.IsOn ? LowerBucket.Text.Trim() : "",
             Whitelist = Overlay.IsOn && !string.IsNullOrWhiteSpace(WritablePaths.Text) ? WritablePaths.Text.Split('\n', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries) : null,
             UID = ID(UID.Value), GID = ID(GID.Value) };
@@ -195,11 +197,18 @@ public sealed partial class MainWindow : Window
             await foreach (var reply in backend.Stream(new Request("mount", Config: config, Persist: Remember.IsChecked == true, Initialize: !config.ReadOnly)))
             {
                 if (reply.Type == "error") throw new InvalidOperationException(reply.Message);
+                if (reply.Type == "access") ApplyAccessMode(reply.ReadOnly);
                 if (reply.Type == "mounted") { SetState(true); await RefreshProfiles(); }
             }
         }
         catch (Exception ex) { ShowError(ex); }
         finally { workerDrive = null; SetState(false); await RefreshAfterAction(); }
+    }
+    private void ApplyAccessMode(bool readOnly)
+    {
+        AccessMode.Text = readOnly
+            ? WriteAccess.IsOn ? "Schreibgeschützt verbunden: Für dieses Bucket fehlen die Schreibrechte oder es ist gesperrt." : "Schreibgeschützt verbunden: Nur lesen wurde ausgewählt."
+            : "Verbunden mit Lese- und Schreibzugriff.";
     }
     private async Task RefreshAfterAction()
     {
@@ -282,10 +291,17 @@ public sealed partial class MainWindow : Window
         if (Notice.IsOpen) throw new Exception("Backend status failed");
         await SmokeProfileLoads();
         Server.Text = "https://storage.example:7419"; Username.Text = "alice"; Password.Password = "temporary-test-secret"; Bucket.Text = "documents";
-        ReadOnly.IsOn = true; Overlay.IsOn = true; LowerBucket.Text = "base"; WritablePaths.Text = "home/";
+        if (!WriteAccess.IsOn) throw new Exception("New connections must default to read/write");
+        WriteAccess.IsOn = true;
+        if (ReadConfig().ReadOnly) throw new Exception("Enabled write access requested a read-only mount");
+        ApplyAccessMode(false);
+        if (!AccessMode.Text.Contains("Lese- und Schreibzugriff")) throw new Exception("Writable mount was displayed as read-only");
+        ApplyAccessMode(true);
+        if (!AccessMode.Text.Contains("fehlen die Schreibrechte")) throw new Exception("Server-enforced read-only mode was not explained");
+        WriteAccess.IsOn = false; Overlay.IsOn = true; LowerBucket.Text = "base"; WritablePaths.Text = "home/";
         var config = ReadConfig();
         if (!config.ReadOnly || config.LowerBucket != "base" || config.Whitelist?.Single() != "home/") throw new Exception("Configuration did not roundtrip");
-        Password.Password = ""; Username.Text = ""; Bucket.Text = ""; Overlay.IsOn = false; ReadOnly.IsOn = false;
+        Password.Password = ""; Username.Text = ""; Bucket.Text = ""; Overlay.IsOn = false; WriteAccess.IsOn = true;
         Server.Text = "http://127.0.0.1:7419";
         AppWindow.Resize(new SizeInt32(700, 800)); await Task.Delay(600);
         if (Grid.GetRow(Aside) != 1) throw new Exception("Compact layout failed");
