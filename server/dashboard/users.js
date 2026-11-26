@@ -9,15 +9,15 @@ export function setupUserViews({connection,currentUsername,escape,toast,showView
  let users=[],createRetry,passwordRetry,selected,deleteRetry,loading=0,pageMeta={},searchTimer;
  const keys=setupS3Keys({connection});
  const traffic=new Map();let trafficPoll;
- const roleRetries=new Map();
+ const roleRetries=new Map(),deleteJobs=new Map();
  const utf8=new TextEncoder();
  function passwordValid(input){input.setCustomValidity(utf8.encode(input.value).length>72?'Das Passwort darf maximal 72 UTF-8-Bytes lang sein.':'');return input.reportValidity()}
  function render({append=false,added=users,loading=false}={}){
  if(loading){if(!users.length)$('user-rows').innerHTML='<tr><td colspan="5" class="empty">Benutzer werden geladen …</td></tr>';return}
   $('user-count').textContent=formatNumber(pageMeta.total??users.length);$('nav-users-count').textContent=formatNumber(pageMeta.all_total??users.length);
   const html=(append?added:users).map(u=>{
-   const self=u.name===currentUsername();
-   return `<tr data-user="${u.id}"><td><div class="user-cell"><span class="user-avatar">${escape(u.name.slice(0,1).toUpperCase())}</span><div><div class="volume-name">${escape(u.name)}${self?'<span class="system-label">DU</span>':''}</div><div class="volume-path">${escape(u.id)}</div></div></div></td><td><select class="user-role-select" data-user-role="${u.id}" ${self?'disabled title="Die eigene Rolle kann nicht geändert werden"':''} aria-label="Rolle für ${escape(u.name)}"><option value="0" ${u.role===0?'selected':''}>User</option><option value="1" ${u.role===1?'selected':''}>Administrator</option></select></td><td data-user-throughput="${u.id}">${userThroughput(u.id)}</td><td><span class="state-badge ${u.disabled?'detached':''}"><i></i>${u.disabled?'Deaktiviert':'Aktiv'}</span></td><td><div class="row-actions"><button class="row-action" data-user-s3="${u.id}">S3-Schlüssel</button><button class="row-action" data-user-password="${u.id}">Passwort ändern</button><button class="row-action danger-action" data-user-delete="${u.id}" ${self?'disabled title="Das eigene Konto kann nicht gelöscht werden"':''}>Löschen</button></div></td></tr>`;
+   const self=u.name===currentUsername(),job=deleteJobs.get(u.id),pending=job?.state==='pending';
+   return `<tr data-user="${u.id}"><td><div class="user-cell"><span class="user-avatar">${escape(u.name.slice(0,1).toUpperCase())}</span><div><div class="volume-name">${escape(u.name)}${self?'<span class="system-label">DU</span>':''}</div><div class="volume-path">${escape(u.id)}</div></div></div></td><td><select class="user-role-select" data-user-role="${u.id}" ${self?'disabled title="Die eigene Rolle kann nicht geändert werden"':pending?'disabled':''} aria-label="Rolle für ${escape(u.name)}"><option value="0" ${u.role===0?'selected':''}>User</option><option value="1" ${u.role===1?'selected':''}>Administrator</option></select></td><td data-user-throughput="${u.id}">${userThroughput(u.id)}</td><td><span class="state-badge ${pending?'draining':job?.state==='failed'?'failed':u.disabled?'detached':''}"><i></i>${pending?'Löschung ausstehend':job?.state==='failed'?'Löschung fehlgeschlagen':u.disabled?'Deaktiviert':'Aktiv'}</span>${job?.state==='failed'?'<div class="error deletion-error">'+escape(job.error)+'</div>':''}</td><td><div class="row-actions"><button class="row-action" data-user-s3="${u.id}" ${pending?'disabled':''}>S3-Schlüssel</button><button class="row-action" data-user-password="${u.id}" ${pending?'disabled':''}>Passwort ändern</button><button class="row-action danger-action" data-user-delete="${u.id}" ${self?'disabled title="Das eigene Konto kann nicht gelöscht werden"':pending?'disabled':''}>${job?.state==='failed'?'Erneut versuchen':'Löschen'}</button></div></td></tr>`;
   }).join('');if(append)$('user-rows').insertAdjacentHTML('beforeend',html);else $('user-rows').innerHTML=html||'<tr><td colspan="5">Keine passenden Benutzer.</td></tr>';
   for(const select of document.querySelectorAll('[data-user-role]'))select.onchange=()=>changeRole(select);
   for(const b of document.querySelectorAll('[data-user-s3]'))b.onclick=()=>keys.open(users.find(u=>u.id===b.dataset.userS3));
@@ -26,7 +26,7 @@ export function setupUserViews({connection,currentUsername,escape,toast,showView
  }
  $('user-rows').closest('.storage-panel').querySelector('.panel-heading').insertAdjacentHTML('beforeend','<label class="search"><span>⌕</span><input id="user-search" placeholder="Name oder ID suchen …" aria-label="Benutzer durchsuchen"></label>');
  const pager=new EndlessList({container:$('user-rows').closest('.storage-panel'),visible:()=>!$('users-view').hidden,fetchPage:(after,limit,query)=>connection().listUsersPage(after,limit,query),entries:page=>page.users,onUpdate:(items,state)=>{if(!state.loading){users=items;pageMeta=state.meta;observeTraffic(state.meta);scheduleTraffic()}render(state)},onError:e=>{$('users-error').textContent=e.message},onLoading:busy=>{$('refresh-users').disabled=busy}});
- async function load(){if(pager.busy)return;loading++;$('users-error').textContent='';return pager.reset($('user-search').value.trim())}
+ async function load(force=false){if(pager.busy&&force!==true)return;loading++;$('users-error').textContent='';return pager.reset($('user-search').value.trim())}
 
  function observeTraffic(page){
   if(!page.node||!page.boot||!page.captured_ns)return;
@@ -90,7 +90,18 @@ export function setupUserViews({connection,currentUsername,escape,toast,showView
   catch(e){if(user.name===currentUsername()&&!e.status){$('user-password-dialog').close();requireLogin('Verbindung beendet. Bitte mit dem neuen Passwort erneut anmelden; bei unklarem Ausgang das bisherige Passwort versuchen.')}else $('user-password-error').textContent=e.message}
   finally{e.submitter.disabled=false}
  });
- function openDelete(id){selected=users.find(u=>u.id===id);if(!selected||selected.name===currentUsername())return;deleteRetry=null;$('user-delete-buckets').checked=true;$('user-delete-description').textContent=`Soll „${selected.name}“ wirklich gelöscht werden?`;$('user-delete-error').textContent='';$('user-delete-dialog').showModal()}
- $('user-delete-form').addEventListener('submit',async e=>{e.preventDefault();const user=selected,deleteBuckets=$('user-delete-buckets').checked,signature=JSON.stringify([user.id,deleteBuckets]);if(deleteRetry?.signature!==signature)deleteRetry={signature,id:newID()};e.submitter.disabled=true;$('user-delete-buckets').disabled=true;$('user-delete-error').textContent='';try{await connection().deleteUser(user.id,deleteRetry.id,deleteBuckets);$('user-delete-dialog').close();toast(`User „${user.name}“ wurde gelöscht.`);await Promise.all([load(),onUserDeleted()])}catch(e){$('user-delete-error').textContent=e.message}finally{e.submitter.disabled=false;$('user-delete-buckets').disabled=false}});
- return {load,clear(){keys.clear();loading++;clearTimeout(trafficPoll);traffic.clear();clearTimeout(searchTimer);pager.clear();pageMeta={};roleRetries.clear();users=[];render()}};
+ function openDelete(id){selected=users.find(u=>u.id===id);if(!selected||selected.name===currentUsername())return;deleteRetry=deleteJobs.get(id)??null;$('user-delete-buckets').checked=deleteRetry?.deleteBuckets??true;$('user-delete-description').textContent=`Soll „${selected.name}“ wirklich gelöscht werden?`;$('user-delete-error').textContent='';$('user-delete-dialog').showModal()}
+ $('user-delete-form').addEventListener('submit',async e=>{
+  e.preventDefault();const user=selected,owner=connection();if(!user||deleteJobs.get(user.id)?.state==='pending')return;
+  const deleteBuckets=$('user-delete-buckets').checked,signature=JSON.stringify([user.id,deleteBuckets]);
+  if(deleteRetry?.signature!==signature)deleteRetry={signature,id:newID()};
+  const job={...deleteRetry,deleteBuckets,state:'pending'};deleteJobs.set(user.id,job);
+  $('user-delete-dialog').close();render();
+  try{await owner.deleteUser(user.id,job.id,deleteBuckets)}catch(err){
+   if(connection()!==owner)return;if(err.status!==404){job.state='failed';job.error=err.message;render();toast(`User „${user.name}“ konnte nicht gelöscht werden: ${err.message}`,true);return;}
+  }
+  if(connection()!==owner)return;deleteJobs.delete(user.id);toast(`User „${user.name}“ wurde gelöscht.`);
+  await Promise.allSettled([load(true),onUserDeleted()]);
+ });
+ return {load,clear(){keys.clear();loading++;clearTimeout(trafficPoll);traffic.clear();clearTimeout(searchTimer);pager.clear();pageMeta={};roleRetries.clear();deleteJobs.clear();users=[];render()}};
 }
