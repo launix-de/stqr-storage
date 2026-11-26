@@ -15,13 +15,30 @@ import (
 	"time"
 )
 
+// WinFsp queries capacity while mounting. The unbounded memory fixture supplies
+// synthetic capacity; native server capacity is checked by the server suite.
+type nativeMountStore struct{ *client.MemoryFilesystemStore }
+
+func (*nativeMountStore) Space(context.Context) (client.BucketSpace, error) {
+	return client.BucketSpace{Total: 1 << 30, Free: 1 << 30, Available: 1 << 30}, nil
+}
+
 // This opt-in test exercises Windows file APIs through the actual WinFsp driver.
 func TestWindowsMountedFilesystem(t *testing.T) {
 	if os.Getenv("STQR_TEST_WINFSP") != "1" {
 		t.Skip("set STQR_TEST_WINFSP=1 on disposable Windows with WinFsp")
 	}
-	f, store := fixture(t)
 	ctx, root := context.Background(), client.FilesystemRootID()
+	store := &nativeMountStore{client.NewMemoryFilesystemStore()}
+	volume, err := client.OpenFilesystem(ctx, store, client.FSOptions{Create: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := New(ctx, volume, false)
+	var capacity fuse.Statfs_t
+	if status := (&Adapter{FS: f}).Statfs("/", &capacity); status != 0 || capacity.Bavail == 0 {
+		t.Fatal("invalid native mount fixture capacity", status, capacity)
+	}
 	info, err := f.Volume.Create(ctx, root, "from-go", 0644, 42, 43, false)
 	if err != nil {
 		t.Fatal(err)
