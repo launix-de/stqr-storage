@@ -553,10 +553,14 @@ echo KSTQR_SANDBOX_BEGIN
 /sandbox @@URL@@ @@BUCKET@@
 echo KSTQR_SANDBOX_END
 cat /proc/self/mountstats
+ls -l /mnt
+# The next probe deliberately restores an earlier already-acknowledged image.
+# Its old channels may correctly retain a lost-durability fence; new reference
+# pins (including opendir) are mutations. Do namespace diagnostics before that
+# destructive test, then verify persistence through the fresh mounts below.
 echo KSTQR_CRASH_RECONNECT_BEGIN
 /crash-reconnect @@URL@@
 echo KSTQR_CRASH_RECONNECT_END
-ls -l /mnt
 if grep 'password=' /proc/mounts; then exit 1; fi
 umount /readonly
 umount /other
