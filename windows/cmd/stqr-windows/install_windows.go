@@ -153,7 +153,11 @@ func (i installation) installExecutable(source string) (string, error) {
 	if err = os.MkdirAll(i.directory, 0700); err != nil {
 		return "", err
 	}
-	dest := filepath.Join(i.directory, fmt.Sprintf("stqr-windows-%x.exe", bundle.Sum(nil)[:8]))
+	// WinUI resource activation requires a stable executable basename.
+	dest := filepath.Join(i.directory, fmt.Sprintf("%x", bundle.Sum(nil)[:8]), "stqr-windows.exe")
+	if err = os.MkdirAll(filepath.Dir(dest), 0700); err != nil {
+		return "", err
+	}
 	if uiErr == nil {
 		if err = installFile(frontend, uiPath(dest), frontendDigest); err != nil {
 			return "", err
