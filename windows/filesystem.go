@@ -26,9 +26,19 @@ type handle struct {
 	active  *sync.RWMutex
 	token   client.RequestID
 }
+
+// FilesystemView keeps ordinary and native-overlay mounts on the shared FS core.
+type FilesystemView interface {
+	client.FilesystemView
+	CollectOrphans(context.Context) error
+	Space(context.Context) (client.BucketSpace, error)
+	Retain(context.Context, client.ObjectID) (client.RequestID, error)
+	Release(context.Context, client.ObjectID, client.RequestID) error
+}
+
 type Filesystem struct {
 	Context  context.Context
-	Volume   *client.Filesystem
+	Volume   FilesystemView
 	ReadOnly bool
 	// Owner for newly created POSIX inodes; the CLI inherits the bucket root.
 	UID, GID    uint32
@@ -38,7 +48,7 @@ type Filesystem struct {
 	directories map[string][]Entry
 }
 
-func New(ctx context.Context, f *client.Filesystem, readonly bool) *Filesystem {
+func New(ctx context.Context, f FilesystemView, readonly bool) *Filesystem {
 	return &Filesystem{Context: ctx, Volume: f, ReadOnly: readonly, handles: map[uint64]handle{}, directories: map[string][]Entry{}}
 }
 func clean(p string) (string, error) {
@@ -153,6 +163,11 @@ func (f *Filesystem) Open(p string, o OpenOptions, mode uint32) (uint64, error) 
 			_ = f.Volume.Release(f.Context, info.ID, token)
 		}
 	}()
+	if o.Write {
+		if e = f.Volume.PrepareWrite(f.Context, info.ID); e != nil {
+			return 0, e
+		}
+	}
 	if o.Truncate {
 		if !o.Write {
 			return 0, syscall.EACCES
@@ -398,7 +413,13 @@ func (f *Filesystem) Link(from, to string) error {
 	if e != nil {
 		return e
 	}
-	_, e = f.Volume.Link(f.Context, parent, name, info.ID)
+	links, ok := f.Volume.(interface {
+		Link(context.Context, client.ObjectID, string, client.ObjectID) (client.FSInfo, error)
+	})
+	if !ok {
+		return syscall.EOPNOTSUPP
+	}
+	_, e = links.Link(f.Context, parent, name, info.ID)
 	return e
 }
 func (f *Filesystem) Symlink(target, p string) error {
@@ -413,6 +434,12 @@ func (f *Filesystem) Symlink(target, p string) error {
 	if e != nil {
 		return e
 	}
-	_, e = f.Volume.Symlink(f.Context, parent, name, target, f.UID, gid)
+	links, ok := f.Volume.(interface {
+		Symlink(context.Context, client.ObjectID, string, string, uint32, uint32) (client.FSInfo, error)
+	})
+	if !ok {
+		return syscall.EOPNOTSUPP
+	}
+	_, e = links.Symlink(f.Context, parent, name, target, f.UID, gid)
 	return e
 }

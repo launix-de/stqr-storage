@@ -1,11 +1,12 @@
 # Filesystem client parity and production-readiness audit
 
 This audit compares the Linux kernel client (`kernel/kstqr`), Linux FUSE adapter
-(`client`) and Windows WinFsp adapter (`windows`). The frozen integration baseline
-is `969f705` on 2026-11-26. It includes open-PR functionality, especially the
-cooperative reference/reclamation protocol; those features are not all in master
-`18216ce`. A green result for the integration does not make an older master
-binary or an older mounted client equivalent. Upgrade all writers together.
+(`client`) and Windows WinFsp adapter (`windows`). The original audit used the
+frozen integration baseline `969f705` on 2026-11-26. Its reference/reclamation
+protocol was not all present in the older master `18216ce`; it was subsequently
+merged. The matrix below also includes the Windows follow-up in PR #50.
+A green result does not make an older mounted binary equivalent. Upgrade all
+writers together.
 
 No finite test run proves bug freedom. The supported common file operations are
 tested below; platform differences and remaining production limits are explicit.
@@ -27,15 +28,15 @@ into the host kernel for this audit.
 | Create hardlinks | Yes | Yes | Explicitly unsupported by the current WinFsp adapter |
 | Access existing Linux hardlinks | Yes | Yes | Shared inode/content |
 | FIFO and Unix socket nodes | Yes, IPC local to a mount | Yes, IPC local to a mount | No equivalent native creation/open support |
-| `user.*` / privileged `trusted.*` xattrs | Yes | Yes | Preserved in shared inodes; xattr callbacks absent |
+| `user.*` / privileged `trusted.*` xattrs | Yes | Yes | `user.*` callbacks; privileged `trusted.*` access rejected |
 | POSIX ACLs, `security.*` / capability xattrs | Unsupported | Unsupported | No full Windows ACL/security-descriptor implementation |
 | Character/block special files inside FS format | Unsupported | Unsupported | Unsupported |
 | Explicit filesystem durability barrier | fsync/fdatasync/msync/syncfs | fsync/fsyncdir | Fsync/Fsyncdir callbacks |
 | Ordinary close is a durability barrier | No blanket guarantee | No | No |
 | Shared writable mmap | Supported within a mount, with writeback | Writable opens use direct I/O; unsupported | No distributed writable-mapping coherence guarantee |
-| Native lower/upper overlay view | Yes | Yes | No constructor/mount option implemented |
-| Overlay symlink/xattr reads | Yes | Yes | No native overlay view |
-| Overlay hardlink/special-file creation and xattr mutation | Unsupported | Unsupported | No native overlay view |
+| Native lower/upper overlay view | Yes | Yes | Shared overlay core, CLI and WinUI options |
+| Overlay symlink/xattr reads | Yes | Yes | Shared overlay read callbacks |
+| Overlay hardlink/special-file creation and xattr mutation | Unsupported | Unsupported | Unsupported |
 | Native bucket-COW snapshots | Server-owned objects, transparent | Server-owned objects, transparent | Server-owned objects, transparent |
 | Subscription/cache invalidation | Separate reader, bounded metadata cache and page invalidation | Subscription cache and FUSE invalidation | Shared subscription cache and WinFsp directory notifications; native cache timeouts zero |
 | Transport failure | Hard wait/reconnect; interrupt/forced-unmount cancellation | Go client request/reconnect semantics | Go client request/reconnect semantics |
@@ -100,8 +101,7 @@ Production release constraints:
 - Pin the complete server and client build set, including the reference protocol
   capability and format revisions. Do not infer compatibility from the label
   `master` while open PRs are deployed in the cluster.
-- The matrix is not full feature parity. Windows native overlays/xattrs/hardlink
-  creation, ACLs and distributed file locks are not implemented. Shared writable
+- The matrix is not full feature parity. Windows hardlink creation, privileged xattr access, ACLs and distributed file locks are not implemented. Shared writable
   mmap coherence across independent mounts is not promised.
 - VM disk images or databases accessed concurrently from multiple mounts require
   external exclusive ownership. Successful per-inode CAS and subscriptions do
@@ -118,3 +118,22 @@ Production release constraints:
 These are release criteria and known limits, not newly invented corruption
 findings. Passing the listed checks supports a bounded trial with the tested
 builds; it does not justify an unconditional bug-free or production-ready claim.
+
+## WinUI and parity follow-up
+
+The Windows follow-up replaces the default setup frontend with native WinUI 3,
+while retaining the Go CLI, DPAPI profiles and WinFsp backend. The Windows adapter
+now accepts the common filesystem-view interface, enforces `PrepareWrite` at
+writable open, exposes `user.*` extended attributes, and mounts native overlays
+with their persisted whitelist. The overlay core has an explicit readonly option
+that rejects copy-up/mutation and suppresses automatic orphan cleanup. Windows
+also enables WinFsp delete-access preflight: readonly/whitelist failures are
+returned before Windows acknowledges deletion, because the driver ignores unlink
+errors during its later cleanup callback. Windows uses the same accepted-write mode as FUSE, with explicit durability barriers and
+a final bounded synchronization during orderly unmount.
+
+These changes do not add native Windows hardlink creation, POSIX IPC nodes,
+Windows ACL translation, distributed application locks or coherent shared writable
+mappings across independent clients. Those require capabilities or protocols
+beyond adapter parity; supported operations retain the existing on-disk format.
+Validation of this follow-up is recorded separately in its PR.

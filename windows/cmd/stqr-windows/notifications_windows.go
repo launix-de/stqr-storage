@@ -11,16 +11,19 @@ import (
 	"time"
 )
 
-func watchWindowsChanges(ctx context.Context, store *client.SubscriptionStore, fs *winfs.Filesystem, host *fuse.FileSystemHost) func() {
+func watchWindowsChanges(ctx context.Context, stores []*client.SubscriptionStore, fs *winfs.Filesystem, host *fuse.FileSystemHost) func() {
 	ctx, cancel := context.WithCancel(ctx)
 	pending := make(chan struct{}, 1)
 	finished := make(chan struct{})
-	unwatch := store.WatchUpdates(func(client.ObjectID) {
-		select {
-		case pending <- struct{}{}:
-		default:
-		}
-	})
+	var unwatch []func()
+	for _, store := range stores {
+		unwatch = append(unwatch, store.WatchUpdates(func(client.ObjectID) {
+			select {
+			case pending <- struct{}{}:
+			default:
+			}
+		}))
+	}
 	go func() {
 		defer close(finished)
 		for {
@@ -52,5 +55,11 @@ func watchWindowsChanges(ctx context.Context, store *client.SubscriptionStore, f
 			}
 		}
 	}()
-	return func() { unwatch(); cancel(); <-finished }
+	return func() {
+		for _, stop := range unwatch {
+			stop()
+		}
+		cancel()
+		<-finished
+	}
 }

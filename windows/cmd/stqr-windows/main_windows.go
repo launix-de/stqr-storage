@@ -6,6 +6,7 @@ package main
 import (
 	"context"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -24,6 +25,15 @@ import (
 )
 
 var errMountUnavailable = errors.New("Windows mount unavailable")
+var errFinalSync = errors.New("final filesystem sync failed")
+
+// Cancellation may end a mount normally, but must never hide a failed barrier.
+func mountResult(ctx context.Context, err error) error {
+	if ctx.Err() != nil && !errors.Is(err, errFinalSync) {
+		return nil
+	}
+	return err
+}
 
 func run() error {
 	flags := flag.NewFlagSet("stqr-windows", flag.ContinueOnError)
@@ -31,6 +41,8 @@ func run() error {
 	username := flags.String("username", "", "STQR username")
 	bucket := flags.String("bucket", "", "filesystem bucket name or ID")
 	ro := flags.Bool("readonly", false, "readonly mount")
+	lowerBucket := flags.String("lower-bucket", "", "optional readonly native-overlay base bucket")
+	whitelist := flags.String("writable-paths", "", "newline-separated writable overlay paths; directories end in /")
 	initialize := flags.Bool("init", false, "initialize an empty filesystem bucket")
 	stdin := flags.Bool("password-stdin", false, "read password from redirected standard input")
 	uid := flags.Uint64("uid", ^uint64(0), "Unix owner for new files (default: root inode owner)")
@@ -39,7 +51,7 @@ func run() error {
 	uninstall := flags.String("uninstall", "", "remove saved drive and unmount, e.g. S:")
 	saved := flags.String("saved-drive", "", "mount a saved drive, e.g. S:")
 	background := flags.Bool("background", false, "run saved drive in background, retrying initial connection")
-	setup := flags.Bool("setup", false, "open setup dialog")
+	flags.Bool("setup", false, "open WinUI configuration")
 	flags.Usage = func() {
 		fmt.Fprintln(flags.Output(), "Usage: stqr-windows [--setup] | --uri URL --username USER --bucket BUCKET [--install] S: | --uninstall S:\nWithout arguments, opens the setup dialog. WinFsp is required.")
 		flags.PrintDefaults()
@@ -61,41 +73,7 @@ func run() error {
 		return fmt.Errorf("--background requires --saved-drive")
 	}
 	var c mountConfig
-	gui := len(os.Args) == 1 || *setup
-	forget := false
-	if gui {
-		hideConsole()
-		c = mountConfig{URI: *uri, Username: *username, Bucket: *bucket, Drive: "S:", ReadOnly: *ro}
-		if *saved != "" {
-			c.Drive = *saved
-		}
-		remembered := false
-		if old, err := installation.load(c.Drive); err == nil {
-			c = old
-			remembered = true
-		}
-		choice, err := showSetup(c, remembered)
-		if err != nil {
-			return err
-		}
-		if choice.cancel {
-			return nil
-		}
-		c = choice.config
-		if choice.remove {
-			if e = installation.remove(c.Drive); e != nil {
-				return e
-			}
-			if e = stopDrive(c.Drive); e != nil {
-				return e
-			}
-			messageBox(0, "STQR", "Autostart und gespeicherte Zugangsdaten entfernt. Das Laufwerk wird getrennt.", 0)
-			return nil
-		}
-		*install = choice.persist
-		forget = !*install
-		*initialize = !c.ReadOnly
-	} else if *saved != "" {
+	if *saved != "" {
 		c, e = installation.load(*saved)
 		if e != nil {
 			return e
@@ -104,7 +82,14 @@ func run() error {
 		if flags.NArg() != 1 || *username == "" || *bucket == "" {
 			return fmt.Errorf("username, bucket and drive letter required; use --setup for the dialog")
 		}
-		c = mountConfig{URI: *uri, Username: *username, Bucket: *bucket, Drive: flags.Arg(0), ReadOnly: *ro}
+		c = mountConfig{URI: *uri, Username: *username, Bucket: *bucket, Drive: flags.Arg(0), ReadOnly: *ro, LowerBucket: *lowerBucket}
+		if *whitelist != "" {
+			for _, line := range strings.Split(*whitelist, "\n") {
+				if line = strings.TrimSpace(line); line != "" {
+					c.Whitelist = append(c.Whitelist, line)
+				}
+			}
+		}
 		for _, v := range []uint64{*uid, *gid} {
 			if v != ^uint64(0) && v > uint64(^uint32(0)) {
 				return fmt.Errorf("uid/gid must fit into 32 bits")
@@ -179,10 +164,13 @@ func run() error {
 		defer log.Close()
 		for {
 			e = mount(ctx, c, false, installation, false, false)
-			if e == nil || ctx.Err() != nil {
+			if e == nil {
 				return nil
 			}
 			fmt.Fprintf(log, "%s %v\n", time.Now().Format(time.RFC3339), e)
+			if ctx.Err() != nil {
+				return mountResult(ctx, e)
+			}
 			if errors.Is(e, errMountUnavailable) {
 				return e
 			}
@@ -193,11 +181,8 @@ func run() error {
 			}
 		}
 	}
-	e = mount(ctx, c, *initialize, installation, *install, forget)
-	if ctx.Err() != nil {
-		return nil
-	}
-	return e
+	e = mount(ctx, c, *initialize, installation, *install, false)
+	return mountResult(ctx, e)
 }
 
 func mount(ctx context.Context, c mountConfig, initialize bool, installation installation, persist, forget bool) (result error) {
@@ -220,7 +205,15 @@ func mount(ctx context.Context, c mountConfig, initialize bool, installation ins
 	}
 	defer conn.Close()
 	store := client.NewSubscriptionStore(conn, 8<<20)
+	store.EnableAcceptedWrites()
 	defer store.Close()
+	defer func() {
+		syncCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if err := conn.Sync(syncCtx); err != nil {
+			result = errors.Join(result, fmt.Errorf("%w: %w", errFinalSync, err))
+		}
+	}()
 	options := client.FSOptions{Create: initialize, ReadOnly: c.ReadOnly}
 	if c.UID != nil {
 		options.UID = *c.UID
@@ -241,7 +234,34 @@ func mount(ctx context.Context, c mountConfig, initialize bool, installation ins
 			return e
 		}
 	}
-	fs, e := client.OpenFilesystem(ctx, store, options)
+	stores := []*client.SubscriptionStore{store}
+	var fs winfs.FilesystemView
+	if c.LowerBucket == "" {
+		fs, e = client.OpenFilesystem(ctx, store, options)
+	} else {
+		var lowerID client.ID
+		var err error
+		if decoded, decodeErr := hex.DecodeString(c.LowerBucket); decodeErr == nil && len(decoded) == len(lowerID) {
+			copy(lowerID[:], decoded)
+		} else {
+			lowerID, err = nbd.ResolveBucket(ctx, nbd.Config{URL: c.httpURI(), Username: c.Username, Password: c.Password}, c.LowerBucket)
+		}
+		if err != nil {
+			return err
+		}
+		if lowerID == id {
+			return fmt.Errorf("Basis und beschreibbares Bucket müssen verschieden sein")
+		}
+		lowerConn, err := client.Dial(ctx, c.URI, c.Username, c.Password, lowerID, "fs")
+		if err != nil {
+			return err
+		}
+		defer lowerConn.Close()
+		lowerStore := client.NewSubscriptionStore(lowerConn, 8<<20)
+		defer lowerStore.Close()
+		stores = append(stores, lowerStore)
+		fs, e = client.OpenOverlayFilesystem(ctx, lowerStore, store, client.OverlayOptions{Create: initialize, ReadOnly: c.ReadOnly, LowerBucketID: lowerID, Whitelist: c.Whitelist})
+	}
 	if e != nil {
 		return e
 	}
@@ -276,7 +296,8 @@ func mount(ctx context.Context, c mountConfig, initialize bool, installation ins
 	host := fuse.NewFileSystemHost(adapter)
 	host.SetCapCaseInsensitive(false)
 	host.SetCapReaddirPlus(true)
-	stopNotifications := watchWindowsChanges(ctx, store, adapter.FS, host)
+	host.SetCapDeleteAccess(true)
+	stopNotifications := watchWindowsChanges(ctx, stores, adapter.FS, host)
 	defer stopNotifications()
 	opts := []string{"-o", "volname=STQR,uid=-1,gid=-1,umask=077,FileInfoTimeout=0,DirInfoTimeout=0,attr_timeout=0,entry_timeout=0,negative_timeout=0"}
 	if c.ReadOnly {
@@ -284,6 +305,7 @@ func mount(ctx context.Context, c mountConfig, initialize bool, installation ins
 	}
 	done := make(chan struct{})
 	defer close(done)
+	adapter.OnReady = func() { go waitForUIDrive(ctx, done, c.Drive) }
 	go func() {
 		select {
 		case <-ctx.Done():
@@ -321,12 +343,24 @@ func mount(ctx context.Context, c mountConfig, initialize bool, installation ins
 	if !host.Mount(c.Drive, opts) {
 		return fmt.Errorf("%w: mount failed; check WinFsp installation and drive availability", errMountUnavailable)
 	}
-	syncCtx, syncCancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer syncCancel()
-	return conn.Sync(syncCtx)
+	return nil
 }
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "--ui-rpc" {
+		if err := runUIRPC(); err != nil {
+			_ = json.NewEncoder(os.Stdout).Encode(uiReply{Version: uiProtocolVersion, Type: "error", Message: err.Error()})
+			os.Exit(1)
+		}
+		return
+	}
+	if len(os.Args) == 1 || hasSetupFlag(os.Args[1:]) {
+		if err := launchWinUI(); err != nil {
+			messageBox(0, "STQR", err.Error(), 0x10)
+			os.Exit(1)
+		}
+		return
+	}
 	attachCLIConsole()
 	if e := run(); e != nil && !errors.Is(e, flag.ErrHelp) {
 		if len(os.Args) == 1 || hasSetupFlag(os.Args[1:]) {

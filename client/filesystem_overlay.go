@@ -16,6 +16,7 @@ import (
 
 type OverlayOptions struct {
 	Create        bool
+	ReadOnly      bool
 	LowerBucketID BucketID
 	// nil adopts an existing upper's policy. Directory rules end in '/'.
 	Whitelist []string
@@ -39,7 +40,7 @@ type OverlayFilesystem struct {
 var errOverlayUnchanged = errors.New("overlay unchanged")
 
 func OpenOverlayFilesystem(ctx context.Context, lowerStore, upperStore FilesystemStore, opt OverlayOptions) (*OverlayFilesystem, error) {
-	if lowerStore == nil || upperStore == nil || opt.LowerBucketID == (BucketID{}) {
+	if lowerStore == nil || upperStore == nil || opt.LowerBucketID == (BucketID{}) || opt.Create && opt.ReadOnly {
 		return nil, syscall.EINVAL
 	}
 	if bucket, known := filesystemStoreBucket(lowerStore); known && bucket != opt.LowerBucketID {
@@ -83,7 +84,7 @@ func OpenOverlayFilesystem(ctx context.Context, lowerStore, upperStore Filesyste
 	}
 	o := &OverlayFilesystem{lower: lower, lowerID: opt.LowerBucketID, paths: map[ObjectID]string{}}
 	upperStore = filesystemDeferredStore(upperStore)
-	o.upper = &Filesystem{directoryCache: newFilesystemDirectoryCache(), store: upperStore, lower: lower, directoryMemoryLimit: 64 << 20}
+	o.upper = &Filesystem{directoryCache: newFilesystemDirectoryCache(), store: upperStore, lower: lower, directoryMemoryLimit: 64 << 20, readOnly: opt.ReadOnly}
 	o.upper.orphanCollector = o.CollectOrphans
 	_, _, _, err = o.state(ctx)
 	if errors.Is(err, ErrNotFound) && opt.Create {
@@ -116,7 +117,7 @@ func OpenOverlayFilesystem(ctx context.Context, lowerStore, upperStore Filesyste
 	if opt.Whitelist != nil && !equalStrings(policy, s.policy) {
 		return nil, errors.New("client: whitelist differs from persisted overlay policy; use a separate upper bucket")
 	}
-	if _, managed := o.upper.managedReferences(); managed {
+	if _, managed := o.upper.managedReferences(); managed && !opt.ReadOnly {
 		o.upper.scheduleOrphanCleanup()
 	}
 	return o, nil
@@ -236,6 +237,9 @@ func (o *OverlayFilesystem) publish(ctx context.Context, s *overlayState) error 
 	return err
 }
 func (o *OverlayFilesystem) edit(ctx context.Context, fn func(*overlayState) error) error {
+	if o.upper.readOnly {
+		return syscall.EROFS
+	}
 	for attempt := 0; attempt < 128; attempt++ {
 		s, _, _, err := o.state(ctx)
 		if err != nil {
@@ -514,6 +518,9 @@ func overlayChildPath(parent, name string) string {
 	return parent + "/" + name
 }
 func (o *OverlayFilesystem) writable(ctx context.Context, s *overlayState, rootKey string, id ObjectID) (string, error) {
+	if o.upper.readOnly {
+		return "", syscall.EROFS
+	}
 	info, err := o.stat(ctx, s, rootKey, id)
 	if err != nil {
 		return "", err

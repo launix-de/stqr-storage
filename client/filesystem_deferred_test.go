@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -414,5 +415,81 @@ func TestDeferredReferenceKeepsOfflineMaintenanceDurable(t *testing.T) {
 		} else if accepted || len(out.Body) != 129 {
 			t.Fatalf("offline action%d weakened", action)
 		}
+	}
+}
+
+// Overlay construction must retain both the native deferred wrapper and the
+// readonly upper flag when those independent features are integrated.
+func TestOverlayNativeDeferredReadOnlyAndSync(t *testing.T) {
+	const caps = CapabilityDurability | CapabilityConnectionSync | CapabilityObjectReferences | CapabilityAcceptedReferences
+	for _, cached := range []bool{false, true} {
+		name := "direct"
+		if cached {
+			name = "subscription"
+		}
+		t.Run(name, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			lowerStore := NewMemoryFilesystemStore()
+			lower, err := OpenFilesystem(ctx, lowerStore, FSOptions{Create: true})
+			if err != nil {
+				t.Fatal(err)
+			}
+			node, err := lower.Create(ctx, FilesystemRootID(), "allowed", 0600, 42, 43, false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err = lower.WriteAt(ctx, node.ID, []byte("lower"), 0); err != nil {
+				t.Fatal(err)
+			}
+			p, host := newDeferredFSPeer(t, caps)
+			c := dialConnectionTest(t, host)
+			var upperStore FilesystemStore = c
+			if cached {
+				cache := NewSubscriptionStore(c, 0)
+				defer cache.Close()
+				upperStore = cache
+			}
+			overlay, err := OpenOverlayFilesystem(ctx, lowerStore, upperStore, OverlayOptions{Create: true, LowerBucketID: BucketID{1}, Whitelist: []string{"allowed"}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err = overlay.WriteAt(ctx, node.ID, []byte("upper"), 0); err != nil {
+				t.Fatal(err)
+			}
+			data := make([]byte, 5)
+			if _, err = overlay.ReadAt(ctx, node.ID, data, 0); err != nil || string(data) != "upper" {
+				t.Fatal("copy-up visibility", string(data), err)
+			}
+			if _, err = lower.ReadAt(ctx, node.ID, data, 0); err != nil || string(data) != "lower" {
+				t.Fatal("copy-up mutated lower", string(data), err)
+			}
+			if p.accepted.Load() == 0 || p.durable.Load() != 0 || p.fences.Load() != 0 {
+				t.Fatal("overlay did not defer native writes", p.accepted.Load(), p.durable.Load(), p.fences.Load())
+			}
+			if err = overlay.Sync(ctx, FilesystemRootID()); err != nil {
+				t.Fatal(err)
+			}
+			if p.fences.Load() != 1 {
+				t.Fatal("overlay Sync did not fence upper", p.fences.Load())
+			}
+			before := p.accepted.Load()
+			readonly, err := OpenOverlayFilesystem(ctx, lowerStore, upperStore, OverlayOptions{ReadOnly: true, LowerBucketID: BucketID{1}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err = readonly.WriteAt(ctx, node.ID, []byte("wrong"), 0); !errors.Is(err, syscall.EROFS) {
+				t.Fatal("readonly copy-up/write permitted", err)
+			}
+			if err = readonly.CollectOrphans(ctx); err != nil {
+				t.Fatal(err)
+			}
+			if _, err = readonly.ReadAt(ctx, node.ID, data, 0); err != nil || string(data) != "upper" {
+				t.Fatal("readonly upper visibility", string(data), err)
+			}
+			if p.accepted.Load() != before || p.durable.Load() != 0 || p.fences.Load() != 1 {
+				t.Fatal("readonly open/write/cleanup issued mutation or fence")
+			}
+		})
 	}
 }

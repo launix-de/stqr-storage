@@ -1,0 +1,309 @@
+// SPDX-License-Identifier: GPL-3.0-only
+using Microsoft.UI;
+using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Media.Imaging;
+using System.Runtime.InteropServices.WindowsRuntime;
+using Windows.Graphics;
+using Windows.Graphics.Imaging;
+using Windows.Storage;
+
+namespace Stqr.UI;
+
+public sealed partial class MainWindow : Window
+{
+    private readonly Backend backend;
+    private readonly string initialDrive;
+    private readonly bool smoke;
+    private bool loading;
+    private bool connecting;
+    private bool mounted;
+    private bool profileLoading;
+    private long profileLoadGeneration;
+    private string? loadedDrive;
+    private string? workerDrive;
+    private string SelectedDrive => Drive.SelectedItem as string ?? "S:";
+
+    public MainWindow(Backend backend, string drive, bool smoke)
+    {
+        this.backend = backend; initialDrive = drive; this.smoke = smoke;
+        InitializeComponent();
+        Title = "STQR · Laufwerke";
+        ExtendsContentIntoTitleBar = true;
+        SetTitleBar(TitleBar);
+        Drive.ItemsSource = Enumerable.Range('A', 26).Select(c => $"{(char)c}:").ToArray();
+        Drive.SelectedItem = drive;
+        Drive.SelectionChanged += async (_, _) => { if (!loading) await LoadDrive(); };
+        Root.SizeChanged += (_, e) => Responsive(e.NewSize.Width);
+        Root.Loaded += Loaded;
+        var area = Microsoft.UI.Windowing.DisplayArea.GetFromWindowId(AppWindow.Id, Microsoft.UI.Windowing.DisplayAreaFallback.Primary).WorkArea;
+        var size = new SizeInt32(Math.Min(1060, area.Width - 32), Math.Min(940, area.Height - 32));
+        AppWindow.Resize(size);
+        AppWindow.Move(new PointInt32(area.X + (area.Width - size.Width) / 2, area.Y + (area.Height - size.Height) / 2));
+    }
+
+    private async void Loaded(object sender, RoutedEventArgs e)
+    {
+        Root.Loaded -= Loaded;
+        try
+        {
+            await RefreshProfiles();
+            loading = true; Drive.SelectedItem = initialDrive; loading = false;
+            await LoadDrive();
+            if (smoke) await SmokeTest();
+        }
+        catch (Exception ex)
+        {
+            ShowError(ex);
+            if (smoke)
+            {
+                var directory = Environment.GetEnvironmentVariable("STQR_UI_SMOKE_DIR") ?? Path.GetTempPath();
+                await File.WriteAllTextAsync(Path.Combine(directory, "winui-smoke-error.txt"), ex.ToString());
+                Environment.Exit(1);
+            }
+        }
+    }
+    private void Responsive(double width)
+    {
+        Body.Width = Math.Max(0, Math.Min(940, width - 64));
+        bool narrow = width < 850;
+        ContentGrid.ColumnSpacing = narrow ? 0 : 24;
+        Grid.SetRow(Forget, width < 650 ? 1 : 0);
+        Grid.SetColumnSpan(Forget, width < 650 ? 3 : 1);
+        ContentGrid.ColumnDefinitions[1].Width = narrow ? new GridLength(0) : new GridLength(260);
+        if (ContentGrid.RowDefinitions.Count == 0)
+        {
+            ContentGrid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+            ContentGrid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+        }
+        Grid.SetColumn(Aside, narrow ? 0 : 1);
+        Grid.SetRow(Aside, narrow ? 1 : 0);
+        Aside.Margin = narrow ? new Thickness(0, 24, 0, 0) : new Thickness(0);
+    }
+    private void ShowError(Exception ex)
+    {
+        Notice.Severity = InfoBarSeverity.Error; Notice.Title = "Verbindung nicht möglich";
+        Notice.Message = ex.Message; Notice.IsOpen = true;
+    }
+    private void SetState(bool active, bool pending = false)
+    {
+        mounted = active; connecting = pending;
+        ConnectButton.IsEnabled = !active && !pending && !profileLoading && loadedDrive == SelectedDrive && workerDrive is null;
+        Disconnect.IsEnabled = !profileLoading && (active || pending);
+        Forget.IsEnabled = !profileLoading && loadedDrive == SelectedDrive && !pending && workerDrive is null;
+        Busy.IsActive = pending; Busy.Visibility = pending ? Visibility.Visible : Visibility.Collapsed;
+        StatusIcon.Glyph = active ? "\uE73E" : "\uE8B7";
+        StatusTitle.Text = pending ? "Verbindung wird aufgebaut" : active ? $"{SelectedDrive} ist verbunden" : "Bereit zum Verbinden";
+        StatusDetail.Text = pending ? "STQR öffnet das Dateisystem. Du kannst den Vorgang jederzeit trennen." : active ? "Deine Dateien stehen im Explorer bereit. Beim Trennen werden ausstehende Änderungen synchronisiert." : "Deine Dateien erscheinen als eigenes Laufwerk im Explorer.";
+        Server.IsEnabled = Username.IsEnabled = Password.IsEnabled = Bucket.IsEnabled = !active && !pending;
+        ReadOnly.IsEnabled = Remember.IsEnabled = Overlay.IsEnabled = UID.IsEnabled = GID.IsEnabled = !active && !pending;
+        LowerBucket.IsEnabled = WritablePaths.IsEnabled = !active && !pending;
+        Drive.IsEnabled = SavedProfiles.IsEnabled = !pending && workerDrive is null;
+    }
+    private async Task RefreshProfiles()
+    {
+        var reply = await backend.Send(new Request("status"));
+        loading = true;
+        SavedProfiles.ItemsSource = (reply.Profiles ?? []).OrderBy(p => p.Drive).ToArray();
+        SavedProfiles.Visibility = reply.Profiles?.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
+        loading = false;
+        DriverNotice.IsOpen = !reply.WinFsp;
+    }
+    private void InvalidateProfileLoad()
+    {
+        profileLoadGeneration++;
+        profileLoading = false;
+    }
+    private async Task LoadDrive(Func<string, Task<Reply>>? load = null)
+    {
+        if (workerDrive is not null || connecting) return;
+        var drive = SelectedDrive;
+        var generation = ++profileLoadGeneration;
+        profileLoading = true;
+        loadedDrive = null;
+        SetState(false);
+        bool Current() => generation == profileLoadGeneration && drive == SelectedDrive && workerDrive is null && !connecting;
+        try
+        {
+            var reply = await (load is null ? backend.Send(new Request("load", drive)) : load(drive));
+            if (!Current()) return;
+            if (reply.Config is { } config)
+            {
+                Server.Text = config.URI; Username.Text = config.Username; Password.Password = config.Password;
+                Bucket.Text = config.Bucket; ReadOnly.IsOn = config.ReadOnly; Remember.IsChecked = reply.Saved;
+                Overlay.IsOn = !string.IsNullOrEmpty(config.LowerBucket); LowerBucket.Text = config.LowerBucket;
+                WritablePaths.Text = string.Join(Environment.NewLine, config.Whitelist ?? []);
+                UID.Value = config.UID is { } uid ? uid : double.NaN;
+                GID.Value = config.GID is { } gid ? gid : double.NaN;
+            }
+            else Remember.IsChecked = false;
+            Forget.Visibility = reply.Saved ? Visibility.Visible : Visibility.Collapsed;
+            DriverNotice.IsOpen = !reply.WinFsp;
+            loadedDrive = drive;
+            SetState(reply.Running);
+        }
+        catch (Exception ex) { if (Current()) ShowError(ex); }
+        finally
+        {
+            if (generation == profileLoadGeneration)
+            {
+                profileLoading = false;
+                SetState(mounted, connecting);
+            }
+        }
+    }
+    private async void SavedChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (loading || SavedProfiles.SelectedItem is not Profile profile) return;
+        loading = true; Drive.SelectedItem = profile.Drive; loading = false;
+        await LoadDrive();
+    }
+    private void OverlayChanged(object sender, RoutedEventArgs e)
+    {
+        if (OverlayFields is not null) OverlayFields.Visibility = Overlay.IsOn ? Visibility.Visible : Visibility.Collapsed;
+    }
+    private MountConfig ReadConfig()
+    {
+        if (!Uri.TryCreate(Server.Text.Trim(), UriKind.Absolute, out var uri) ||
+            !new[] { "http", "https", "ws", "wss" }.Contains(uri.Scheme) || uri.Host.Length == 0 || uri.UserInfo.Length != 0)
+        { Server.Focus(FocusState.Programmatic); throw new InvalidOperationException("Bitte eine Server-Adresse ohne eingebettete Zugangsdaten eingeben."); }
+        if (string.IsNullOrWhiteSpace(Username.Text)) { Username.Focus(FocusState.Programmatic); throw new InvalidOperationException("Bitte einen Benutzernamen eingeben."); }
+        if (Password.Password.Length == 0) { Password.Focus(FocusState.Programmatic); throw new InvalidOperationException("Bitte ein Passwort eingeben."); }
+        if (string.IsNullOrWhiteSpace(Bucket.Text)) { Bucket.Focus(FocusState.Programmatic); throw new InvalidOperationException("Bitte ein Bucket auswählen."); }
+        if (Overlay.IsOn && string.IsNullOrWhiteSpace(LowerBucket.Text)) { LowerBucket.Focus(FocusState.Programmatic); throw new InvalidOperationException("Bitte ein Basisbucket für das Overlay eingeben."); }
+        static uint? ID(double value)
+        {
+            if (double.IsNaN(value)) return null;
+            if (!double.IsFinite(value) || value < 0 || value > uint.MaxValue || value != Math.Truncate(value))
+                throw new InvalidOperationException("Unix-IDs müssen ganze Zahlen zwischen 0 und 4294967295 sein.");
+            return (uint)value;
+        }
+        return new MountConfig { URI = Server.Text.Trim(), Username = Username.Text.Trim(), Password = Password.Password,
+            Bucket = Bucket.Text.Trim(), Drive = SelectedDrive, ReadOnly = ReadOnly.IsOn,
+            LowerBucket = Overlay.IsOn ? LowerBucket.Text.Trim() : "",
+            Whitelist = Overlay.IsOn && !string.IsNullOrWhiteSpace(WritablePaths.Text) ? WritablePaths.Text.Split('\n', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries) : null,
+            UID = ID(UID.Value), GID = ID(GID.Value) };
+    }
+    private async void ConnectClicked(object sender, RoutedEventArgs e)
+    {
+        if (connecting || mounted || profileLoading || loadedDrive != SelectedDrive || workerDrive is not null) return;
+        try
+        {
+            var config = ReadConfig();
+            InvalidateProfileLoad();
+            Notice.IsOpen = false; workerDrive = config.Drive; SetState(false, true);
+            await foreach (var reply in backend.Stream(new Request("mount", Config: config, Persist: Remember.IsChecked == true, Initialize: !config.ReadOnly)))
+            {
+                if (reply.Type == "error") throw new InvalidOperationException(reply.Message);
+                if (reply.Type == "mounted") { SetState(true); await RefreshProfiles(); }
+            }
+        }
+        catch (Exception ex) { ShowError(ex); }
+        finally { workerDrive = null; SetState(false); await RefreshAfterAction(); }
+    }
+    private async Task RefreshAfterAction()
+    {
+        try { await RefreshProfiles(); await LoadDrive(); } catch (Exception ex) { ShowError(ex); }
+    }
+    private async void DisconnectClicked(object sender, RoutedEventArgs e)
+    {
+        try
+        {
+            InvalidateProfileLoad();
+            Disconnect.IsEnabled = false;
+            await backend.Send(new Request("stop", SelectedDrive));
+            for (int n = 0; n < 100; n++)
+            {
+                await Task.Delay(100);
+                var reply = await backend.Send(new Request("load", SelectedDrive));
+                if (!reply.Running) { await RefreshAfterAction(); return; }
+            }
+            Notice.Severity = InfoBarSeverity.Informational; Notice.Title = "Trennen läuft";
+            Notice.Message = "STQR wartet auf ausstehende Dateioperationen. Bitte das Programm nicht gewaltsam beenden."; Notice.IsOpen = true;
+        }
+        catch (Exception ex) { ShowError(ex); Disconnect.IsEnabled = true; }
+    }
+    private async void ForgetClicked(object sender, RoutedEventArgs e)
+    {
+        try
+        {
+            var dialog = new ContentDialog { XamlRoot = Root.XamlRoot, Title = "Verbindung entfernen?",
+                Content = "Das Laufwerk wird getrennt. Gespeicherte Zugangsdaten und Autostart werden entfernt. Deine Dateien bleiben im Bucket erhalten.",
+                PrimaryButtonText = "Entfernen", CloseButtonText = "Abbrechen", DefaultButton = ContentDialogButton.Close };
+            if (await dialog.ShowAsync() != ContentDialogResult.Primary) return;
+            InvalidateProfileLoad();
+            await backend.Send(new Request("forget", SelectedDrive));
+            Password.Password = ""; await RefreshAfterAction();
+        }
+        catch (Exception ex) { ShowError(ex); }
+    }
+    private async Task SmokeProfileLoads()
+    {
+        void Select(string drive) { loading = true; Drive.SelectedItem = drive; loading = false; }
+        static Reply Settings(string bucket) => new(1, "settings", null,
+            new MountConfig { URI = "http://127.0.0.1:7419", Username = bucket, Password = bucket, Bucket = bucket },
+            null, false, true, true);
+        var old = new TaskCompletionSource<Reply>();
+        var latest = new TaskCompletionSource<Reply>();
+        Select("S:");
+        var first = LoadDrive(_ => old.Task);
+        if (ConnectButton.IsEnabled) throw new Exception("Connect remained enabled during profile load");
+        Select("T:");
+        var second = LoadDrive(_ => latest.Task);
+        latest.SetResult(Settings("latest"));
+        await second;
+        old.SetResult(Settings("obsolete"));
+        await first;
+        if (SelectedDrive != "T:" || Bucket.Text != "latest" || Username.Text != "latest" || !ConnectButton.IsEnabled)
+            throw new Exception("Out-of-order profile loads changed the selected drive's settings");
+        var pending = new TaskCompletionSource<Reply>();
+        var stale = LoadDrive(_ => pending.Task);
+        InvalidateProfileLoad();
+        workerDrive = SelectedDrive; SetState(false, true);
+        pending.SetResult(Settings("stale"));
+        await stale;
+        if (Bucket.Text != "latest" || !connecting || ConnectButton.IsEnabled)
+            throw new Exception("Obsolete profile load overwrote connection state");
+        workerDrive = null; SetState(false);
+        await LoadDrive(_ => Task.FromException<Reply>(new IOException("simulated profile load failure")));
+        if (ConnectButton.IsEnabled) throw new Exception("Failed profile load enabled connection with stale settings");
+        Notice.IsOpen = false;
+        Select(initialDrive);
+        await LoadDrive();
+        if (Notice.IsOpen) throw new Exception($"Profile regression cleanup failed: {Notice.Message}");
+    }
+    private async Task SmokeTest()
+    {
+        if (!Server.Focus(FocusState.Keyboard)) throw new Exception("Server field cannot receive keyboard focus");
+        if (!Microsoft.UI.Xaml.Input.FocusManager.TryMoveFocus(Microsoft.UI.Xaml.Input.FocusNavigationDirection.Next, new Microsoft.UI.Xaml.Input.FindNextElementOptions { SearchRoot = Root })) throw new Exception("Keyboard navigation failed");
+        Server.Text = "invalid";
+        try { ReadConfig(); throw new Exception("Invalid server was accepted"); }
+        catch (InvalidOperationException) { }
+        if (Notice.IsOpen) throw new Exception("Backend status failed");
+        await SmokeProfileLoads();
+        Server.Text = "https://storage.example:7419"; Username.Text = "alice"; Password.Password = "temporary-test-secret"; Bucket.Text = "documents";
+        ReadOnly.IsOn = true; Overlay.IsOn = true; LowerBucket.Text = "base"; WritablePaths.Text = "home/";
+        var config = ReadConfig();
+        if (!config.ReadOnly || config.LowerBucket != "base" || config.Whitelist?.Single() != "home/") throw new Exception("Configuration did not roundtrip");
+        Password.Password = ""; Username.Text = ""; Bucket.Text = ""; Overlay.IsOn = false; ReadOnly.IsOn = false;
+        Server.Text = "http://127.0.0.1:7419";
+        AppWindow.Resize(new SizeInt32(700, 800)); await Task.Delay(600);
+        if (Grid.GetRow(Aside) != 1) throw new Exception("Compact layout failed");
+        AppWindow.Resize(new SizeInt32(1060, 940)); await Task.Delay(800);
+        if (Grid.GetColumn(Aside) != 1 || ConnectButton.ActualWidth < 100 || Body.ActualWidth > Root.ActualWidth - 63) throw new Exception("Wide layout failed");
+        var directory = Environment.GetEnvironmentVariable("STQR_UI_SMOKE_DIR") ?? Path.GetTempPath();
+        var folder = await StorageFolder.GetFolderFromPathAsync(Path.GetFullPath(directory));
+        var bitmap = new RenderTargetBitmap(); await bitmap.RenderAsync(Root);
+        var pixels = await bitmap.GetPixelsAsync();
+        var file = await folder.CreateFileAsync("stqr-winui.png", CreationCollisionOption.ReplaceExisting);
+        using (var stream = await file.OpenAsync(FileAccessMode.ReadWrite))
+        {
+            var encoder = await BitmapEncoder.CreateAsync(BitmapEncoder.PngEncoderId, stream);
+            encoder.SetPixelData(BitmapPixelFormat.Bgra8, BitmapAlphaMode.Premultiplied,
+                (uint)bitmap.PixelWidth, (uint)bitmap.PixelHeight, 96, 96, pixels.ToArray());
+            await encoder.FlushAsync();
+        }
+        await File.WriteAllTextAsync(Path.Combine(directory, "winui-smoke.txt"), "PASS: native WinUI startup, backend IPC, profile load ordering, input validation, overlay/readonly controls and responsive layouts\n");
+        Application.Current.Exit();
+    }
+}

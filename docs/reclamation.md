@@ -16,7 +16,7 @@ single-object operations in clients; ordinary reads need no permanent receipt.
 | Linux kernel block devices | Deterministic stripe IDs; overwrite existing stripes, remove full discarded stripes and zero partial discards. No guest-filesystem collector or guest-snapshot implementation. |
 | QEMU/NBD and Linux NBD helper | Deterministic stripe IDs and fixed descriptor ID. TRIM releases eligible stripes. Explicit offline Catalog.Collect preserves supplied opaque roots and rejects collection while local readonly or writable exports exist. Native exclusive maintenance is still required across processes. The helper forwards NBD requests. |
 | JavaScript native test fixture | Test-only STAT, GET, SCAN and ranged CAS on stable object IDs; no dashboard object/filesystem management or collector. |
-| Windows/WinFsp | Shared Go filesystem and Retain/Release. Close waits for in-flight handle operations. Unsupported overlays, alternate streams, security descriptors and hardlink creation remain documented in the Windows README. |
+| Windows/WinFsp | Shared Go filesystem and Retain/Release. Close waits for in-flight handle operations. Normal and native-overlay views share the reference protocol. Alternate streams, security descriptors and native hardlink creation remain unsupported; see the Windows README. |
 
 ## Cooperative open and orphan lifetime
 

@@ -8,14 +8,16 @@ import (
 )
 
 type mountConfig struct {
-	URI      string  `json:"uri"`
-	Username string  `json:"username"`
-	Password string  `json:"password"`
-	Bucket   string  `json:"bucket"`
-	Drive    string  `json:"drive"`
-	ReadOnly bool    `json:"readonly"`
-	UID      *uint32 `json:"uid,omitempty"`
-	GID      *uint32 `json:"gid,omitempty"`
+	URI         string   `json:"uri"`
+	Username    string   `json:"username"`
+	Password    string   `json:"password"`
+	Bucket      string   `json:"bucket"`
+	LowerBucket string   `json:"lower_bucket,omitempty"`
+	Whitelist   []string `json:"whitelist,omitempty"`
+	Drive       string   `json:"drive"`
+	ReadOnly    bool     `json:"readonly"`
+	UID         *uint32  `json:"uid,omitempty"`
+	GID         *uint32  `json:"gid,omitempty"`
 }
 
 func normalizeDrive(d string) (string, error) {
@@ -38,7 +40,17 @@ func (c *mountConfig) validate() error {
 	if c.Username == "" || c.Password == "" || c.Bucket == "" {
 		return fmt.Errorf("Benutzername, Passwort und Bucket sind erforderlich")
 	}
-	for _, s := range []string{c.URI, c.Username, c.Password, c.Bucket} {
+	if c.LowerBucket == c.Bucket && c.LowerBucket != "" {
+		return fmt.Errorf("Basis und beschreibbares Bucket müssen verschieden sein")
+	}
+	if c.LowerBucket == "" && len(c.Whitelist) > 0 {
+		return fmt.Errorf("Eine Pfadfreigabe benötigt ein Overlay-Basisbucket")
+	}
+	if len(c.Whitelist) > 1024 {
+		return fmt.Errorf("Zu viele Overlay-Pfadfreigaben")
+	}
+	values := append([]string{c.URI, c.Username, c.Password, c.Bucket, c.LowerBucket}, c.Whitelist...)
+	for _, s := range values {
 		if len(s) > 4096 || strings.ContainsRune(s, 0) {
 			return fmt.Errorf("Eingabe ungültig oder zu lang")
 		}

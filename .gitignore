@@ -43,3 +43,7 @@ __pycache__/
 /kernel/kstqr/.*.d
 /kernel/kstqr/.tmp_versions/
 /kernel/kstqr/mount.kstqr
+
+# WinUI intermediate build files.
+/windows/ui/obj/
+/windows/ui/.vs/

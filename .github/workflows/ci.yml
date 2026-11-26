@@ -155,7 +155,7 @@ jobs:
   windows:
     name: Windows / native callbacks and setup
     runs-on: windows-2025
-    timeout-minutes: 15
+    timeout-minutes: 25
     env:
       CGO_ENABLED: '0'
     defaults:
@@ -169,6 +169,9 @@ jobs:
         with:
           go-version-file: windows/go.mod
           cache-dependency-path: '**/go.sum'
+      - uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5
+        with:
+          dotnet-version: '10.0.x'
       - run: go test ./... -count=1 -timeout=10m
       - name: Install the signed WinFsp runtime for real driver tests
         shell: pwsh
@@ -184,8 +187,45 @@ jobs:
       - name: Real WinFsp mount through native Windows file APIs
         env:
           STQR_TEST_WINFSP: '1'
-        run: go test . -run '^TestWindowsMountedFilesystem$' -count=1 -v -timeout=3m
-      - run: go build -buildvcs=false -ldflags="-H=windowsgui" -o stqr-windows.exe ./cmd/stqr-windows
+        run: go test . -run '^TestWindowsMounted(Filesystem|NativeOverlay)$' -count=1 -v -timeout=3m
+      - name: Publish self-contained WinUI application and Go backend
+        shell: pwsh
+        run: ./build.ps1
+      - name: Native WinUI startup, validation and responsive layout
+        shell: pwsh
+        run: |
+          $env:STQR_UI_SMOKE_DIR = (Resolve-Path bin).Path
+          $bundle = Join-Path $env:RUNNER_TEMP 'stqr-deployment-check'
+          New-Item -ItemType Directory -Force -Path $bundle | Out-Null
+          Copy-Item bin/stqr-windows.exe (Join-Path $bundle 'stqr-windows.exe')
+          Copy-Item bin/stqr-windows.ui.exe (Join-Path $bundle 'stqr-windows.ui.exe')
+          $installed = Join-Path $bundle 'versioned-installation'
+          New-Item -ItemType Directory -Force -Path $installed | Out-Null
+          Copy-Item (Join-Path $bundle '*.exe') $installed
+          foreach ($directory in @($bundle, $installed)) {
+            Remove-Item bin/winui-smoke.txt -ErrorAction SilentlyContinue
+            $ui = Start-Process (Join-Path $directory stqr-windows.ui.exe) -WorkingDirectory $directory -ArgumentList '--smoke-test' -PassThru
+            if (!$ui.WaitForExit(90000)) { $ui.Kill(); throw "WinUI smoke test timed out: $directory" }
+            if ($ui.ExitCode -ne 0) {
+              if (Test-Path bin/winui-smoke-error.txt) { Get-Content bin/winui-smoke-error.txt }
+              throw "WinUI smoke test failed: $directory ($($ui.ExitCode))"
+            }
+            if (!(Test-Path bin/winui-smoke.txt)) { throw "Missing WinUI smoke evidence: $directory" }
+            Get-Content bin/winui-smoke.txt
+          }
+      - name: Retain the complete Windows bundle and actual UI screenshot
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: windows-winui
+          path: |
+            windows/bin/stqr-windows.exe
+            windows/bin/stqr-windows.ui.exe
+            windows/bin/stqr-winui.png
+            windows/bin/winui-smoke.txt
+            windows/bin/winui-smoke-error.txt
+          if-no-files-found: warn
+          retention-days: 14
 
   format-compatibility:
     name: Tagged formats / upgrade and restart
