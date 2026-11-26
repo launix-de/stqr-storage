@@ -149,20 +149,144 @@ func TestPlacementInventoryYieldsVolumeToQueuedWriter(t *testing.T) {
 	}
 }
 
-func TestPlacementWholeRangeUsesCachedUsageWithoutIO(t *testing.T) {
+func TestPlacementEstimatesUseRAMWithoutIO(t *testing.T) {
 	r, v, _, p, d := placementInventoryFixture(t)
-	shape := placementShape{bucket: p.Bucket, copies: 1}
-	allowance := 1
-	before := v.IOStats()
-	m, ok := r.measuredPlacement(shape, p.Entries[0], d, false, &allowance)
-	after := v.IOStats()
-	if !ok || m.cost == 0 || after.ReadOps != before.ReadOps || after.WriteOps != before.WriteOps {
-		t.Fatal("whole-range optimization read storage", ok, m.cost, before, after)
+	weights := r.placementWeights(r.server.placement.Load(), map[client.ID]BucketDescription{p.Bucket: d})
+	for _, bits := range []uint16{0, 1, 8, 32, 256} {
+		shape := placementShape{bucket: p.Bucket, bits: bits, copies: 1}
+		for _, change := range []bool{false, true} {
+			next := d
+			if change {
+				goal := d.Policy
+				goal.Version++
+				goal.Compression = "gzip"
+				next.DesiredPolicy = &goal
+			}
+			r.measurements.Store(rangeMetricKey{shape.bucket, shape.start, shape.bits}, placementMeasurement{at: time.Now().Add(-time.Hour)})
+			before := v.IOStats()
+			for i := 0; i < 20; i++ {
+				m, ok := r.measuredPlacement(shape, p.Entries[0], next, weights)
+				if !ok || m.cost == 0 || !m.estimateOnly {
+					t.Fatal("missing RAM estimate", bits, change, m, ok)
+				}
+			}
+			after := v.IOStats()
+			if after.ReadOps != before.ReadOps || after.WriteOps != before.WriteOps {
+				t.Fatal("balancing read storage", bits, change, before, after)
+			}
+		}
 	}
-	// An optimization estimate must not be reused as a mandatory measurement.
-	before = after
-	m, ok = r.measuredPlacement(shape, p.Entries[0], d, true, &allowance)
-	if !ok || m.estimateOnly || v.IOStats().ReadOps == before.ReadOps {
-		t.Fatal("required measurement reused an optimization estimate")
+	// Concrete migration inventory remains separate and still sees receipts.
+	before := v.IOStats()
+	cost, _, err := r.policyPlacementCost(p, p.Entries[0], client.ID{}, volume.ID{}, volume.Raw)
+	if err != nil || cost == 0 || v.IOStats().ReadOps == before.ReadOps {
+		t.Fatal("concrete inventory was bypassed", cost, err)
+	}
+}
+
+func TestPlacementEstimatesRefreshFromMutationAccounting(t *testing.T) {
+	r, v, _, p, d := placementInventoryFixture(t)
+	weights := r.placementWeights(r.server.placement.Load(), map[client.ID]BucketDescription{p.Bucket: d})
+	shape := placementShape{bucket: p.Bucket, copies: 1}
+	first, ok := r.measuredPlacement(shape, p.Entries[0], d, weights)
+	if !ok {
+		t.Fatal("unknown initial accounting")
+	}
+	h, err := v.Open(true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = h.Put(volume.Key{Bucket: volume.ID(p.Bucket), Object: volume.ObjectID{2}}, make([]byte, 128<<10), volume.Options{Accepted: true})
+	h.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := v.IOStats()
+	second, ok := r.measuredPlacement(shape, p.Entries[0], d, weights)
+	if !ok || second.cost <= first.cost {
+		t.Fatal("ignored committed accounting", first.cost, second.cost, ok)
+	}
+	if after := v.IOStats(); after.ReadOps != before.ReadOps || after.WriteOps != before.WriteOps {
+		t.Fatal("refresh read storage", before, after)
+	}
+	// No statistics is unknown; it must not become a zero-byte placement offer.
+	r.server.quotaUsage.Store(nil)
+	if _, ok = r.measuredPlacement(shape, p.Entries[0], d, weights); ok {
+		t.Fatal("missing aggregate fabricated as zero")
+	}
+}
+
+func TestPlacementEstimatesNormalizeSplitRanges(t *testing.T) {
+	r, v, _, p, d := placementInventoryFixture(t)
+	left, right := p.Entries[0], p.Entries[0]
+	left.PrefixBits, right.PrefixBits = 1, 1
+	right.Start[0] = 128
+	p.Entries = []client.RangeEntry{left, right}
+	image, err := buildPlacement([]client.MapPatch{p})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.server.placement.Store(image)
+	weights := r.placementWeights(image, map[client.ID]BucketDescription{p.Bucket: d})
+	before := v.IOStats()
+	var sum uint64
+	for _, entry := range p.Entries {
+		m, ok := r.measuredPlacement(placementShape{bucket: p.Bucket, start: entry.Start, bits: 1, copies: 1}, entry, d, weights)
+		if !ok || m.cost == 0 {
+			t.Fatal("split lacks aggregate estimate", m, ok)
+		}
+		sum += m.cost
+	}
+	total := storagePhysical(r.server.quotaUsage.Load().volumes[v.Identity().VolumeID], volume.ID(p.Bucket))
+	if sum < total || sum > total+1 {
+		t.Fatal("split duplicated bucket footprint", sum, total)
+	}
+	if after := v.IOStats(); after.ReadOps != before.ReadOps || after.WriteOps != before.WriteOps {
+		t.Fatal("split scanned metadata", before, after)
+	}
+}
+
+func TestPlacementIdlePlanningDoesNotReadStorage(t *testing.T) {
+	r, v, _, p, d := placementInventoryFixture(t)
+	s := r.server
+	s.cfg.Node.ID = r.node.String()
+	s.scopes = r
+	s.quotaPolicies.Store(&quotaPolicyImage{descriptions: []BucketDescription{d}})
+	// A skewed split with many unrelated receipts exercises the production
+	// target compiler, not just its byte-cost helper. Both healthy and newly
+	// required storage-class changes must remain metadata-I/O free.
+	left, right := p.Entries[0], p.Entries[0]
+	left.PrefixBits, right.PrefixBits = 1, 1
+	right.Start[0] = 128
+	p.Entries = []client.RangeEntry{left, right}
+	image, err := buildPlacement([]client.MapPatch{p})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.placement.Store(image)
+	for _, required := range []bool{false, true} {
+		next := d
+		if required {
+			next.Policy.StorageStrategy = "ssd"
+			goal := next.Policy
+			goal.Version++
+			next.DesiredPolicy = &goal
+		}
+		before := v.IOStats()
+		for i := 0; i < 3; i++ {
+			r.measurements.Range(func(key, value any) bool {
+				m := value.(placementMeasurement)
+				m.at = time.Now().Add(-time.Hour)
+				r.measurements.Store(key, m)
+				return true
+			})
+			m := r.buildPlacementTargets("", []BucketDescription{next})
+			if m == nil {
+				t.Fatal("target planner skipped fixture")
+			}
+		}
+		if after := v.IOStats(); after.ReadOps != before.ReadOps || after.WriteOps != before.WriteOps {
+			t.Fatal("idle target planning touched storage", required, before, after)
+		}
 	}
 }

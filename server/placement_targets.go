@@ -215,7 +215,10 @@ func (r *rangeManager) buildPlacementTargets(group string, descriptions []Bucket
 	mixed ^= mixed >> 29
 	mixed *= 0xbf58476d1ce4e5b9
 	mixed ^= mixed >> 31
-	measurementSelected := r.placementSamples(shapes, input.Work, mixed)
+	for i, shape := range shapes {
+		input.Work[i].Read, input.Work[i].Write = r.rangeWorkload(rangeMetricKey{shape.bucket, shape.start, shape.bits})
+	}
+	weights := r.placementWeights(image, byBucket)
 	for i, shape := range shapes {
 		d, entry := byBucket[shape.bucket], current[i]
 		goal := d.Policy
@@ -235,16 +238,12 @@ func (r *rangeManager) buildPlacementTargets(group string, descriptions []Bucket
 			}
 		}
 		required[i] = !valid || d.DesiredPolicy != nil && entry.PolicyVersion != goal.Version
-		// Cold healthy ranges are sampled in rotating windows. Measurement is
-		// metadata-only and cached; the 100-ms improvement itself never does I/O.
+		// All scoring is based on maintained RAM accounting. Invalid placements
+		// and desired policies do not turn an optimization tick into inventory.
 		var cost uint64
 		var soleSource volume.ID
 		var retained map[volume.ID]uint64
-		allowance := 0
-		if measurementSelected[i] {
-			allowance = 1
-		}
-		measurement, measured := r.measuredPlacement(shape, entry, d, !valid, &allowance)
+		measurement, measured := r.measuredPlacement(shape, entry, d, weights)
 		if measured {
 			cost, retained = measurement.cost, measurement.retained
 		} else if !valid {

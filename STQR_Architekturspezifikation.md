@@ -454,7 +454,7 @@ eine unvollständige Ausgangszuordnung nicht als erfüllte Policy deklarieren.
 
 Die Verbesserungssuche besitzt eine Deadline von **höchstens 100 ms** je Zyklus,
 einschließlich ihrer eigenen Indizes und Initialisierung. Bei Foreground-I/O darf
-sie früher enden. Messung von Objekt-/Receipt-Metadaten, Greedy und Materialisierung
+sie früher enden. RAM-Aggregation, Greedy und Materialisierung
 der Ergebnis-Map sind getrennte Phasen und werden getrennt gemessen. Nach Ablauf
 oder Abbruch bleibt der beste bereits übernommene gültige Stand erhalten. Die
 Implementierung prüft die Deadline kooperativ an begrenzten Rechenschritten;
@@ -490,10 +490,17 @@ Alternativen bevorzugt. Ablehnung eines Kandidaten oder Budgetablauf beweist
 keine Unlösbarkeit.
 
 Die Map bleibt bucketbezogen. Immutable Bucket-Spannen und Primary-Zähler
-verhindern wiederholte globale Map-Scans pro PG-Worker. Größenmessungen werden
-aus Metadaten gewonnen, gecacht und für gesunde Ranges in kleinen wechselnden
-Fenstern erneuert; aktuelle Admission wird beim tatsächlichen Handoff erneut
-geprüft. Klassen-/Garantie-Vorplanung darf Probleme vereinfachen, ersetzt aber
+verhindern wiederholte globale Map-Scans pro PG-Worker. Die Kostenbewertung liest ausschließlich fortlaufend gepflegte RAM-Aggregate
+für Belegung und Range-I/O. Periodische Objekt-, Receipt- oder Replica-Scans
+sind auch bei fehlenden/abgelaufenen Messwerten, Platzdruck oder Policy-Änderungen
+verboten. Ein Takt und eine Cache-Frist rechtfertigen niemals Storage-I/O.
+Fehlende Aggregate bleiben unbekannt. Bekannte Bucket-/Volume-Summen enthalten
+Metadaten und Retry-Belege; für Teilranges werden vorläufige Byte-Schätzungen
+nach dem auf dem Source-Volume gehaltenen Hashraumanteil gebildet, ohne
+Objektstatistiken im RAM vorzuhalten. Solche Schätzungen sind keine exakten
+Kindrange-Zähler, erkennen keinen Verteilungsskew und gewähren keine Admission.
+Erst ein ausgewählter konkreter Handoff darf die benötigte Inventur durchführen;
+Kapazität, Garantien und Quota werden dabei verbindlich erneut geprüft. Klassen-/Garantie-Vorplanung darf Probleme vereinfachen, ersetzt aber
 nicht die konkrete Node-/Volume-Prüfung.
 
 Primary-/Replica-Rollen werden kapazitätsgewichtet über die Ranges verteilt.
