@@ -36,14 +36,14 @@ func TestRejectedCreateDoesNotRescanWholeBucketForQuota(t *testing.T) {
 		t.Fatal(err)
 	}
 	v.SetCacheLimits(1, 4096)
-	before := v.IOStats().ReadBytes
+	before := testStorageReadBytes(v.IOStats())
 	for i := 0; i < 32; i++ {
 		_, err = b.Put(ctx, actor, volume.ObjectID{}, []byte("x"), volume.Options{RequestID: volume.ID(client.NewRequestID()), CreateOnly: true, Accepted: true})
 		if !errors.Is(err, volume.ErrPrecondition) {
 			t.Fatal("immutable object already exists", err)
 		}
 	}
-	reads := v.IOStats().ReadBytes - before
+	reads := testStorageReadBytes(v.IOStats()) - before
 	t.Logf("32 rejected creates: %d physical index-read bytes", reads)
 	// A one-page cache still permits bounded B-tree path lookups. It must
 	// not reread thousands of unrelated object/receipt records per attempt.
@@ -84,7 +84,7 @@ func TestPhysicalFullRetryDoesNotRescanWholeBucketForQuota(t *testing.T) {
 		t.Fatal(err)
 	}
 	v.SetCacheLimits(1, 4096)
-	before := v.IOStats().ReadBytes
+	before := testStorageReadBytes(v.IOStats())
 	payload := make([]byte, 20<<20)
 	for i := 0; i < 8; i++ {
 		_, err = b.Put(ctx, actor, volume.ObjectID{}, payload, volume.Options{RequestID: volume.ID(client.NewRequestID()), Accepted: true})
@@ -92,7 +92,7 @@ func TestPhysicalFullRetryDoesNotRescanWholeBucketForQuota(t *testing.T) {
 			t.Fatal("physical capacity rejection", err)
 		}
 	}
-	reads := v.IOStats().ReadBytes - before
+	reads := testStorageReadBytes(v.IOStats()) - before
 	t.Logf("8 physically rejected writes: %d physical index-read bytes", reads)
 	if reads > 1<<20 {
 		t.Errorf("capacity retries reread the bucket index: %d bytes", reads)

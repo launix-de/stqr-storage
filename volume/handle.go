@@ -205,8 +205,8 @@ func (h *Handle) AllocatedPhysical(k Key) (uint64, error) {
 
 // CopyTo streams a range to dst under the existing lock, clipping at EOF.
 // It never closes the handle. Both metadata and any further CopyTo calls remain
-// protected until Close. This writer API allows future direct-transfer paths;
-// the current engine reads/checks/decompresses bounded blocks.
+// protected until Close. RAW mapped spans are checked and passed directly to
+// dst; compressed spans and fallback backends use bounded decoded buffers.
 func (h *Handle) CopyTo(k Key, offset, length uint64, dst io.Writer) (uint64, error) {
 	return withHandle(h, false, func(v *Volume) (uint64, error) {
 		return v.copyToLocked(k, offset, length, dst)

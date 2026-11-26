@@ -2,6 +2,7 @@
 package volume
 
 import (
+	"errors"
 	"io"
 	"os"
 	"sync"
@@ -11,6 +12,8 @@ import (
 // files are never resized by OpenFile. Creation is exclusive and explicit.
 type FileIO struct {
 	file     *os.File
+	mapMu    sync.RWMutex
+	mapping  []byte // demand-paged, read-only; mapping changes require Volume exclusivity
 	size     int64
 	once     sync.Once
 	closeErr error
@@ -34,7 +37,7 @@ func OpenFile(path string) (*FileIO, error) {
 		f.Close()
 		return nil, e
 	}
-	return &FileIO{file: f, size: size}, nil
+	return newFileIO(f, size)
 }
 func CreateFile(path string, size int64) (*FileIO, error) {
 	if size < MinVolumeSize || size%PageSize != 0 {
@@ -65,13 +68,41 @@ func CreateFile(path string, size int64) (*FileIO, error) {
 		f.Close()
 		return nil, e
 	}
-	return &FileIO{file: f, size: size}, nil
+	return newFileIO(f, size)
 }
-func (f *FileIO) ReadAt(p []byte, off int64) (int, error)  { return f.file.ReadAt(p, off) }
+func (f *FileIO) ReadAt(p []byte, off int64) (int, error) {
+	f.mapMu.RLock()
+	defer f.mapMu.RUnlock()
+	if f.mapping == nil {
+		return f.file.ReadAt(p, off)
+	}
+	if off < 0 {
+		return 0, ErrRange
+	}
+	if len(p) == 0 {
+		return 0, nil
+	}
+	if off >= int64(len(f.mapping)) {
+		return 0, io.EOF
+	}
+	n := copy(p, f.mapping[off:])
+	if n < len(p) {
+		return n, io.EOF
+	}
+	return n, nil
+}
 func (f *FileIO) WriteAt(p []byte, off int64) (int, error) { return f.file.WriteAt(p, off) }
 func (f *FileIO) Sync() error                              { return syncVolumeFile(f.file) }
 func (f *FileIO) Size() (int64, error)                     { return fileSize(f.file) }
-func (f *FileIO) Close() error                             { f.once.Do(func() { f.closeErr = f.file.Close() }); return f.closeErr }
+func (f *FileIO) Close() error {
+	f.once.Do(func() {
+		f.mapMu.Lock()
+		defer f.mapMu.Unlock()
+		f.closeErr = errors.Join(unmapVolumeFile(f.mapping), f.file.Close())
+		f.mapping = nil
+	})
+	return f.closeErr
+}
 
 // MemoryIO is a bounded, sparse RAM device. Closing it discards every page.
 // It intentionally has no eviction policy and no disk-persistence claim.
@@ -179,4 +210,80 @@ func (m *MemoryIO) grow(size int64) error {
 		m.size = size
 	}
 	return nil
+}
+
+// newFileIO maps only virtual address space. It does not populate pages or build
+// a RAM index of every object. A successful Open/Format transfers exclusive
+// lifecycle ownership: callers must not independently Close, resize or truncate
+// its file while a Volume (and any of its handles) is alive. On failure, callers
+// remain responsible for closing the FileIO.
+func newFileIO(file *os.File, size int64) (*FileIO, error) {
+	f := &FileIO{file: file, size: size}
+	if err := f.remap(size); err != nil {
+		file.Close()
+		return nil, err
+	}
+	return f, nil
+}
+
+// remap is called only with the owning Volume's exclusive lock and no active
+// checkpoint, or before ownership transfer. Existing read handles therefore pin
+// their mapping and borrowed slices for their complete lifetime. Map the new
+// extent first: a failed mapping leaves the previous extent usable for recovery.
+func (f *FileIO) remap(size int64) error {
+	f.mapMu.Lock()
+	defer f.mapMu.Unlock()
+	if int64(len(f.mapping)) == size {
+		return nil
+	}
+	mapping, err := mapVolumeFile(f.file, size)
+	if err != nil {
+		return err
+	}
+	if err = unmapVolumeFile(f.mapping); err != nil {
+		unmapVolumeFile(mapping)
+		return err
+	}
+	f.mapping, f.size = mapping, size
+	return nil
+}
+
+// borrowAt is an internal read-only capability, not a public unlocked view.
+// The owning Volume pins its lifetime with its read/write lock. Callers must
+// never modify this slice or retain it beyond the Volume's protected operation.
+func (f *FileIO) borrowAt(off uint64, n int) ([]byte, int, error) {
+	f.mapMu.RLock()
+	defer f.mapMu.RUnlock()
+	if f.mapping == nil {
+		return nil, 0, ErrUnsupported
+	}
+	if n < 0 || off > uint64(len(f.mapping)) || uint64(n) > uint64(len(f.mapping))-off {
+		return nil, 0, ErrRange
+	}
+	return f.mapping[off : off+uint64(n) : off+uint64(n)], n, nil
+}
+
+// A RAM volume borrows its existing sparse page, without a disk mapping or a
+// copy. Missing pages represent zero runs and allocate no resident payload.
+func (m *MemoryIO) borrowAt(off uint64, n int) ([]byte, int, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if m.closed {
+		return nil, 0, ErrClosed
+	}
+	if n < 0 || off > uint64(m.size) || uint64(n) > uint64(m.size)-off {
+		return nil, 0, ErrRange
+	}
+	at := int(off % PageSize)
+	n = min(n, PageSize-at)
+	if page := m.pages[int64(off/PageSize)]; page != nil {
+		return page[at : at+n : at+n], n, nil
+	}
+	return nil, n, nil
+}
+
+func (f *FileIO) hasMapping() bool {
+	f.mapMu.RLock()
+	defer f.mapMu.RUnlock()
+	return f.mapping != nil
 }
