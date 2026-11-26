@@ -141,6 +141,7 @@ func mountTestFilesystem(t *testing.T, f *Filesystem, ready string) string {
 	host := fuse.NewFileSystemHost(&Adapter{FS: f})
 	host.SetCapCaseInsensitive(false)
 	host.SetCapReaddirPlus(true)
+	host.SetCapDeleteAccess(true)
 	drive := os.Getenv("STQR_TEST_WINFSP_DRIVE")
 	if drive == "" {
 		drive = "S:"
@@ -269,6 +270,9 @@ func TestWindowsMountedNativeOverlay(t *testing.T) {
 		path := func(name string) string { return filepath.Join(drive+`\`, name) }
 		if err := os.WriteFile(path("protected"), []byte("bad"), 0600); err == nil {
 			t.Fatal("native open bypassed whitelist")
+		}
+		if err := os.Remove(path("protected")); err == nil {
+			t.Fatal("native delete bypassed whitelist")
 		}
 		if err := os.WriteFile(path("allowed"), []byte("upper content"), 0600); err != nil {
 			t.Fatal(err)

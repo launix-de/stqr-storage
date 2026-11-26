@@ -42,7 +42,7 @@ func run() error {
 	uninstall := flags.String("uninstall", "", "remove saved drive and unmount, e.g. S:")
 	saved := flags.String("saved-drive", "", "mount a saved drive, e.g. S:")
 	background := flags.Bool("background", false, "run saved drive in background, retrying initial connection")
-	setup := flags.Bool("setup", false, "open setup dialog")
+	flags.Bool("setup", false, "open WinUI configuration")
 	flags.Usage = func() {
 		fmt.Fprintln(flags.Output(), "Usage: stqr-windows [--setup] | --uri URL --username USER --bucket BUCKET [--install] S: | --uninstall S:\nWithout arguments, opens the setup dialog. WinFsp is required.")
 		flags.PrintDefaults()
@@ -64,41 +64,7 @@ func run() error {
 		return fmt.Errorf("--background requires --saved-drive")
 	}
 	var c mountConfig
-	gui := len(os.Args) == 1 || *setup
-	forget := false
-	if gui {
-		hideConsole()
-		c = mountConfig{URI: *uri, Username: *username, Bucket: *bucket, Drive: "S:", ReadOnly: *ro}
-		if *saved != "" {
-			c.Drive = *saved
-		}
-		remembered := false
-		if old, err := installation.load(c.Drive); err == nil {
-			c = old
-			remembered = true
-		}
-		choice, err := showSetup(c, remembered)
-		if err != nil {
-			return err
-		}
-		if choice.cancel {
-			return nil
-		}
-		c = choice.config
-		if choice.remove {
-			if e = installation.remove(c.Drive); e != nil {
-				return e
-			}
-			if e = stopDrive(c.Drive); e != nil {
-				return e
-			}
-			messageBox(0, "STQR", "Autostart und gespeicherte Zugangsdaten entfernt. Das Laufwerk wird getrennt.", 0)
-			return nil
-		}
-		*install = choice.persist
-		forget = !*install
-		*initialize = !c.ReadOnly
-	} else if *saved != "" {
+	if *saved != "" {
 		c, e = installation.load(*saved)
 		if e != nil {
 			return e
@@ -203,7 +169,7 @@ func run() error {
 			}
 		}
 	}
-	e = mount(ctx, c, *initialize, installation, *install, forget)
+	e = mount(ctx, c, *initialize, installation, *install, false)
 	if ctx.Err() != nil {
 		return nil
 	}
@@ -319,6 +285,7 @@ func mount(ctx context.Context, c mountConfig, initialize bool, installation ins
 	host := fuse.NewFileSystemHost(adapter)
 	host.SetCapCaseInsensitive(false)
 	host.SetCapReaddirPlus(true)
+	host.SetCapDeleteAccess(true)
 	stopNotifications := watchWindowsChanges(ctx, stores, adapter.FS, host)
 	defer stopNotifications()
 	opts := []string{"-o", "volname=STQR,uid=-1,gid=-1,umask=077,FileInfoTimeout=0,DirInfoTimeout=0,attr_timeout=0,entry_timeout=0,negative_timeout=0"}

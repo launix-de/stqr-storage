@@ -179,12 +179,18 @@ func (a *Adapter) Utimens(p string, ts []fuse.Timespec) int {
 	}
 	return errno(a.FS.Setattr(p, 0, v))
 }
+
+// WinFsp checks deletion before cleanup; unlink errors during cleanup are ignored.
 func (a *Adapter) Access(p string, mask uint32) int {
-	if _, e := a.FS.Lookup(p); e != nil {
-		return errno(e)
+	info, err := a.FS.Lookup(p)
+	if err != nil {
+		return errno(err)
 	}
-	if mask&fuse.W_OK != 0 {
-		return errno(a.FS.writable())
+	if mask&(fuse.W_OK|fuse.DELETE_OK) != 0 {
+		if err := a.FS.writable(); err != nil {
+			return errno(err)
+		}
+		return errno(a.FS.Volume.CheckWrite(a.FS.Context, info.ID))
 	}
 	return 0
 }

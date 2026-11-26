@@ -15,7 +15,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-	"unsafe"
 )
 
 func TestInstallEncryptedProfileAndAutostart(t *testing.T) {
@@ -109,54 +108,6 @@ func TestDriveSessionExclusionAndStop(t *testing.T) {
 		t.Fatal("stop event did not cancel session")
 	}
 }
-func TestSetupDialogCheckbox(t *testing.T) {
-	if os.Getenv("STQR_TEST_WINDOWS_UI") != "1" {
-		t.Skip("set STQR_TEST_WINDOWS_UI=1 to exercise native UI")
-	}
-	done := make(chan error, 1)
-	go func() {
-		find := user32.NewProc("FindWindowExW")
-		var hwnd uintptr
-		for n := 0; n < 100; n++ {
-			var after uintptr
-			for {
-				hwnd, _, _ = find.Call(0, after, uintptr(unsafe.Pointer(u16(setupClass))), 0)
-				if hwnd == 0 {
-					break
-				}
-				var pid uint32
-				user32.NewProc("GetWindowThreadProcessId").Call(hwnd, uintptr(unsafe.Pointer(&pid)))
-				if pid == uint32(os.Getpid()) {
-					break
-				}
-				after = hwnd
-			}
-			visible, _, _ := user32.NewProc("IsWindowVisible").Call(hwnd)
-			if hwnd != 0 && visible != 0 && field(hwnd, idPersist) != 0 {
-				break
-			}
-			time.Sleep(50 * time.Millisecond)
-		}
-		if hwnd == 0 {
-			done <- fmt.Errorf("dialog missing")
-			return
-		}
-		sendMessage.Call(field(hwnd, idPersist), 0xf1, 1, 0)
-		sendMessage.Call(hwnd, 0x111, 1, 0)
-		done <- nil
-	}()
-	choice, e := showSetup(mountConfig{URI: "http://storage:7419", Username: "alice", Password: "secret", Bucket: "docs", Drive: "S:"}, false)
-	if e != nil {
-		t.Fatal(e)
-	}
-	if e = <-done; e != nil {
-		t.Fatal(e)
-	}
-	if choice.cancel || choice.remove || !choice.persist || choice.config.Password != "secret" {
-		t.Fatal("dialog did not preserve checkbox/config")
-	}
-}
-
 func TestInstallWinUIBundle(t *testing.T) {
 	source := filepath.Join(t.TempDir(), "stqr-windows.exe")
 	i := installation{directory: filepath.Join(t.TempDir(), "installed")}
