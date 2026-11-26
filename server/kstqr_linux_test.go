@@ -121,7 +121,36 @@ func TestKSTQRVirtualMachine(t *testing.T) {
 	var onlineObjects []client.ObjectID
 	var onlineGet func(context.Context, client.ObjectID) error
 	var nativeOverlay atomic.Pointer[client.OverlayFilesystem]
+	writebackFault := &kernelWritebackFault{}
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		current.Load().Handler().ServeHTTP(w, r)
+	}))
+	defer upstream.Close()
 	host := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/ws" {
+			writebackFault.proxy(w, r, upstream.URL)
+			return
+		}
+		if strings.HasPrefix(r.URL.Path, "/__kstqr_test/writeback-") {
+			var err error
+			switch strings.TrimPrefix(r.URL.Path, "/__kstqr_test/writeback-") {
+			case "fail":
+				writebackFault.begin()
+			case "retry":
+				err = writebackFault.end()
+			case "verified":
+				err = writebackFault.verify()
+			default:
+				http.NotFound(w, r)
+				return
+			}
+			if err != nil {
+				http.Error(w, err.Error(), 500)
+			} else {
+				w.WriteHeader(200)
+			}
+			return
+		}
 		if r.URL.Path == "/__kstqr_test/online-retained" || r.URL.Path == "/__kstqr_test/online-reclaimed" {
 			if onlineGet == nil || len(onlineObjects) != 3 {
 				http.Error(w, "reclamation fixture missing", 500)
@@ -555,6 +584,12 @@ echo KSTQR_SANDBOX_BEGIN
 echo KSTQR_SANDBOX_END
 cat /proc/self/mountstats
 ls -l /mnt
+# Coherence deliberately replaces subscriber sockets with accepted work in
+# flight. Its error state is not the clean-session precondition of this
+# separate crash fixture. All earlier probe processes have exited and closed
+# their handles; start a new mount without clearing any live client's latch.
+umount /mnt
+/mount.kstqr --uri @@URL@@ --bucket @@BUCKET@@ --credentials /credentials /mnt
 echo KSTQR_CRASH_RECONNECT_BEGIN
 /crash-reconnect @@URL@@
 echo KSTQR_CRASH_RECONNECT_END
@@ -877,8 +912,46 @@ poweroff -f
 		if e = conn.Sync(ctx); e != nil {
 			t.Fatal(e)
 		}
+		busyCold, e := fs.Create(ctx, client.FilesystemRootID(), "busy-cold", 0644, 0, 0, false)
+		if e != nil {
+			t.Fatal(e)
+		}
+		if _, e = fs.WriteAt(ctx, busyCold.ID, bytes.Repeat([]byte("B"), 65536), 0); e != nil {
+			t.Fatal(e)
+		}
+		if e = conn.Sync(ctx); e != nil {
+			t.Fatal(e)
+		}
+		mutable, e := fs.Create(ctx, client.FilesystemRootID(), "busy-mutable", 0644, 0, 0, false)
+		if e != nil {
+			t.Fatal(e)
+		}
+		if _, e = fs.WriteAt(ctx, mutable.ID, bytes.Repeat([]byte("M"), 65536), 0); e != nil {
+			t.Fatal(e)
+		}
+		for i := 0; i < 12; i++ {
+			file, err := fs.Create(ctx, client.FilesystemRootID(), fmt.Sprintf("parallel-cold-%d", i), 0644, 0, 0, false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err = fs.WriteAt(ctx, file.ID, bytes.Repeat([]byte("P"), 4096), 0); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if e = conn.Sync(ctx); e != nil {
+			t.Fatal(e)
+		}
 		native, control, fixture := startKernelOutageFixture(t, s)
 		t.Cleanup(func() {
+			if !fixture.recoveryChecked.Load() {
+				t.Error("parallel readers did not coalesce transport recovery")
+			}
+			if !fixture.busyChecked.Load() {
+				t.Error("transient 503 did not preserve the live owner connection")
+			}
+			if !fixture.busyStatChecked.Load() || !fixture.busyDeleteChecked.Load() {
+				t.Error("STAT/DELETE transient replies did not preserve the live owner connection")
+			}
 			if fixture.pauses.Load() != 2 || fixture.drops.Load() != 1 {
 				t.Errorf("outage fixture did not exercise both failures: pauses=%d dropped_replies=%d", fixture.pauses.Load(), fixture.drops.Load())
 			}
@@ -898,8 +971,13 @@ ip link set eth0 up
 ip addr add 10.0.2.15/24 dev eth0
 ip route add default via 10.0.2.2
 insmod /kstqr.ko
-/mount.kstqr --uri %s --bucket %s --credentials /credentials /mnt
-/outage-test %s
+/mount.kstqr --uri %[1]s --bucket %[2]s --credentials /credentials /mnt
+/outage-test %[3]s mixed-busy
+umount /mnt
+# Finish orphan cleanup and its accepted writes before a fresh read-outage
+# mount, so the recovery oracle does not invent durability for background I/O.
+/mount.kstqr --uri %[1]s --bucket %[2]s --credentials /credentials /mnt
+/outage-test %[3]s
 umount /mnt
 rmmod kstqr
 if dmesg | grep -E 'BUG:|WARNING:|Oops:|KASAN:'; then exit 1; fi
