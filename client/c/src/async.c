@@ -84,6 +84,8 @@ static int async_send(stqr_client *c,struct sq_async *p) {
     struct buf wrapped={0};struct buf *body=&p->body;
     int err;
     if(p->mutation && any_lost(c) && !accepted_visibility_after_loss(c,p->op,p->mutation))return -ESTALE;
+    if(p->mutation>1 && !(c->capabilities&STQR_CAP_DURABILITY))return -EOPNOTSUPP;
+    if(p->op==0x121 && c->accepted_references && !references_accepted(c))return -EOPNOTSUPP;
     err=ensure_channel(c);if(err)return err;
     /* A redirect may reach an older peer after the original negotiation. Such
      * a peer cannot certify a no-ACK prefix; surface this instead of returning
@@ -250,6 +252,7 @@ int stqr_object_reference_async(stqr_client *c,stqr_object_id target,stqr_id tok
     stqr_object_id root;stqr_id rid={{0}};struct buf b={0};int err;
     if(!c||!cb||action>5||zero(token.bytes,16))return -EINVAL;
     if(!(c->capabilities&STQR_CAP_OBJECT_REFERENCES))return -EOPNOTSUPP;
+    if(c->accepted_references && !references_accepted(c))return -EOPNOTSUPP;
     err=sq_hash(256,domain,sizeof(domain)-1,root.bytes);if(err)return err;
     reference(c,&b,root);put(&b,target.bytes,32);number(&b,action,1);put(&b,token.bytes,16);
     err=async_submit(c,0x121,&b,rid,root,1,0,0,0,cb,arg);drop(&b);return err;

@@ -412,13 +412,8 @@ static void ks_bd_put_super(struct super_block *sb)
 	if (b->queue) {
 		destroy_workqueue(b->queue);
 		b->queue = NULL;
-		if (!b->readonly && b->rpc.client) {
-            int err;
-            mutex_lock(&b->rpc.lock);
-            err=ks_bd_sync_locked(b);
-            mutex_unlock(&b->rpc.lock);
-            if(err)pr_err("kstqr: block export final sync failed\n");
-        }
+		/* Completed visibility writes need no additional shutdown fence. The
+		 * block layer requests persistence explicitly with FLUSH/FUA/sync_fs. */
 	}
 	list_for_each_entry_safe(d, next, &b->disks, list)
 	{

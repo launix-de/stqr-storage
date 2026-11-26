@@ -22,6 +22,7 @@
             exit(1);                                                                               \
         }                                                                                          \
     } while (0)
+#include "explicit_sync.h"
 static void save(const char *path, const char *text)
 {
     int fd = open(path, O_CREAT | O_TRUNC | O_RDWR, 0640);
@@ -41,6 +42,7 @@ int main(void)
     struct stat st;
     char *mapped;
     setvbuf(stdout, NULL, _IOLBF, 0);
+    explicit_sync_policy();
     puts("kstqr: setgid directory inheritance");
     REQUIRE(!mkdir("/mnt/setgid", 0777));
     REQUIRE(!chown("/mnt/setgid", 0, 45678));
