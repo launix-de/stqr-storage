@@ -138,7 +138,7 @@ func (b *Bucket) ID() volume.ID {
 func (b *Bucket) Describe() BucketDescription {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
-	return cloneBucketDescription(b.description)
+	return cloneBucketDescription(effectiveSystemFormat(b.description))
 }
 
 // Internal snapshots reference immutable slices: publication replaces the
@@ -146,7 +146,7 @@ func (b *Bucket) Describe() BucketDescription {
 func (b *Bucket) storageDescription() BucketDescription {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
-	return b.description
+	return effectiveSystemFormat(b.description)
 }
 func cloneBucketDescription(d BucketDescription) BucketDescription {
 	d.Grants = append([]BucketGrant(nil), d.Grants...)
@@ -166,6 +166,7 @@ func DefaultBucketPolicy() BucketPolicy {
 func NewBucket(id volume.ID, name string) (*Bucket, error) {
 	d := BucketDescription{Schema: 1, ID: id.String(), Name: name, State: BucketActive, Revision: 1, Policy: DefaultBucketPolicy()}
 	if id == systemBucket {
+		d.Schema, d.Format = 2, systemAdminFormat
 		d.Policy.PlacementMode = "everywhere"
 		d.Policy.Redundancy = BucketRedundancy{Mode: "replication", ACK: "all"}
 		d.Policy.PlacementGroup = systemPlacementGroup.String()
@@ -254,6 +255,9 @@ func normalizeBucketDescription(d BucketDescription) (BucketDescription, error) 
 		return d, ErrBucketInvalid
 	}
 	if !validBucketFormat(d.Format, true) || d.Format != "" && d.Schema < 2 || d.Schema == 2 && d.Format == "" {
+		return d, ErrBucketInvalid
+	}
+	if d.Format == systemAdminFormat && id != systemBucket || id == systemBucket && d.Format != "" && d.Format != systemAdminFormat {
 		return d, ErrBucketInvalid
 	}
 	if _, ok := bucketEnum(string(d.State), "active", "locked", "deleting"); !ok {
