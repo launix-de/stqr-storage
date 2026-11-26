@@ -10,6 +10,10 @@ import (
 // dashboard poll or a scan of every object's index. CollectStats holds cfg.mu;
 // this path only reads immutable images and cannot invert the volume lock order.
 func (s *Server) collectQuotaStats(snap *client.StatsSnapshot, filter client.StatsFilter) {
+	// Cold usage is unknown, never an empty bucket or spendable allowance.
+	if s.storageWarming.Load() {
+		return
+	}
 	image := s.quotaUsage.Load()
 	view := s.currentSystem.Load()
 	policies := s.quotaPolicies.Load()

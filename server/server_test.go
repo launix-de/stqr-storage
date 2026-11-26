@@ -558,6 +558,21 @@ func TestNodeIOCountersKeepDetachedVolumeHistory(t *testing.T) {
 	if e != nil {
 		t.Fatal(e)
 	}
+	// Force a mapped read before retirement; it must survive node-history
+	// transfer exactly like positioned backend access.
+	readBefore := src.IOStats()
+	h, e = src.Open(false)
+	if e != nil {
+		t.Fatal(e)
+	}
+	_, e = h.CopyTo(volume.Key{Bucket: volume.ID{1}, Object: volume.ObjectID{1}}, 0, 80<<10, io.Discard)
+	h.Close()
+	if e != nil {
+		t.Fatal(e)
+	}
+	if after := src.IOStats(); after.ViewReadBytes <= readBefore.ViewReadBytes || after.ReadBytes != readBefore.ReadBytes {
+		t.Fatal("fixture did not read mapped payload", readBefore, after)
+	}
 	op, e := s.RemoveVolume(newID(), a.VolumeID)
 	if e != nil {
 		t.Fatal(e)
@@ -568,4 +583,15 @@ func TestNodeIOCountersKeepDetachedVolumeHistory(t *testing.T) {
 	if got < expected {
 		t.Fatalf("node counters forgot detached bytes: %d < %d", got, expected)
 	}
+	expectedRead := volumeAccessIO(src.IOStats()).PhysicalReadBytes + volumeAccessIO(dst.IOStats()).PhysicalReadBytes + volumeAccessIO(s.system.IOStats()).PhysicalReadBytes
+	snapshot := s.CollectStats(client.StatsFilter{})
+	if snapshot.IO.PhysicalReadBytes < expectedRead {
+		t.Fatal("retired mapped reads disappeared", snapshot.IO.PhysicalReadBytes, expectedRead)
+	}
+	for _, row := range snapshot.Volumes {
+		if row.ID.String() == a.VolumeID {
+			t.Fatal("retired source also counted as active")
+		}
+	}
+
 }

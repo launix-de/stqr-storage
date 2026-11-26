@@ -72,6 +72,9 @@ func (s *Server) growthInfo(vid string) (volumeGrowInfo, error) {
 	return out, nil
 }
 func (s *Server) GrowVolume(id, vid string, sizeBytes int64) (Operation, error) {
+	if s.storageWarming.Load() {
+		return Operation{}, s.storageUnavailable()
+	}
 	s.opMu.Lock()
 	defer s.opMu.Unlock()
 	if s.forceFrozen() {

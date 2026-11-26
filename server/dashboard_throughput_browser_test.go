@@ -34,8 +34,8 @@ func TestDashboardThroughputBrowser(t *testing.T) {
 		t.Fatal(err)
 	}
 	// mmap views are real payload reads but are not positioned backend I/O.
-	// Assert both families here; the browser must not demand a fabricated
-	// nonzero physical-read rate merely because the logical payload is read.
+	// Assert both families here; the browser then requires nonzero storage-access
+	// read and write rates without fabricating physical-device traffic.
 	before := v.IOStats()
 	if _, _, err := b.GetRange(ctx, actor, id, 0, 4096); err != nil {
 		t.Fatal(err)

@@ -54,7 +54,7 @@ func statusOf(e error) int {
 		return 409
 	case errors.Is(e, volume.ErrUnsupported):
 		return 501
-	case errors.Is(e, volume.ErrClosed), errors.Is(e, volume.ErrRecovery), errors.Is(e, volume.ErrDraining):
+	case errors.Is(e, volume.ErrAccountingNotReady), errors.Is(e, volume.ErrClosed), errors.Is(e, volume.ErrRecovery), errors.Is(e, volume.ErrDraining):
 		return 503
 	case errors.Is(e, volume.ErrRange):
 		return 400
@@ -177,6 +177,9 @@ func (s *Server) finishOperation(op Operation, e error) (Operation, error) {
 var validName = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
 
 func (s *Server) AddVolume(id string, r AddVolumeRequest) (op Operation, err error) {
+	if s.storageWarming.Load() {
+		return op, s.storageUnavailable()
+	}
 	s.opMu.Lock()
 	s.dirtyVolumeAuthority()
 	defer s.opMu.Unlock()
@@ -342,6 +345,9 @@ func (s *Server) AddVolume(id string, r AddVolumeRequest) (op Operation, err err
 	return op, err
 }
 func (s *Server) RemoveVolume(id, vid string) (Operation, error) {
+	if s.storageWarming.Load() {
+		return Operation{}, s.storageUnavailable()
+	}
 	s.opMu.Lock()
 	s.dirtyVolumeAuthority()
 	defer s.opMu.Unlock()
@@ -444,6 +450,9 @@ func (s *Server) configView() map[string]any {
 	return view
 }
 func (s *Server) updateConfig(patch map[string]json.RawMessage) error {
+	if s.storageWarming.Load() {
+		return s.storageUnavailable()
+	}
 	s.opMu.Lock()
 	s.dirtyVolumeAuthority()
 	defer s.opMu.Unlock()
@@ -509,6 +518,9 @@ func (s *Server) updateConfig(patch map[string]json.RawMessage) error {
 // RescanVolume adopts capacity added externally (e.g. lvextend). It does not
 // resize an LV, reread partition tables or format an already attached device.
 func (s *Server) RescanVolume(id, vid string) (op Operation, err error) {
+	if s.storageWarming.Load() {
+		return op, s.storageUnavailable()
+	}
 	s.opMu.Lock()
 	s.dirtyVolumeAuthority()
 	defer s.opMu.Unlock()

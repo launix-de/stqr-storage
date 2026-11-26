@@ -723,6 +723,20 @@ func (s *Server) catchupRangePeer(p *peerConnection) {
 	s.mu.Unlock()
 	go func() {
 		defer s.workers.Done()
+		// Archive catchup changes the effective ownership predicate. Keep it
+		// behind the same recovery barrier as local migration workers.
+		if s.storageWarming.Load() {
+			select {
+			case <-s.storageWarmDone:
+			case <-p.ctx.Done():
+				return
+			case <-s.ctx.Done():
+				return
+			}
+			if s.storageWarming.Load() {
+				return
+			}
+		}
 		ctx, cancel := context.WithTimeout(p.ctx, 30*time.Second)
 		defer cancel()
 		if s.scopes.syncArchiveFrom(ctx, p.Node) != nil {

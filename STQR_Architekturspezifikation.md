@@ -953,7 +953,7 @@ Volume-Format **3** ergänzt die bestehende Formatfamilie `STQRVOL2` um Verwaltu
 - Sichtbare private/Staging-, Accepted- und laufende Fence-Seiten haben Vorrang vor dem physischen Mapping. Ein Leser darf während des außerhalb des RWLocks arbeitenden Checkpoints keine älteren oder halb überschriebenen Bytes aus dem Mapping übernehmen. Der Fence hält seine bereits veröffentlichten RAM-Seiten unveränderlich bis zum Abschluss unter exklusivem Lock fest.
 - Die Lebensdauer folgt dem Volume-Handle: aktive Lese-Handles verhindern Remap/Unmap durch `Grow`, `Rescan`, `Shrink` und `Close`. Vergrößern bildet zuerst die neue physische Kapazität ab; bei Mapping-Fehler bleibt das bisherige Mapping gültig. Internes Verkleinern entfernt das alte Mapping vor dem Truncate. Externes Truncation/Umhängen eines aktiven Backends verletzt die exklusive Eigentümerschaft.
 - RAM-Volumes verleihen ihre vorhandenen sparsamen RAM-Seiten direkt. Eigene `VolumeIO`-Provider und nicht unterstützte Plattformen behalten einen begrenzten, ausgerichteten ReadAt-Fallback; dieser wird nicht als kopierfreier Mapping-Zugriff ausgegeben.
-- `ReadOps`/`ReadBytes` messen positionierte Backend-Reads; `ViewReadOps`/`ViewReadBytes` erfassen davon getrennt Zugriffe über mmap bzw. RAM-Views. **Keine der Größen misst tatsächliche OS-Pagefaults oder Festplattenzugriffe.** View-Zugriffe dürfen nicht zu angeblicher physischer Disk-I/O addiert werden. Das aktuelle Statistik-Wireformat überträgt die View-Zähler noch nicht; die Volume-Leserate umfasst deshalb nur positionierte Reads, während die logischen Bucket-/User-Zähler weiterhin die ausgelieferten Nutzdaten erfassen.
+- `ReadOps`/`ReadBytes` messen positionierte Backend-Reads; `ViewReadOps`/`ViewReadBytes` erfassen davon getrennt Zugriffe über mmap bzw. RAM-Views. **Keine der Größen misst tatsächliche OS-Pagefaults oder Festplattenzugriffe.** Die bestehenden Wire-Felder `PhysicalReadBytes`/`PhysicalWriteBytes` behalten aus Kompatibilitätsgründen ihren Namen, bedeuten aber **Speicherzugriffsbytes** statt tatsächlicher Datenträger-I/O. Für Volume-/Node-Leseraten werden positionierte `ReadBytes` und getrennte `ViewReadBytes` genau einmal addiert; die Anzeige benennt RAM/mmap, Metadaten und Migration ausdrücklich. Auch ausgehängte Volumes behalten dieselbe Zählweise in der Node-Historie. Backend-Operationszähler bleiben getrennt von Objektoperationen. Die logischen Bucket-/User-Zähler erfassen weiterhin die ausgelieferten Nutzdaten; das Wirelayout bleibt unverändert.
 
 ### 8.3.1 Software Contract der Volume-Library
 
@@ -966,6 +966,26 @@ Volume-Format **3** ergänzt die bestehende Formatfamilie `STQRVOL2` um Verwaltu
 - Die Objekt-API ist ausschließlich am Handle angesiedelt; auf `Volume` gibt es keine zweite, automatisch sperrende Variante von GET/PUT/APPEND/TRUNC/CAS oder `CopyTo`. Read- und Write-Handles bieten `Stat`, `Get`, `GetRange`, `ReadAt`, `WithReadView`, `CopyTo`, `Extents`, `Scan`, `OperationStatus` und `ScanRequests`. Nur Write-Handles bieten zusätzlich die Mutationen (einschließlich Reader-Varianten), `Recompress`, `Restore`, `Repair`, `RestoreRequest`, `ForgetRequest` und `SyncThrough`. Ein Read-Handle weist diese mit `ErrReadOnly` ab. `Volume` behält die eigenständige allgemeine `Stat`-Abfrage sowie Volume-Verwaltung, Sync, Checkpoint, Compaction, Scrub und vollständigen Export/Import mit eigener Sperrverwaltung; diese Aufrufe finden außerhalb offener Handle-Sessions statt. `Handle.Close` beendet die Session, `Volume.Close` schließt das Backend.
 - `Handle.WithReadView(key, offset, length, callback)` verleiht innerhalb des Callbacks geprüfte, **nur lesbare** Segmente. RAW-Daten referenzieren mmap-/RAM-Seiten; Sparse-Lücken werden als Nullbereiche ohne Payload-Puffer angegeben. Komprimierte Chunks werden bei Bedarf begrenzt dekodiert. Slices dürfen weder verändert noch nach Callback-Ende behalten werden. Der aktive Methodenaufruf verhindert paralleles Handle-Close und vorzeitiges Runtime-Cleanup. Callback-Reentry in Handle/Volume ist verboten. Ein View-Bereich ist nach EOF-Clipping auf `MaxBufferedRead` begrenzt; `CopyTo` streamt auch größere Objekte in begrenzten Views und verlangt keine Ganzobjekt-Allokation. `Get`/`GetRange` liefern weiterhin eigene veränderbare Kopien. Diese Strategie verändert weder Objekt-IDs noch das Volume-Format.
 - Index/Metadaten werden für schnellen Zugriff im RAM gecacht. Bei vielen kleinen Objekten wird ein **begrenzter Cache plus On-Volume-Index** verwendet; Lookup/Recovery dürfen keinen unbegrenzten Vollindex oder sämtliche Payloads in RAM verlangen. Der konkrete Library-Stand dokumentiert Cachegrenzen, Disk-Fallback, Checkpoint/Compaction und deren Tests.
+
+### 8.3.2 Verfügbarkeit während der Wiederherstellung
+
+Vor dem HTTP-Start werden Identität, WAL, System-Konfiguration sowie Membership-,
+Placement- und Range-Journale einschließlich Source-Fences und Target-Aktivierungen
+validiert. Danach stehen Authentifizierung, Dashboard, Konfiguration, Statistiken
+und GET auf eindeutig autoritativen Ranges bereits zur Verfügung. Ein fehlender
+Aggregat-Checkpoint löst höchstens einen Hintergrundlauf mit begrenzten Caches
+unter Read-Locks aus; er verschiebt den Listener nicht hinter einen Objektzensus.
+Ein abgeleiteter, exakt an Volume-Checkpoint und Ownership-Prädikat gebundener
+Zähler-Cache enthält nur Aggregate pro Bucket, keine Objektverzeichnisse.
+
+Bis Zähler, Import-Reserven und lokale Recovery vollständig rekonstruiert sind,
+bedeutet fehlender Verbrauch **unbekannt**, niemals null oder freies Kontingent.
+Schreibende Requests und Kapazitäts-/Placement-Änderungen erhalten vor einem
+Write-Lock HTTP-/Protokollstatus 503. Migration, Rebalancing und schreibende
+Housekeeping-Worker starten erst danach. Die Node meldet vorübergehend den
+Laufzeitzustand pausiert mit Reason-Bit 10 (Speicher-Wiederherstellung); daraus
+folgt weder ein persistierter Drain noch eine Membership-Änderung. Dashboard und
+Leser dürfen nicht hinter einem wartenden Cold-Startup-Writer blockiert werden.
 
 ### 8.4 VolumeIO
 
