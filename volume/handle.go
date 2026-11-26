@@ -44,11 +44,21 @@ type handleLease struct {
 
 // Open acquires the volume lock. write=false allows concurrent readers;
 // write=true also permits mutations. Physical checkpoints release the lock;
-// bounded buffered mutations may publish while that I/O is in flight.
+// bounded buffered mutations may publish while that I/O is in flight. A write
+// open waits for exclusive allocator maintenance or private payload staging;
+// callers do not need to retry transient internal admission contention.
 // The returned handle is the only supported way to compose locked operations.
 func (v *Volume) Open(write bool) (*Handle, error) {
 	if write {
 		v.mu.Lock()
+		// Blocking admission waits for exclusive allocator maintenance/private
+		// payload staging. Those paths release mu for I/O and broadcast before
+		// relinquishing their reservation; exposing their transient ErrBusy
+		// here would make concurrent ordinary callers fail nondeterministically.
+		// Ordinary checkpoints have neither flag and still admit pipelined writes.
+		for v.maintenance || v.preparing {
+			v.prepareCond.Wait()
+		}
 	} else {
 		v.mu.RLock()
 	}

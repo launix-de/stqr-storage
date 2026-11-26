@@ -212,3 +212,50 @@ func TestExplicitSyncAllowsReaders(t *testing.T) {
 	awaitCheckpointTest(t, flushed)
 	awaitCheckpointTest(t, waited)
 }
+
+// Blocking handle admission must wait for a maintenance checkpoint, rather
+// than exporting its transient buffer backpressure as ErrBusy to callers such
+// as concurrent catalog saves. Accepted writes still pipeline ordinary fences.
+func TestOpenWaitsForMaintenanceCheckpoint(t *testing.T) {
+	v, disk := newCheckpointGate(t)
+	key := testKey(1)
+	if _, err := testPut(v, key, []byte("visible"), Options{Accepted: true}); err != nil {
+		t.Fatal(err)
+	}
+	entered, release := disk.arm(nil)
+	defer release()
+	maintenance := make(chan error, 1)
+	go func() {
+		h, err := v.Open(true)
+		if err == nil {
+			err = h.ForgetRequest(testID(999))
+			h.Close()
+		}
+		maintenance <- err
+	}()
+	select {
+	case <-entered:
+	case <-time.After(3 * time.Second):
+		t.Fatal("maintenance checkpoint did not start")
+	}
+	writer := make(chan error, 1)
+	go func() {
+		h, err := v.Open(true)
+		if err == nil {
+			_, err = h.Put(testKey(2), []byte("after maintenance"), Options{Accepted: true})
+			h.Close()
+		}
+		writer <- err
+	}()
+	select {
+	case err := <-writer:
+		t.Fatalf("blocking writer did not wait for maintenance: %v", err)
+	case <-time.After(30 * time.Millisecond):
+	}
+	// Reads remain available while management waits for physical storage.
+	mustGet(t, v, key, []byte("visible"))
+	release()
+	awaitCheckpointTest(t, maintenance)
+	awaitCheckpointTest(t, writer)
+	mustGet(t, v, testKey(2), []byte("after maintenance"))
+}
