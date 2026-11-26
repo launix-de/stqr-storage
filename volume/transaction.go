@@ -78,6 +78,9 @@ func (t *transaction) spillPages() error {
 		}
 		for off, page := range t.pages {
 			if err := t.acceptedPages.put(off, page, 1); err != nil {
+				if errors.Is(err, ErrBusy) {
+					return ErrWritebackPressure
+				}
 				return err
 			}
 			delete(t.pages, off)
@@ -441,7 +444,7 @@ func (t *transaction) writeBytes(off uint64, b []byte) error {
 		off += uint64(n)
 		b = b[n:]
 	}
-	return nil
+	return t.spillPages()
 }
 func (t *transaction) patch(off uint64, b []byte) error {
 	for len(b) > 0 {

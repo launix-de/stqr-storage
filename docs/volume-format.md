@@ -36,7 +36,8 @@ lock. A complete published image is readable before its durable ACK. Later
 bounded mutations use a separate overlay while an earlier image is being
 checkpointed; an old fence confirms only the image it wrote. Both WAL allocations
 and page images remain protected until completion. Closing rejects new
-publications before flushing the final overlay. See [write fences](write-fences.md)
+publications, waits for an already requested fence, and discards a later unfenced
+overlay. See [write fences](write-fences.md)
 for acknowledgement ordering, Linux persistence primitives and resource bounds.
 
 `Options.Accepted=true` never starts a persistence fence, even for oversized
