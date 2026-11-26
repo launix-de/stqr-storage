@@ -1,5 +1,12 @@
 # Deleted bucket reclamation
 
+The first committed transition to `DELETING` atomically renames the bucket to
+`<original>-deleted00`, then `-deleted01`, and so on until the name is unused.
+The original name becomes available immediately; the bucket ID remains stable.
+Long names lose only complete UTF-8 characters from the end of their prefix so
+the renamed value stays within 255 bytes. Repeated delete requests retain the
+assigned name. The catalog rejects transitions out of `DELETING`.
+
 A committed `DELETING` catalog description remains the durable cleanup intent.
 Normal client access and new clone edges are rejected in this state. Physical
 reclamation can therefore work under the volume lock without holding node
