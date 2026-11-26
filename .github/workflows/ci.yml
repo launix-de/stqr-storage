@@ -53,7 +53,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y build-essential libpam0g-dev dnsmasq-base
           test -f /usr/include/security/pam_modules.h
-          make all pam
+          make -C .. networkboot
           python3 -m unittest discover -s tests -v
           sh -n initramfs/hooks/stqr initramfs/scripts/stqr
 
@@ -145,9 +145,9 @@ jobs:
           sudo modprobe fuse
           sudo chmod a+rw /dev/fuse
           test -r /dev/fuse -a -w /dev/fuse
-      - run: make -C client/c all check
-      - run: make -C qemu-plugin-nbd all
-      - run: make -C networkboot all
+      - run: make c-client c-integration && make -C client/c check
+      - run: make nbd
+      - run: make networkboot
       - name: Real native clients against disposable localhost fixtures
         # Kernel here means FUSE/VFS mounts, not loading the kstqr module.
         run: go test -race ./client ./server -p=1 -run 'Test(CClient|.*Networkboot.*|.*Kernel.*|.*Rsync.*|BucketNativeOverlayPHPCluster)$' -count=1 -v -timeout=15m
