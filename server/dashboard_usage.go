@@ -33,10 +33,31 @@ func (s *Server) dashboardBucketUsage() dashboardBucketUsage {
 		}
 		image.values[snapshot.Node] = entries
 	}
-	add(local)
+	// Legacy telemetry represents unavailable local quota accounting as zero
+	// counters. Do not promote those placeholders to known dashboard usage.
+	usage := s.quotaUsage.Load()
+	localKnown := usage != nil
+	if localKnown {
+		system := s.system.Identity().VolumeID
+		for _, v := range local.Volumes {
+			id := volume.ID(v.ID)
+			if id == system {
+				continue
+			}
+			if _, ok := usage.volumes[id]; !ok {
+				localKnown = false
+				break
+			}
+		}
+	}
+	if localKnown {
+		add(local)
+	}
 	s.peerStatsMu.RLock()
 	for _, peer := range s.peerStats {
-		if peer.online && peer.snapshot != nil && time.Since(peer.lastSeen) < 10*time.Second {
+		if peer.online && peer.snapshot != nil && peer.connection != nil &&
+			peer.snapshot.Node == peer.connection.Node && peer.snapshot.BootID == peer.connection.Boot &&
+			time.Since(peer.lastSeen) < 10*time.Second {
 			add(*peer.snapshot)
 		}
 	}
@@ -65,7 +86,11 @@ func (image dashboardBucketUsage) used(d BucketDescription) (uint64, error) {
 		if image.placement == nil {
 			return 0, errors.New("Placement-Statistik noch nicht verfügbar")
 		}
-		for _, entry := range image.placement.bucketEntries(client.ID(id)) {
+		entries := image.placement.bucketEntries(client.ID(id))
+		if len(entries) == 0 {
+			return 0, errors.New("Placement-Statistik des Buckets noch nicht verfügbar")
+		}
+		for _, entry := range entries {
 			if entry.State != 0 || entry.Runtime != (client.ID{}) {
 				return 0, errors.New("Belegung während des Placement-Wechsels noch nicht verfügbar")
 			}

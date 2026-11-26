@@ -3,6 +3,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {quotaUsageBase} from './dashboard/buckets.js';
 import {userTrafficSummary} from './dashboard/throughput.js';
+import {currentSnapshots,seedMembers} from './dashboard/membership.js';
+import {parseBucketPage} from './dashboard/bucket-codec.js';
 import {defaultBucketPolicy} from './dashboard/bucket-codec.js';
 const escape=s=>String(s).replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('"','&quot;');
 test('unlimited buckets show absolute physical occupancy without a fake percentage',()=>{
@@ -26,4 +28,26 @@ test('user summary sums full node totals once independently of paged user rows',
  const restarted=entry('a',100n,200n);restarted.entry.previous.boot='old';
  assert.deepEqual(userTrafficSummary([restarted],1000),{read:100n,write:200n,readRate:null,writeRate:null});
  assert.deepEqual(userTrafficSummary([],1000),{read:null,write:null,readRate:null,writeRate:null});
+});
+
+test('user totals retain an unsampled current member instead of shrinking the sum',()=>{
+ const view={member_nodes:['a','b'],membership_epoch:'1',config:{generation:1}};
+ const sample={received:1000,snapshot:{node:'a',boot:'a',captured:2000000000n,io:{logicalRead:100n,logicalWrite:200n}},previous:{boot:'a',captured:1000000000n,io:{logicalRead:0n,logicalWrite:0n}}};
+ const states=new Map([['a',sample],['departed',{snapshot:{node:'departed'}}]]);
+ seedMembers(view,states);
+ const sources=currentSnapshots(view,states,true).map(entry=>({node:entry.snapshot.node,entry:entry.placeholder?null:entry}));
+ assert.deepEqual(userTrafficSummary(sources,1000),{read:null,write:null,readRate:null,writeRate:null});
+ const fresh={received:1000,snapshot:{node:'b',boot:'b',captured:2000000000n,io:{logicalRead:300n,logicalWrite:400n}},previous:{boot:'b',captured:1000000000n,io:{logicalRead:0n,logicalWrite:0n}}};
+ states.set('b',fresh);
+ assert.deepEqual(userTrafficSummary(currentSnapshots(view,states,true).map(entry=>({node:entry.snapshot.node,entry})),1000),{read:400n,write:600n,readRate:400n,writeRate:600n});
+});
+test('new counters keep uint64 precision and old/reset samples stay unknown',()=>{
+ const n='18446744073709551615';
+ const page=parseBucketPage('{"occupied_physical_bytes":'+n+',"read_bytes_total":"'+n+'","write_bytes_total":"'+n+'"}');
+ assert.equal(page.occupied_physical_bytes,n);
+ const entry={received:1000,snapshot:{boot:'boot',captured:2000000000n,io:{logicalRead:BigInt(page.read_bytes_total),logicalWrite:BigInt(page.write_bytes_total)}},previous:{boot:'boot',captured:1000000000n,io:{logicalRead:BigInt(n),logicalWrite:BigInt(n)}}};
+ assert.equal(userTrafficSummary([{node:'a',entry}],1000).read,18446744073709551615n);
+ const wrapped={...entry,snapshot:{...entry.snapshot,io:{logicalRead:0n,logicalWrite:0n}}};
+ assert.deepEqual(userTrafficSummary([{node:'a',entry:wrapped}],1000),{read:0n,write:0n,readRate:null,writeRate:null});
+ assert.deepEqual(userTrafficSummary([{node:'old',entry:{received:1000,snapshot:{boot:'old',captured:2000000000n,users:[]}}}],1000),{read:null,write:null,readRate:null,writeRate:null});
 });
