@@ -93,7 +93,7 @@ func (t *objectTransport) fail(e error) {
 		t.cause = e
 		close(t.done)
 		for id, work := range t.connectionWrites {
-			if !work.noAck {
+			if !work.noAck && !work.accepted {
 				delete(t.connectionWrites, id)
 			} else if work.err == nil {
 				work.err = &UnknownOutcomeError{RequestID: id, Cause: e}

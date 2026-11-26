@@ -60,7 +60,7 @@ func TestCClient(t *testing.T) {
 		admin := s.cfg.Auth.BootstrapAdmin
 		run(t, host.URL, admin.Username, admin.Password, client.ID(b.ID()).String(), "")
 	})
-	for _, mode := range []string{"async", "async-close"} {
+	for _, mode := range []string{"async", "async-close", "accepted-references"} {
 		t.Run(mode, func(t *testing.T) {
 			s := testServer(t)
 			addTestVolume(t, s, "c-async", "hdd", 32<<20)

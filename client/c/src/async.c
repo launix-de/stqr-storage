@@ -80,6 +80,9 @@ static int async_send(stqr_client *c,struct sq_async *p) {
      * a false successful legacy fence. */
     if(p->fire && !(c->capabilities&STQR_CAP_CONNECTION_SYNC))return -EOPNOTSUPP;
     p->wire_op=p->op;
+    if(p->op==0x121 && references_accepted(c)) {
+        put(&wrapped,body->p,body->n);number(&wrapped,1,1);body=&wrapped;
+    }
     if(p->mutation>1 && (c->capabilities&STQR_CAP_DURABILITY)) {
         if(body->n<80)return -EINVAL;
         put(&wrapped,body->p,80);number(&wrapped,p->op,2);put(&wrapped,body->p+80,body->n-80);
@@ -192,7 +195,11 @@ static int async_dispatch(stqr_client *c,unsigned kind,unsigned op,const stqr_u8
         }
     }
     else if(!err&&(p->op==0x100||p->op==0x101))err=async_decode_get(c,p,m,&data,&n,&info);
-    else if(!err&&(p->op==0x107||p->op==0x108)){info_decode(m,&info);err=done(m);if(!err)err=accept_info(c,&info);}
+    else if(!err&&(p->op==0x107||p->op==0x108||p->op==0x102||p->op==0x103)){
+        info_decode(m,&info);
+        if(p->op==0x103 && (readnum(m,8)!=p->offset || readnum(m,8)!=p->length || readnum(m,8)!=info.length))m->err=-EPROTO;
+        err=done(m);if(!err)err=accept_info(c,&info);
+    }
     else if(!err&&p->op==0x121){if(readnum(m,1)!=1)m->err=-EPROTO;err=done(m);}
     else if(!err&&p->op==0x106)err=done(m);
     else if(!err&&p->op==0x111){
@@ -214,7 +221,7 @@ static int async_dispatch(stqr_client *c,unsigned kind,unsigned op,const stqr_u8
         }
         async_retire_fire(c,p,&err,&status);
     }
-    async_finish(c,p,err,status,data,n,(p->op==0x100||p->op==0x101||p->op==0x107||p->op==0x108||p->op==0x110)?&info:NULL);
+    async_finish(c,p,err,status,data,n,(p->op==0x100||p->op==0x101||p->op==0x107||p->op==0x108||p->op==0x110||p->op==0x102||p->op==0x103)?&info:NULL);
     return 1;
 }
 int stqr_object_reference_async(stqr_client *c,stqr_object_id target,stqr_id token,unsigned action,stqr_completion cb,void *arg) {
@@ -273,17 +280,19 @@ int stqr_cas_async(stqr_client *c,stqr_object_id id,unsigned scope,stqr_u64 off,
     if(!err){blob(&b,expected,en);blob(&b,replacement,rn);err=async_submit(c,0x108,&b,o->request_id,id,1+!!o->accepted,0,off,rn,cb,arg);}
     drop(&b);return err;
 }
-static int async_put(stqr_client *c,stqr_object_id id,stqr_u64 off,const void *data,size_t n,const stqr_options *o,int ranged) {
+static int async_put(stqr_client *c,stqr_object_id id,stqr_u64 off,const void *data,size_t n,const stqr_options *o,int ranged,stqr_completion cb,void *arg) {
     struct buf b={0};stqr_u8 hash[32];int err;
     if(!c||!o||n>SQ_CHUNK||(n&&!data)||n>~(stqr_u64)0-off)return -EINVAL;
-    if(!(c->capabilities&STQR_CAP_CONNECTION_SYNC)){stqr_options opt=*o;stqr_info info;opt.accepted=1;return ranged?stqr_put_range(c,id,off,data,n,&opt,&info):stqr_put(c,id,data,n,&opt,&info);}
+    if(!cb&&!(c->capabilities&STQR_CAP_CONNECTION_SYNC)){stqr_options opt=*o;stqr_info info;opt.accepted=1;return ranged?stqr_put_range(c,id,off,data,n,&opt,&info):stqr_put(c,id,data,n,&opt,&info);}
     reference(c,&b,id);if(ranged)number(&b,off,8);err=options(&b,o);
     if(!err)err=sq_hash(256,data,n,hash);
-    if(!err){number(&b,0,1);number(&b,n,8);put(&b,hash,32);blob(&b,data,n);err=async_submit(c,ranged?0x103:0x102,&b,o->request_id,id,2,1,off,n,NULL,NULL);}
+    if(!err){number(&b,0,1);number(&b,n,8);put(&b,hash,32);blob(&b,data,n);err=async_submit(c,ranged?0x103:0x102,&b,o->request_id,id,cb?(1+!!o->accepted):2,!cb,off,n,cb,arg);}
     drop(&b);return err;
 }
-int stqr_put_async(stqr_client *c,stqr_object_id id,const void *p,size_t n,const stqr_options *o){return async_put(c,id,0,p,n,o,0);}
-int stqr_put_range_async(stqr_client *c,stqr_object_id id,stqr_u64 off,const void *p,size_t n,const stqr_options *o){return async_put(c,id,off,p,n,o,1);}
+int stqr_put_async(stqr_client *c,stqr_object_id id,const void *p,size_t n,const stqr_options *o){return async_put(c,id,0,p,n,o,0,NULL,NULL);}
+int stqr_put_range_async(stqr_client *c,stqr_object_id id,stqr_u64 off,const void *p,size_t n,const stqr_options *o){return async_put(c,id,off,p,n,o,1,NULL,NULL);}
+int stqr_put_result_async(stqr_client *c,stqr_object_id id,const void *p,size_t n,const stqr_options *o,stqr_completion cb,void *arg){if(!cb)return -EINVAL;return async_put(c,id,0,p,n,o,0,cb,arg);}
+int stqr_put_range_result_async(stqr_client *c,stqr_object_id id,stqr_u64 off,const void *p,size_t n,const stqr_options *o,stqr_completion cb,void *arg){if(!cb)return -EINVAL;return async_put(c,id,off,p,n,o,1,cb,arg);}
 struct async_sync_group { stqr_client *client;stqr_completion complete;void *arg;unsigned pending;int error,status; };
 static void async_sync_done(void *arg,int error,int status,void *data,size_t n,const stqr_info *info) {
     struct async_sync_group *g=arg;(void)n;(void)info;sq_free(data);

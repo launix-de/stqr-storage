@@ -32,14 +32,15 @@ type terminalFrame struct {
 }
 
 type wsSession struct {
-	connectionFenceCap atomic.Bool
-	fenceMu            sync.Mutex
-	connectionSequence uint64
-	connectionJobs     map[client.ID]*connectionWork
-	connectionTouches  map[*volume.Volume]uint64
-	connectionFences   map[client.ID]*connectionFence
-	connectionFailures []connectionFailure
-	uploadTails        map[client.ID]chan struct{}
+	acceptedReferencesCap atomic.Bool
+	connectionFenceCap    atomic.Bool
+	fenceMu               sync.Mutex
+	connectionSequence    uint64
+	connectionJobs        map[client.ID]*connectionWork
+	connectionTouches     map[*volume.Volume]uint64
+	connectionFences      map[client.ID]*connectionFence
+	connectionFailures    []connectionFailure
+	uploadTails           map[client.ID]chan struct{}
 
 	durabilityCap      atomic.Bool
 	versionsSubscribed bool   // guarded by subMu

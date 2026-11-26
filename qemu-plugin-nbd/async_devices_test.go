@@ -14,106 +14,163 @@ import (
 	"time"
 )
 
-type queuedBlockWrite struct {
-	id    client.ObjectID
-	off   uint64
-	data  []byte
-	whole bool
-}
-type queuedBlockStore struct {
+type visibleBlockStore struct {
 	*testStore
-	queueMu sync.Mutex
-	queued  []queuedBlockWrite
+	gate    func([]byte) <-chan struct{}
+	started chan string
+	fenceMu sync.Mutex
 	fail    error
 	fences  int
 }
 
-func (s *queuedBlockStore) PutAsync(_ context.Context, id client.ObjectID, data []byte, _ client.PutOptions) error {
-	s.queueMu.Lock()
-	defer s.queueMu.Unlock()
-	s.queued = append(s.queued, queuedBlockWrite{id: id, data: bytes.Clone(data), whole: true})
+func (s *visibleBlockStore) ConcurrentObjectRequests() bool { return true }
+func (s *visibleBlockStore) await(ctx context.Context, data []byte, opt client.PutOptions) error {
+	if !opt.Accepted {
+		return errors.New("block write requested physical durability")
+	}
+	s.started <- string(data[:min(len(data), 16)])
+	if s.gate != nil {
+		select {
+		case <-s.gate(data):
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
 	return nil
 }
-func (s *queuedBlockStore) PutRangeAsync(_ context.Context, id client.ObjectID, off uint64, data []byte, _ client.PutOptions) error {
-	s.queueMu.Lock()
-	defer s.queueMu.Unlock()
-	s.queued = append(s.queued, queuedBlockWrite{id: id, off: off, data: bytes.Clone(data)})
-	return nil
+func (s *visibleBlockStore) Put(ctx context.Context, id client.ObjectID, data []byte, opt client.PutOptions) (client.ObjectInfo, error) {
+	if err := s.await(ctx, data, opt); err != nil {
+		return client.ObjectInfo{}, err
+	}
+	return s.testStore.Put(ctx, id, data, opt)
 }
-func (s *queuedBlockStore) Sync(ctx context.Context) error {
-	s.queueMu.Lock()
-	defer s.queueMu.Unlock()
+func (s *visibleBlockStore) PutRange(ctx context.Context, id client.ObjectID, off uint64, data []byte, opt client.PutOptions) (client.ObjectInfo, error) {
+	if err := s.await(ctx, data, opt); err != nil {
+		return client.ObjectInfo{}, err
+	}
+	return s.testStore.PutRange(ctx, id, off, data, opt)
+}
+func (s *visibleBlockStore) Sync(context.Context) error {
+	s.fenceMu.Lock()
+	defer s.fenceMu.Unlock()
 	s.fences++
-	if s.fail != nil {
-		return s.fail
-	}
-	// Reverse completion deliberately: callers must fence only genuine dependencies.
-	for i := len(s.queued) - 1; i >= 0; i-- {
-		w := s.queued[i]
-		var err error
-		if w.whole {
-			_, err = s.testStore.Put(ctx, w.id, w.data, client.PutOptions{})
-		} else {
-			_, err = s.testStore.PutRange(ctx, w.id, w.off, w.data, client.PutOptions{})
-		}
-		if err != nil {
-			return err
-		}
-	}
-	s.queued = nil
-	return nil
+	return s.fail
 }
-func TestAsyncBlockWritesPipelineAndFenceOverlaps(t *testing.T) {
-	ctx := context.Background()
-	s := &queuedBlockStore{testStore: newTestStore()}
+func waitBlockOperations(t *testing.T, c *Catalog, n int) {
+	t.Helper()
+	deadline := time.After(5 * time.Second)
+	ticker := time.NewTicker(time.Millisecond)
+	defer ticker.Stop()
+	for {
+		c.writeMu.Lock()
+		count := len(c.operations)
+		c.writeMu.Unlock()
+		if count == n {
+			return
+		}
+		select {
+		case <-deadline:
+			t.Fatal("range dependency was not admitted", n, count)
+		case <-ticker.C:
+		}
+	}
+}
+func TestAsyncBlockWritesUseVisibilityWithoutImplicitFence(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	gate := make(chan struct{})
+	ready := make(chan struct{})
+	close(ready)
+	s := &visibleBlockStore{testStore: newTestStore(), started: make(chan string, 16)}
+	s.gate = func(data []byte) <-chan struct{} {
+		if string(data) == "first" {
+			return gate
+		}
+		return ready
+	}
 	c := NewCatalog(s)
 	m, err := c.Create(ctx, Metadata{Name: "async", Size: 3 * StripeSize})
 	if err != nil {
 		t.Fatal(err)
 	}
-	baseline := s.fences
-	if err = c.WriteAt(ctx, m, []byte("first"), 0); err != nil {
-		t.Fatal(err)
+	first := make(chan error, 1)
+	go func() { first <- c.WriteAt(ctx, m, []byte("first"), 0) }()
+	select {
+	case <-s.started:
+	case <-ctx.Done():
+		t.Fatal(ctx.Err())
 	}
 	if err = c.WriteAt(ctx, m, []byte("independent"), StripeSize); err != nil {
-		t.Fatal(err)
+		t.Fatal("independent write blocked", err)
 	}
-	if s.fences != baseline || len(s.queued) != 2 {
-		t.Fatal("independent ranges did not pipeline", s.fences, len(s.queued))
-	}
-	if err = c.WriteAt(ctx, m, []byte("last!"), 0); err != nil {
-		t.Fatal(err)
-	}
-	if s.fences != baseline+1 || len(s.queued) != 1 {
-		t.Fatal("overlap was not fenced", s.fences, len(s.queued))
-	}
+	<-s.started
+	last := make(chan error, 1)
+	go func() { last <- c.WriteAt(ctx, m, []byte("last!"), 0) }()
+	waitBlockOperations(t, c, 2)
+	read := make(chan error, 1)
 	got := make([]byte, 5)
-	if err = c.ReadAt(ctx, m, got, 0); err != nil {
+	go func() { read <- c.ReadAt(ctx, m, got, 0) }()
+	waitBlockOperations(t, c, 3)
+	select {
+	case <-s.started:
+		t.Fatal("overlapping write overtook pending result")
+	default:
+	}
+	close(gate)
+	if err = <-first; err != nil {
 		t.Fatal(err)
 	}
-	if string(got) != "last!" || s.fences != baseline+2 {
-		t.Fatal("read overtook queued write", string(got), s.fences)
-	}
-	if err = c.WriteAt(ctx, m, []byte("trim"), 2*StripeSize); err != nil {
+	if err = <-last; err != nil {
 		t.Fatal(err)
 	}
-	if err = c.Trim(ctx, m, 2*StripeSize, StripeSize); err != nil {
+	if err = <-read; err != nil || string(got) != "last!" {
+		t.Fatal("read overtook write visibility", string(got), err)
+	}
+	if err = c.Trim(ctx, m, 0, StripeSize); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err = s.Get(ctx, StripeID(m.ID, 2)); !errors.Is(err, client.ErrNotFound) {
-		t.Fatal("late write resurrected trimmed stripe", err)
+	if s.fences != 0 {
+		t.Fatal("overlap/read/trim requested physical Sync", s.fences)
 	}
-	if err = c.Sync(ctx); err != nil {
-		t.Fatal(err)
-	}
-	got = make([]byte, 11)
-	if err = c.ReadAt(ctx, m, got, StripeSize); err != nil || string(got) != "independent" {
-		t.Fatal("independent stripe lost", string(got), err)
+	if err = c.Sync(ctx); err != nil || s.fences != 1 {
+		t.Fatal("explicit flush missing", s.fences, err)
 	}
 }
-func TestAsyncBlockFenceFailureRetainsPending(t *testing.T) {
+func TestAsyncBlockIndependentStripesOverlap(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	gate := make(chan struct{})
+	s := &visibleBlockStore{testStore: newTestStore(), started: make(chan string, 8), gate: func([]byte) <-chan struct{} { return gate }}
+	c := NewCatalog(s)
+	m, err := c.Create(ctx, Metadata{Name: "stripes", Size: 2 * StripeSize})
+	if err != nil {
+		t.Fatal(err)
+	}
+	data := bytes.Repeat([]byte{1}, int(2*StripeSize))
+	done := make(chan error, 1)
+	go func() { done <- c.WriteAt(ctx, m, data, 0) }()
+	for i := 0; i < 2; i++ {
+		select {
+		case <-s.started:
+		case <-ctx.Done():
+			t.Fatal("independent stripes serialized", ctx.Err())
+		}
+	}
+	close(gate)
+	if err = <-done; err != nil {
+		t.Fatal(err)
+	}
+	got := make([]byte, len(data))
+	if err = c.ReadAt(ctx, m, got, 0); err != nil || !bytes.Equal(data, got) {
+		t.Fatal("stripe visibility mismatch", err)
+	}
+	if s.fences != 0 {
+		t.Fatal("striping requested physical durability")
+	}
+}
+func TestAsyncBlockExplicitFenceFailureDoesNotBlockVisibility(t *testing.T) {
 	ctx := context.Background()
-	s := &queuedBlockStore{testStore: newTestStore()}
+	s := &visibleBlockStore{testStore: newTestStore(), started: make(chan string, 8)}
 	c := NewCatalog(s)
 	m, err := c.Create(ctx, Metadata{Name: "failure", Size: StripeSize})
 	if err != nil {
@@ -127,19 +184,16 @@ func TestAsyncBlockFenceFailureRetainsPending(t *testing.T) {
 	if err = c.Sync(ctx); !errors.Is(err, failure) {
 		t.Fatal(err)
 	}
-	if err = c.WriteAt(ctx, m, []byte("second"), 0); !errors.Is(err, failure) {
-		t.Fatal("overlap ignored failed fence", err)
-	}
-	if len(s.queued) != 1 {
-		t.Fatal("dependent write admitted after failed fence")
-	}
-	s.fail = nil
-	if err = c.Sync(ctx); err != nil {
-		t.Fatal(err)
+	if err = c.WriteAt(ctx, m, []byte("last!"), 0); err != nil {
+		t.Fatal("normal write requested another physical fence", err)
 	}
 	got := make([]byte, 5)
-	if err = c.ReadAt(ctx, m, got, 0); err != nil || string(got) != "first" {
+	if err = c.ReadAt(ctx, m, got, 0); err != nil || string(got) != "last!" {
 		t.Fatal(string(got), err)
+	}
+	s.fail = nil
+	if err = c.Sync(ctx); err != nil || s.fences != 2 {
+		t.Fatal("explicit retry missing", s.fences, err)
 	}
 }
 

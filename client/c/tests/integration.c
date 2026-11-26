@@ -135,6 +135,23 @@ int main(void) {
         CHECK(!stqr_async_pending(c));stqr_close(c);
         puts("C asynchronous multiplexing, no-ACK writes and connection fences passed");return 0;
     }
+    if (mode && !strcmp(mode,"accepted-references")) {
+        stqr_id pin,claim;stqr_commit_mark mark;struct async_result result={0};
+        CHECK(stqr_capabilities(c)&STQR_CAP_ACCEPTED_REFERENCES);
+        stqr_set_accepted_references(c,1);
+        CHECK(!stqr_request_id(&pin)&&!stqr_request_id(&claim));
+        CHECK(!stqr_object_reference_async(c,id,pin,0,async_completed,&result));
+        async_wait(c,&result,1);CHECK(!result.error);
+        CHECK(!stqr_pending_mark(c,&mark)&&mark.sequence);
+        CHECK(!stqr_sync(c));CHECK(!stqr_reconnect(c));
+        /* Mode survives reconnect; every endpoint checks its own capability. */
+        CHECK(!stqr_object_unpin(c,id,pin));
+        CHECK(!stqr_pending_mark(c,&mark)&&mark.sequence);
+        CHECK(!stqr_object_claim(c,id,claim));
+        CHECK(!stqr_object_release_claim(c,id,claim));
+        CHECK(!stqr_sync(c));CHECK(!stqr_pending_mark(c,&mark)&&!mark.sequence);
+        stqr_close(c);puts("C accepted reference receipts and explicit fences passed");return 0;
+    }
     if (mode && !strcmp(mode,"references")) {
         stqr_client *other=NULL;
         stqr_id pin, claim, second;

@@ -38,7 +38,7 @@ func compareFSLowerAnchor(a, b fsLowerAnchor) int {
 }
 
 func (f *Filesystem) lowerAnchorsSnapshot(ctx context.Context, create bool) (fsSnapshot, []fsLowerAnchor, error) {
-	ctx = context.WithValue(ctx, fsDurableKey{}, true)
+	ctx = context.WithValue(ctx, fsFreshReadKey{}, true)
 	for attempt := 0; attempt < 128; attempt++ {
 		s, err := f.snapshot(ctx, filesystemLowerAnchorsID)
 		if errors.Is(err, ErrNotFound) && create {

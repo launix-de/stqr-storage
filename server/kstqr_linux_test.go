@@ -579,7 +579,7 @@ poweroff -f
 		begin := strings.Index(init, "for attempt in 1 2 3 4; do")
 		end := strings.Index(init, "if dmesg |")
 		script := `/mount.kstqr --uri ` + endpoint + ` --bucket ` + client.ID(b.ID()).String() + ` --credentials /readonly-credentials --readonly /readonly
-/throughput
+/throughput ` + endpoint + `
 cat /proc/self/mountstats
 umount /readonly
 rmmod kstqr

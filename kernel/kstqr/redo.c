@@ -222,19 +222,20 @@ struct ks_edit_completion {
  stqr_object_id id;
  const void *data;
  size_t size;
- bool submitted;
+ u64 offset;
+ bool full, submitted;
 };
 static int apply_edits(struct ks_fs *f, stqr_object_id tx, const struct buf *encoded, bool legacy,
 		       u64 *index)
 {
 	struct buf d = *encoded;
 	unsigned count = readnum(&d, 4), i;
-    bool queued=false, independent=edits_independent(encoded,legacy);
+    bool independent=edits_independent(encoded,legacy);
 	int err = 0;
     struct ks_edit_completion *results = independent ? kcalloc(count,sizeof(*results),GFP_NOFS) : NULL;
 	for (i = 0; i < count; i++) {
 		stqr_object_id id;
-		stqr_options opt = {0};
+		stqr_options opt = {.accepted=1};
 		stqr_info info;
 		struct ks_rpc *rpc;
 		const u8 *p = take(&d, 32), *data;
@@ -259,26 +260,22 @@ static int apply_edits(struct ks_fs *f, stqr_object_id tx, const struct buf *enc
 		if (err)goto complete;
 		rpc = ks_rpc_lock(f, id);
 		ks_cache_forget(f, id);
-        /* The durable intent and marked heads already protect this burst.
-         * Existing payload/index edits can be submitted without individual
-         * fsync/ACK; final publication remains behind the owner fences. */
-        if(results && !remove && opt.absent && full &&
+        /* Accepted replies establish visibility and expose operation errors;
+         * physical durability is requested only by the caller's sync. */
+        if(results && !remove &&
            (stqr_capabilities(rpc->client)&STQR_CAP_CONNECTION_SYNC)) {
             struct ks_edit_completion *job=&results[i];
             init_completion(&job->result.done);job->id=id;job->data=data;job->size=n;
-            opt.accepted=1;
-            err=stqr_cas_async(rpc->client,id,1,0,NULL,0,data,n,&opt,ks_async_completed,&job->result);
+            job->offset=off;job->full=full;
+            if(opt.absent&&full)
+                err=stqr_cas_async(rpc->client,id,1,0,NULL,0,data,n,&opt,ks_async_completed,&job->result);
+            else if(full)
+                err=stqr_put_result_async(rpc->client,id,data,n,&opt,ks_async_completed,&job->result);
+            else
+                err=stqr_put_range_result_async(rpc->client,id,off,data,n,&opt,ks_async_completed,&job->result);
             mutex_unlock(&rpc->lock);
             if(err)goto complete;
-            job->submitted=true;queued=true;continue;
-        }
-        if(independent && !remove && !opt.absent &&
-           (stqr_capabilities(rpc->client)&STQR_CAP_CONNECTION_SYNC)) {
-            err=full?stqr_put_async(rpc->client,id,data,n,&opt):
-                     stqr_put_range_async(rpc->client,id,off,data,n,&opt);
-            mutex_unlock(&rpc->lock);
-            if(err)goto complete;
-            queued=true;continue;
+            job->submitted=true;continue;
         }
 		bool auth_retry = false;
 		for (;;) {
@@ -324,13 +321,15 @@ complete:
         if(result==-EAGAIN && job->result.status==412 && f->references) {
             void *observed=NULL;size_t size=0;stqr_info info;
             int check=get_object(f,job->id,&observed,&size,&info);
-            result=!check&&size==job->size&&!memcmp(observed,job->data,size)?0:-EIO;
+            result=-EIO;
+            if(!check && ((job->full&&size==job->size&&!memcmp(observed,job->data,size)) ||
+               (!job->full&&job->offset<=size&&job->size<=size-job->offset&&
+                !memcmp((u8 *)observed+job->offset,job->data,job->size))))result=0;
             sq_free(observed);
         }
         sq_free(job->result.data);if(!err)err=result;
     }
     kfree(results);
-    if(queued) {int fenced=ks_checkpoint(f);if(!err)err=fenced;}
     return err;
 }
 static int intent_get(struct ks_fs *f, stqr_object_id id, struct buf *raw, struct buf *head,

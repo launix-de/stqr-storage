@@ -36,7 +36,7 @@ struct stqr_client {
     size_t authorization_len;
     unsigned port, timeout;
     stqr_id bucket, runtime, lease;
-    int status;
+    int status, accepted_references;
     stqr_u64 capabilities;
     stqr_update_handler update;
     void *update_arg;
@@ -55,6 +55,13 @@ struct stqr_client {
     stqr_u64 channel_clock;
 };
 struct buf { stqr_u8 *p; size_t n, cap, pos; int err; };
+void stqr_set_accepted_references(stqr_client *c,int enabled) {
+    if(c)c->accepted_references=!!enabled;
+}
+static int references_accepted(stqr_client *c) {
+    stqr_u64 required=STQR_CAP_ACCEPTED_REFERENCES|STQR_CAP_OBJECT_REFERENCES|STQR_CAP_CONNECTION_SYNC|STQR_CAP_DURABILITY;
+    return c->accepted_references && (c->capabilities&required)==required;
+}
 static void async_fail(stqr_client *, struct sq_channel *, int);
 static int async_channel_pending(stqr_client *, struct sq_channel *);
 static void route_free(struct sq_route *r) {
@@ -723,6 +730,9 @@ static int request_payload(stqr_client *c, unsigned op, struct buf *body, stqr_i
         c->status=0; c->redirect[0]=0;
         c->query_valid=((op>=0x100 && op<=0x110) || op==0x121) && body->n>=80;
         if (c->query_valid) memcpy(c->query.bytes,body->p+16,32);
+        if(op==0x121 && references_accepted(c)) {
+            put(&wrapped,body->p,body->n);number(&wrapped,1,1);wire_body=&wrapped;
+        }
         if (mutation>1 && (c->capabilities & STQR_CAP_DURABILITY)) {
             if (body->n<80) return -EINVAL;
             put(&wrapped,body->p,80); number(&wrapped,op,2); put(&wrapped,body->p+80,body->n-80);
@@ -782,7 +792,7 @@ static int reconnect_active(stqr_client *c) {
     if (!err) err = handshake(c);
     if (err) { broken(c); return err; }
     c->status = 0;
-    number(&body, 2, 2); number(&body, 2, 2); number(&body, STQR_CAP_DURABILITY|STQR_CAP_OBJECT_REFERENCES|STQR_CAP_CONNECTION_SYNC, 8); blob(&body, "stqr-c", 6);
+    number(&body, 2, 2); number(&body, 2, 2); number(&body, STQR_CAP_DURABILITY|STQR_CAP_OBJECT_REFERENCES|STQR_CAP_CONNECTION_SYNC|STQR_CAP_ACCEPTED_REFERENCES, 8); blob(&body, "stqr-c", 6);
     err = request(c, 1, &body, id, 0, &result, NULL);
     if (!err) {
         if (readnum(&result, 2) != 2) result.err = -EPROTO;

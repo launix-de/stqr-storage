@@ -21,7 +21,7 @@ struct ks_bd {
 	struct workqueue_struct *queue;
 	struct ks_rpc rpc;
     DECLARE_HASHTABLE(pending, 8);
-    u64 pending_sequence;
+
 	bool readonly, failed, stopping;
 	struct super_block *sb;
 
@@ -101,7 +101,9 @@ void ks_bd_exit(void) { destroy_workqueue(ks_bd_releases); }
 struct ks_bd_pending {
  struct hlist_node hash;
  stqr_object_id id;
- u64 start,end,sequence;
+ u64 start,end;
+ struct completion done;
+ unsigned refs;
 };
 static void ks_bd_free(struct kref *ref)
 {
@@ -143,8 +145,7 @@ static u32 ks_bd_hash(stqr_object_id id)
 }
 static int ks_bd_sync_locked(struct ks_bd *b)
 {
- struct ks_bd_result r={0};u64 cut=b->pending_sequence;
- struct ks_bd_pending *p;struct hlist_node *tmp;unsigned bucket;int err;
+ struct ks_bd_result r={0};int err;
  if(!b->rpc.receive_started || !(stqr_capabilities(b->rpc.client)&STQR_CAP_CONNECTION_SYNC))
   return stqr_sync(b->rpc.client);
  init_completion(&r.done);
@@ -153,23 +154,48 @@ static int ks_bd_sync_locked(struct ks_bd *b)
  if(!err){wait_for_completion(&r.done);err=r.error;}
  stqr_free(r.data);
  mutex_lock(&b->rpc.lock);
- if(!err)hash_for_each_safe(b->pending,bucket,tmp,p,hash)if(p->sequence<=cut){hash_del(&p->hash);kfree(p);}
- return err;
+  return err;
 }
-static int ks_bd_dependency(struct ks_bd *b,stqr_object_id id,u64 start,u64 end,bool write)
+static int ks_bd_dependency(struct ks_bd *b,stqr_object_id id,u64 start,u64 end,
+                            bool write,struct ks_bd_pending **active)
 {
- struct ks_bd_pending *p,*found=NULL;int err;
+ struct ks_bd_pending *p;
 again:
- found=NULL;
- hash_for_each_possible(b->pending,p,hash,ks_bd_hash(id))if(!memcmp(p->id.bytes,id.bytes,32)){
-  if(start<p->end&&p->start<end){err=ks_bd_sync_locked(b);if(err)return err;goto again;}
-  found=p;
- }
+ hash_for_each_possible(b->pending,p,hash,ks_bd_hash(id))
+  if(!memcmp(p->id.bytes,id.bytes,32)&&start<p->end&&p->start<end) {
+   /* An overlapping write needs the earlier visibility completion, never a
+    * persistence barrier. Unrelated ranges remain in flight on this socket. */
+   p->refs++;mutex_unlock(&b->rpc.lock);wait_for_completion(&p->done);
+   mutex_lock(&b->rpc.lock);if(!--p->refs)kfree(p);goto again;
+  }
  if(!write)return 0;
- if(!found){found=kzalloc(sizeof(*found),GFP_NOFS);if(!found)return -ENOMEM;
-  found->id=id;found->start=start;found->end=end;hash_add(b->pending,&found->hash,ks_bd_hash(id));
- }else{found->start=min(found->start,start);found->end=max(found->end,end);}
- found->sequence=++b->pending_sequence;return 0;
+ p=kzalloc(sizeof(*p),GFP_NOFS);if(!p)return -ENOMEM;
+ p->id=id;p->start=start;p->end=end;p->refs=1;init_completion(&p->done);
+ hash_add(b->pending,&p->hash,ks_bd_hash(id));*active=p;return 0;
+}
+static void ks_bd_visible(struct ks_bd_pending *p)
+{
+ if(!p)return;
+ hash_del(&p->hash);complete_all(&p->done);if(!--p->refs)kfree(p);
+}
+static int ks_bd_put_async_locked(struct ks_bd *b,stqr_object_id id,u64 off,
+                                  const void *data,size_t n,const stqr_options *o,
+                                  stqr_info *info,bool full)
+{
+ struct ks_bd_result r={0};int err;init_completion(&r.done);
+ err=full?stqr_put_result_async(b->rpc.client,id,data,n,o,ks_bd_completed,&r):
+          stqr_put_range_result_async(b->rpc.client,id,off,data,n,o,ks_bd_completed,&r);
+ mutex_unlock(&b->rpc.lock);
+ if(!err){wait_for_completion(&r.done);err=r.error;}
+ stqr_free(r.data);mutex_lock(&b->rpc.lock);if(info)*info=r.info;return err;
+}
+static int ks_bd_delete_async_locked(struct ks_bd *b,stqr_object_id id,const stqr_options *o)
+{
+ struct ks_bd_result r={0};int err;init_completion(&r.done);
+ err=stqr_delete_async(b->rpc.client,id,o,ks_bd_completed,&r);
+ mutex_unlock(&b->rpc.lock);
+ if(!err){wait_for_completion(&r.done);err=r.error;}
+ stqr_free(r.data);mutex_lock(&b->rpc.lock);return err;
 }
 static int ks_bd_get_async_locked(struct ks_bd *b,stqr_object_id id,u64 off,u64 length,
                                  void **data,size_t *actual,stqr_info *info,bool stat)
@@ -197,12 +223,13 @@ static int ks_bd_range(struct ks_disk *d, unsigned op, u64 off, void *data, size
 		stqr_object_id id;
 		stqr_info info;
 		stqr_options o = {.accepted = 1};
+        struct ks_bd_pending *active=NULL;
 		size_t at = off % KS_BD_STRIPE, n = min_t(size_t, size, KS_BD_STRIPE - at);
 		err = ks_bd_address(d->meta.id, off / KS_BD_STRIPE, &id);
 		if (err)
 			break;
         if(stqr_capabilities(b->rpc.client)&STQR_CAP_CONNECTION_SYNC) {
-            err=ks_bd_dependency(b,id,at,at+n,op!=REQ_OP_READ);
+            err=ks_bd_dependency(b,id,at,at+n,op!=REQ_OP_READ,&active);
             if(err)break;
         }
 		if (op == REQ_OP_READ) {
@@ -237,12 +264,11 @@ static int ks_bd_range(struct ks_disk *d, unsigned op, u64 off, void *data, size
 			stqr_free(raw);
 		} else {
 			err = stqr_request_id(&o.request_id);
-			if (err)
-				break;
+			if (err) {ks_bd_visible(active);break;}
 			if (op == REQ_OP_WRITE)
 				err = at == 0 && n == KS_BD_STRIPE
-					  ? stqr_put_async(b->rpc.client,id,data,n,&o)
-                      : stqr_put_range_async(b->rpc.client,id,at,data,n,&o);
+					  ? ks_bd_put_async_locked(b,id,0,data,n,&o,&info,true)
+                      : ks_bd_put_async_locked(b,id,at,data,n,&o,&info,false);
 			else {
 				err = ks_bd_get_async_locked(b,id,0,0,NULL,NULL,&info,true);
 				if (err == -ENOENT)
@@ -251,23 +277,22 @@ static int ks_bd_range(struct ks_disk *d, unsigned op, u64 off, void *data, size
 					if (info.length > KS_BD_STRIPE)
 						err = -EPROTO;
 					else if (at == 0 && n == KS_BD_STRIPE) {
-						err = stqr_delete(b->rpc.client, id, &o);
+						err = ks_bd_delete_async_locked(b,id,&o);
 						if (err == -ENOENT)
 							err = 0;
 						/* WRITE without DELETE may still zero the logical
 						 * contents. */
 						if (err == -EACCES)
-							err = stqr_put(b->rpc.client, id, NULL, 0, &o,
-								       &info);
+							err = ks_bd_put_async_locked(b,id,0,NULL,0,&o,&info,true);
 					} else if (at < info.length) {
 						size_t stored = min_t(u64, n, info.length - at);
 						memset(data, 0, stored);
-						err = stqr_put_range(b->rpc.client, id, at, data,
-								     stored, &o, &info);
+						err = ks_bd_put_async_locked(b,id,at,data,stored,&o,&info,false);
 					}
 				}
 			}
 		}
+        ks_bd_visible(active);
 		off += n;
 		size -= n;
 		data = (u8 *)data + n;

@@ -12,7 +12,7 @@ import (
 )
 
 // fsReferenceStore is ordinary, format-agnostic object coordination. Tokens are
-// durable across reconnects; crashed holders require explicit offline recovery.
+// valid across reconnects; explicit Sync checkpoints them for crash recovery.
 type fsReferenceStore interface {
 	PinObject(context.Context, ObjectID, ID) error
 	UnpinObject(context.Context, ObjectID, ID) error
@@ -308,7 +308,7 @@ func (f *Filesystem) retirePinnedIntent(ctx context.Context, id ObjectID, tx fsT
 	}
 }
 
-// Retain registers a durable open reference before exposing a handle. A linked
+// Retain registers a visible open reference before exposing a handle. A linked
 // inode is checked after pinning, so unlink cannot race the lifetime acquisition.
 // Minimal custom stores keep the older conservative, offline-only lifecycle.
 func (f *Filesystem) Retain(ctx context.Context, id ObjectID) (RequestID, error) {
@@ -449,7 +449,7 @@ func encodeFSOrphans(ids []ObjectID) []byte {
 }
 
 func (f *Filesystem) orphanSnapshot(ctx context.Context, create bool) (fsSnapshot, []ObjectID, error) {
-	ctx = context.WithValue(ctx, fsDurableKey{}, true)
+	ctx = context.WithValue(ctx, fsFreshReadKey{}, true)
 	for attempt := 0; attempt < 128; attempt++ {
 		s, err := f.snapshot(ctx, filesystemOrphansID)
 		if errors.Is(err, ErrNotFound) && create {
@@ -676,6 +676,15 @@ func (f *Filesystem) scheduleOrphanCleanup() {
 	var life context.Context
 	var native *Client
 	switch store := f.store.(type) {
+	case *filesystemNativeStore:
+		native = store.Client
+		store.mu.Lock()
+		offline := store.maintenance != nil
+		store.mu.Unlock()
+		if offline {
+			return
+		}
+		life = store.life
 	case *Client:
 		native = store
 		store.mu.Lock()

@@ -58,7 +58,8 @@ static void ks_rpc_readable(void *arg)
 }
 void ks_rpc_start(struct ks_rpc *rpc)
 {
-	INIT_WORK(&rpc->receive, ks_rpc_receive);
+	stqr_set_accepted_references(rpc->client,1);
+    INIT_WORK(&rpc->receive, ks_rpc_receive);
 	rpc->receive_started = true;
 	stqr_set_readable_handler(rpc->client, ks_rpc_readable, rpc);
 	ks_rpc_readable(rpc);
@@ -165,7 +166,8 @@ int ks_object_reference(struct ks_fs *f, stqr_object_id id, stqr_id token, unsig
 			auth_retry = true;
 		else if (!ks_transport_retryable(rpc->client, err))
 			break;
-		/* Tokens are durable and idempotent across every reconnect. */
+		/* Tokens are idempotent across reconnect; only an explicit kernel
+         * sync promises their persistence across server restart. */
 		err = ks_reconnect_wait(f, rpc->client);
 		if (err)
 			break;
@@ -224,6 +226,11 @@ static int get_object(struct ks_fs *f, stqr_object_id id, void **p, size_t *n, s
 			return err;
 	}
 }
+/* Filesystem software contract: inode/directory, intent, decision and retirement
+ * CAS all use accepted results. A completion confirms comparison and visibility,
+ * not physical persistence. Dependent phases await those results without disk
+ * fences; only explicit VFS sync/O_SYNC requests and unmount checkpoint owners.
+ * A normal read/write/open/close makes no server-crash durability promise. */
 static int cas_object(struct ks_fs *f, stqr_object_id id, const void *p, size_t n,
 		      const void *expected, size_t expected_size, bool absent)
 {
@@ -233,7 +240,7 @@ static int cas_object(struct ks_fs *f, stqr_object_id id, const void *p, size_t 
 	int err;
 	if (f->readonly)
 		return -EROFS;
-	o.accepted = 0;
+	o.accepted = 1;
 	o.absent = absent;
 	err = stqr_request_id(&o.request_id);
 	if (err)
@@ -285,6 +292,7 @@ static int cas_object(struct ks_fs *f, stqr_object_id id, const void *p, size_t 
 static int ks_delete_locked(struct ks_rpc *rpc,stqr_object_id id,const stqr_options *opt)
 {
  struct ks_async_result result={0};int err;
+ stqr_options accepted=*opt;accepted.accepted=1;opt=&accepted;
  if(!rpc->receive_started)return stqr_delete(rpc->client,id,opt);
  init_completion(&result.done);
  err=stqr_delete_async(rpc->client,id,opt,ks_async_completed,&result);

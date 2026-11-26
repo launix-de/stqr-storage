@@ -83,8 +83,9 @@ legacy marks and conservative ordering.
 ## Causal references and multiple owners
 
 Object IDs remain stable; the server does not interpret client formats. A format
-must join independent payload/index writes, then explicitly fence prerequisites
-before durably publishing dependent references or retiring recovery intent.
+must join independent payload/index writes, then join the visibility/results of prerequisites before publishing dependent
+references or retiring recovery intent. Ordinary filesystem operations do not
+request physical checkpoints.
 There is no multi-object transaction. Overlapping block-device stripes retain
 their necessary causal order; independent stripes pipeline on one owner socket.
 Go exposes enqueue-only PutAsync/PutRangeAsync alongside result-returning methods.
@@ -145,3 +146,25 @@ remain under the volume lock and do not change the on-disk format or ACK contrac
 The [write-fence implementation](write-fences.md) separates readable publication
 from durable acknowledgement and permits later bounded writes during physical
 checkpoint I/O without holding the volume metadata lock.
+
+## Filesystem adapters: explicit sync only
+
+Native filesystem adapters use accepted results for all ordinary data, inode,
+directory, recovery-intent, decision, deletion and reference changes. Ownership
+reads must be fresh; that does not require durable mutation ACKs. Independent
+object requests overlap, while actual CAS results and same-object visibility
+keep their causal order. There are no automatic publication-phase fences.
+
+Only explicit fsync/fdatasync/msync(MS_SYNC), O_SYNC/O_DSYNC, filesystem sync and
+block FLUSH/FUA request persistence. Close discards connection tracking without a
+fence. Background checkpoints and bounded-buffer pressure may still cause backend
+Sync calls; those are distinct from a filesystem requesting durability.
+
+CapabilityAcceptedReferences (1<<20) permits an optional trailing accepted Bool
+on ObjectReference. Legacy/default reference requests remain durable; offline
+maintenance does not accept the weaker mode. Accepted replies retain receipt
+header48 and the exact local volume dependency until an explicit owner fence.
+
+S3 PUT and multipart acknowledgements stay durable, including caller-supplied
+publication options. Filesystem adapters scope their mode to their own calls;
+they do not weaken the same raw Client used by a native or S3 caller.

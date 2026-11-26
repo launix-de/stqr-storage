@@ -125,6 +125,16 @@ func (s *Server) executeObjectReference(ctx context.Context, m client.Message, w
 	var target volume.ObjectID
 	copy(target[:], d.Take(32))
 	action, token := d.U8(), d.ID()
+	// The legacy body retains its durable-ACK contract. Filesystem adapters
+	// may explicitly choose a visible-only result with the negotiated trailer;
+	// this is generic object coordination, never a server-side FS interpretation.
+	accepted := false
+	if len(d.B) > 0 && d.Err == nil {
+		accepted = d.Bool()
+		if ws == nil || ws.authorization == nil || !ws.authorization.objectReferences.Load() || !ws.acceptedReferencesCap.Load() || !ws.connectionFenceCap.Load() || !ws.durabilityCap.Load() {
+			return nil, fail(501, "accepted reference capability was not negotiated")
+		}
+	}
 	if d.Done() != nil || action > 8 || token == (client.ID{}) || target == op.object {
 		return nil, fail(400, "invalid object reference")
 	}
@@ -132,6 +142,9 @@ func (s *Server) executeObjectReference(ctx context.Context, m client.Message, w
 		return nil, err
 	}
 	if action == 6 || action == 7 || action == 8 {
+		if accepted {
+			return nil, fail(400, "offline reference maintenance requires durable requests")
+		}
 		if ws == nil || p.connection == nil || !p.connection.objectReferences.Load() {
 			return nil, ErrBucketForbidden
 		}
@@ -247,7 +260,7 @@ func (s *Server) executeObjectReference(ctx context.Context, m client.Message, w
 			entries = append(entries, objectReferenceEntry{target, proof, uid, action == 2, action == 4})
 		}
 		next := encodeObjectReferences(entries, op.bucket.ID())
-		_, err = op.bucket.CAS(ctx, internal, op.object, 0, raw, next, volume.Options{RequestID: volume.ID(client.NewRequestID()), CreateOnly: absent, WholeObject: true})
+		_, err = op.bucket.CAS(ctx, internal, op.object, 0, raw, next, volume.Options{RequestID: volume.ID(client.NewRequestID()), CreateOnly: absent, WholeObject: true, Accepted: accepted})
 		if errors.Is(err, volume.ErrPrecondition) {
 			continue
 		}

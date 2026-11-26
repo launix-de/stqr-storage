@@ -75,7 +75,7 @@ func (t *objectTransport) enqueueOperation(ctx context.Context, m Message, mutat
 		if m.Opcode == ObjectAccepted && len(m.Body) >= 82 {
 			ref.Opcode = uint16(m.Body[80]) | uint16(m.Body[81])<<8
 		}
-		tracked = &connectionSubmission{sequence: t.connectionSequence, noAck: m.Kind == FireAndForget, accepted: m.Opcode == ObjectAccepted, message: ref}
+		tracked = &connectionSubmission{sequence: t.connectionSequence, noAck: m.Kind == FireAndForget, accepted: m.Opcode == ObjectAccepted || m.Opcode == ObjectReference, message: ref}
 		t.connectionWrites[m.ID] = tracked
 	}
 	if cut, _ := ctx.Value(connectionCutKey{}).(*connectionCut); cut != nil && m.Opcode == ConnectionSync {
@@ -157,7 +157,7 @@ func (t *objectTransport) syncConnection(ctx context.Context) error {
 		t.mu.Lock()
 		defer t.mu.Unlock()
 		for id, work := range t.connectionWrites {
-			if work.noAck {
+			if work.noAck || work.accepted {
 				if work.err != nil {
 					return work.err
 				}

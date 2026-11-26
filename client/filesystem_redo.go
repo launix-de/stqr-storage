@@ -11,8 +11,9 @@ import (
 
 const fsMaxIntentBytes = 128 << 20
 
-type fsDurableKey struct{}
-type fsAcceptedBurstKey struct{}
+// fsFreshReadKey bypasses cached ownership observations. It does not request
+// durable mutation acknowledgements; persistence belongs to explicit Sync.
+type fsFreshReadKey struct{}
 type fsExternalWrite struct {
 	owner ObjectID
 	index uint64
@@ -88,7 +89,7 @@ func (f *Filesystem) storeIntentAt(ctx context.Context, id ObjectID, raw []byte)
 	}); err != nil {
 		return ObjectID{}, err
 	}
-	// Only the final descriptor publishes these independent, already durable
+	// Only the final descriptor publishes these independent, already visible
 	// pieces. Their completion order has no bearing on the encoded chunk order.
 	for _, part := range parts {
 		e.B = append(e.B, part[:]...)
@@ -160,8 +161,7 @@ func fsRedoRequest(id ObjectID, index uint64) RequestID {
 	return out
 }
 func (f *Filesystem) applyFSWrite(ctx context.Context, txID ObjectID, index uint64, w fsBlockWrite) error {
-	accepted, _ := ctx.Value(fsAcceptedBurstKey{}).(bool)
-	opt := MutationOptions{RequestID: fsRedoRequest(txID, index), Accepted: accepted}
+	opt := MutationOptions{RequestID: fsRedoRequest(txID, index)}
 	if w.absent {
 		opt.Absent = true
 	}
@@ -169,7 +169,7 @@ func (f *Filesystem) applyFSWrite(ctx context.Context, txID ObjectID, index uint
 		if d, ok := f.store.(interface {
 			Delete(context.Context, ObjectID, DeleteOptions) error
 		}); ok {
-			err := d.Delete(ctx, w.id, DeleteOptions{RequestID: opt.RequestID, Accepted: accepted})
+			err := d.Delete(ctx, w.id, DeleteOptions{RequestID: opt.RequestID})
 			if errors.Is(err, ErrNotFound) {
 				return nil
 			}
@@ -208,7 +208,7 @@ func (f *Filesystem) applyFSWrite(ctx context.Context, txID ObjectID, index uint
 	return err
 }
 
-// Retire redo payload only after every inode marker is durably gone. A tiny
+// Retire redo payload only after every inode marker is visibly gone. A tiny
 // completed descriptor remains until ordinary fsck so delayed helpers can still
 // recognize completion without finding a dangling marker. Payloads do not grow
 // with the number of successful overwrites.
@@ -348,17 +348,11 @@ func (f *Filesystem) objectBurst(ctx context.Context, count int, run func(contex
 	return nil
 }
 
-// applyExternalWrites runs only after the durable REDO decision and marker
+// applyExternalWrites runs only after the visible REDO decision and marker
 // ownership checks. Distinct objects are independent; a repeated object starts
-// another wave. Every accepted wave is fenced before a later wave or any inode
-// can publish its final image, so helpers can recover an interrupted burst.
+// another wave. Completion of one wave establishes visibility for the next;
+// physical durability is requested only by the caller through Filesystem.Sync.
 func (f *Filesystem) applyExternalWrites(ctx context.Context, txID ObjectID, writes []fsExternalWrite, pinned bool) error {
-	parallel, ok := f.store.(interface{ ConcurrentObjectRequests() bool })
-	syncer, canSync := f.store.(interface{ Sync(context.Context) error })
-	accepted := ok && parallel.ConcurrentObjectRequests() && canSync
-	if accepted {
-		ctx = context.WithValue(ctx, fsAcceptedBurstKey{}, true)
-	}
 	for len(writes) > 0 {
 		seen := map[ObjectID]bool{}
 		end := 0
@@ -381,13 +375,6 @@ func (f *Filesystem) applyExternalWrites(ctx context.Context, txID ObjectID, wri
 			}
 			return err
 		})
-		// Checkpoint successes even when another independent operation failed. Keep
-		// all inode markers and REDO payload on either operation or fence failure.
-		if accepted {
-			if fenceErr := syncer.Sync(ctx); err == nil {
-				err = fenceErr
-			}
-		}
 		if err != nil {
 			return err
 		}

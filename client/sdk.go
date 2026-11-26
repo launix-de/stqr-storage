@@ -150,7 +150,7 @@ func (c *Client) connectEndpoint(ctx context.Context, endpoint string) (*objectT
 	hello := Encoder{}
 	hello.U16(2)
 	hello.U16(2)
-	hello.U64(CapabilityDurability | CapabilityObjectReferences | CapabilityConnectionSync)
+	hello.U64(CapabilityDurability | CapabilityObjectReferences | CapabilityConnectionSync | CapabilityAcceptedReferences)
 	hello.Text("stqr-go")
 	r, e := t.roundTrip(ctx, Message{Kind: Request, Opcode: Hello, ID: NewRequestID(), Body: hello.B}, false, nil)
 	if e == nil {
@@ -350,11 +350,11 @@ func (c *Client) do(ctx context.Context, opcode uint16, body []byte, id RequestI
 	if maintenance != nil && !distributed {
 		// A reconnect loses exclusive ownership. Never resume a sweep against a
 		// potentially changed graph; the operator must start a fresh fsck.
-		outgoing := m
+		outgoing, referenceAccepted := acceptedReferenceMessage(ctx, maintenance, m)
 		if mutation && upload == nil && ctx.Value(acceptedContextKey{}) == true && maintenance.capabilities&CapabilityDurability != 0 {
 			outgoing = acceptedMessage(m)
 		}
-		r, err := maintenance.roundTrip(ctx, outgoing, mutation, upload)
+		r, err := maintenance.roundTrip(ctx, outgoing, mutation || referenceAccepted, upload)
 		if err == nil {
 			if mark := r.headers[DurabilityHeader]; len(mark) > 0 {
 				if err = c.observeDurability(maintenance, mark); err != nil {
@@ -390,7 +390,7 @@ func (c *Client) do(ctx context.Context, opcode uint16, body []byte, id RequestI
 				copy(subscription[:], m.Body[80:96])
 				c.bindSubscriptionTransport(subscription, t)
 			}
-			outgoing := m
+			outgoing, referenceAccepted := acceptedReferenceMessage(ctx, t, m)
 			if mutation && upload == nil && ctx.Value(acceptedContextKey{}) == true && t.capabilities&CapabilityDurability != 0 {
 				if t.capabilities&CapabilityConnectionSync == 0 {
 					if err := c.syncExcept(ctx, t); err != nil {
@@ -399,7 +399,7 @@ func (c *Client) do(ctx context.Context, opcode uint16, body []byte, id RequestI
 				}
 				outgoing = acceptedMessage(m)
 			}
-			r, er := t.roundTrip(ctx, outgoing, mutation, upload)
+			r, er := t.roundTrip(ctx, outgoing, mutation || referenceAccepted, upload)
 			if er == nil {
 				if b := r.headers[DurabilityHeader]; len(b) > 0 {
 					if err := c.observeDurability(t, b); err != nil {

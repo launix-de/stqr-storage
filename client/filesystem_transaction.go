@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 package client
 
-// Namespace transactions use ordinary bucket objects. A durable descriptor
+// Namespace transactions use ordinary bucket objects. A visible descriptor
 // lists expected inode images and replacements; small inode markers
 // refer to it. Readers help finish interrupted transactions before using an
 // inode. All participants are acquired in OID order, avoiding lock cycles.
@@ -219,7 +219,7 @@ func (f *Filesystem) readLockedSnapshotOnce(ctx context.Context, id ObjectID) (f
 }
 
 func (f *Filesystem) transact(ctx context.Context, members []fsTxMember) (bool, error) {
-	ctx = context.WithValue(ctx, fsDurableKey{}, true)
+	ctx = context.WithValue(ctx, fsFreshReadKey{}, true)
 	if len(members) == 0 || len(members) > 1024 {
 		return false, syscall.E2BIG
 	}
@@ -318,7 +318,7 @@ func (f *Filesystem) helpTransaction(ctx context.Context, id ObjectID, depth int
 	if _, ok := f.managedReferences(); ok {
 		return f.helpPinnedTransaction(ctx, id, depth, ID{})
 	}
-	ctx = context.WithValue(ctx, fsDurableKey{}, true)
+	ctx = context.WithValue(ctx, fsFreshReadKey{}, true)
 	if depth >= 128 {
 		return false, syscall.EAGAIN
 	}
@@ -356,7 +356,7 @@ func (f *Filesystem) helpTransaction(ctx context.Context, id ObjectID, depth int
 				}
 			}
 
-			// Final state is durable before removing any marker. A concurrent
+			// Final state is visible before removing any marker. A concurrent
 			// writer may already have changed an inode after another helper
 			// removed its marker; only our own markers can be replaced here.
 			for _, m := range tx.members {
@@ -410,7 +410,7 @@ func (f *Filesystem) helpTransaction(ctx context.Context, id ObjectID, depth int
 				break
 			}
 			// Compare the complete observed inode under the storage lock. A late
-			// marker still refers to this durable transaction descriptor and is
+			// marker still refers to this visible transaction descriptor and is
 			// resolved using its committed/aborted decision.
 			_, e = f.store.CAS(ctx, m.id, 0, current, marker, CASOptions{Scope: CASObject, MutationOptions: MutationOptions{RequestID: NewRequestID()}})
 			if errors.Is(e, ErrPrecondition) {

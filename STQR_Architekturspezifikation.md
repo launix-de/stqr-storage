@@ -1273,13 +1273,49 @@ Sync-Antworten selbst von ihren benutzten Owner-Verbindungen ein. ConnectionSync
 broadcastet und proxyt nichts. Die bestehende Authentifizierungsbindung einer
 Bucket-Verbindung bleibt erhalten; mehrere Buckets teilen keinen veränderlichen
 serverseitigen „aktuellen Bucket“. Clientformate müssen echte Abhängigkeiten
-selbst ordnen: unabhängige Payload-/Indexwrites parallel, dann explizite Fence vor
-dauerhafter Veröffentlichung abhängiger Referenzen. Überlappende BD-Schreibbereiche
+selbst ordnen: unabhängige Payload-/Indexwrites parallel, dann Sichtbarkeits-/CAS-Ergebnisse vor abhängigen Requests abwarten.
+Physische Persistenz fordert der FS-Client ausschließlich an seinen expliziten
+Sync-Grenzen an (§10.10). Überlappende BD-Schreibbereiche
 benötigen ihre eigene Reihenfolge; unabhängige Stripes nicht. Der Kernel verwendet
 Request-ID-Demultiplexing, ereignisgesteuerten Empfang und Completion-Callbacks
 für Folio-/Writeback-/asynchrone kiocb-Pfade, statt den gesamten Kanal bis zur
 Antwort zu sperren. Storage bleibt in-place auf stabilen Objekt-IDs; dies ist
 weder eine Transaktion noch eine historische Versionierungs-API.
+
+### 10.10 Dateisysteme: Persistenz nur auf ausdrückliche Anforderung
+
+Normales `write`, Verzeichnisoperationen, Open/Close, Metadatenänderungen und
+Kernel-Writeback stellen keine Durability-Anforderung. Native FS-Adapter
+verwenden Accepted für sämtliche betroffenen Objekte: Payload, Index, Inode,
+Directory, Intent/Entscheidung, Retirement und Referenzkoordination. Der
+Server interpretiert diese Formate weiterhin nicht. Bei abhängigen CAS-/PUT-
+Operationen wird deren Sichtbarkeit bzw. Vergleichsergebnis abgewartet, ohne
+hierfür eine ConnectionSync-/BucketSync-Barriere einzuführen. Unabhängige
+Operationen dürfen innerhalb eines Bursts parallel laufen.
+
+Erst `fsync`, `fdatasync`, `msync(MS_SYNC)`, `O_SYNC`/`O_DSYNC`, Dateisystem-Sync
+oder ein angeforderter Block-FLUSH/FUA wartet auf Persistenz aller vorherigen
+Änderungen der beteiligten Owner-Verbindungen. Eine gewöhnliche Flush-on-Close-
+Benachrichtigung ist keine solche Anforderung. Ohne diese Grenze gibt es keine
+Wiederanlauf-Durability-Zusage. Hintergrund-Checkpoints oder begrenzter
+Volume-Puffer dürfen unabhängig davon früher persistieren; der Client erzwingt
+keine vorsorglichen Zwischenfences. Explizites Unmount-/Shutdown-Sync und
+administrative Operationen behalten ihre eigenen angeforderten Zusagen.
+
+Für Objekt-Referenzen erlaubt Capability `1048576` zusätzlich zur Objekt-Referenz-Capability,
+`8192` und `524288` einen optionalen abschließenden `accepted:Bool`-Wert im
+bestehenden OBJECT_REFERENCE-Body. Fehlt er, bleibt das bisherige dauerhafte
+ACK bestehen. Nur ausgehandelte Clients dürfen ihn senden. `true` bestätigt
+sichtbare Referenz-/Claim-Änderungen mit Tag48-Receipt; deren tatsächliches
+lokales Volume wird in der Connection-Touch-Map erfasst. Offline-Reset-/Reclaim-
+Operationen verwenden weiterhin die dauerhafte Variante. Ein alter Peer darf
+die stärkere Zusage behalten; unbekannte optionale Trailer werden ihm nicht
+zugesandt. Die bestehenden Objekt-IDs und gespeicherten Formate ändern sich nicht.
+
+S3-PUT und Multipart-ACKs bleiben dauerhaft. Ein FS-Adapter aktiviert Deferred
+nur für seine eigenen Aufrufe; ein daneben verwendeter nativer Client oder
+S3-Aufruf wird dadurch nicht global umkonfiguriert. Generische native APIs
+behalten zur Kompatibilität ihren bisherigen Default.
 
 ## 11. Replikation, Erasure Coding und Read-Replicas
 

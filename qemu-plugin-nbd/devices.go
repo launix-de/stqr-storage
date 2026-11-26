@@ -109,14 +109,15 @@ func decodeMetadata(raw []byte) (Metadata, error) {
 	return m, m.validate()
 }
 
-type pendingBlockRange struct{ begin, end uint64 }
-type asyncBlockStore interface {
-	PutAsync(context.Context, client.ObjectID, []byte, client.PutOptions) error
-	PutRangeAsync(context.Context, client.ObjectID, uint64, []byte, client.PutOptions) error
+type blockOperation struct {
+	device     client.ID
+	begin, end uint64
+	write, all bool
+	done       chan struct{}
 }
 type Catalog struct {
-	writeMu sync.Mutex // orders only local admission and true overlapping dependencies
-	pending map[client.ID][]pendingBlockRange
+	writeMu    sync.Mutex // protects in-memory causal completion dependencies only
+	operations map[*blockOperation]struct{}
 
 	store   Store
 	mu      sync.Mutex
@@ -270,14 +271,11 @@ func (c *Catalog) ReadAt(ctx context.Context, m Metadata, dst []byte, off uint64
 	if off > m.Size || uint64(len(dst)) > m.Size-off {
 		return client.ErrRange
 	}
-	c.writeMu.Lock()
-	if c.overlapsPending(m.ID, off, off+uint64(len(dst))) {
-		if err := c.syncPending(ctx); err != nil {
-			c.writeMu.Unlock()
-			return err
-		}
+	complete, err := c.beginOperation(ctx, m.ID, off, off+uint64(len(dst)), false, false)
+	if err != nil {
+		return err
 	}
-	c.writeMu.Unlock()
+	defer complete()
 	clear(dst)
 	for len(dst) > 0 {
 		index, at := off/StripeSize, off%StripeSize
@@ -326,91 +324,97 @@ func (c *Catalog) WriteAt(ctx context.Context, m Metadata, data []byte, off uint
 	if off > m.Size || uint64(len(data)) > m.Size-off {
 		return client.ErrRange
 	}
-	c.writeMu.Lock()
-	defer c.writeMu.Unlock()
-	async, pipelined := c.store.(asyncBlockStore)
-	// Independent stripes/ranges may execute in any order. An overlapping
-	// subsequent write must observe completion of the preceding one.
-	if pipelined && c.overlapsPending(m.ID, off, off+uint64(len(data))) {
-		if err := c.syncPending(ctx); err != nil {
+	complete, err := c.beginOperation(ctx, m.ID, off, off+uint64(len(data)), true, false)
+	if err != nil {
+		return err
+	}
+	defer complete()
+	parallel, ok := c.store.(interface{ ConcurrentObjectRequests() bool })
+	concurrent := ok && parallel.ConcurrentObjectRequests()
+	var calls sync.WaitGroup
+	var results []*error
+	write := func(id client.ObjectID, at, n uint64, payload []byte) error {
+		opt := client.PutOptions{Accepted: true, RequestID: client.NewRequestID()}
+		if at == 0 && n == StripeSize {
+			_, err := c.store.Put(ctx, id, payload, opt)
 			return err
 		}
+		_, err := c.store.PutRange(ctx, id, at, payload, opt)
+		return err
 	}
 	for len(data) > 0 {
 		at := off % StripeSize
 		n := min(uint64(len(data)), StripeSize-at)
 		id := StripeID(m.ID, off/StripeSize)
-		opt := client.PutOptions{Accepted: true, RequestID: client.NewRequestID()}
-		var e error
-		if pipelined {
-			if at == 0 && n == StripeSize {
-				e = async.PutAsync(ctx, id, data[:n], opt)
-			} else {
-				e = async.PutRangeAsync(ctx, id, at, data[:n], opt)
-			}
-		} else if at == 0 && n == StripeSize {
-			_, e = c.store.Put(ctx, id, data[:n], opt)
-		} else {
-			_, e = c.store.PutRange(ctx, id, at, data[:n], opt)
-		}
-		if e != nil {
-			return e
-		}
-		if pipelined {
-			c.notePending(m.ID, off, off+n)
+		payload := data[:n]
+		if concurrent {
+			calls.Add(1)
+			// Each result slot is allocated before launch; do not capture the slice
+			// header while another stripe is appending to it.
+			slot := new(error)
+			go func() { defer calls.Done(); *slot = write(id, at, n, payload) }()
+			results = append(results, slot)
+		} else if err := write(id, at, n, payload); err != nil {
+			return err
 		}
 		data = data[n:]
 		off += n
 	}
+	calls.Wait()
+	for _, failure := range results {
+		if *failure != nil {
+			return *failure
+		}
+	}
+
 	return nil
 }
+
+// Sync is the explicit durability boundary. It captures locally admitted work
+// and waits only for completion before sending the native owner fences.
 func (c *Catalog) Sync(ctx context.Context) error {
-	c.writeMu.Lock()
-	defer c.writeMu.Unlock()
-	return c.syncPending(ctx)
-}
-func (c *Catalog) syncPending(ctx context.Context) error {
-	if err := c.store.Sync(ctx); err != nil {
+	complete, err := c.beginOperation(ctx, client.ID{}, 0, 0, true, true)
+	if err != nil {
 		return err
 	}
-	c.pending = nil
-	return nil
+	defer complete()
+	return c.store.Sync(ctx)
 }
-func (c *Catalog) overlapsPending(device client.ID, begin, end uint64) bool {
-	for _, interval := range c.pending[device] {
-		if begin < interval.end && interval.begin < end {
-			return true
+
+// beginOperation records visibility dependencies, never storage barriers. A
+// later overlapping operation waits for actual results; disjoint ranges proceed.
+// The global form is used only for explicit flush or administrative inventory.
+func (c *Catalog) beginOperation(ctx context.Context, device client.ID, begin, end uint64, write, all bool) (func(), error) {
+	op := &blockOperation{device: device, begin: begin, end: end, write: write, all: all, done: make(chan struct{})}
+	c.writeMu.Lock()
+	var predecessors []<-chan struct{}
+	for old := range c.operations {
+		if all || old.all || device == old.device && (write || old.write) && begin < old.end && old.begin < end {
+			predecessors = append(predecessors, old.done)
 		}
 	}
-	return false
-}
-func (c *Catalog) notePending(device client.ID, begin, end uint64) {
-	if c.pending == nil {
-		c.pending = map[client.ID][]pendingBlockRange{}
+	if c.operations == nil {
+		c.operations = map[*blockOperation]struct{}{}
 	}
-	old := c.pending[device]
-	merged := make([]pendingBlockRange, 0, len(old)+1)
-	added := false
-	for _, interval := range old {
-		if interval.end < begin {
-			merged = append(merged, interval)
-			continue
+	c.operations[op] = struct{}{}
+	c.writeMu.Unlock()
+	var once sync.Once
+	complete := func() {
+		once.Do(func() { c.writeMu.Lock(); delete(c.operations, op); close(op.done); c.writeMu.Unlock() })
+	}
+	for _, prior := range predecessors {
+		select {
+		case <-prior:
+		case <-ctx.Done():
+			complete()
+			return nil, ctx.Err()
 		}
-		if end < interval.begin {
-			if !added {
-				merged = append(merged, pendingBlockRange{begin, end})
-				added = true
-			}
-			merged = append(merged, interval)
-			continue
-		}
-		begin = min(begin, interval.begin)
-		end = max(end, interval.end)
 	}
-	if !added {
-		merged = append(merged, pendingBlockRange{begin, end})
+	if err := ctx.Err(); err != nil {
+		complete()
+		return nil, err
 	}
-	c.pending[device] = merged
+	return complete, nil
 }
 
 // Trim deletes complete 1-MiB stripes and zeroes only the stored portion of
@@ -420,13 +424,11 @@ func (c *Catalog) Trim(ctx context.Context, m Metadata, off, length uint64) erro
 	if off > m.Size || length > m.Size-off {
 		return client.ErrRange
 	}
-	c.writeMu.Lock()
-	defer c.writeMu.Unlock()
-	if c.overlapsPending(m.ID, off, off+length) {
-		if err := c.syncPending(ctx); err != nil {
-			return err
-		}
+	complete, err := c.beginOperation(ctx, m.ID, off, off+length, true, false)
+	if err != nil {
+		return err
 	}
+	defer complete()
 	var zeros []byte
 	for length > 0 {
 		if err := ctx.Err(); err != nil {
@@ -470,11 +472,11 @@ func (c *Catalog) Trim(ctx context.Context, m Metadata, off, length uint64) erro
 // opaque roots. Acquire maintenance and read the application manifest first.
 // Memory is bounded by device metadata and one native scan page, not disk size.
 func (c *Catalog) Collect(ctx context.Context, opaque []client.ObjectID) (uint64, error) {
-	c.writeMu.Lock()
-	defer c.writeMu.Unlock()
-	if err := c.syncPending(ctx); err != nil {
+	complete, err := c.beginOperation(ctx, client.ID{}, 0, 0, true, true)
+	if err != nil {
 		return 0, err
 	}
+	defer complete()
 	// Local exports, including read-only ones, can still address a generation
 	// whose descriptor was removed. Keep their stripes until the last export
 	// releases it and exclude new claims for the complete inventory/sweep.

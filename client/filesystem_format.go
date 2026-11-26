@@ -38,7 +38,7 @@ package client
 // Writes contain id:OID, absent/full/remove:Bool, offset:u64, data:Blob,
 // before:Blob (the preimage is used by CAS-only backends). Locked heads
 // contain STFL v1 plus descriptor:OID. Helpers compare the actual head bytes,
-// durably decide the intent, and then publish its before/after images. Read-only
+// publish the intent decision, and then publish its before/after images. Read-only
 // readers resolve the logical image without writing. Upgrade all mounts together.
 
 import (

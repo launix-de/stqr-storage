@@ -9,7 +9,11 @@ import "errors"
 // Exhausted buffer space returns ErrBusy without a partially published batch;
 // the caller leaves its outer locks before flushing/retrying.
 func (v *Volume) bufferCleanup(run func() error) (uint64, error) {
-	if v.deferred != nil && len(v.deferred.pages) > v.deferred.pageLimit/2 {
+	return v.bufferCleanupMode(run, false)
+}
+
+func (v *Volume) bufferCleanupMode(run func() error, continuation bool) (uint64, error) {
+	if !continuation && v.deferred != nil && len(v.deferred.pages) > v.deferred.pageLimit/2 {
 		return 0, ErrBusy
 	}
 	if err := v.beginDeferred(); err != nil {
@@ -37,6 +41,17 @@ func (v *Volume) bufferCleanup(run func() error) (uint64, error) {
 		}
 	}
 	return v.sb.Generation, err
+}
+
+// PurgeAccepted finishes an already accepted DELETE without introducing a
+// durable housekeeping operation. The caller must have fenced ownership and
+// established that no clone/migration needs the tombstone. The real staging
+// budget still bounds the transaction; the soft half-full threshold must not
+// force an intervening checkpoint between DELETE and its small index cleanup.
+func (h *Handle) PurgeAccepted(k Key) (uint64, error) {
+	return withHandleMode(h, true, true, func(v *Volume) (uint64, error) {
+		return v.bufferCleanupMode(func() error { return v.purgeBatchLocked([]ObjectRecord{{Key: k}}) }, true)
+	})
 }
 
 func (h *Handle) PurgeBatchAccepted(records []ObjectRecord) (uint64, error) {

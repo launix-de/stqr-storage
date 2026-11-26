@@ -1038,22 +1038,13 @@ func (b *Bucket) mutateAttempt(ctx context.Context, p principal, id volume.Objec
 	default:
 		err = volume.ErrUnsupported
 	}
-	if err == nil && opt.Accepted {
-		generation, gerr := h.Generation()
-		if gerr != nil {
-			return result, gerr
-		}
-		s.recordAccepted(b.ID(), v, generation)
-		touchConnectionVolume(ctx, v, generation)
-		publishedGeneration = generation
-	}
-	if err == nil && !p.cowInternal && !repeated && s.objectSubscriptions.watched(key) {
-		published, readErr := h.RecordInfo(key)
-		if readErr == nil {
-			s.objectSubscriptions.publish(key, published, h, v)
-		} else {
-			s.objectSubscriptions.resyncWhere(func(k volume.Key) bool { return k == key })
-		}
+	mutationPublished := err == nil
+	notify := mutationPublished && !p.cowInternal && !repeated && s.objectSubscriptions.watched(key)
+	var notification volume.Info
+	var notificationErr error
+	if notify {
+		// Capture DELETE metadata before optional physical index reclamation.
+		notification, notificationErr = h.RecordInfo(key)
 	}
 	if err == nil && opcode == 0x0106 && !retainResult && !p.cowInternal && len(d.ClonePeers) == 0 && !b.lostRange(id) {
 		moving := false
@@ -1070,7 +1061,30 @@ func (b *Bucket) mutateAttempt(ctx context.Context, p principal, id volume.Objec
 		// No copy/clone can still need this deletion marker. The node's
 		// admission lock prevents a new handoff from starting in this gap.
 		if !moving {
-			err = h.Purge(key)
+			if opt.Accepted {
+				_, err = h.PurgeAccepted(key)
+			} else {
+				err = h.Purge(key)
+			}
+		}
+	}
+	if mutationPublished && opt.Accepted {
+		// Include accepted tombstone reclamation in the same connection fence;
+		// recording the generation before housekeeping could ACK an older cut.
+		generation, gerr := h.Generation()
+		if gerr != nil {
+			return result, gerr
+		}
+		s.recordAccepted(b.ID(), v, generation)
+		touchConnectionVolume(ctx, v, generation)
+		publishedGeneration = generation
+	}
+	if notify {
+		// Publish only after the receipt includes the final cleanup generation.
+		if notificationErr == nil {
+			s.objectSubscriptions.publish(key, notification, h, v)
+		} else {
+			s.objectSubscriptions.resyncWhere(func(k volume.Key) bool { return k == key })
 		}
 	}
 	// Release the write handle before consulting capacity/index statistics.
