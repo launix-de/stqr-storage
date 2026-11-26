@@ -89,13 +89,13 @@ func placementInventoryFixture(t *testing.T) (*rangeManager, *volume.Volume, *pl
 }
 
 func TestPlacementInventoryYieldsVolumeToQueuedWriter(t *testing.T) {
-	r, v, probe, p, _ := placementInventoryFixture(t)
+	r, v, probe, _, _ := placementInventoryFixture(t)
 	var resume sync.Once
 	defer resume.Do(func() { close(probe.resume) })
 	probe.armed.Store(true)
 	done := make(chan error, 1)
 	go func() {
-		_, _, err := r.policyPlacementCost(p, p.Entries[0], client.ID{}, volume.ID{}, volume.Raw)
+		_, _, err := 0, 0, scanRangeRequests(r.server.ctx, v, func(volume.RequestRecord) error { return nil })
 		done <- err
 	}()
 	select {
@@ -176,11 +176,12 @@ func TestPlacementEstimatesUseRAMWithoutIO(t *testing.T) {
 			}
 		}
 	}
-	// Concrete migration inventory remains separate and still sees receipts.
+	// Candidate costing also stays RAM-only: compiling a selected difference
+	// must not restart an unrelated receipt census on every failed admission.
 	before := v.IOStats()
 	cost, _, err := r.policyPlacementCost(p, p.Entries[0], client.ID{}, volume.ID{}, volume.Raw)
-	if err != nil || cost == 0 || v.IOStats().ReadOps == before.ReadOps {
-		t.Fatal("concrete inventory was bypassed", cost, err)
+	if err != nil || cost == 0 || v.IOStats().ReadOps != before.ReadOps {
+		t.Fatal("candidate costing touched storage", cost, err)
 	}
 }
 
@@ -288,5 +289,36 @@ func TestPlacementIdlePlanningDoesNotReadStorage(t *testing.T) {
 		if after := v.IOStats(); after.ReadOps != before.ReadOps || after.WriteOps != before.WriteOps {
 			t.Fatal("idle target planning touched storage", required, before, after)
 		}
+	}
+}
+
+// A target that stays pending is retried every worker tick in production. The
+// old idle-only test missed this path: makePlan recounted ALL retry receipts
+// on each diff, including receipts belonging to unrelated buckets.
+func TestPlacementPendingDiffUsesRAMWithoutIO(t *testing.T) {
+	r, v, _, p, d := placementInventoryFixture(t)
+	r.server.cfg.Node.ID = r.node.String()
+	target := placementTarget{shape: placementShape{bucket: p.Bucket, copies: 1}, description: d, locations: []client.Location{{Node: client.ID{9}, Volume: client.ID{8}, Class: uint8(volume.HDD)}}}
+	before := v.IOStats()
+	for i := 0; i < 20; i++ {
+		if _, ok := r.diffPlacementTarget(target, p); ok {
+			t.Fatal("unavailable destination became executable")
+		}
+		retained := map[volume.ID]uint64{}
+		cost, count, err := r.policyPlacementCost(p, p.Entries[0], client.ID{9}, volume.ID{8}, volume.Raw, retained)
+		if err != nil || cost == 0 || count != 1 || retained[v.Identity().VolumeID] == 0 {
+			t.Fatal("missing RAM cost", cost, count, err, retained)
+		}
+		if _, err = r.replicaAbortCost(p, p.Entries[0]); err != nil {
+			t.Fatal(err)
+		}
+	}
+	after := v.IOStats()
+	if after.ReadOps != before.ReadOps || after.WriteOps != before.WriteOps || after.SyncOps != before.SyncOps {
+		t.Fatal("pending difference read persistent metadata", before, after)
+	}
+	r.server.quotaUsage.Store(nil)
+	if _, _, err := r.policyPlacementCost(p, p.Entries[0], client.ID{9}, volume.ID{8}, volume.Raw); err == nil {
+		t.Fatal("missing counters fabricated as empty range")
 	}
 }
