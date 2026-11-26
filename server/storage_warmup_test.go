@@ -416,3 +416,79 @@ func TestStorageWarmupReplaysSourceFenceBeforeReads(t *testing.T) {
 		t.Fatal("unaffected range blocked", err)
 	}
 }
+
+func TestStorageWarmupReadonlyCOWDoesNotWriteStorage(t *testing.T) {
+	path, bucket, id, _, _ := warmupFixture(t)
+	entered, release := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	unblock := func() { once.Do(func() { close(release) }) }
+	defer unblock()
+	s, err := Open(Options{ConfigPath: path, manualRanges: true, wrapDataVolumeIO: func(v volume.VolumeIO) volume.VolumeIO {
+		return &blockedCensusIO{VolumeIO: v, entered: entered, release: release}
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { unblock(); s.Close() }()
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		t.Fatal("no blocked census")
+	}
+	var beforeWrites, beforeSyncs uint64
+	for _, v := range s.quotaVolumes() {
+		stats := v.IOStats()
+		beforeWrites += stats.WriteOps
+		beforeSyncs += stats.SyncOps
+	}
+	capture := client.Encoder{}
+	capture.ID(bucket)
+	capture.B = append(capture.B, id[:]...)
+	capture.Bool(false)
+	capture.Bool(false)
+	raw, err := s.cowPeerMessage(context.Background(), client.Message{Kind: client.Request, Opcode: peerCowCapture, Body: capture.B})
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := client.Decoder{B: raw}
+	if !d.Bool() {
+		t.Fatal("missing read capture")
+	}
+	snapshot := d.ID()
+	read := client.Encoder{}
+	read.ID(snapshot)
+	read.U64(0)
+	read.U64(uint64(len("persistent warmup payload")))
+	raw, err = s.cowPeerMessage(context.Background(), client.Message{Kind: client.Request, Opcode: peerCowRead, Body: read.B})
+	if err != nil {
+		t.Fatal(err)
+	}
+	d = client.Decoder{B: raw}
+	if string(d.Blob()) != "persistent warmup payload" || d.Done() != nil {
+		t.Fatal("incorrect inherited read")
+	}
+	closeBody := client.Encoder{}
+	closeBody.ID(snapshot)
+	if _, err = s.cowPeerMessage(context.Background(), client.Message{Kind: client.Request, Opcode: peerCowClose, Body: closeBody.B}); err != nil {
+		t.Fatal(err)
+	}
+	var writes, syncs uint64
+	for _, v := range s.quotaVolumes() {
+		stats := v.IOStats()
+		writes += stats.WriteOps
+		syncs += stats.SyncOps
+	}
+	if writes != beforeWrites || syncs != beforeSyncs {
+		t.Fatal("read-only COW wrote/synced storage", beforeWrites, writes, beforeSyncs, syncs)
+	}
+	for _, op := range []uint16{peerVerifyFrontend, peerCowCapture, peerCowRead, peerCowClose, peerCowInventory} {
+		if !storageWarmReadMessage(client.Message{Opcode: op}) {
+			t.Fatalf("read operation %04x blocked", op)
+		}
+	}
+	for _, op := range []uint16{peerCowMaterialize, peerCowSync, client.ObjectReference, client.ObjectAccepted, client.VolumeGrow, client.BucketCreate, client.ConnectionSync, peerPGRebuildRequest} {
+		if storageWarmReadMessage(client.Message{Opcode: op}) {
+			t.Fatalf("mutation %04x admitted", op)
+		}
+	}
+}
