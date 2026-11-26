@@ -349,7 +349,7 @@ func (r *rangeManager) cleanup(ctx context.Context, p rangePlan) error {
 // opMu before every deletion, but checkpoint only after releasing both locks.
 func (r *rangeManager) cleanupBatch(ctx context.Context, p rangePlan, v *volume.Volume, objects []volume.ObjectRecord, ids []volume.ID) error {
 	// Give unfinished bucket deletions a bounded turn between cleanup pages.
-	defer r.server.reclaimBucketStep()
+	defer r.server.reclaimBucketStep(true)
 	if err := ctx.Err(); err != nil {
 		return err
 	}

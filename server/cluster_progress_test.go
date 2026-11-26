@@ -303,6 +303,11 @@ func TestRangeCleanupAdvancesUnfinishedBucketPurgeBetweenPages(t *testing.T) {
 	oldView := s.currentSystem.Load()
 	description := doomed.Describe()
 	description.State = BucketDeleting
+	doomed.mu.Lock()
+	oldDescription := doomed.description
+	doomed.description = description
+	doomed.mu.Unlock()
+	defer func() { doomed.mu.Lock(); doomed.description = oldDescription; doomed.mu.Unlock() }()
 	s.currentSystem.Store(&systemView{descriptions: []BucketDescription{description}})
 	defer s.currentSystem.Store(oldView)
 	var after *volume.ObjectID
