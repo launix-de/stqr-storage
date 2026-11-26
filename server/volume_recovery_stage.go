@@ -57,6 +57,9 @@ func (s *Server) StageRecoveryVolume(name, path string) (volume.ID, error) {
 	return s.stageRecoveryVolume(name, path, nil)
 }
 func (s *Server) stageRecoveryVolume(name, path string, actor *principal) (volume.ID, error) {
+	if s.storageWarming.Load() {
+		return volume.ID{}, s.storageUnavailable()
+	}
 	s.opMu.Lock()
 	defer s.opMu.Unlock()
 	return s.stageRecoveryVolumeLocked(name, path, actor, "")
