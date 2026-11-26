@@ -190,7 +190,7 @@ func (s *Server) WaitStorageReady(ctx context.Context) error {
 
 func (s *Server) startStorageWorkers(opts Options) {
 	s.startLeaseRecovery()
-	s.startAcceptedCheckpoints()
+	s.startDurabilityCleanup()
 	s.startBucketReclaimer()
 	// Transport fixtures drive recovery explicitly; autonomous housekeeping
 	// belongs to the production daemon lifecycle, including startup recovery.
