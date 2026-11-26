@@ -144,8 +144,15 @@ func (s *replicaSpool) Close() {
 	s.memory = nil
 }
 
+func newReplicaManager(s *Server) *replicaManager {
+	return &replicaManager{server: s, locks: make(map[volume.Key]*replicaLock), uploads: make(map[volume.ID]*replicaUpload)}
+}
+
 func (s *Server) initReplicas() error {
-	r := &replicaManager{server: s, locks: make(map[volume.Key]*replicaLock), uploads: make(map[volume.ID]*replicaUpload)}
+	r := s.replicas
+	if r == nil {
+		r = newReplicaManager(s)
+	}
 	for _, v := range s.quotaVolumes() {
 		h, err := v.Open(false)
 		if err != nil {
@@ -199,7 +206,9 @@ func (s *Server) initReplicas() error {
 			}
 		}
 	}
-	s.replicas = r
+	if s.replicas == nil {
+		s.replicas = r
+	}
 	return nil
 }
 

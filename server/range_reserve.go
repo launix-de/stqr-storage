@@ -35,14 +35,26 @@ func (r *rangeManager) consumed(t *rangeTxn, store *volume.Volume, before uint64
 	r.mu.Unlock()
 }
 
-// restoreReservations runs before listeners/workers. The durable plan is the
+// restoreReservations runs before mutation workers, while reads may already be
+// served from the replayed placement/fences. The durable plan is the
 // claim; canonical target indexes reconstruct import progress, including a
 // crash between restoring bytes and recording its advisory transfer memo.
 func (r *rangeManager) restoreReservations() error {
 	totals := map[volume.ID]uint64{}
+	r.mu.Lock()
+	txns := make([]*rangeTxn, 0, len(r.txns))
 	for _, t := range r.txns {
+		txns = append(txns, t)
+	}
+	r.mu.Unlock()
+	for _, t := range txns {
+		if err := r.server.ctx.Err(); err != nil {
+			return err
+		}
 		if !r.active(t) || t.plan.Target != r.node {
+			r.mu.Lock()
 			t.remaining = 0
+			r.mu.Unlock()
 			continue
 		}
 		store, err := r.destination(t.plan)
@@ -56,6 +68,10 @@ func (r *rangeManager) restoreReservations() error {
 		used, found := uint64(0), false
 		var after *volume.ObjectID
 		for {
+			if err := r.server.ctx.Err(); err != nil {
+				h.Close()
+				return err
+			}
 			records, err := h.ScanBucketObjects(volume.ID(t.plan.Before.Bucket), after, 128)
 			if err != nil {
 				h.Close()
@@ -80,6 +96,9 @@ func (r *rangeManager) restoreReservations() error {
 			after = &next
 		}
 		err = h.ScanRequests(func(record volume.RequestRecord) error {
+			if err := r.server.ctx.Err(); err != nil {
+				return err
+			}
 			if record.Key.Bucket == volume.ID(t.plan.Before.Bucket) && t.plan.contains(record.Key.Object) {
 				used = addCapacity(used, 512)
 				found = true
@@ -93,10 +112,14 @@ func (r *rangeManager) restoreReservations() error {
 		if found {
 			used = addCapacity(used, 64<<10)
 		} // shared index/root budget
+		r.mu.Lock()
 		t.remaining = t.plan.Physical - min(t.plan.Physical, used)
 		totals[t.plan.Volume] = addCapacity(totals[t.plan.Volume], t.remaining)
+		r.mu.Unlock()
 	}
+	r.mu.Lock()
 	r.publishQuotaImportsLocked()
+	r.mu.Unlock()
 	if err := r.server.applyQuotaProtectionLocked(); err != nil {
 		return err
 	}

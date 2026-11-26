@@ -12,6 +12,9 @@ const peerForceScopeEnvelope uint16 = 0x1066
 type forceScopeKey struct{}
 
 func (s *Server) scopedTransition(claim *controlClaim) error {
+	if s.storageWarming.Load() {
+		return s.storageUnavailable()
+	}
 	if s.control == nil {
 		if claim != nil {
 			return errControlConflict

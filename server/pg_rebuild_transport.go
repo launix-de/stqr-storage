@@ -11,6 +11,9 @@ import (
 // its participants. Each message starts independently; coordinator gates enforce
 // real per-PG dependencies without a separate transport worker budget.
 func (s *Server) launchPGRequest(ctx context.Context, m client.Message, p principal, reply func([]byte)) bool {
+	if s.storageWarming.Load() {
+		return false
+	}
 	if !(m.Opcode >= peerPGRebuildRequest && m.Opcode <= peerPGRebuildRanges || m.Opcode == peerBucketLease) || m.Kind != client.Request || s.scopes == nil {
 		return false
 	}
