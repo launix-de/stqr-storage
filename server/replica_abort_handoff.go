@@ -140,26 +140,13 @@ func (s *Server) receiveReplicaAbortHistory(m client.Message, actor client.ID) (
 	return nil, nil
 }
 
+// Replica promotion also uses the maintained physical total as an advisory
+// upper budget for retained abort/retry history. Never scan the replica index
+// on a planning tick; transfer walks actual history only after selecting a move.
 func (r *rangeManager) replicaAbortCost(before client.MapPatch, entry client.RangeEntry, retained ...map[volume.ID]uint64) (uint64, error) {
-	p := rangePlan{Before: before, Moving: entry, Source: r.node}
-	var cost uint64
-	for _, store := range r.sourceVolumes(p) {
-		err := scanRangeReplicas(r.server.ctx, store, func(record volume.ReplicaRecord) error {
-			if record.State == volume.ReplicaAborted && client.ID(record.Request.Key.Bucket) == before.Bucket && p.contains(record.Request.Key.Object) {
-				cost = addCapacity(cost, 512)
-				if len(retained) > 0 {
-					id := store.Identity().VolumeID
-					retained[0][id] = addCapacity(retained[0][id], 512)
-				}
-			}
-			return nil
-		})
-		if err != nil {
-			return 0, err
-		}
-	}
-	if cost > 0 {
+	cost, _, _, err := r.placementCostTotals(before, entry, retained...)
+	if err == nil && cost > 0 {
 		cost = addCapacity(cost, 64<<10)
 	}
-	return cost, nil
+	return cost, err
 }
