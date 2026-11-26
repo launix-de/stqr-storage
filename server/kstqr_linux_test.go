@@ -121,7 +121,36 @@ func TestKSTQRVirtualMachine(t *testing.T) {
 	var onlineObjects []client.ObjectID
 	var onlineGet func(context.Context, client.ObjectID) error
 	var nativeOverlay atomic.Pointer[client.OverlayFilesystem]
+	writebackFault := &kernelWritebackFault{}
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		current.Load().Handler().ServeHTTP(w, r)
+	}))
+	defer upstream.Close()
 	host := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/ws" {
+			writebackFault.proxy(w, r, upstream.URL)
+			return
+		}
+		if strings.HasPrefix(r.URL.Path, "/__kstqr_test/writeback-") {
+			var err error
+			switch strings.TrimPrefix(r.URL.Path, "/__kstqr_test/writeback-") {
+			case "fail":
+				writebackFault.begin()
+			case "retry":
+				err = writebackFault.end()
+			case "verified":
+				err = writebackFault.verify()
+			default:
+				http.NotFound(w, r)
+				return
+			}
+			if err != nil {
+				http.Error(w, err.Error(), 500)
+			} else {
+				w.WriteHeader(200)
+			}
+			return
+		}
 		if r.URL.Path == "/__kstqr_test/online-retained" || r.URL.Path == "/__kstqr_test/online-reclaimed" {
 			if onlineGet == nil || len(onlineObjects) != 3 {
 				http.Error(w, "reclamation fixture missing", 500)
@@ -555,6 +584,12 @@ echo KSTQR_SANDBOX_BEGIN
 echo KSTQR_SANDBOX_END
 cat /proc/self/mountstats
 ls -l /mnt
+# Coherence deliberately replaces subscriber sockets with accepted work in
+# flight. Its error state is not the clean-session precondition of this
+# separate crash fixture. All earlier probe processes have exited and closed
+# their handles; start a new mount without clearing any live client's latch.
+umount /mnt
+/mount.kstqr --uri @@URL@@ --bucket @@BUCKET@@ --credentials /credentials /mnt
 echo KSTQR_CRASH_RECONNECT_BEGIN
 /crash-reconnect @@URL@@
 echo KSTQR_CRASH_RECONNECT_END
