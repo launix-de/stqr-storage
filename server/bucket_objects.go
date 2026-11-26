@@ -512,6 +512,9 @@ func (b *Bucket) mutateAttempt(ctx context.Context, p principal, id volume.Objec
 		return volume.Result{}, fail(503, "bucket not attached")
 	}
 	s := b.server
+	if s.storageWarming.Load() {
+		return volume.Result{}, s.storageUnavailable()
+	}
 	if s.metadataPreview {
 		return volume.Result{}, fail(503, "metadata preview cannot mutate user objects")
 	}

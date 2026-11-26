@@ -14,6 +14,19 @@ import (
 
 const peerBucketFormat uint16 = 0x10b0
 const internalObjectFormat = "__stqr_internal_objects"
+const systemAdminFormat = "admin"
+
+// The system namespace is identified by its reserved ID, never by a user-
+// supplied name or application format. A legacy committed description may
+// still have no format: validate its original bytes/hash first, then expose
+// this deterministic runtime projection. The next ordinary system-image
+// publication persists the explicit label without rewriting old manifests.
+func effectiveSystemFormat(d BucketDescription) BucketDescription {
+	if d.Format == "" && d.ID == systemBucket.String() {
+		d.Schema, d.Format = 2, systemAdminFormat
+	}
+	return d
+}
 
 // Values are opaque and case sensitive. No frontend schema is known here.
 func validBucketFormat(format string, empty bool) bool {
@@ -44,6 +57,9 @@ func (s *Server) openBucketFormat(ctx context.Context, raw, format string, p pri
 	if !validBucketFormat(format, false) {
 		return fail(400, "a nonempty bucket format is required")
 	}
+	if format == systemAdminFormat {
+		return fail(403, "admin format is reserved for the system bucket")
+	}
 	id, err := bucketID(raw)
 	if err != nil || id == systemBucket {
 		return ErrBucketForbidden
@@ -62,6 +78,9 @@ func (s *Server) openBucketFormat(ctx context.Context, raw, format string, p pri
 			return fail(409, fmt.Sprintf("bucket format mismatch: expected %q, got %q", b.Describe().Format, format))
 		}
 		return nil
+	}
+	if s.storageWarming.Load() {
+		return s.storageUnavailable()
 	}
 	// A client cannot keep an initial metadata decision waiting indefinitely.
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
@@ -132,6 +151,9 @@ func (s *Server) receiveBucketFormat(ctx context.Context, body []byte) ([]byte, 
 }
 
 func (s *Server) setEmptyBucketFormat(id volume.ID, format string, p principal) error {
+	if format == systemAdminFormat || id == systemBucket {
+		return fail(403, "admin format is reserved for the system bucket")
+	}
 	b, err := s.formatAccess(id, p)
 	if err != nil {
 		return err
@@ -149,6 +171,9 @@ func (s *Server) setEmptyBucketFormat(id volume.ID, format string, p principal) 
 }
 
 func (s *Server) commitBucketFormat(ctx context.Context, id volume.ID, format string, p principal) error {
+	if format == systemAdminFormat || id == systemBucket {
+		return fail(403, "admin format is reserved for the system bucket")
+	}
 	c := s.controller
 	c.mu.Lock()
 	defer c.mu.Unlock()

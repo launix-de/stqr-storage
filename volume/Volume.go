@@ -23,9 +23,14 @@ import (
 //     Handle.Close, except that pinned checkpoints admit readers during I/O.
 //     Use defer Close; CopyTo does not release the handle. Never
 //     reenter Volume methods while holding a handle. Neither type may be copied.
-//   - Payloads are accessed in bounded blocks, never through a mandatory mmap.
-//     Metadata uses a bounded RAM cache and page-sized B+-trees. Neither opening nor looking up many objects requires a full RAM
-//     directory. In-flight operations can temporarily hold one object's metadata.
+//   - Linux files/devices use read-only, demand-paged mmap; private RAM devices
+//     borrow their existing sparse pages. No eager preload or complete object
+//     directory is required. Metadata caches and decompression remain bounded.
+//     Unsupported backends retain bounded positioned reads.
+//   - Borrowed read slices are read-only and valid only inside WithReadView's
+//     callback. The Handle and its private lock pin mapping/overlay lifetimes;
+//     Grow, Rescan, Shrink and Close cannot unmap an active read handle. An
+//     independently resized/truncated backing device violates exclusive ownership.
 //   - Checkpoint I/O runs against a pinned, immutable accepted-write buffer
 //     outside the metadata lock. Readers may continue; subsequent in-place
 //     writers use a separate bounded overlay until the WAL space is reusable.
@@ -42,32 +47,39 @@ type Volume struct {
 	staging           map[uint64][]byte
 	durableGeneration uint64
 
-	mu               sync.RWMutex
-	preparing        bool
-	checkpointing    bool
-	prepareCond      *sync.Cond
-	accountMu        sync.Mutex
-	accounting       map[ID]bucketAllocation
-	owned            map[ID]bucketAllocation
-	ownerStamp       any
-	ownerFilter      func(Key, bool) bool
-	admission        Admission
-	observer         func(StorageSnapshot)
-	overlay          *transaction
-	dev              VolumeIO
-	sb               Superblock
-	cache            *objectCache
-	nodes            *nodeCache
-	failed           error
-	closed           bool
-	closing          bool
-	maintenance      uint64
-	name             string
-	state            State
-	guaranteed       uint64
-	inFlightReserved uint64
-	onClose          func()
-	limit            uint64
+	mu                sync.RWMutex
+	preparing         bool
+	checkpointing     bool
+	prepareCond       *sync.Cond
+	accountWarm       sync.Mutex
+	accountManaged    atomic.Bool
+	accountReady      atomic.Bool
+	accountEpoch      uint64
+	accountCachePath  string
+	accountOwnerKey   [32]byte
+	accountOwnerKnown bool
+	accountMu         sync.Mutex
+	accounting        map[ID]bucketAllocation
+	owned             map[ID]bucketAllocation
+	ownerStamp        any
+	ownerFilter       func(Key, bool) bool
+	admission         Admission
+	observer          func(StorageSnapshot)
+	overlay           *transaction
+	dev               VolumeIO
+	sb                Superblock
+	cache             *objectCache
+	nodes             *nodeCache
+	failed            error
+	closed            bool
+	closing           bool
+	maintenance       uint64
+	name              string
+	state             State
+	guaranteed        uint64
+	inFlightReserved  uint64
+	onClose           func()
+	limit             uint64
 }
 
 type State uint8
@@ -146,7 +158,10 @@ func New(filename string, sizeBytes int64, class Class) (*Volume, error) {
 			d.Close()
 			return nil, err
 		}
-		d.size = n
+		if err = d.remap(n); err != nil {
+			d.Close()
+			return nil, err
+		}
 	}
 	v, e := Open(d, OpenOptions{})
 	if errors.Is(e, ErrUnformatted) {
@@ -278,6 +293,9 @@ func (v *Volume) publish(s Superblock) error {
 	return t.commit(false)
 }
 func (v *Volume) check(write bool) error {
+	if write && !v.AccountingReady() {
+		return ErrAccountingNotReady
+	}
 	// A checkpoint pins the visible write buffer, not the metadata mutex.
 	// Writers wait without excluding readers until the in-place WAL is safe
 	// to reuse. No second object revision or alternate object ID is created.
@@ -384,6 +402,10 @@ func (v *Volume) Close() error {
 		// New publications are rejected while the final accepted buffer is
 		// checkpointed, so clean close cannot discard a later overlay.
 		flushErr = v.checkpointIO((*Volume).flushDeferredIO)
+	}
+	if flushErr == nil && v.failed == nil {
+		// Derived cache failure never changes an acknowledged storage result.
+		_ = v.saveAccountingCacheLocked()
 	}
 	v.closed = true
 	v.state = Detached

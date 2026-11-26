@@ -150,8 +150,10 @@ func (s *Server) initRanges(dataDir string) error {
 		return err
 	}
 	r.publishQuotaRangesLocked()
-	if err := r.restoreReservations(); err != nil {
-		return err
+	if !s.storageWarming.Load() {
+		if err := r.restoreReservations(); err != nil {
+			return err
+		}
 	}
 	r.publishActivityLocked()
 	r.publishQuotaImportsLocked()

@@ -122,7 +122,7 @@ func TestConnectionDataPathHasNoAccountOrGrantLookups(t *testing.T) {
 		}
 	}
 	after := s.system.IOStats()
-	if after.ReadOps != before.ReadOps || after.WriteOps != before.WriteOps {
+	if testStorageReadOps(after) != testStorageReadOps(before) || after.WriteOps != before.WriteOps {
 		t.Fatalf("data path touched account/catalog storage: before %+v after %+v", before, after)
 	}
 	// The connection remains a valid capability if the admin device is temporarily
@@ -172,7 +172,7 @@ func TestConnectionCachesAdminAndPeerRoles(t *testing.T) {
 	request := client.Message{Kind: client.Request, Opcode: client.NodeConfigGet, ID: client.NewRequestID()}
 	bucketReplyResult(t, requestMessage(t, conn, request), 200)
 	after := s.system.IOStats()
-	if after.ReadOps != before.ReadOps {
+	if testStorageReadOps(after) != testStorageReadOps(before) {
 		t.Fatal("admin role was looked up again")
 	}
 	peerID := volume.ID{11}

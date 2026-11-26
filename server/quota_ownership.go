@@ -2,7 +2,11 @@
 package server
 
 import (
+	"bytes"
+	"crypto/sha256"
+	"encoding/binary"
 	"slices"
+	"sort"
 
 	"github.com/launix-de/stqr-storage/client"
 	"github.com/launix-de/stqr-storage/volume"
@@ -92,7 +96,7 @@ func (stamp quotaOwnershipStamp) OwnershipForEntireBucket(bucket volume.ID) (boo
 	return false, false
 }
 
-func (s *Server) refreshQuotaOwnership(v *volume.Volume) error {
+func (s *Server) quotaOwnership(v *volume.Volume) quotaOwnershipStamp {
 	image := s.placement.Load()
 	view := s.currentSystem.Load()
 	id := v.Identity().VolumeID
@@ -107,6 +111,10 @@ func (s *Server) refreshQuotaOwnership(v *volume.Volume) error {
 		stamp.legacy = s.cfg.Generation
 		s.mu.RUnlock()
 	}
+	return stamp
+}
+func (s *Server) refreshQuotaOwnership(v *volume.Volume) error {
+	stamp := s.quotaOwnership(v)
 	return v.SetOwnershipFilter(stamp, stamp.includesRecord)
 }
 
@@ -186,4 +194,49 @@ func (b *Bucket) plannedPhysicalUsage(view *systemView) (uint64, error) {
 		total = addCapacity(total, n)
 	}
 	return total, nil
+}
+
+// OwnershipCheckpointKey describes only the normalized ownership predicate, not
+// map epochs, accounts, or envelope revisions. The sidecar is a derived cache;
+// the volume independently binds it to its exact durable checkpoint.
+func (stamp quotaOwnershipStamp) OwnershipCheckpointKey() [32]byte {
+	h := sha256.New()
+	h.Write(stamp.node[:])
+	h.Write(stamp.volume[:])
+	for _, flag := range []bool{stamp.general, stamp.standalone} {
+		if flag {
+			h.Write([]byte{1})
+		} else {
+			h.Write([]byte{0})
+		}
+	}
+	var buckets []client.ID
+	if stamp.placement != nil {
+		for id := range stamp.placement.bounds {
+			buckets = append(buckets, id)
+		}
+	}
+	sort.Slice(buckets, func(i, j int) bool { return bytes.Compare(buckets[i][:], buckets[j][:]) < 0 })
+	for _, id := range buckets {
+		segments := stamp.ownershipSegments(volume.ID(id))
+		if len(segments) == 0 {
+			continue
+		}
+		h.Write(id[:])
+		h.Write(binary.LittleEndian.AppendUint64(nil, uint64(len(segments))))
+		for _, seg := range segments {
+			h.Write(seg.start[:])
+			flags := byte(0)
+			if seg.ordinary {
+				flags |= 1
+			}
+			if seg.imported {
+				flags |= 2
+			}
+			h.Write([]byte{flags})
+		}
+	}
+	var result [32]byte
+	copy(result[:], h.Sum(nil))
+	return result
 }

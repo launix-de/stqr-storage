@@ -370,37 +370,25 @@ func (v *Volume) readBytes(dst []byte, off uint64) error {
 }
 
 func (v *Volume) readVisibleBytes(dst []byte, off uint64) error {
-	if v.overlay != nil {
-		return v.overlay.readBytes(dst, off)
-	}
-	if v.deferred != nil || v.staging != nil || v.fence != nil {
-		return v.readLayer(dst, off)
-	}
 	for len(dst) > 0 {
-		at := off % PageSize
-		if at == 0 && len(dst) >= PageSize {
-			n := len(dst) / PageSize * PageSize
-			if off+uint64(n) > v.limit {
-				return ErrCorrupt
-			}
-			if e := readFullAt(v.dev, dst[:n], off); e != nil {
-				return e
-			}
-			off += uint64(n)
-			dst = dst[n:]
-			continue
+		data, n, _, err := v.visibleRegion(off, len(dst))
+		if err != nil {
+			return err
 		}
-		b, e := v.readPage(off - at)
-		if e != nil {
-			return e
+		if n <= 0 {
+			return ErrCorrupt
 		}
-		n := min(len(dst), PageSize-int(at))
-		copy(dst, b[at:at+uint64(n)])
+		if data == nil {
+			clear(dst[:n])
+		} else {
+			copy(dst[:n], data)
+		}
 		off += uint64(n)
 		dst = dst[n:]
 	}
 	return nil
 }
+
 func (t *transaction) writeBytes(off uint64, b []byte) error {
 	for len(b) > 0 {
 		at := off % PageSize

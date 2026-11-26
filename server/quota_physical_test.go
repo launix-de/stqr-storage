@@ -513,7 +513,7 @@ func TestDaemonQuotaStatsReportUnderestimatedGuaranteeWithoutPayloadIO(t *testin
 	before := v.Stats().IO
 	snap := source.node.CollectStats(client.StatsFilter{})
 	after := v.Stats().IO
-	if before.ReadBytes != after.ReadBytes || before.WriteBytes != after.WriteBytes {
+	if testStorageReadBytes(before) != testStorageReadBytes(after) || before.WriteBytes != after.WriteBytes {
 		t.Fatal("stats performed payload/index IO")
 	}
 	found := false

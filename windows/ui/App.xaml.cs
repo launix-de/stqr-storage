@@ -1,6 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-only
 using Microsoft.UI.Xaml;
-using System.Diagnostics;
 
 namespace Stqr.UI;
 
@@ -11,14 +10,10 @@ public partial class App : Application
     protected override void OnLaunched(LaunchActivatedEventArgs args)
     {
         var argv = Environment.GetCommandLineArgs();
-        var executable = Environment.ProcessPath ?? throw new InvalidOperationException("Executable path unavailable");
-        var backend = executable.EndsWith(".ui.exe", StringComparison.OrdinalIgnoreCase)
-            ? executable[..^7] + ".exe" : Path.Combine(Path.GetDirectoryName(executable)!, "stqr-windows.exe");
-        if (!argv.Contains("--dialog") && !argv.Contains("--smoke-test"))
-        {
-            Process.Start(new ProcessStartInfo(backend) { UseShellExecute = false });
-            Exit(); return;
-        }
+        var backend = Environment.GetEnvironmentVariable("STQR_BACKEND_EXE");
+        Environment.SetEnvironmentVariable("STQR_BACKEND_EXE", null);
+        if (string.IsNullOrEmpty(backend) || !Path.IsPathFullyQualified(backend) || !File.Exists(backend))
+            throw new InvalidOperationException("Please start stqr-windows.exe.");
         string drive = "S:";
         for (int i = 1; i + 1 < argv.Length; i++)
             if (argv[i] == "--saved-drive") drive = argv[i + 1];

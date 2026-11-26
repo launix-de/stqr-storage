@@ -515,21 +515,19 @@ func (v *Volume) copyToLocked(k Key, offset, length uint64, dst io.Writer) (uint
 		return 0, ErrRange
 	}
 	length = min(length, o.Info.Length-offset)
-	buf := make([]byte, BlockSize)
 	var done uint64
 	for done < length {
-		n := min(uint64(len(buf)), length-done)
-		if e = v.readObject(o, buf[:n], offset+done); e != nil {
-			return done, e
+		n := min(uint64(BlockSize), length-done)
+		view, err := v.objectReadView(o, offset+done, n)
+		if err != nil {
+			return done, err
 		}
-		written, err := dst.Write(buf[:n])
+		written, err := view.WriteTo(dst)
 		done += uint64(written)
 		if err != nil {
 			return done, err
 		}
-		if written != int(n) {
-			return done, io.ErrShortWrite
-		}
 	}
+
 	return done, nil
 }

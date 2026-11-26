@@ -60,6 +60,9 @@ func (s *Server) dispatchAs(m client.Message, ws *wsSession, p principal) ([]byt
 			return client.ResponseBody(403, nil, "bucket connection has no administrative privileges"), 403
 		}
 	}
+	if s.storageWarming.Load() && !storageWarmReadMessage(m) {
+		return client.ResponseBody(503, nil, s.storageUnavailable().Error()), 503
+	}
 	if m.Opcode == client.BucketFormatOpen {
 		return s.openSocketBucketFormat(m, ws, p)
 	}

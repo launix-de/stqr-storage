@@ -44,7 +44,7 @@ func TestOwnershipDeltaSkipsUnrelatedRecordsAndInstallsNewPredicate(t *testing.T
 		if err = v.SetOwnershipFilter(stamp, func(Key, bool) bool { calls++; return true }); err != nil {
 			t.Fatal(err)
 		}
-		if after := v.IOStats(); calls != 0 || after.ReadOps != before.ReadOps || after.WriteOps != before.WriteOps {
+		if after := v.IOStats(); calls != 0 || testReadWorkOps(after) != testReadWorkOps(before) || after.WriteOps != before.WriteOps {
 			t.Fatal("metadata/empty bucket scanned existing storage", calls, before, after)
 		}
 	}

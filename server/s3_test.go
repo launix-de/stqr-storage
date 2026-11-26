@@ -265,6 +265,13 @@ func TestS3AuthenticationGrantsAndKeyPersistence(t *testing.T) {
 	if err != nil || found.ID != user.ID || secret != testS3Secret {
 		t.Fatal("access key did not survive restart", err)
 	}
+	// Reads and authentication are available before derived accounting is warm.
+	// This next assertion mutates key metadata and requires write readiness.
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := reopened.WaitStorageReady(ctx); err != nil {
+		t.Fatal("storage did not become ready for key revocation", err)
+	}
 	e := client.Encoder{}
 	uid, _ := parseID(user.ID)
 	e.ID(client.ID(uid))

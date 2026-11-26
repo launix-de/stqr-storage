@@ -211,23 +211,29 @@ func (s *Server) pruneDurability() {
 	}
 	d.mu.Unlock()
 	for _, item := range work {
-		confirmed := true
+		confirmed := item.refs[:0]
+		allConfirmed := true
 		for _, ref := range item.refs {
-			if !ref.v.TryIsDurableThrough(ref.generation) {
-				confirmed = false
-				break
+			if ref.v.TryIsDurableThrough(ref.generation) {
+				confirmed = append(confirmed, ref)
+			} else {
+				allConfirmed = false
 			}
 		}
-		if !confirmed {
+		if len(confirmed) == 0 {
 			continue
 		}
 		d.mu.Lock()
-		for _, ref := range item.refs {
+		// One still-pending volume must not retain closed/replaced peers.
+		// Newer publications on a confirmed volume remain for the next fence.
+		for _, ref := range confirmed {
 			if item.state.volumes[ref.v] == ref.generation {
 				delete(item.state.volumes, ref.v)
 			}
 		}
-		if item.state.durable < item.cut {
+		// Removing individual confirmed references does not certify a bucket
+		// prefix until every generation in this captured cut is persisted.
+		if allConfirmed && item.state.durable < item.cut {
 			item.state.durable = item.cut
 		}
 		d.mu.Unlock()

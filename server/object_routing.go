@@ -33,6 +33,15 @@ func (s *Server) checkObjectOwner(bucket volume.ID, id volume.ObjectID, replicaR
 	if s.controller == nil {
 		return nil
 	}
+	if s.storageWarming.Load() && s.scopes != nil {
+		// The system head may precede a durable source fence. A warmup read
+		// cannot treat the old head's location as independent authority.
+		release, err := s.scopes.guard(bucket, id)
+		if err != nil {
+			return err
+		}
+		release()
+	}
 	if s.scopes != nil && s.scopes.incoming(bucket, id) {
 		return fail(503, "target handoff is not yet committed")
 	}

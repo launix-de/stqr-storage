@@ -3,6 +3,11 @@ package client
 
 // Wire field order follows architecture specification §7.1. This is not the Go
 // memory layout. Unimplemented single-node counters are zero, never estimates.
+// PhysicalReadBytes/PhysicalWriteBytes are legacy wire names for volume storage
+// ACCESS bytes, including metadata, migration and cached mmap/RAM reads. They
+// measure neither OS page faults nor bytes transferred by physical disks. The
+// positioned and view read families are mutually exclusive and summed once.
+// LogicalReadBytes/LogicalWriteBytes retain delivered object-payload semantics.
 type IOStats struct {
 	Ops                                        [6]uint64
 	LogicalReadBytes, LogicalWriteBytes        uint64

@@ -192,6 +192,19 @@ func mount(ctx context.Context, c mountConfig, initialize bool, installation ins
 		return e
 	}
 	defer conn.Close()
+	permissions, e := conn.BucketAccess(ctx)
+	if e != nil {
+		return fmt.Errorf("Bucket-Zugriffsrechte konnten nicht geprüft werden: %w", e)
+	}
+	requestedConfig := c
+	c.ReadOnly, e = effectiveReadOnly(c.ReadOnly, permissions)
+	if e != nil {
+		return e
+	}
+	initialize = initialize && !c.ReadOnly
+	if notify, ok := ctx.Value(uiAccessKey{}).(func(bool)); ok {
+		notify(c.ReadOnly)
+	}
 	store := client.NewSubscriptionStore(conn, 8<<20)
 	store.EnableAcceptedWrites()
 	defer store.Close()
@@ -261,7 +274,7 @@ func mount(ctx context.Context, c mountConfig, initialize bool, installation ins
 		if err != nil {
 			return err
 		}
-		if err = installation.save(c, executable); err != nil {
+		if err = installation.save(requestedConfig, executable); err != nil {
 			return err
 		}
 	} else if forget {
@@ -333,7 +346,7 @@ func main() {
 		}
 		return
 	}
-	if len(os.Args) == 1 || hasSetupFlag(os.Args[1:]) {
+	if len(os.Args) == 1 || hasSetupFlag(os.Args[1:]) || len(os.Args) == 2 && os.Args[1] == "--ui-smoke-test" {
 		if err := launchWinUI(); err != nil {
 			messageBox(0, "STQR", err.Error(), 0x10)
 			os.Exit(1)
@@ -349,12 +362,4 @@ func main() {
 		}
 		os.Exit(1)
 	}
-}
-func hasSetupFlag(args []string) bool {
-	for _, a := range args {
-		if strings.TrimLeft(a, "-") == "setup" || strings.TrimLeft(a, "-") == "setup=true" {
-			return true
-		}
-	}
-	return false
 }

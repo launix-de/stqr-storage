@@ -123,7 +123,7 @@ func (s *Server) installSystemView(view *systemView) error {
 	if err := s.applyQuotaProtectionLocked(); err != nil {
 		return err
 	}
-	if s.scopes != nil {
+	if s.scopes != nil && !s.storageWarming.Load() {
 		if err := s.ensureVolumeAuthorityLocked(); err != nil {
 			return err
 		}

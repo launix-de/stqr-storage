@@ -12,8 +12,18 @@ import (
 // system-object operation records. It does not infer distributed ownership.
 // Unpublished new files remain discoverable, never silently removed/formatted.
 func (s *Server) recoverOperations() error {
+	s.mu.RLock()
+	cfg := copyConfig(s.cfg)
+	stores := make(map[string]*managedVolume, len(s.volumes))
+	for id, m := range s.volumes {
+		stores[id] = m
+	}
+	s.mu.RUnlock()
 	var after *volume.Key
 	for {
+		if err := s.ctx.Err(); err != nil {
+			return err
+		}
 		h, e := s.system.Open(false)
 		if e != nil {
 			return e
@@ -46,7 +56,7 @@ func (s *Server) recoverOperations() error {
 			switch op.Kind {
 			case "recovery-stage":
 				op.State, op.Status = "failed", 503
-				for _, v := range append(append([]VolumeConfig(nil), s.cfg.RecoveryVolumes...), s.cfg.Volumes...) {
+				for _, v := range append(append([]VolumeConfig(nil), cfg.RecoveryVolumes...), cfg.Volumes...) {
 					if v.OperationID == op.ID {
 						op.State, op.Status, op.VolumeID = "fulfilled", 201, v.ID
 					}
@@ -55,7 +65,7 @@ func (s *Server) recoverOperations() error {
 				op.State, op.Status = "failed", 503
 				if op.VolumeID != "" {
 					found := false
-					for _, v := range s.cfg.RecoveryVolumes {
+					for _, v := range cfg.RecoveryVolumes {
 						found = found || v.ID == op.VolumeID
 					}
 					if !found {
@@ -78,17 +88,17 @@ func (s *Server) recoverOperations() error {
 				}
 			case "cluster-shutdown":
 				switch {
-				case s.cfg.Node.ClusterStopID == op.ID:
+				case cfg.Node.ClusterStopID == op.ID:
 					op.State, op.Status = "fulfilled", 200
 					op.Detail = "Wiederanlauf nach Cluster-Shutdown"
-				case s.cfg.Node.ClusterShutdownRequest == op.ID:
+				case cfg.Node.ClusterShutdownRequest == op.ID:
 					op.State, op.Status = "running", 202
 				default:
 					op.State, op.Status = "failed", 503
 					op.Detail = "Shutdown-Auftrag vor Speicherung unterbrochen"
 				}
 			case "node-short":
-				if s.cfg.Node.ShortOperation == op.ID {
+				if cfg.Node.ShortOperation == op.ID {
 					op.State = "fulfilled"
 					op.Status = 200
 					op.Detail = "Wiederanlauf nach Wartungs-Shutdown"
@@ -98,7 +108,7 @@ func (s *Server) recoverOperations() error {
 					op.Detail = "Wartungsauftrag vor Speicherung unterbrochen"
 				}
 			case "node-drain":
-				if s.cfg.Node.Draining {
+				if cfg.Node.Draining {
 					op.State = "running"
 					op.Status = 202
 				} else {
@@ -107,7 +117,7 @@ func (s *Server) recoverOperations() error {
 				}
 			case "add":
 				found := false
-				for _, v := range s.cfg.Volumes {
+				for _, v := range cfg.Volumes {
 					if v.OperationID == op.ID {
 						op.VolumeID = v.ID
 						op.State = "fulfilled"
@@ -124,9 +134,9 @@ func (s *Server) recoverOperations() error {
 				}
 			case "remove":
 				var configured *VolumeConfig
-				for i := range s.cfg.Volumes {
-					if s.cfg.Volumes[i].ID == op.VolumeID {
-						configured = &s.cfg.Volumes[i]
+				for i := range cfg.Volumes {
+					if cfg.Volumes[i].ID == op.VolumeID {
+						configured = &cfg.Volumes[i]
 						break
 					}
 				}
@@ -144,7 +154,7 @@ func (s *Server) recoverOperations() error {
 					op.Detail = "Entfernen wurde vor dem Draining-Commit unterbrochen; Volume bleibt eingebunden"
 				}
 			case "grow":
-				m := s.volumes[op.VolumeID]
+				m := stores[op.VolumeID]
 				if m != nil && op.SizeBytes > 0 && m.store.Size() >= uint64(op.SizeBytes) {
 					op.State = "fulfilled"
 					op.Status = 200
@@ -155,7 +165,7 @@ func (s *Server) recoverOperations() error {
 					op.Detail = "Vergrößerung unterbrochen; aktuelle Kapazität prüfen und erneut anfordern"
 				}
 			case "rescan":
-				m := s.volumes[op.VolumeID]
+				m := stores[op.VolumeID]
 				if m == nil {
 					op.State = "failed"
 					op.Status = 404
@@ -167,11 +177,17 @@ func (s *Server) recoverOperations() error {
 						op.Status = statusOf(e)
 						op.Detail = e.Error()
 					} else {
+						s.mu.Lock()
 						m.config.SizeBytes = int64(n)
 						for i := range s.cfg.Volumes {
 							if s.cfg.Volumes[i].ID == op.VolumeID {
 								s.cfg.Volumes[i].SizeBytes = int64(n)
 							}
+						}
+						err := saveConfig(s.configPath, s.cfg)
+						s.mu.Unlock()
+						if err != nil {
+							return err
 						}
 						op.State = "fulfilled"
 						op.Status = 200
