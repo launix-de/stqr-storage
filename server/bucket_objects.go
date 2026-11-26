@@ -704,14 +704,17 @@ func (b *Bucket) mutateAttempt(ctx context.Context, p principal, id volume.Objec
 	if opcode == 0x0105 || opcode == 0x0106 {
 		payloadLength = 0
 	}
-	if generation, pending := v.PendingCheckpoint(opt.Accepted || payloadLength <= 1<<20 && opcode != cowRestoreOpcode, payloadLength); pending && (generation == 0 || !v.IsDurableThrough(generation)) {
-		return volume.Result{}, &acceptedCheckpoint{v, generation}
+	if generation, pending := v.PendingCheckpoint(opt.Accepted || payloadLength <= 1<<20 && opcode != cowRestoreOpcode, payloadLength); pending {
+		if generation == 0 {
+			// Waiting for an already requested fence never starts a new checkpoint.
+			return volume.Result{}, &acceptedCheckpoint{v, 0}
+		}
+		if !opt.Accepted && !v.IsDurableThrough(generation) {
+			return volume.Result{}, &acceptedCheckpoint{v, generation}
+		}
 	}
-	// A rejected buffered mutation may leave an empty group at an already
-	// durable generation. Waiting through that generation cannot drain it.
-	// Continue to the normal handle path, which rechecks admission and drains
-	// the group before building a durable mutation. Later writes remain subject
-	// to the same handle/operation checks, not this preflight hint.
+	// Accepted operations must proceed through bounded unsynced writeback, or
+	// return backpressure. Buffer pressure is never permission to request Sync.
 	// Independent destinations are not durability dependencies. The connection
 	// and bucket fences already track every touched volume; only an explicit
 	// fence or the storage engine's bounded WAL requirements may flush them.
