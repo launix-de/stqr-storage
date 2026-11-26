@@ -140,7 +140,7 @@ tests. These cover open handles across rename/unlink, sparse and segmented I/O,
 concurrent append, readonly rejection and metadata callbacks. The setup tests
 cover DPAPI roundtrips and tamper rejection, executable copying, startup quoting,
 profile removal and per-drive exclusion/stop events. The backend tests can run under
-Wine. The WinUI frontend requires real Windows; use `--smoke-test` with
+Wine. The WinUI frontend requires real Windows; run `stqr-windows.exe --ui-smoke-test` with
 `STQR_UI_SMOKE_DIR` pointing to an existing output directory. A drive mount and application compatibility still require
 testing on real Windows with WinFsp; Wine callback tests do not load its driver.
 

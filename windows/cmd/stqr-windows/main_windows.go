@@ -350,11 +350,3 @@ func main() {
 		os.Exit(1)
 	}
 }
-func hasSetupFlag(args []string) bool {
-	for _, a := range args {
-		if strings.TrimLeft(a, "-") == "setup" || strings.TrimLeft(a, "-") == "setup=true" {
-			return true
-		}
-	}
-	return false
-}
