@@ -63,55 +63,137 @@ func (h *Handle) StorageUsage() ([]BucketStorage, error) {
 		return v.usage(v.accounting, v.sb), nil
 	})
 }
+
+// The canonical index is the recovery source, so a cold volume needs one
+// census. Build all and selected totals together when the first ownership
+// filter arrives. Retain only O(buckets) counters/proofs and bounded existing
+// object/page caches, never a second object directory or per-object statistics.
 func (v *Volume) initAccounting() error {
 	if v.accounting != nil {
 		return nil
 	}
-	accounts := make(map[ID]bucketAllocation)
-	err := v.walkIndex(func(x indexEntry) error {
-		id, a, err := v.accountRecord(x.Key)
-		if err != nil {
-			return err
-		}
-		b := accounts[id]
-		b.logical += a.logical
-		b.payload += a.payload
-		b.metadata += a.metadata
-		b.records += a.records
-		b.objects += a.objects
-		accounts[id] = b
-		return nil
-	})
+	all, _, err := v.scanAccounting(nil, nil, false)
 	if err == nil {
-		v.accounting = accounts
+		v.accounting = all
 	}
 	return err
 }
-func (v *Volume) accountRecord(k indexKey) (ID, bucketAllocation, error) {
-	var a bucketAllocation
+
+type accountingRecord struct {
+	key        Key
+	allocation bucketAllocation
+	imported   bool
+}
+
+type bucketOwnershipProof struct{ include, known bool }
+
+func addAllocation(totals map[ID]bucketAllocation, id ID, a bucketAllocation) {
+	b := totals[id]
+	b.logical += a.logical
+	b.payload += a.payload
+	b.metadata += a.metadata
+	b.records += a.records
+	b.objects += a.objects
+	totals[id] = b
+}
+
+func (v *Volume) scanAccounting(stamp any, include func(Key, bool) bool, owned bool) (map[ID]bucketAllocation, map[ID]bucketAllocation, error) {
+	all := make(map[ID]bucketAllocation)
+	selected := make(map[ID]bucketAllocation)
+	proofs := make(map[ID]bucketOwnershipProof)
+	totals, aggregate := stamp.(OwnershipBucketTotals)
+	err := v.walkIndex(func(x indexEntry) error {
+		r, err := v.accountRecordAt(x)
+		if err != nil {
+			return err
+		}
+		addAllocation(all, r.key.Bucket, r.allocation)
+		if !owned {
+			return nil
+		}
+		proof, found := proofs[r.key.Bucket]
+		if !found {
+			if aggregate {
+				proof.include, proof.known = totals.OwnershipForEntireBucket(r.key.Bucket)
+			}
+			proofs[r.key.Bucket] = proof
+		}
+		own := proof.include
+		if !proof.known {
+			own = include == nil || include(r.key, r.imported)
+		}
+		if own {
+			addAllocation(selected, r.key.Bucket, r.allocation)
+		}
+		return nil
+	})
+	return all, selected, err
+}
+
+// A census already has each physical address. Decode it directly instead of
+// searching the B-tree again, or rereading a receipt once for its bucket, again
+// for its imported flag, and a third time for its footprint.
+func (v *Volume) accountRecordAt(x indexEntry) (accountingRecord, error) {
+	var r accountingRecord
+	k, ptr := x.Key, x.Value
 	if k[0] == 3 {
-		return k.object().Bucket, a, nil
+		r.key = k.object()
+		return r, nil
+	}
+	if k[0] == 0 {
+		r.key = k.object()
+		if ptr == 0 {
+			return r, nil
+		}
+		o := v.cache.get(r.key)
+		if o == nil || o.Base != ptr {
+			var err error
+			o, err = v.loadObjectAt(ptr)
+			if err != nil {
+				return r, err
+			}
+			v.cache.put(r.key, o)
+		}
+		r.imported = o.importShadow
+		r.allocation = accountObject(o)
+		return r, nil
+	}
+	if ptr == 0 && (k[0] == 1 || k[0] == 2) {
+		return r, nil
+	}
+	if k[0] == 1 {
+		d, err := v.dedupeAt(ptr)
+		if err != nil {
+			return r, err
+		}
+		r.key, r.imported = d.Key, d.importShadow
+		r.allocation.records, r.allocation.metadata = 1, receiptBytes
+		return r, nil
 	}
 	if k[0] == 2 {
+		replica, err := v.replicaAt(ptr)
+		if err != nil {
+			return r, err
+		}
 		var id ID
 		copy(id[:], k[1:17])
-		r, found, err := v.loadReplica(id)
-		if err != nil || !found {
-			return ID{}, a, err
+		if replica.Request.ID != id {
+			return r, ErrCorrupt
 		}
-		a.records, a.metadata = 1, replicaBytes
-		if r.object != 0 {
+		r.key = replica.Request.Key
+		a := bucketAllocation{records: 1, metadata: replicaBytes}
+		if replica.object != 0 {
 			a.metadata += receiptBytes
-			o, err := v.loadObjectAt(r.object)
+			o, err := v.loadObjectAt(replica.object)
 			if err != nil {
-				return ID{}, a, err
+				return r, err
 			}
 			a.metadata += o.Size
-			old, err := v.loadObject(r.Request.Key)
+			old, err := v.loadObject(replica.Request.Key)
 			if errors.Is(err, ErrNotFound) {
 				old = nil
 			} else if err != nil {
-				return ID{}, a, err
+				return r, err
 			}
 			for _, allocation := range exclusiveAllocations(o, old) {
 				if allocation.meta {
@@ -121,45 +203,44 @@ func (v *Volume) accountRecord(k indexKey) (ID, bucketAllocation, error) {
 				}
 			}
 		}
-		return r.Request.Key.Bucket, a, nil
+		r.allocation = a
+		return r, nil
+	}
+	return r, ErrCorrupt
+}
+
+func accountObject(o *object) bucketAllocation {
+	a := bucketAllocation{records: 1, metadata: o.Size}
+	if !o.Info.Deleted {
+		a.logical, a.objects = o.Info.Length, 1
+	}
+	for _, allocation := range objectAllocations(o) {
+		if allocation.meta {
+			a.metadata += allocation.n
+		} else {
+			a.payload += allocation.n
+		}
+	}
+	return a
+}
+
+func (v *Volume) accountRecord(k indexKey) (ID, bucketAllocation, error) {
+	if k[0] == 3 {
+		return k.object().Bucket, bucketAllocation{}, nil
 	}
 	if k[0] == 0 {
-		key := k.object()
-		o, err := v.loadObject(key)
-		if errors.Is(err, ErrNotFound) {
-			return key.Bucket, a, nil
+		if o := v.cache.get(k.object()); o != nil {
+			return k.object().Bucket, accountObject(o), nil
 		}
-		if err != nil {
-			return ID{}, a, err
-		}
-		a.records = 1
-		a.metadata = o.Size
-		if !o.Info.Deleted {
-			a.logical = o.Info.Length
-			a.objects = 1
-		}
-		for _, allocation := range objectAllocations(o) {
-			if allocation.meta {
-				a.metadata += allocation.n
-			} else {
-				a.payload += allocation.n
-			}
-		}
-		return key.Bucket, a, nil
 	}
-	if k[0] == 1 {
-		var id ID
-		copy(id[:], k[1:17])
-		d, found, err := v.loadDedupe(id)
-		if err != nil || !found {
-			return ID{}, a, err
-		}
-		a.records = 1
-		a.metadata = receiptBytes
-		return d.Key.Bucket, a, nil
+	ptr, err := v.lookup(k)
+	if err != nil {
+		return ID{}, bucketAllocation{}, err
 	}
-	return ID{}, a, ErrCorrupt
+	r, err := v.accountRecordAt(indexEntry{Key: k, Value: ptr})
+	return r.key.Bucket, r.allocation, err
 }
+
 func (v *Volume) usage(accounts map[ID]bucketAllocation, sb Superblock) []BucketStorage {
 	var records, private uint64
 	out := make([]BucketStorage, 0, len(accounts))
@@ -360,8 +441,43 @@ func (v *Volume) SetOwnershipFilter(stamp any, include func(Key, bool) bool) err
 	if v.owned != nil && v.ownerStamp == stamp {
 		return nil
 	}
-	if err := v.initAccounting(); err != nil {
-		return err
+	if v.accounting == nil {
+		all, selected, err := v.scanAccounting(stamp, include, true)
+		if err != nil {
+			return err
+		}
+		v.accounting, v.owned = all, selected
+		v.ownerFilter, v.ownerStamp = include, stamp
+		if v.observer != nil {
+			v.observer(StorageSnapshot{All: v.usage(all, v.sb), Owned: v.ownedUsage(selected, all, v.sb)})
+		}
+		return nil
+	}
+	if v.owned == nil {
+		if totals, ok := stamp.(OwnershipBucketTotals); ok {
+			selected := make(map[ID]bucketAllocation)
+			complete := true
+			for id, a := range v.accounting {
+				if a.records == 0 {
+					continue
+				}
+				own, exact := totals.OwnershipForEntireBucket(id)
+				if !exact {
+					complete = false
+					break
+				}
+				if own {
+					selected[id] = a
+				}
+			}
+			if complete {
+				v.owned, v.ownerFilter, v.ownerStamp = selected, include, stamp
+				if v.observer != nil {
+					v.observer(StorageSnapshot{All: v.usage(v.accounting, v.sb), Owned: v.ownedUsage(selected, v.accounting, v.sb)})
+				}
+				return nil
+			}
+		}
 	}
 	if v.owned != nil {
 		if delta, ok := stamp.(OwnershipDelta); ok {
@@ -414,30 +530,14 @@ func (v *Volume) SetOwnershipFilter(stamp any, include func(Key, bool) bool) err
 	}
 	selected := make(map[ID]bucketAllocation)
 	err := v.walkIndex(func(x indexEntry) error {
-		k, err := v.recordKey(x.Key)
+		r, err := v.accountRecordAt(x)
 		if err != nil {
 			return err
 		}
-		if include != nil {
-			flag, err := v.recordImported(x.Key)
-			if err != nil {
-				return err
-			}
-			if !include(k, flag) {
-				return nil
-			}
+		if include != nil && !include(r.key, r.imported) {
+			return nil
 		}
-		id, a, err := v.accountRecord(x.Key)
-		if err != nil {
-			return err
-		}
-		b := selected[id]
-		b.logical += a.logical
-		b.payload += a.payload
-		b.metadata += a.metadata
-		b.records += a.records
-		b.objects += a.objects
-		selected[id] = b
+		addAllocation(selected, r.key.Bucket, r.allocation)
 		return nil
 	})
 	if err != nil {
