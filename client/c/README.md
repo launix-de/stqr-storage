@@ -2,7 +2,7 @@
 
 The C library connects directly to STQR over an authenticated, bucket-bound
 WebSocket. It does not embed Go, call a helper daemon, or implement its operations
-through another language's SDK. URL, username, password and bucket ID are required
+through another language's SDK. URL, username, password, bucket ID and format are required
 by `stqr_dial`. The server checks the grant at upgrade; it cannot be changed on an
 established connection.
 
@@ -109,6 +109,14 @@ all of them before applying, resetting or closing the fence. Confirmations are
 bucket-scoped and never erase later, unconfirmed writes. The existing `stqr_sync`
 API keeps its serialized-call contract. No new wire messages or storage format
 are introduced.
+
+## Migrating explicit format arguments
+
+`stqr_dial` takes the format between the bucket ID and timeout. This changes the
+C source and binary calling interface. Rebuild and relink C consumers against the
+matching header and library, and deploy those rebuilt consumers together with the
+library. Rebuild kernel modules using the matching client core as well. Upgrade
+all server members before relying on persistent format enforcement.
 
 ## Kernel reuse
 

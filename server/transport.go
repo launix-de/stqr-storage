@@ -107,6 +107,16 @@ func (s *Server) serveWebSocket(w http.ResponseWriter, r *http.Request, p princi
 		httpError(w, 400, errors.New("valid WebSocket upgrade required"))
 		return
 	}
+	// Opening may persist an unset format. Check every connection prerequisite
+	// first, including session, lease and shutdown restrictions. The unset-format
+	// exception is only for this side-effect-free preflight, never registration.
+	s.opMu.Lock()
+	_, _, authErr := s.authorizeConnection(r, p, true)
+	s.opMu.Unlock()
+	if authErr != nil {
+		httpError(w, statusOf(authErr), authErr)
+		return
+	}
 	if raw := r.Header.Get(client.BucketHeader); raw != "" {
 		if err := s.openBucketFormat(r.Context(), raw, r.Header.Get(client.FormatHeader), p); err != nil {
 			httpError(w, statusOf(err), err)
@@ -114,16 +124,14 @@ func (s *Server) serveWebSocket(w http.ResponseWriter, r *http.Request, p princi
 		}
 	}
 
+	// Binding uses the existing cluster metadata commit without holding opMu.
+	// Recheck the fresh capability and committed format under the registration
+	// lock so ACL/session/lease changes during that commit cannot admit a socket.
 	s.opMu.Lock()
-	authorization, p, authErr := s.authorizeConnection(r, p)
+	authorization, p, authErr := s.authorizeConnection(r, p, false)
 	if authErr != nil {
 		s.opMu.Unlock()
 		httpError(w, statusOf(authErr), authErr)
-		return
-	}
-	if (s.shortStopping.Load() || s.drainClosing.Load()) && !p.isPeer() {
-		s.opMu.Unlock()
-		httpError(w, 503, errors.New("node is shutting down"))
 		return
 	}
 	up := websocket.Upgrader{Subprotocols: []string{"stqr.v2", "stqr.v1"}, CheckOrigin: sameOrigin, EnableCompression: false, ReadBufferSize: 4096, WriteBufferSize: 4096}

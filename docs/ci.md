@@ -33,12 +33,13 @@ move an existing retained tag. A checkpoint must include a working
 `server/format_compat_test.go` producer. Future fixture/manifest changes must
 preserve the current reader's ability to verify its older manifests.
 
-When format-owning files change, CI requires a retained checkpoint to be an
-ancestor of the PR/push base and tests every retained tag. Changes between that
-checkpoint and the base do not create a new checkpoint obligation: compatibility
-is decided by reading the generated data, not by identical source files.
-`FORMAT_PATHS` lists format owners; extend it when adding an owner. Manual runs
-can select a comparison base with `--base COMMIT`.
+CI decides compatibility by generating data with each retained tagged version
+and reading it with the candidate. Source-file changes and Git ancestry do not
+imply a format change and do not require another tag. In particular, compatible
+locking, buffering and cleanup changes need no new format checkpoint. Retain new
+milestones when intentionally establishing another format/release baseline. Before
+intentionally changing a persistent encoding, preserve the last compatible state
+as a milestone; this is a format decision, not a filename heuristic.
 
 `tools/compat/check.py` enumerates **all** Git tags, including annotated and
 lightweight tags. For each tag it:
