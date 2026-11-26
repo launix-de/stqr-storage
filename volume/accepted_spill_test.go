@@ -244,3 +244,304 @@ func TestAcceptedSpillDirtyIndexIsBoundedAndSorted(t *testing.T) {
 		}
 	}
 }
+
+func TestAcceptedSpillCrashAtEveryExplicitCheckpointStep(t *testing.T) {
+	base := newCrash(4 << 20)
+	v, err := Format(base, FormatOptions{Class: SSD})
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := testKey(1)
+	old := bytes.Repeat([]byte("o"), 64<<10)
+	next := bytes.Repeat([]byte("n"), len(old))
+	if _, err = testPut(v, key, old, Options{}); err != nil {
+		t.Fatal(err)
+	}
+	for _, through := range []bool{false, true} {
+		for _, persist := range []bool{false, true} {
+			failures := 0
+			for step := 1; step < 160; step++ {
+				d := base.crash()
+				w, err := Open(d, OpenOptions{})
+				if err != nil {
+					t.Fatal(err)
+				}
+				w.mu.Lock()
+				if err = w.beginDeferred(); err != nil {
+					t.Fatal(err)
+				}
+				w.deferred.store.limit = 2
+				w.mu.Unlock()
+				if _, err = testPut(w, key, next, Options{Accepted: true}); err != nil {
+					t.Fatal(err)
+				}
+				if w.deferred.store.data == nil {
+					t.Fatal("fault test did not enter private spill path")
+				}
+				if d.steps != 0 {
+					t.Fatal("accepted preparation wrote/synced backend", d.steps)
+				}
+				d.fail = step
+				d.writeThrough = through
+				d.persistFailedSync = persist
+				commitErr := w.Sync()
+				if commitErr != nil {
+					failures++
+					if !errors.Is(commitErr, ErrRecovery) {
+						t.Fatal(commitErr)
+					}
+				}
+				recovered, err := Open(d.crash(), OpenOptions{})
+				if err != nil {
+					t.Fatalf("through=%v persist=%v step=%d recovery=%v", through, persist, step, err)
+				}
+				got, _, err := testGet(recovered, key)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !bytes.Equal(got, old) && !bytes.Equal(got, next) || commitErr == nil && !bytes.Equal(got, next) {
+					t.Fatalf("step=%d mixed or lost confirmed image", step)
+				}
+				w.Close()
+				recovered.Close()
+				if commitErr == nil {
+					break
+				}
+			}
+			if failures < 35 {
+				t.Fatal("spilled write/anchor/fence fault points not exercised", failures)
+			}
+		}
+	}
+}
+func TestAcceptedSpillFailureFencesWithoutSync(t *testing.T) {
+	d := newCrash(32 << 20)
+	v, err := Format(d, FormatOptions{Class: SSD})
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := testKey(1)
+	if _, err = testPut(v, key, []byte("old durable bytes"), Options{}); err != nil {
+		t.Fatal(err)
+	}
+	payload := bytes.Repeat([]byte("p"), 8<<20)
+	if _, err = testPut(v, key, payload, Options{Accepted: true}); err != nil {
+		t.Fatal(err)
+	}
+	if v.deferred.store.data == nil {
+		t.Fatal("missing private spill")
+	}
+	// A failed private-cache eviction is an ambiguous volatile publication and
+	// fences this instance. It cannot Sync accepted bytes to repair the failure.
+	v.deferred.store.data.Close()
+	before := v.IOStats()
+	_, err = testPut(v, testKey(9), []byte("must not publish"), Options{Accepted: true})
+	if !errors.Is(err, ErrRecovery) {
+		t.Fatal("private spill write failure not fenced", err)
+	}
+	if after := v.IOStats(); after.SyncOps != before.SyncOps || after.WriteOps != before.WriteOps {
+		t.Fatal("spill failure forced durable fallback", before, after)
+	}
+	recovered, err := Open(d.crash(), OpenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustGet(t, recovered, key, []byte("old durable bytes"))
+	if _, _, err = testGet(recovered, testKey(9)); !errors.Is(err, ErrNotFound) {
+		t.Fatal(err)
+	}
+	v.Close()
+}
+func TestAcceptedSpillNoSafeRedoBackpressuresBeforePublication(t *testing.T) {
+	d := newCrash(4 << 20)
+	v, err := Format(d, FormatOptions{Class: SSD})
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := testKey(1)
+	old := bytes.Repeat([]byte("o"), 3<<20)
+	if _, err = testPut(v, key, old, Options{}); err != nil {
+		t.Fatal(err)
+	}
+	before := v.IOStats()
+	generation := v.Header().Generation
+	_, err = testPut(v, key, bytes.Repeat([]byte("n"), len(old)), Options{Accepted: true})
+	if !errors.Is(err, ErrWritebackPressure) {
+		t.Fatal("no safe redo space must backpressure", err)
+	}
+	if v.Header().Generation != generation {
+		t.Fatal("rejected overwrite published metadata")
+	}
+	mustGet(t, v, key, old)
+	if after := v.IOStats(); after.SyncOps != before.SyncOps || after.WriteOps != before.WriteOps {
+		t.Fatal("redo pressure forced Sync", after)
+	}
+	v.Close()
+}
+func TestAcceptedSpillReadersAndLaterTailDuringExplicitFence(t *testing.T) {
+	d := newCrash(16 << 20)
+	gate := &checkpointGateIO{VolumeIO: d}
+	v, err := Format(gate, FormatOptions{Class: SSD})
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := testKey(1)
+	old := bytes.Repeat([]byte("o"), 64<<10)
+	next := bytes.Repeat([]byte("n"), len(old))
+	if _, err = testPut(v, key, old, Options{}); err != nil {
+		t.Fatal(err)
+	}
+	v.mu.Lock()
+	if err = v.beginDeferred(); err != nil {
+		t.Fatal(err)
+	}
+	v.deferred.store.limit = 2
+	v.mu.Unlock()
+	if _, err = testPut(v, key, next, Options{Accepted: true}); err != nil {
+		t.Fatal(err)
+	}
+	entered, release := gate.arm(nil)
+	defer release()
+	done := make(chan error, 1)
+	go func() { done <- v.Sync() }()
+	<-entered
+	mustGet(t, v, key, next)
+	if _, err = testPut(v, testKey(2), []byte("later unsynced tail"), Options{Accepted: true}); err != nil {
+		t.Fatal(err)
+	}
+	mustGet(t, v, testKey(2), []byte("later unsynced tail"))
+	release()
+	if err = <-done; err != nil {
+		t.Fatal(err)
+	}
+	beforeClose := v.IOStats()
+	if err = v.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if v.IOStats().SyncOps != beforeClose.SyncOps {
+		t.Fatal("Close synced later tail")
+	}
+	recovered, err := Open(d.crash(), OpenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustGet(t, recovered, key, next)
+	if _, _, err = testGet(recovered, testKey(2)); !errors.Is(err, ErrNotFound) {
+		t.Fatal("old fence included a later tail", err)
+	}
+}
+
+func TestAcceptedSpillInitialMigrationFailureNeverReusesPartialIndex(t *testing.T) {
+	s := newDirtyStore(2, false)
+	defer s.close()
+	old := bytes.Repeat([]byte("old"), PageSize/3+1)[:PageSize]
+	for _, off := range []uint64{PageSize, 2 * PageSize} {
+		if err := s.put(off, old, 2); err != nil {
+			t.Fatal(err)
+		}
+	}
+	calls := 0
+	s.createTemp = func() (*os.File, error) {
+		calls++
+		f, err := os.CreateTemp(t.TempDir(), "initial-spill-*")
+		if err != nil {
+			return nil, err
+		}
+		if calls == 3 {
+			name := f.Name()
+			f.Close()
+			return os.Open(name)
+		}
+		return f, nil
+	}
+	if err := s.put(3*PageSize, old, 2); err == nil {
+		t.Fatal("read-only spill log did not fail")
+	}
+	data, _ := s.data.Stat()
+	index, _ := s.index.Stat()
+	log, _ := s.log.Stat()
+	if data.Size() == 0 || index.Size() == 0 || log.Size() != 0 {
+		t.Fatal("did not reach partial initial data/index migration", data.Size(), index.Size(), log.Size())
+	}
+	if p, ok, err := s.get(PageSize); err == nil || p != nil || ok {
+		t.Fatal("half-indexed spill looked usable", ok, err)
+	}
+	if err := s.put(4*PageSize, old, 2); err == nil {
+		t.Fatal("poisoned spill reused")
+	}
+}
+func TestAcceptedSpillPartialParentMergeIsFenced(t *testing.T) {
+	d := newCrash(8 << 20)
+	v, err := Format(d, FormatOptions{Class: SSD})
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := testKey(1)
+	if _, err = testPut(v, key, []byte("durable old"), Options{}); err != nil {
+		t.Fatal(err)
+	}
+	accepted := bytes.Repeat([]byte("a"), 8192)
+	if _, err = testPut(v, key, accepted, Options{Accepted: true}); err != nil {
+		t.Fatal(err)
+	}
+	group := v.deferred
+	group.store.limit = len(group.store.pages)
+	calls := 0
+	group.store.createTemp = func() (*os.File, error) {
+		calls++
+		f, e := os.CreateTemp(t.TempDir(), "parent-merge-*")
+		if e != nil {
+			return nil, e
+		}
+		if calls == 3 {
+			name := f.Name()
+			f.Close()
+			return os.Open(name)
+		}
+		return f, nil
+	}
+	before := v.IOStats()
+	generation := v.Header().Generation
+	_, err = testPut(v, testKey(77), []byte("new object"), Options{Accepted: true})
+	if !errors.Is(err, ErrRecovery) {
+		t.Fatal("partially indexed parent was not fenced", err)
+	}
+	if v.Header().Generation != generation {
+		t.Fatal("failed parent merge published generation")
+	}
+	if _, _, err = testGet(v, key); !errors.Is(err, ErrRecovery) {
+		t.Fatal("previous accepted bytes silently became zero/readable through poisoned spill", err)
+	}
+	if after := v.IOStats(); after.SyncOps != before.SyncOps || after.WriteOps != before.WriteOps {
+		t.Fatal("failure forced Sync", after)
+	}
+	v.Close()
+	recovered, err := Open(d.crash(), OpenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustGet(t, recovered, key, []byte("durable old"))
+}
+func TestAcceptedSpillExternalMergePassesAreBounded(t *testing.T) {
+	s := newDirtyStore(2, false)
+	s.sortRun = 3
+	defer s.close()
+	for i := 200; i >= 0; i-- {
+		if err := s.put(uint64(i)*PageSize, make([]byte, PageSize), 1); err != nil {
+			t.Fatal(err)
+		}
+	}
+	count := 0
+	if err := s.eachSorted(func(off uint64, _ byte, _ []byte) error {
+		if off != uint64(count)*PageSize {
+			t.Fatal("multi-pass merge lost ordering", off, count)
+		}
+		count++
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if count != 201 || len(s.pages) > 2 || len(s.flags) > 2 {
+		t.Fatal("external merge changed memory/directory bound", count)
+	}
+}

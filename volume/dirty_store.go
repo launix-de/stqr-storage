@@ -3,6 +3,7 @@ package volume
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -26,15 +27,20 @@ type dirtyStore struct {
 	noSpill          bool
 	count            uint64
 	data, index, log *os.File
+	closed           bool
+	failed           error
+	createTemp       func() (*os.File, error)
+	sortRun          int
 }
 
 func newDirtyStore(limit int, noSpill bool) *dirtyStore {
 	return &dirtyStore{pages: make(map[uint64][]byte), flags: make(map[uint64]byte), limit: max(1, limit), noSpill: noSpill}
 }
 func (s *dirtyStore) close() {
-	if s == nil {
+	if s == nil || s.closed {
 		return
 	}
+	s.closed = true
 	for _, f := range []*os.File{s.data, s.index, s.log} {
 		if f != nil {
 			name := f.Name()
@@ -45,6 +51,12 @@ func (s *dirtyStore) close() {
 	s.data, s.index, s.log = nil, nil, nil
 }
 func (s *dirtyStore) openSpill() error {
+	if s.closed {
+		return ErrClosed
+	}
+	if s.failed != nil {
+		return s.failed
+	}
 	if s.data != nil {
 		return nil
 	}
@@ -53,7 +65,13 @@ func (s *dirtyStore) openSpill() error {
 	}
 	files := []**os.File{&s.data, &s.index, &s.log}
 	for _, p := range files {
-		f, err := os.CreateTemp("", "stqr-unsynced-*")
+		var f *os.File
+		var err error
+		if s.createTemp != nil {
+			f, err = s.createTemp()
+		} else {
+			f, err = os.CreateTemp("", "stqr-unsynced-*")
+		}
 		if err != nil {
 			s.close()
 			return err
@@ -93,6 +111,14 @@ func (s *dirtyStore) addIndex(off uint64, flag byte) error {
 	return err
 }
 func (s *dirtyStore) flag(off uint64) (byte, error) {
+	if s != nil {
+		if s.closed {
+			return 0, ErrClosed
+		}
+		if s.failed != nil {
+			return 0, s.failed
+		}
+	}
 	if s == nil {
 		return 0, nil
 	}
@@ -113,6 +139,14 @@ func (s *dirtyStore) flag(off uint64) (byte, error) {
 	return b[0], nil
 }
 func (s *dirtyStore) get(off uint64) ([]byte, bool, error) {
+	if s != nil {
+		if s.closed {
+			return nil, false, ErrClosed
+		}
+		if s.failed != nil {
+			return nil, false, s.failed
+		}
+	}
 	if s == nil {
 		return nil, false, nil
 	}
@@ -130,7 +164,18 @@ func (s *dirtyStore) get(off uint64) ([]byte, bool, error) {
 
 // flag=1 is wholly free in the previous durable image; flag=2 requires redo.
 // Transaction staging uses flag=1 temporarily, before baseline classification.
-func (s *dirtyStore) put(off uint64, p []byte, flag byte) error {
+func (s *dirtyStore) put(off uint64, p []byte, flag byte) (resultErr error) {
+	if s.closed {
+		return ErrClosed
+	}
+	if s.failed != nil {
+		return s.failed
+	}
+	defer func() {
+		if resultErr != nil && !errors.Is(resultErr, ErrBusy) {
+			s.failed = resultErr
+		}
+	}()
 	if off%PageSize != 0 || len(p) != PageSize || flag == 0 {
 		return ErrCorrupt
 	}
@@ -174,6 +219,14 @@ func (s *dirtyStore) put(off uint64, p []byte, flag byte) error {
 	return nil
 }
 func (s *dirtyStore) each(fn func(uint64, byte, []byte) error) error {
+	if s != nil {
+		if s.closed {
+			return ErrClosed
+		}
+		if s.failed != nil {
+			return s.failed
+		}
+	}
 	if s == nil {
 		return nil
 	}
@@ -212,6 +265,14 @@ func (s *dirtyStore) each(fn func(uint64, byte, []byte) error) error {
 // eachSorted keeps checkpoint writes in physical order without an all-dirty-page
 // heap directory. Sort bounded runs, then merge at most 32 streams per pass.
 func (s *dirtyStore) eachSorted(fn func(uint64, byte, []byte) error) error {
+	if s != nil {
+		if s.closed {
+			return ErrClosed
+		}
+		if s.failed != nil {
+			return s.failed
+		}
+	}
 	if s == nil {
 		return nil
 	}
@@ -248,7 +309,10 @@ func (s *dirtyStore) eachSorted(fn func(uint64, byte, []byte) error) error {
 	}
 	defer os.RemoveAll(dir)
 	name := func(pass int, run uint64) string { return filepath.Join(dir, fmt.Sprintf("%d-%d", pass, run)) }
-	const perRun = 65536
+	perRun := uint64(65536)
+	if s.sortRun > 0 {
+		perRun = uint64(s.sortRun)
+	}
 	runs := uint64(0)
 	for start := uint64(0); start < s.count; start += perRun {
 		n := min(uint64(perRun), s.count-start)
