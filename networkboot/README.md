@@ -551,7 +551,7 @@ existing published release remain available.
 | --- | --- |
 | `required control participant is offline`, maintenance unavailable, or an operation waiting for a peer | Restore connectivity to every admitted cluster member. Retry `prepare-system ubuntu` after the cluster is stable. |
 | Missing headers or `mkinitramfs` | Use `edit-image ubuntu` to install the target kernel's headers and `initramfs-tools-core`, then shut the VM down. |
-| Legacy boot release/schema error | Run `prepare-system ubuntu` with current tools to publish a native release, then restart an old gateway process with the new code. |
+| Image format/manifest mismatch | The named bucket must be the FS image itself and contain a self-referencing boot manifest. Migrate existing split BD/root images before using these tools. |
 | iPXE download fails or `test-boot` keeps waiting | Check the gateway terminal/service journal for `PXE ready`, its selected address and HTTP port. Verify client routing/firewall access. |
 | Physical firmware never finds the boot offer | Check NIC PXE settings, broadcast/VLAN layout, standalone loader files, competing PXE services and Proxy-DHCP/TFTP traffic. A QEMU HTTP-only success does not test these. |
 | STQR login works but the desktop/home does not | Check the Unix/NSS account, numeric ownership, bucket grant, client-reachable URI and actual service's PAM ordering. Reprepare the image to synchronize accounts; inspect the guest PAM/helper errors if a home mount fails. |

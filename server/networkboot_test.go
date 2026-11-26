@@ -324,9 +324,12 @@ with tempfile.TemporaryDirectory(prefix='stqr-gateway-') as work:
 	if err := json.Unmarshal(manifestRaw, &nativeManifest); err != nil || nativeManifest.Schema != 2 {
 		t.Fatal("native manifest", err)
 	}
-	image, err := s.BucketByName("nbd-image")
-	if err != nil || nativeManifest.RootBucket != client.ID(image.ID()) || image.ID() == b.ID() {
-		t.Fatal("published filesystem must own its root independently of the installation BD", err)
+	published, err := s.BucketByName("nbd-image")
+	if err != nil || published.Describe().Format != "fs" || nativeManifest.RootBucket != client.ID(published.ID()) || published.ID() == b.ID() {
+		t.Fatal("published image is not a self-contained FS bucket", err, nativeManifest)
+	}
+	if b.Describe().Format != "bd" {
+		t.Fatal("publishing changed installation disk format")
 	}
 	ctx := context.Background()
 	lower, err := client.Dial(ctx, host.URL, a.Username, a.Password, nativeManifest.RootBucket, "fs")

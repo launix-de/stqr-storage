@@ -63,7 +63,7 @@ func TestClusterNetworkbootNBDWithQEMU(t *testing.T) {
 			t.Fatalf("%v: %v %s", args, e, out)
 		}
 	}
-	run("check-exclusive", "image")
+	run("check-exclusive", "image-bd")
 	run("create", "image-bd")
 	run("--size", "4194304", "init-disk", "image-bd")
 	run("--size", "4194304", "check-install-disk", "image-bd")
@@ -146,13 +146,25 @@ func TestClusterNetworkbootNBDWithQEMU(t *testing.T) {
 		t.Fatal(e)
 	}
 	run("publish", "image", artifacts)
+	run("check-image", "image")
+	// Publishing uses a separate FS namespace; the installer remains a BD and
+	// can still be inspected until prepare-system performs its explicit cleanup.
+	run("--size", "4194304", "check-install-disk", "image-bd")
+	if out, e := invoke("nbd", "image"); e == nil || !bytes.Contains(out, []byte("format mismatch")) {
+		t.Fatal("published FS accepted as installation BD", e, string(out))
+	}
 	if out, e := invoke("--size", "4194304", "check-install-disk", "image"); e == nil || !bytes.Contains(out, []byte("format")) {
 		t.Fatal("resume must reject a filesystem image as an installation BD", e, string(out))
 	}
+
 	run("gc", "image")
 	run("fetch", "image", filepath.Join(dir, "fetched"))
 	run("clone-image", "image", "copy")
 	run("check-image", "copy")
+	run("create", "bd-copy")
+	run("clone", "image-bd", "bd-copy")
+	run("clear", "bd-copy")
+	run("delete", "bd-copy")
 	run("clear", "copy")
 	run("delete", "copy")
 	run("delete", "image-bd")
