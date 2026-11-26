@@ -9,7 +9,9 @@ import (
 
 // SetPublicRead changes only the fixed ACL flag with byte-comparing ranged CAS.
 // Payload, ETag and Last-Modified remain unchanged. Private is the default ACL.
-func (s *S3) SetPublicRead(ctx context.Context, key string, public bool) error {
+func (s *S3) SetPublicRead(ctx context.Context, key string, public bool) (resultErr error) {
+	ctx, finish := s.beginWrite(ctx)
+	defer finish(&resultErr)
 	for n := 0; n < 128; n++ {
 		o, err := s.Head(ctx, key)
 		if err != nil {

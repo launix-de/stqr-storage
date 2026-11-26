@@ -336,7 +336,10 @@ func (c *Client) putAsync(ctx context.Context, op uint16, id ObjectID, off uint6
 		}
 		return err
 	}
-	m = acceptedMessage(m)
+	m, _, err = outgoingMutation(withAccepted(ctx, true), t, m, true, nil)
+	if err != nil {
+		return err
+	}
 	m.Kind = FireAndForget
 	return t.enqueueOperation(ctx, m, true)
 }
