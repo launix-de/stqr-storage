@@ -4,10 +4,18 @@ const require=createRequire(import.meta.url),{chromium}=require(process.env.STQR
 let input='';for await(const chunk of process.stdin)input+=chunk;
 const cfg=JSON.parse(input),browser=await chromium.launch({executablePath:process.env.STQR_TEST_BROWSER_EXECUTABLE??'/usr/bin/google-chrome',headless:true,args:['--no-sandbox']});
 try{
- const page=await browser.newPage({bypassCSP:true,viewport:{width:1500,height:1100}}),errors=[];page.on('pageerror',e=>errors.push(e.message));
+ const page=await browser.newPage({viewport:{width:1500,height:1100}}),errors=[];page.on('pageerror',e=>errors.push(e.message));
  await page.goto(cfg.url);await page.locator('#username').fill(cfg.username);await page.locator('#password').fill(cfg.password);await page.locator('#login-form button[type=submit]').click();
  const expected=cfg.capacity;
- await page.waitForFunction(({total,minimum})=>{const m=document.querySelector('#capacity-summary [data-capacity-meter]');return m?.dataset.capacity===total&&BigInt(m.dataset.used)>=BigInt(minimum)},{total:expected,minimum:cfg.minimumUsed});
+ // Playwright 1.50 implements waitForFunction with in-page string eval,
+ // which strict CSP correctly rejects. Poll direct locator functions instead;
+ // keep the real dashboard policy enabled throughout the browser test.
+ const meter=page.locator('#capacity-summary [data-capacity-meter]');let ready=false;
+ for(const deadline=Date.now()+30000;Date.now()<deadline;){
+  ready=await meter.evaluate((m,{total,minimum})=>m.dataset.capacity===total&&BigInt(m.dataset.used??'0')>=BigInt(minimum),{total:expected,minimum:cfg.minimumUsed});
+  if(ready)break;await new Promise(resolve=>setTimeout(resolve,100));
+ }
+ if(!ready)throw Error('Global capacity did not receive all node reports and acknowledged payload');
  async function verify(prefix){
   const card=page.locator(`#${prefix}capacity-summary`);await card.waitFor({state:'visible'});
   const result=await card.evaluate(el=>{
