@@ -595,6 +595,19 @@ rmmod kstqr
 		init = init[:begin] + script + init[end:]
 	}
 
+	if os.Getenv("STQR_KERNEL_RESTART_ONLY") == "1" {
+		begin := strings.Index(init, "for attempt in 1 2 3 4; do")
+		end := strings.Index(init, "if dmesg |")
+		script := `/mount.kstqr --uri ` + endpoint + ` --bucket ` + client.ID(b.ID()).String() + ` --credentials /credentials /mnt
+/mount.kstqr --uri ` + endpoint + ` --bucket ` + client.ID(b.ID()).String() + ` --credentials /readonly-credentials --readonly /readonly
+/crash-reconnect ` + endpoint + `
+umount /readonly
+umount /mnt
+rmmod kstqr
+`
+		init = init[:begin] + script + init[end:]
+	}
+
 	var nativeUpperID client.ID
 	var watcher *client.Client
 	if os.Getenv("STQR_KERNEL_OVERLAY") == "1" {
@@ -939,6 +952,13 @@ poweroff -f
 	}
 	if err != nil || !strings.Contains(string(output), "KSTQR_VM_PASS") || strings.Contains(string(output), "KSTQR_VM_FAIL") {
 		t.Fatalf("kernel VM: %v\n%s", err, output)
+	}
+	if os.Getenv("STQR_KERNEL_RESTART_ONLY") == "1" {
+		if !strings.Contains(string(output), "KSTQR_CRASH_RECONNECT_PASS") {
+			t.Fatal("targeted restart regression did not complete")
+		}
+		t.Log("Readonly reopen and fresh accepted writes survive restart; lost prefixes remain unconfirmed")
+		return
 	}
 	if os.Getenv("STQR_KERNEL_OVERLAY") == "1" {
 		uc, e := client.Dial(ctx, host.URL, admin.Username, admin.Password, nativeUpperID, "fs")

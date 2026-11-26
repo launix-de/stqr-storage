@@ -1651,7 +1651,7 @@ static int ks_fill_super(struct super_block *sb, struct fs_context *fc)
 				c->timeout);
 	if (!err)
 		for (unsigned slot = 0; slot < KS_RPC_SLOTS; slot++)
-			ks_rpc_start(&f->rpc[slot]);
+			ks_rpc_start(&f->rpc[slot],f);
 	if (!err)
 		f->references = !!(stqr_capabilities(f->rpc[0].client) & STQR_CAP_OBJECT_REFERENCES);
 	if (!err)
@@ -1684,7 +1684,7 @@ static int ks_fill_super(struct super_block *sb, struct fs_context *fc)
 						      c->password, c->lower, "fs", c->timeout);
 				if (!err)
 					for (unsigned slot = 0; slot < KS_RPC_SLOTS; slot++)
-						ks_rpc_start(&lower->rpc[slot]);
+						ks_rpc_start(&lower->rpc[slot],lower);
 				if (!err)
 					lower->references = !!(stqr_capabilities(lower->rpc[0].client) &
 							      STQR_CAP_OBJECT_REFERENCES);

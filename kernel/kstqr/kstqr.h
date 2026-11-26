@@ -17,12 +17,13 @@ int ks_reconnect_wait(struct ks_fs *, stqr_client *);
 struct ks_cache;
 struct ks_overlay_state;
 struct ks_rpc {
+    struct ks_fs *fs;
 	struct mutex lock;
 	stqr_client *client;
 	struct work_struct receive;
 	bool receive_started;
 };
-void ks_rpc_start(struct ks_rpc *);
+void ks_rpc_start(struct ks_rpc *, struct ks_fs *);
 void ks_rpc_stop(struct ks_rpc *);
 
 #define KS_DIR_LIMIT (16U << 20)
@@ -152,6 +153,7 @@ void ks_cache_note_durable(struct ks_fs *, const stqr_commit_mark *);
 struct ks_rpc *ks_rpc_lock(struct ks_fs *, stqr_object_id);
 int ks_cache_start(struct ks_fs *, const char *, const char *, unsigned);
 void ks_cache_stop(struct ks_fs *);
+void ks_cache_reconnected(struct ks_fs *);
 int ks_cache_peek(struct ks_fs *, stqr_object_id, void **, size_t *, stqr_info *);
 int ks_snapshot_cached(struct ks_fs *, stqr_object_id, struct ks_snapshot *);
 int ks_cache_get(struct ks_fs *, stqr_object_id, void **, size_t *, stqr_info *);

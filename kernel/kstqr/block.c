@@ -585,7 +585,7 @@ int ks_bd_fill_super(struct super_block *sb, const char *url, const char *user,
 	err = stqr_stat(b->rpc.client, ks_root_id, &info);
 	if (err != -ENOENT)
 		return err ? err : -EINVAL;
-    ks_rpc_start(&b->rpc);
+    ks_rpc_start(&b->rpc,NULL);
 	root = new_inode(sb);
 	if (!root)
 		return -ENOMEM;

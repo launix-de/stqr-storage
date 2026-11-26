@@ -73,7 +73,7 @@ void stqr_set_readable_handler(stqr_client *c,void (*ready)(void *),void *arg) {
 static int async_send(stqr_client *c,struct sq_async *p) {
     struct buf wrapped={0};struct buf *body=&p->body;
     int err;
-    if(p->mutation && any_lost(c))return -ESTALE;
+    if(p->mutation && any_lost(c) && !accepted_visibility_after_loss(c,p->op,p->mutation))return -ESTALE;
     err=ensure_channel(c);if(err)return err;
     /* A redirect may reach an older peer after the original negotiation. Such
      * a peer cannot certify a no-ACK prefix; surface this instead of returning
@@ -207,7 +207,15 @@ static int async_dispatch(stqr_client *c,unsigned kind,unsigned op,const stqr_u8
         if(!err&&*at){struct sq_binding *binding=*at;*at=binding->next;sq_free(binding);}
     }
     else if(p->op==0x122){
-        if(!err){const stqr_u8 *boot=take(m,16);readnum(m,8);if(done(m)||!boot||zero(boot,16))err=-EPROTO;}
+        if(!err){
+            const stqr_u8 *boot=take(m,16);readnum(m,8);
+            if(done(m)||!boot||zero(boot,16))err=-EPROTO;
+            else if(p->mark.sequence&&memcmp(p->mark.boot.bytes,boot,16)) {
+                /* A new server boot cannot certify an older accepted prefix,
+                 * even if no fresh receipt has exposed that mismatch yet. */
+                c->durability_lost=1;err=-ESTALE;
+            }
+        }
         /* Notices already queued before this ACK are covered too. If another
          * request was submitted meanwhile retain its potentially newer mark. */
         if(!err && p->channel->submitted==p->sequence) {

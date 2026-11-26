@@ -350,6 +350,17 @@ out:
 	mutex_unlock(cache_wire(c));
 	return err;
 }
+/* Caller owns the shared RPC framing lock. Any page faulted while the socket
+ * was unavailable lacked subscription coverage and must be invalidated again. */
+void ks_cache_reconnected(struct ks_fs *f)
+{
+ struct ks_cache *c=f->cache;
+ if(!c||!c->shared)return;
+ mutex_lock(&c->lock);
+ c->available=!!(stqr_capabilities(c->client)&STQR_CAP_SUBSCRIPTIONS);
+ mutex_unlock(&c->lock);
+ ks_queue_invalidation(f,NULL);
+}
 static int reader(void *arg)
 {
 	struct ks_cache *c = arg;
@@ -431,6 +442,7 @@ void ks_cache_stop(struct ks_fs *f)
 	cancel_work_sync(&f->invalidation_work);
 	mutex_lock(cache_wire(c));
     stqr_set_update_handler(c->client, NULL, NULL);
+    f->cache=NULL;
     mutex_unlock(cache_wire(c));
     if (!c->shared) stqr_close(c->client);
 	list_for_each_entry_safe(e, next, &c->lru, lru)

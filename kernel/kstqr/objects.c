@@ -49,6 +49,11 @@ static void ks_rpc_receive(struct work_struct *work)
 	do {
 		result = rpc->client ? stqr_poll(rpc->client, 0) : 0;
 	} while (result > 0);
+    /* Socket loss also removes subscription coverage. Reconnect from this
+     * existing event worker so an idle mmap can regain coverage without a new
+     * application read and without introducing another socket or polling loop. */
+    if(result<0 && rpc->fs && !READ_ONCE(rpc->fs->stopping))
+        ks_reconnect_wait(rpc->fs,rpc->client);
 	mutex_unlock(&rpc->lock);
 }
 static void ks_rpc_readable(void *arg)
@@ -56,8 +61,9 @@ static void ks_rpc_readable(void *arg)
 	struct ks_rpc *rpc = arg;
 	ks_queue_fence_work(&rpc->receive);
 }
-void ks_rpc_start(struct ks_rpc *rpc)
+void ks_rpc_start(struct ks_rpc *rpc,struct ks_fs *fs)
 {
+    rpc->fs=fs;
 	stqr_set_accepted_references(rpc->client,1);
     INIT_WORK(&rpc->receive, ks_rpc_receive);
 	rpc->receive_started = true;
@@ -133,7 +139,13 @@ int ks_reconnect_wait(struct ks_fs *f, stqr_client *client)
 		if (fatal_signal_pending(current))
 			return -EINTR;
 		err = stqr_reconnect(client);
-		if (!err || !ks_transport_retryable(client, err))
+        if(!err) {
+            /* A foreground request may win the reconnect race against the
+             * receiver. Restore coverage in either path while framing is held. */
+            ks_cache_reconnected(f);
+            return 0;
+        }
+		if (!ks_transport_retryable(client, err))
 			return err;
 		msleep(pause);
 		pause = min(pause * 2, 1000U);

@@ -18,6 +18,11 @@ static void control(const char *base,const char *action){
 int main(int argc,char **argv){
  CHECK(argc==2);int fd=open("/mnt/rollback-file",O_CREAT|O_TRUNC|O_RDWR,0600);CHECK(fd>=0);
  CHECK(!ftruncate(fd,4096));CHECK(pwrite(fd,"durable",7,0)==7);CHECK(!fsync(fd));
+ /* Even a read-only mount creates accepted pin/unpin receipts. Keep one
+  * unconfirmed prefix on that connection before replacing the server boot. */
+ int readonly=open("/readonly/go.txt",O_RDONLY);CHECK(readonly>=0);
+ char readonly_data[32];CHECK(read(readonly,readonly_data,sizeof(readonly_data))>0);
+ CHECK(!close(readonly));
  control(argv[1],"checkpoint-image");
  CHECK(!ftruncate(fd,8192));CHECK(pwrite(fd,"unconfirmed",11,0)==11);
  struct stat st;CHECK(!fstat(fd,&st)&&st.st_size==8192);
@@ -30,5 +35,16 @@ int main(int argc,char **argv){
   * writes/intents were only accepted, so rollback may discard them; reconnect
   * must preserve the saved bytes and never certify lost accepted marks. */
  int sync_result=fsync(fd);CHECK(!sync_result||errno==ESTALE||errno==EIO);
- CHECK(!close(fd));puts("KSTQR_CRASH_RECONNECT_PASS");return 0;
+ CHECK(!close(fd));
+ /* Losing that old prefix must not permanently veto fresh live pin/unpin
+  * operations: ordinary opens/reads/closes never promised crash durability. */
+ for(unsigned reopened=0;reopened<2;reopened++) {
+  readonly=open("/readonly/go.txt",O_RDONLY);CHECK(readonly>=0);
+  CHECK(read(readonly,readonly_data,sizeof(readonly_data))>0);CHECK(!close(readonly));
+ }
+ int fresh=open("/mnt/after-restart",O_CREAT|O_TRUNC|O_RDWR,0600);CHECK(fresh>=0);
+ CHECK(write(fresh,"fresh",5)==5);CHECK(pread(fresh,data,5,0)==5&&!memcmp(data,"fresh",5));
+ /* The uncertain old prefix is still not silently acknowledged by fsync. */
+ sync_result=fsync(fresh);CHECK(sync_result<0&&(errno==ESTALE||errno==EIO));
+ CHECK(!close(fresh));puts("KSTQR_CRASH_RECONNECT_PASS");return 0;
 }

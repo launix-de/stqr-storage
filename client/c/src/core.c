@@ -62,6 +62,13 @@ static int references_accepted(stqr_client *c) {
     stqr_u64 required=STQR_CAP_ACCEPTED_REFERENCES|STQR_CAP_OBJECT_REFERENCES|STQR_CAP_CONNECTION_SYNC|STQR_CAP_DURABILITY;
     return c->accepted_references && (c->capabilities&required)==required;
 }
+/* A filesystem's accepted session may regain live visibility after a restart
+ * even when an older prefix has unknown persistence. Keep that uncertainty
+ * latched for explicit Sync; never extend this exception to durable operations
+ * or a generic C connection which did not opt into the filesystem mode. */
+static int accepted_visibility_after_loss(stqr_client *c,unsigned op,int mutation) {
+    return references_accepted(c) && (op==0x121 || mutation>1);
+}
 static void async_fail(stqr_client *, struct sq_channel *, int);
 static int async_channel_pending(stqr_client *, struct sq_channel *);
 static void route_free(struct sq_route *r) {
@@ -712,7 +719,7 @@ static int request_payload(stqr_client *c, unsigned op, struct buf *body, stqr_i
     int err;
     stqr_u64 started = sq_now_ms();
     if (!c || !c->socket) return -ENOTCONN;
-    if (mutation && any_lost(c)) return -ESTALE;
+    if (mutation && any_lost(c) && !accepted_visibility_after_loss(c,op,mutation)) return -ESTALE;
     /* Reads/subscriptions may change channels without a durability fence.
      * Fence their retained causal dependencies only when publishing a write
      * on a different owner, or when the caller explicitly requests SYNC. */
@@ -727,6 +734,8 @@ static int request_payload(stqr_client *c, unsigned op, struct buf *body, stqr_i
     if (zero(id.bytes,16)) { if (mutation) return -EINVAL; if ((err=stqr_request_id(&id))) return err; }
     for (unsigned redirects=0;redirects<16;) {
         struct buf wrapped={0}; unsigned wire_op=op; struct buf *wire_body=body;
+        /* Redirect/reconnect can change the peer's accepted capabilities. */
+        if(mutation && any_lost(c) && !accepted_visibility_after_loss(c,op,mutation))return -ESTALE;
         c->status=0; c->redirect[0]=0;
         c->query_valid=((op>=0x100 && op<=0x110) || op==0x121) && body->n>=80;
         if (c->query_valid) memcpy(c->query.bytes,body->p+16,32);
