@@ -162,13 +162,15 @@ int ks_reconnect_wait(struct ks_fs *f, stqr_client *client)
  * replacement and abort the next burst of otherwise independent requests.
  * Caller holds rpc->lock on entry and return; epoch is captured before submit.
  */
-static int ks_rpc_retry(struct ks_fs *f, struct ks_rpc *rpc, u64 epoch, int status)
+int ks_rpc_retry(struct ks_fs *f, struct ks_rpc *rpc, u64 epoch, int status)
 {
     if (READ_ONCE(f->stopping))
         return -ESHUTDOWN;
     if (fatal_signal_pending(current))
         return -EINTR;
-    if (status == 503) {
+    /* Synchronous SDK entry can reject an already closed socket before
+     * replacing its previous status. Such a stale503 is transport loss. */
+    if (status == 503 && rpc->client && rpc->client->socket) {
         mutex_unlock(&rpc->lock);
         msleep(50);
         mutex_lock(&rpc->lock);
@@ -337,16 +339,36 @@ static int cas_object(struct ks_fs *f, stqr_object_id id, const void *p, size_t 
 	mutex_unlock(&rpc->lock);
 	return err;
 }
-static int ks_delete_locked(struct ks_rpc *rpc,stqr_object_id id,const stqr_options *opt)
+/* One deletion attempt; callers retain its status across the framing unlock,
+ * just as they retain its request identity across recovery. */
+static int ks_delete_locked(struct ks_rpc *rpc, stqr_object_id id,
+                            const stqr_options *opt, int *status)
 {
- struct ks_async_result result={0};int err;
- stqr_options accepted=*opt;accepted.accepted=1;opt=&accepted;
- if(!rpc->receive_started)return stqr_delete(rpc->client,id,opt);
- init_completion(&result.done);
- err=stqr_delete_async(rpc->client,id,opt,ks_async_completed,&result);
- mutex_unlock(&rpc->lock);
- if(!err){wait_for_completion(&result.done);err=result.error;}
- sq_free(result.data);mutex_lock(&rpc->lock);return err;
+    struct ks_async_result result = {0};
+    stqr_options accepted = *opt;
+    int err;
+    accepted.accepted = 1;
+    opt = &accepted;
+    if (status)
+        *status = 0;
+    if (!rpc->receive_started) {
+        err = stqr_delete(rpc->client, id, opt);
+        if (status)
+            *status = stqr_status(rpc->client);
+        return err;
+    }
+    init_completion(&result.done);
+    err = stqr_delete_async(rpc->client, id, opt, ks_async_completed, &result);
+    mutex_unlock(&rpc->lock);
+    if (!err) {
+        wait_for_completion(&result.done);
+        err = result.error;
+        if (status)
+            *status = result.status;
+    }
+    sq_free(result.data);
+    mutex_lock(&rpc->lock);
+    return err;
 }
 static int immutable(struct ks_fs *f, const void *p, size_t n, stqr_object_id *id)
 {

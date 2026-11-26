@@ -18,25 +18,29 @@ import (
 )
 
 type kernelOutageFixture struct {
-	mu               sync.Mutex
-	handler          http.Handler
-	listener         net.Listener
-	server           *http.Server
-	address          string
-	connections      map[*kernelOutageConnection]bool
-	ctx              context.Context
-	cancel           context.CancelFunc
-	workers          sync.WaitGroup
-	armed            atomic.Bool
-	drops            atomic.Int32
-	pauses           atomic.Int32
-	accepted         atomic.Int32
-	busyArmed        atomic.Bool
-	busyReplies      atomic.Int32
-	busyBaseline     atomic.Int32
-	busyChecked      atomic.Bool
-	recoveryBaseline atomic.Int32
-	recoveryChecked  atomic.Bool
+	mu                sync.Mutex
+	handler           http.Handler
+	listener          net.Listener
+	server            *http.Server
+	address           string
+	connections       map[*kernelOutageConnection]bool
+	ctx               context.Context
+	cancel            context.CancelFunc
+	workers           sync.WaitGroup
+	armed             atomic.Bool
+	drops             atomic.Int32
+	pauses            atomic.Int32
+	accepted          atomic.Int32
+	busyOpcode        atomic.Uint32
+	busyExpected      atomic.Uint32
+	busyCompleted     atomic.Bool
+	busyReplies       atomic.Int32
+	busyBaseline      atomic.Int32
+	busyChecked       atomic.Bool
+	busyStatChecked   atomic.Bool
+	busyDeleteChecked atomic.Bool
+	recoveryBaseline  atomic.Int32
+	recoveryChecked   atomic.Bool
 }
 type kernelOutageListener struct {
 	net.Listener
@@ -78,9 +82,24 @@ func (c *kernelOutageConnection) Write(p []byte) (int, error) {
 		}
 		if length < 126 && len(p) == offset+length || offset == 4 && len(p) == offset+length {
 			m, e := client.DecodeMessage(p[offset:])
-			// GET is side-effect free: replace one completed snapshot with a
-			// transient rejection, retaining the socket and other in-flight work.
-			if e == nil && m.Kind == client.Response && (m.Opcode == 0x0100 || m.Opcode == 0x0101) && c.fixture.busyArmed.CompareAndSwap(true, false) {
+			// Preserve one live connection across a completed transient
+			// rejection. DELETE may have completed before its reply is hidden;
+			// its idempotent retry must still use the same socket and identity.
+			opcode := uint32(m.Opcode)
+			if opcode == 0x101 {
+				opcode = 0x100
+			}
+			if e == nil && opcode == 0x118 {
+				d := client.Decoder{B: m.Body}
+				status := d.V()
+				d.Blob()
+				// Accepted DELETE has an empty result; accepted CAS/PUT have
+				// object information. Do not turn a committed CAS into a503.
+				if d.Err == nil && (status < 300 || status == 404) && len(d.B) == 0 {
+					opcode = 0x106
+				}
+			}
+			if e == nil && m.Kind == client.Response && opcode != 0 && c.fixture.busyOpcode.CompareAndSwap(opcode, 0) {
 				m.Body = client.ResponseBody(503, nil, "test temporarily busy")
 				payload := client.EncodeMessage(m)
 				frame := []byte{0x82, byte(len(payload))}
@@ -90,6 +109,9 @@ func (c *kernelOutageConnection) Write(p []byte) (int, error) {
 				}
 				c.fixture.busyReplies.Add(1)
 				return len(p), nil
+			}
+			if e == nil && m.Kind == client.Response && opcode == c.fixture.busyExpected.Load() && c.fixture.busyReplies.Load() == 1 {
+				c.fixture.busyCompleted.Store(true)
 			}
 			if e == nil && m.Kind == client.Response && (m.Opcode == 0x108 || m.Opcode == 0x118) {
 				d := client.Decoder{B: m.Body}
@@ -167,15 +189,45 @@ func startKernelOutageFixture(t *testing.T, s *Server) (string, string, *kernelO
 	}
 	control := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
-		case "/busy-read":
+		case "/busy-read", "/busy-stat", "/busy-delete":
+			opcode := uint32(0x100)
+			if r.URL.Path == "/busy-stat" {
+				opcode = 0x107
+			} else if r.URL.Path == "/busy-delete" {
+				opcode = 0x106
+			}
+			f.busyReplies.Store(0)
+			f.busyCompleted.Store(false)
 			f.busyBaseline.Store(f.accepted.Load())
-			f.busyArmed.Store(true)
-		case "/check-busy":
-			if f.busyReplies.Load() != 1 || f.accepted.Load() != f.busyBaseline.Load() {
+			f.busyExpected.Store(opcode)
+			f.busyOpcode.Store(opcode)
+		case "/check-busy", "/check-busy-stat", "/check-busy-delete":
+			opcode := uint32(0x100)
+			checked := &f.busyChecked
+			if r.URL.Path == "/check-busy-stat" {
+				opcode, checked = 0x107, &f.busyStatChecked
+			} else if r.URL.Path == "/check-busy-delete" {
+				opcode, checked = 0x106, &f.busyDeleteChecked
+			}
+			// Orphan DELETE is performed by kernel work; await its actual
+			// retry response rather than guessing that a sleep was enough.
+			deadline := time.NewTimer(5 * time.Second)
+			defer deadline.Stop()
+			for !f.busyCompleted.Load() {
+				select {
+				case <-r.Context().Done():
+					return
+				case <-deadline.C:
+					http.Error(w, "busy operation did not complete its retry", 500)
+					return
+				case <-time.After(10 * time.Millisecond):
+				}
+			}
+			if f.busyExpected.Load() != opcode || f.busyReplies.Load() != 1 || f.accepted.Load() != f.busyBaseline.Load() {
 				http.Error(w, "503 caused shared transport reconnect", 500)
 				return
 			}
-			f.busyChecked.Store(true)
+			checked.Store(true)
 		case "/check-recovery":
 			if got := f.accepted.Load() - f.recoveryBaseline.Load(); got != 1 {
 				http.Error(w, "parallel readers did not share one reconnect", 500)

@@ -887,6 +887,13 @@ poweroff -f
 		if e = conn.Sync(ctx); e != nil {
 			t.Fatal(e)
 		}
+		mutable, e := fs.Create(ctx, client.FilesystemRootID(), "busy-mutable", 0644, 0, 0, false)
+		if e != nil {
+			t.Fatal(e)
+		}
+		if _, e = fs.WriteAt(ctx, mutable.ID, bytes.Repeat([]byte("M"), 65536), 0); e != nil {
+			t.Fatal(e)
+		}
 		for i := 0; i < 12; i++ {
 			file, err := fs.Create(ctx, client.FilesystemRootID(), fmt.Sprintf("parallel-cold-%d", i), 0644, 0, 0, false)
 			if err != nil {
@@ -907,6 +914,9 @@ poweroff -f
 			if !fixture.busyChecked.Load() {
 				t.Error("transient 503 did not preserve the live owner connection")
 			}
+			if !fixture.busyStatChecked.Load() || !fixture.busyDeleteChecked.Load() {
+				t.Error("STAT/DELETE transient replies did not preserve the live owner connection")
+			}
 			if fixture.pauses.Load() != 2 || fixture.drops.Load() != 1 {
 				t.Errorf("outage fixture did not exercise both failures: pauses=%d dropped_replies=%d", fixture.pauses.Load(), fixture.drops.Load())
 			}
@@ -926,8 +936,13 @@ ip link set eth0 up
 ip addr add 10.0.2.15/24 dev eth0
 ip route add default via 10.0.2.2
 insmod /kstqr.ko
-/mount.kstqr --uri %s --bucket %s --credentials /credentials /mnt
-/outage-test %s
+/mount.kstqr --uri %[1]s --bucket %[2]s --credentials /credentials /mnt
+/outage-test %[3]s mixed-busy
+umount /mnt
+# Finish orphan cleanup and its accepted writes before a fresh read-outage
+# mount, so the recovery oracle does not invent durability for background I/O.
+/mount.kstqr --uri %[1]s --bucket %[2]s --credentials /credentials /mnt
+/outage-test %[3]s
 umount /mnt
 rmmod kstqr
 if dmesg | grep -E 'BUG:|WARNING:|Oops:|KASAN:'; then exit 1; fi

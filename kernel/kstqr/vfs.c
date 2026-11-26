@@ -1534,10 +1534,11 @@ static int ks_statfs(struct dentry *d, struct kstatfs *s)
 	int err;
 	mutex_lock(&f->rpc[0].lock);
 	for (;;) {
+        u64 epoch = f->rpc[0].reconnect_epoch;
 		err = stqr_bucket_space(f->rpc[0].client, &space);
 		if (!ks_transport_retryable(f->rpc[0].client, err))
 			break;
-		err = ks_reconnect_wait(f, f->rpc[0].client);
+		err = ks_rpc_retry(f, &f->rpc[0], epoch, stqr_status(f->rpc[0].client));
 		if (err)
 			break;
 	}

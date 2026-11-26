@@ -7,6 +7,7 @@
 #include <string.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
+#include <sys/vfs.h>
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
@@ -35,8 +36,29 @@ static void control(const char *base, const char *path) {
   int st;
   CHECK(waitpid(p, &st, 0) == p && WIFEXITED(st) && WEXITSTATUS(st) == 0);
 }
+static void mixed_busy(const char *base) {
+  int fd = open("/mnt/busy-mutable", O_RDWR);
+  CHECK(fd >= 0);
+  CHECK(!fsync(fd));
+  control(base, "busy-stat");
+  CHECK(pwrite(fd, "S", 1, 32768) == 1);
+  CHECK(!fsync(fd));
+  char byte;
+  CHECK(pread(fd, &byte, 1, 32768) == 1 && byte == 'S');
+  CHECK(!close(fd));
+  control(base, "check-busy-stat");
+  control(base, "busy-delete");
+  CHECK(!unlink("/mnt/busy-mutable"));
+  control(base, "check-busy-delete");
+  puts("KSTQR_MIXED_BUSY_PASS");
+}
 int main(int argc, char **argv) {
-  CHECK(argc == 2);
+  CHECK(argc == 2 || argc == 3);
+  if (argc == 3) {
+    CHECK(!strcmp(argv[2], "mixed-busy"));
+    mixed_busy(argv[1]);
+    return 0;
+  }
   control(argv[1], "busy-read");
   int busy = open("/mnt/busy-cold", O_RDONLY);
   CHECK(busy >= 0);
@@ -56,7 +78,7 @@ int main(int argc, char **argv) {
     CHECK(fds[i] >= 0);
   }
   control(argv[1], "offline");
-  pid_t children[12];
+  pid_t children[13];
   for (int i = 0; i < 12; i++) {
     children[i] = fork();
     CHECK(children[i] >= 0);
@@ -65,14 +87,21 @@ int main(int argc, char **argv) {
       _exit(pread(fds[i], &value, 1, 0) == 1 && value == 'P' ? 0 : 1);
     }
   }
+  children[12] = fork();
+  CHECK(children[12] >= 0);
+  if (!children[12]) {
+    struct statfs space;
+    _exit(statfs("/mnt", &space) == 0 ? 0 : 1);
+  }
   double started = now();
   CHECK(p[32768] == 'R');
   CHECK(now() - started >= 1.0);
-  for (int i = 0; i < 12; i++) {
+  for (int i = 0; i < 13; i++) {
     int status;
     CHECK(waitpid(children[i], &status, 0) == children[i]);
     CHECK(WIFEXITED(status) && WEXITSTATUS(status) == 0);
-    CHECK(!close(fds[i]));
+    if (i < 12)
+      CHECK(!close(fds[i]));
   }
   control(argv[1], "check-recovery");
   CHECK(!munmap((void *)p, 65536));
