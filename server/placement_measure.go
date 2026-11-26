@@ -2,13 +2,14 @@
 package server
 
 import (
+	"math"
 	"time"
 
 	"github.com/launix-de/stqr-storage/client"
 	"github.com/launix-de/stqr-storage/volume"
 )
 
-// Cached metadata measurements are estimates for optimization, never authority
+// Live RAM accounting estimates are inputs for optimization, never authority
 // for PREPARE. The existing executor always measures/reserves the actual move.
 type placementMeasurement struct {
 	epoch, policy uint64
@@ -20,53 +21,77 @@ type placementMeasurement struct {
 	estimateOnly  bool
 }
 
-func (r *rangeManager) measuredPlacement(shape placementShape, entry client.RangeEntry, d BucketDescription, required bool, allowance *int) (placementMeasurement, bool) {
+// placementWeight is bounded by map entries and volumes, never object count.
+// A split has no exact child byte count until work on those children supplies
+// one. Apportion maintained bucket totals by owned hash width, rather than
+// reconstructing child totals by reading object/receipt metadata. These are
+// optimization estimates only: PREPARE still reserves the actual move.
+type placementWeightKey struct {
+	bucket client.ID
+	volume volume.ID
+}
+
+func (r *rangeManager) placementWeights(image *placementImage, buckets map[client.ID]BucketDescription) map[placementWeightKey]float64 {
+	weights := make(map[placementWeightKey]float64)
+	for bucket := range buckets {
+		for _, entry := range image.bucketEntries(bucket) {
+			if len(entry.Locations) == 0 || entry.Locations[0].Node != r.node {
+				continue
+			}
+			before := client.MapPatch{Bucket: bucket, Entries: []client.RangeEntry{entry}}
+			for _, store := range r.sourceVolumes(rangePlan{Before: before, Moving: entry, Source: r.node}) {
+				weights[placementWeightKey{bucket, store.Identity().VolumeID}] += math.Ldexp(1, -int(entry.PrefixBits))
+			}
+		}
+	}
+	return weights
+}
+
+// Software contract: the periodic planner uses RAM aggregates exclusively,
+// even for expired samples, invalid placements, pressure and policy changes.
+// Missing statistics mean unknown, not an empty range. No cache miss or timer
+// is permission to census object, request or replica indexes. Exact inventory
+// belongs to execution of a selected map difference, not optimization scoring.
+func (r *rangeManager) measuredPlacement(shape placementShape, entry client.RangeEntry, d BucketDescription, weights map[placementWeightKey]float64) (placementMeasurement, bool) {
 	key := rangeMetricKey{shape.bucket, shape.start, shape.bits}
-	codec := bucketCodec(d.Policy)
 	var prior placementMeasurement
 	if value, ok := r.measurements.Load(key); ok {
 		prior = value.(placementMeasurement)
-		if prior.epoch == entry.OwnerEpoch && prior.policy == entry.PolicyVersion && prior.codec == codec && (!required || !prior.estimateOnly) && time.Since(prior.at) < 30*time.Second {
-			return prior, true
-		}
-	}
-	if !required {
-		if *allowance == 0 {
-			return placementMeasurement{}, false
-		}
-		*allowance--
 	}
 	before, ok := r.server.routingPatch(volume.ID(shape.bucket), volume.ObjectID(shape.start))
 	if !ok {
 		return placementMeasurement{}, false
 	}
-	measurement := placementMeasurement{epoch: entry.OwnerEpoch, policy: entry.PolicyVersion, codec: codec, at: time.Now(), retained: make(map[volume.ID]uint64)}
-	if !required && shape.bits == 0 && d.DesiredPolicy == nil {
-		measurement.estimateOnly = true
-		// A whole bucket already has physical accounting maintained by volume
-		// callbacks. Optimization needs an estimate, not another receipt census.
-		// diffPlacementTarget still measures and reserves the actual move.
-		usage := r.server.quotaUsage.Load()
-		if usage == nil {
+	usage := r.server.quotaUsage.Load()
+	if usage == nil {
+		return placementMeasurement{}, false
+	}
+	measurement := placementMeasurement{epoch: entry.OwnerEpoch, policy: entry.PolicyVersion, codec: bucketCodec(d.Policy), at: time.Now(), retained: make(map[volume.ID]uint64), estimateOnly: true}
+	stores := r.sourceVolumes(rangePlan{Before: before, Moving: entry, Source: r.node})
+	if len(stores) == 0 {
+		return placementMeasurement{}, false
+	}
+	for _, store := range stores {
+		id := store.Identity().VolumeID
+		rows, known := usage.volumes[id]
+		if !known {
 			return placementMeasurement{}, false
 		}
-		p := rangePlan{Before: before, Moving: entry, Source: r.node}
-		for _, store := range r.sourceVolumes(p) {
-			id := store.Identity().VolumeID
-			rows, known := usage.volumes[id]
-			if !known {
-				return placementMeasurement{}, false
-			}
-			n := storagePhysical(rows, volume.ID(shape.bucket))
-			measurement.cost = addCapacity(measurement.cost, n)
-			measurement.retained[id] = n
+		total := storagePhysical(rows, volume.ID(shape.bucket))
+		weight := weights[placementWeightKey{shape.bucket, id}]
+		if weight <= 0 {
+			return placementMeasurement{}, false
 		}
-		return r.storePlacementMeasurement(key, prior, measurement), true
-	}
-	var err error
-	measurement.cost, _, err = r.policyPlacementCost(before, entry, client.ID{}, volume.ID{}, codec, measurement.retained)
-	if err != nil {
-		return placementMeasurement{}, false
+		share := math.Min(1, math.Ldexp(1, -int(shape.bits))/weight)
+		n := total
+		if share < 1 && total > 0 {
+			estimate := math.Ceil(float64(total) * share)
+			if estimate < float64(total) {
+				n = uint64(estimate)
+			}
+		}
+		measurement.cost = addCapacity(measurement.cost, n)
+		measurement.retained[id] = n
 	}
 	return r.storePlacementMeasurement(key, prior, measurement), true
 }
@@ -77,60 +102,4 @@ func (r *rangeManager) storePlacementMeasurement(key rangeMetricKey, prior, meas
 	}
 	r.measurements.Store(key, measurement)
 	return measurement
-}
-
-// Keep discovery linear in the PG's ranges. Four oldest hot measurements win;
-// the remainder is a moving cold window, so neither busy nor quiet ranges can
-// permanently monopolize the eight metadata refreshes.
-func (r *rangeManager) placementSamples(shapes []placementShape, work []placementWorkload, seed uint64) []bool {
-	type candidate struct {
-		index   int
-		at      time.Time
-		traffic float64
-	}
-	var hot [4]candidate
-	count := 0
-	for i, shape := range shapes {
-		key := rangeMetricKey{shape.bucket, shape.start, shape.bits}
-		work[i].Read, work[i].Write = r.rangeWorkload(key)
-		traffic := work[i].Read + work[i].Write
-		if traffic == 0 {
-			continue
-		}
-		item := candidate{index: i, traffic: traffic}
-		if value, ok := r.measurements.Load(key); ok {
-			item.at = value.(placementMeasurement).at
-		}
-		pos := count
-		for pos > 0 {
-			previous := hot[pos-1]
-			if !item.at.Before(previous.at) && !(item.at.Equal(previous.at) && item.traffic > previous.traffic) {
-				break
-			}
-			pos--
-		}
-		if pos == len(hot) {
-			continue
-		}
-		if count < len(hot) {
-			count++
-		}
-		copy(hot[pos+1:count], hot[pos:count-1])
-		hot[pos] = item
-	}
-	selected := make([]bool, len(shapes))
-	for _, item := range hot[:count] {
-		selected[item.index] = true
-	}
-	if len(shapes) > 0 {
-		start := int(seed % uint64(len(shapes)))
-		for offset := 0; offset < len(shapes) && count < 8; offset++ {
-			i := (start + offset) % len(shapes)
-			if !selected[i] {
-				selected[i] = true
-				count++
-			}
-		}
-	}
-	return selected
 }
