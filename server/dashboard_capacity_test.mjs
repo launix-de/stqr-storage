@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {capacityModel} from './dashboard/capacity.js';
+import {capacityKnown,capacityModel} from './dashboard/capacity.js';
 import {currentSnapshots} from './dashboard/membership.js';
 
 test('capacity meter partitions occupied and protected free bytes with exact byte ticks',()=>{
@@ -36,4 +36,16 @@ test('global totals use all reported member volumes, excluding departed and join
  // A table search is not an input: global totals must not change with visible
  // rows, collapsed nodes, pagination or the selected dashboard page.
  assert.equal(entries.length,2);
+});
+test('a missing current-member report leaves global capacity unknown, not a partial total',()=>{
+ const states=new Map([
+ ['a',{snapshot:{volumes:[{capacity:100n}]}}],
+ ['b',{placeholder:true,snapshot:{volumes:[]}}],
+ ['retired',{snapshot:{volumes:[{capacity:999n}]}}]
+ ]),view={member_nodes:['a','b']};
+ assert.equal(capacityKnown(currentSnapshots(view,states),2),false);
+ states.set('b',{snapshot:{volumes:[]}});
+ assert.equal(capacityKnown(currentSnapshots(view,states),2),true,'a reported empty member is known');
+ assert.equal(capacityKnown([],2),false);
+ assert.equal(capacityKnown(currentSnapshots({},states),states.size),true,'legacy report-only snapshots remain supported');
 });

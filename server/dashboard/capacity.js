@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-only
 import {formatBytes,formatNumber} from './numbers.js';
 
+// A missing member report is unknown, not a smaller cluster capacity.
+export function capacityKnown(entries,memberCount){return entries.length>0&&entries.length===memberCount}
+
 // The same member-filtered RAM aggregate drives both global physical cards.
 // Free includes protected reserves; usable excludes them. No object scan/fetch.
 export function capacityModel(t){
