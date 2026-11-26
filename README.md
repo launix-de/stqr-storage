@@ -225,7 +225,7 @@ make server fuse
 
 Use the root Makefile for every component. `make` or `make all` builds the Linux
 components and cross-compiles the Windows Go backend; `make -j4 all` enables
-parallel builds. Build the full WinUI bundle on Windows with `make windows-package`. Individual targets keep their existing output paths:
+parallel builds. Build the complete Windows executable on Windows with `make windows-package`. Individual targets keep their existing output paths:
 
 | Target | Output |
 | --- | --- |
@@ -236,8 +236,8 @@ parallel builds. Build the full WinUI bundle on Windows with `make windows-packa
 | `make nbd` | `qemu-plugin-nbd/bin/stqr-nbd`, native NBD client |
 | `make pam` | `networkboot/bin/pam_stqr.so` |
 | `make networkboot` | Boot tools/helpers, PAM module and kernel source archive in `networkboot/bin/` |
-| `make windows` | Windows Go backend only: `windows/bin/stqr-windows.exe` (amd64 cross-build) |
-| `make windows-package` | Full self-contained WinUI + Go bundle; requires a Windows host, PowerShell and .NET 10 |
+| `make windows` | Windows Go backend only: `windows/bin/stqr-windows-backend.exe` (development amd64 cross-build) |
+| `make windows-package` | Single self-contained `stqr-windows.exe` with integrated UI; requires a Windows host, PowerShell and .NET 10 |
 
 The complete build requires GNU Make, Go 1.24+, a C11 compiler, OpenSSL development
 headers/libraries, static libc, PAM development headers/runtime (`libpam0g-dev`

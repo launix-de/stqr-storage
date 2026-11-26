@@ -32,7 +32,7 @@ func TestBucketUsageCountsCommitsWithoutRepeatedIndexScans(t *testing.T) {
 		t.Fatal("initial count", used, err)
 	}
 	warm := v.IOStats()
-	if warm.ReadOps <= before.ReadOps {
+	if testStorageReadOps(warm) <= testStorageReadOps(before) {
 		t.Fatal("test did not exercise a cold volume index")
 	}
 	for i := 0; i < 20; i++ {
@@ -40,7 +40,7 @@ func TestBucketUsageCountsCommitsWithoutRepeatedIndexScans(t *testing.T) {
 			t.Fatal("cached count", used, err)
 		}
 	}
-	if v.IOStats().ReadOps != warm.ReadOps {
+	if testStorageReadOps(v.IOStats()) != testStorageReadOps(warm) {
 		t.Fatal("warm usage read traversed the object index")
 	}
 	id := volume.ObjectID{1}
@@ -71,7 +71,7 @@ func TestBucketUsageCountsCommitsWithoutRepeatedIndexScans(t *testing.T) {
 	if used, err := b.logicalUsage(); err != nil || used != total {
 		t.Fatal("incremental count", used, total, err)
 	}
-	if v.IOStats().ReadOps != before.ReadOps {
+	if testStorageReadOps(v.IOStats()) != testStorageReadOps(before) {
 		t.Fatal("successful mutations invalidated the incremental counter")
 	}
 }

@@ -173,7 +173,7 @@ func TestPlacementEstimatesUseRAMWithoutIO(t *testing.T) {
 				}
 			}
 			after := v.IOStats()
-			if after.ReadOps != before.ReadOps || after.WriteOps != before.WriteOps {
+			if testStorageReadOps(after) != testStorageReadOps(before) || after.WriteOps != before.WriteOps {
 				t.Fatal("balancing read storage", bits, change, before, after)
 			}
 		}
@@ -182,7 +182,7 @@ func TestPlacementEstimatesUseRAMWithoutIO(t *testing.T) {
 	// must not restart an unrelated receipt census on every failed admission.
 	before := v.IOStats()
 	cost, _, err := r.policyPlacementCost(p, p.Entries[0], client.ID{}, volume.ID{}, volume.Raw)
-	if err != nil || cost == 0 || v.IOStats().ReadOps != before.ReadOps {
+	if err != nil || cost == 0 || testStorageReadOps(v.IOStats()) != testStorageReadOps(before) {
 		t.Fatal("candidate costing touched storage", cost, err)
 	}
 }
@@ -209,7 +209,7 @@ func TestPlacementEstimatesRefreshFromMutationAccounting(t *testing.T) {
 	if !ok || second.cost <= first.cost {
 		t.Fatal("ignored committed accounting", first.cost, second.cost, ok)
 	}
-	if after := v.IOStats(); after.ReadOps != before.ReadOps || after.WriteOps != before.WriteOps {
+	if after := v.IOStats(); testStorageReadOps(after) != testStorageReadOps(before) || after.WriteOps != before.WriteOps {
 		t.Fatal("refresh read storage", before, after)
 	}
 	// No statistics is unknown; it must not become a zero-byte placement offer.
@@ -244,7 +244,7 @@ func TestPlacementEstimatesNormalizeSplitRanges(t *testing.T) {
 	if sum < total || sum > total+1 {
 		t.Fatal("split duplicated bucket footprint", sum, total)
 	}
-	if after := v.IOStats(); after.ReadOps != before.ReadOps || after.WriteOps != before.WriteOps {
+	if after := v.IOStats(); testStorageReadOps(after) != testStorageReadOps(before) || after.WriteOps != before.WriteOps {
 		t.Fatal("split scanned metadata", before, after)
 	}
 }
@@ -288,7 +288,7 @@ func TestPlacementIdlePlanningDoesNotReadStorage(t *testing.T) {
 				t.Fatal("target planner skipped fixture")
 			}
 		}
-		if after := v.IOStats(); after.ReadOps != before.ReadOps || after.WriteOps != before.WriteOps {
+		if after := v.IOStats(); testStorageReadOps(after) != testStorageReadOps(before) || after.WriteOps != before.WriteOps {
 			t.Fatal("idle target planning touched storage", required, before, after)
 		}
 	}
@@ -316,7 +316,7 @@ func TestPlacementPendingDiffUsesRAMWithoutIO(t *testing.T) {
 		}
 	}
 	after := v.IOStats()
-	if after.ReadOps != before.ReadOps || after.WriteOps != before.WriteOps || after.SyncOps != before.SyncOps {
+	if testStorageReadOps(after) != testStorageReadOps(before) || after.WriteOps != before.WriteOps || after.SyncOps != before.SyncOps {
 		t.Fatal("pending difference read persistent metadata", before, after)
 	}
 	r.server.quotaUsage.Store(nil)
@@ -349,7 +349,7 @@ func TestPlacementInPlaceCodecUsesRetainedAccounting(t *testing.T) {
 	if err != nil || same != 0 {
 		t.Fatal("unchanged retained copy was charged again", same, err)
 	}
-	if after := v.IOStats(); after.ReadOps != before.ReadOps || after.WriteOps != before.WriteOps || after.SyncOps != before.SyncOps {
+	if after := v.IOStats(); testStorageReadOps(after) != testStorageReadOps(before) || after.WriteOps != before.WriteOps || after.SyncOps != before.SyncOps {
 		t.Fatal("retained codec estimate touched storage", before, after)
 	}
 }
@@ -385,7 +385,7 @@ func TestPlacementMissingSourceIsUnknownButKnownEmptyIsZero(t *testing.T) {
 	if err != nil || cost != 0 || count != 0 {
 		t.Fatal("known complete snapshot omitted an empty bucket", cost, count, err)
 	}
-	if after := v.IOStats(); after.ReadOps != before.ReadOps || after.WriteOps != before.WriteOps {
+	if after := v.IOStats(); testStorageReadOps(after) != testStorageReadOps(before) || after.WriteOps != before.WriteOps {
 		t.Fatal("empty estimate read storage", before, after)
 	}
 }
@@ -415,7 +415,7 @@ func TestPlacementRangeCostBoundsAtCounterLimit(t *testing.T) {
 		}
 		prior = physical
 	}
-	if after := v.IOStats(); after.ReadOps != before.ReadOps || after.WriteOps != before.WriteOps || after.SyncOps != before.SyncOps {
+	if after := v.IOStats(); testStorageReadOps(after) != testStorageReadOps(before) || after.WriteOps != before.WriteOps || after.SyncOps != before.SyncOps {
 		t.Fatal("counter bound estimate touched storage", before, after)
 	}
 }

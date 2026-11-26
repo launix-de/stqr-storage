@@ -108,41 +108,34 @@ func TestDriveSessionExclusionAndStop(t *testing.T) {
 		t.Fatal("stop event did not cancel session")
 	}
 }
-func TestInstallWinUIBundle(t *testing.T) {
+func TestInstallSelfContainedExecutable(t *testing.T) {
 	source := filepath.Join(t.TempDir(), "stqr-windows.exe")
 	i := installation{directory: filepath.Join(t.TempDir(), "installed")}
-	for path, content := range map[string]string{source: "backend", uiPath(source): "frontend-v1"} {
-		if err := os.WriteFile(path, []byte(content), 0600); err != nil {
-			t.Fatal(err)
-		}
+	if err := os.WriteFile(source, []byte("client-with-ui-v1"), 0600); err != nil {
+		t.Fatal(err)
 	}
 	first, err := i.installExecutable(source)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if filepath.Base(first) != "stqr-windows.exe" || filepath.Base(uiPath(first)) != "stqr-windows.ui.exe" {
-		t.Fatal("WinUI executable basename changed", first)
+	if filepath.Base(first) != "stqr-windows.exe" {
+		t.Fatal("executable basename changed", first)
 	}
-	if raw, err := os.ReadFile(uiPath(first)); err != nil || string(raw) != "frontend-v1" {
-		t.Fatal("UI not installed", err)
+	entries, err := os.ReadDir(filepath.Dir(first))
+	if err != nil || len(entries) != 1 {
+		t.Fatal("installation needs additional files", entries, err)
 	}
 	if same, err := i.installExecutable(source); err != nil || same != first {
-		t.Fatal("unchanged bundle was not reused", err)
+		t.Fatal("unchanged executable not reused", err)
 	}
-	if err := os.WriteFile(uiPath(source), []byte("frontend-v2"), 0600); err != nil {
+	if err := os.WriteFile(source, []byte("client-with-ui-v2"), 0600); err != nil {
 		t.Fatal(err)
 	}
 	second, err := i.installExecutable(source)
 	if err != nil || second == first {
-		t.Fatal("UI update did not version the bundle", err)
+		t.Fatal("new executable did not version installation", err)
 	}
-	if filepath.Base(first) != "stqr-windows.exe" || filepath.Base(uiPath(first)) != "stqr-windows.ui.exe" {
-		t.Fatal("WinUI executable basename changed", first)
-	}
-	if raw, err := os.ReadFile(uiPath(first)); err != nil || string(raw) != "frontend-v1" {
-		t.Fatal("running UI version was replaced", err)
-	}
-	if raw, err := os.ReadFile(uiPath(second)); err != nil || string(raw) != "frontend-v2" {
-		t.Fatal("UI update missing", err)
+	if raw, err := os.ReadFile(first); err != nil || string(raw) != "client-with-ui-v1" {
+		t.Fatal("running version was replaced", err)
 	}
 }

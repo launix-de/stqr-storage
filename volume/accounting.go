@@ -3,6 +3,7 @@ package volume
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"math/bits"
 	"sort"
@@ -37,6 +38,9 @@ type bucketAllocation struct{ logical, payload, metadata, records, objects uint6
 // Later transactions update only keys they changed; reopen reconstructs counters
 // from the same canonical records rather than trusting a separately synced log.
 func (v *Volume) SetAdmission(f Admission, observers ...func(StorageSnapshot)) error {
+	if !v.AccountingReady() {
+		return ErrAccountingNotReady
+	}
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	if err := v.check(false); err != nil {
@@ -72,6 +76,9 @@ func (v *Volume) initAccounting() error {
 	if v.accounting != nil {
 		return nil
 	}
+	if v.accountManaged.Load() && !v.accountReady.Load() {
+		return ErrAccountingNotReady
+	}
 	all, _, err := v.scanAccounting(nil, nil, false)
 	if err == nil {
 		v.accounting = all
@@ -98,11 +105,20 @@ func addAllocation(totals map[ID]bucketAllocation, id ID, a bucketAllocation) {
 }
 
 func (v *Volume) scanAccounting(stamp any, include func(Key, bool) bool, owned bool) (map[ID]bucketAllocation, map[ID]bucketAllocation, error) {
+	return v.scanAccountingWithContext(context.Background(), stamp, include, owned)
+}
+func (v *Volume) scanAccountingContext(ctx context.Context, stamp any, include func(Key, bool) bool) (map[ID]bucketAllocation, map[ID]bucketAllocation, error) {
+	return v.scanAccountingWithContext(ctx, stamp, include, true)
+}
+func (v *Volume) scanAccountingWithContext(ctx context.Context, stamp any, include func(Key, bool) bool, owned bool) (map[ID]bucketAllocation, map[ID]bucketAllocation, error) {
 	all := make(map[ID]bucketAllocation)
 	selected := make(map[ID]bucketAllocation)
 	proofs := make(map[ID]bucketOwnershipProof)
 	totals, aggregate := stamp.(OwnershipBucketTotals)
 	err := v.walkIndex(func(x indexEntry) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		r, err := v.accountRecordAt(x)
 		if err != nil {
 			return err
@@ -345,6 +361,9 @@ func (t *transaction) projectAccounts(base map[ID]bucketAllocation, include func
 // weights as StorageUsage. It scans metadata only and never reads payload bytes.
 func (h *Handle) StorageUsageWhere(include func(Key) bool, authoritative ...bool) (uint64, error) {
 	return withHandle(h, false, func(v *Volume) (uint64, error) {
+		if !v.AccountingReady() {
+			return 0, ErrAccountingNotReady
+		}
 		if include == nil {
 			return 0, ErrRange
 		}
@@ -433,6 +452,9 @@ type OwnershipBucketTotals interface {
 // additional required replica charged against a bucket's absolute quota.
 // stamp must be comparable and change whenever the ownership predicate changes.
 func (v *Volume) SetOwnershipFilter(stamp any, include func(Key, bool) bool) error {
+	if !v.AccountingReady() {
+		return ErrAccountingNotReady
+	}
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	if err := v.check(false); err != nil {
@@ -566,6 +588,9 @@ func (v *Volume) recordKey(key indexKey) (Key, error) {
 }
 func (h *Handle) OwnedStorageUsage() ([]BucketStorage, error) {
 	return withHandle(h, false, func(v *Volume) ([]BucketStorage, error) {
+		if !v.AccountingReady() {
+			return nil, ErrAccountingNotReady
+		}
 		v.accountMu.Lock()
 		defer v.accountMu.Unlock()
 		if err := v.initAccounting(); err != nil {

@@ -712,11 +712,9 @@ func (b *Bucket) mutateAttempt(ctx context.Context, p principal, id volume.Objec
 	// Continue to the normal handle path, which rechecks admission and drains
 	// the group before building a durable mutation. Later writes remain subject
 	// to the same handle/operation checks, not this preflight hint.
-	if !connectionFenced(ctx) {
-		if err := s.switchAcceptedVolume(b.ID(), v, opt.Accepted || payloadLength <= 1<<20 && opcode != cowRestoreOpcode); err != nil {
-			return volume.Result{}, err
-		}
-	}
+	// Independent destinations are not durability dependencies. The connection
+	// and bucket fences already track every touched volume; only an explicit
+	// fence or the storage engine's bounded WAL requirements may flush them.
 	if !exists && opcode != 0x0102 && opcode != 0x0106 && b.lostRange(id) {
 		return volume.Result{}, fail(410, "partial mutation cannot recreate a lost object")
 	}

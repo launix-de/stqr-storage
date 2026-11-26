@@ -15,7 +15,6 @@ type durabilityVolume struct {
 	generation uint64
 }
 type bucketDurability struct {
-	active            *volume.Volume
 	sequence, durable uint64
 	volumes           map[*volume.Volume]uint64
 }
@@ -46,41 +45,6 @@ func (*publishedCheckpoint) Error() string {
 	return "published mutation awaiting durable acknowledgement"
 }
 
-// Called under opMu before every object mutation. Keeping just one volatile
-// volume per bucket preserves causal data/index/inode ordering across local
-// volumes: a change of destination checkpoints the preceding volume first.
-func (s *Server) switchAcceptedVolume(bucket volume.ID, v *volume.Volume, accepted bool) error {
-	d := &s.durability
-	d.mu.Lock()
-	if d.buckets == nil {
-		d.buckets = map[volume.ID]*bucketDurability{}
-	}
-	state := d.buckets[bucket]
-	if state == nil && accepted {
-		state = &bucketDurability{volumes: map[*volume.Volume]uint64{}}
-		d.buckets[bucket] = state
-	}
-	var previous *volume.Volume
-	var generation uint64
-	if state != nil {
-		previous = state.active
-		generation = state.volumes[previous]
-	}
-	d.mu.Unlock()
-	if previous != nil && previous != v && !previous.IsDurableThrough(generation) {
-		return &acceptedCheckpoint{previous, generation}
-	}
-	if state != nil {
-		d.mu.Lock()
-		if accepted {
-			state.active = v
-		} else if previous != v {
-			state.active = nil
-		}
-		d.mu.Unlock()
-	}
-	return nil
-}
 func (s *Server) recordAccepted(bucket volume.ID, v *volume.Volume, generation uint64) {
 	d := &s.durability
 	d.mu.Lock()
@@ -93,7 +57,6 @@ func (s *Server) recordAccepted(bucket volume.ID, v *volume.Volume, generation u
 		b = &bucketDurability{volumes: map[*volume.Volume]uint64{}}
 		d.buckets[bucket] = b
 	}
-	b.active = v
 	b.sequence++
 	b.volumes[v] = generation
 }
@@ -217,16 +180,67 @@ func (s *Server) executeSync(ctx context.Context, m client.Message, ws *wsSessio
 			delete(state.volumes, ref.v)
 		}
 	}
-	if len(state.volumes) == 0 {
-		state.active = nil
-	}
 	if state.durable < cut {
 		state.durable = cut
 	}
 	s.durability.mu.Unlock()
 	return (client.CommitMark{Boot: s.boot, Sequence: cut}).MarshalBinary(), 200, nil
 }
-func (s *Server) startAcceptedCheckpoints() {
+
+// pruneDurability only forgets generations already persisted by an explicit
+// fence, a durable mutation, or necessary storage-engine checkpoint. It must
+// never start disk I/O: accepted writes have no periodic durability deadline.
+func (s *Server) pruneDurability() {
+	type cleanup struct {
+		state *bucketDurability
+		cut   uint64
+		refs  []durabilityVolume
+	}
+	d := &s.durability
+	d.mu.Lock()
+	work := make([]cleanup, 0, len(d.buckets))
+	for _, state := range d.buckets {
+		if len(state.volumes) == 0 {
+			continue
+		}
+		item := cleanup{state: state, cut: state.sequence}
+		for v, g := range state.volumes {
+			item.refs = append(item.refs, durabilityVolume{v, g})
+		}
+		work = append(work, item)
+	}
+	d.mu.Unlock()
+	for _, item := range work {
+		confirmed := item.refs[:0]
+		allConfirmed := true
+		for _, ref := range item.refs {
+			if ref.v.TryIsDurableThrough(ref.generation) {
+				confirmed = append(confirmed, ref)
+			} else {
+				allConfirmed = false
+			}
+		}
+		if len(confirmed) == 0 {
+			continue
+		}
+		d.mu.Lock()
+		// One still-pending volume must not retain closed/replaced peers.
+		// Newer publications on a confirmed volume remain for the next fence.
+		for _, ref := range confirmed {
+			if item.state.volumes[ref.v] == ref.generation {
+				delete(item.state.volumes, ref.v)
+			}
+		}
+		// Removing individual confirmed references does not certify a bucket
+		// prefix until every generation in this captured cut is persisted.
+		if allConfirmed && item.state.durable < item.cut {
+			item.state.durable = item.cut
+		}
+		d.mu.Unlock()
+	}
+}
+
+func (s *Server) startDurabilityCleanup() {
 	s.workers.Add(1)
 	go func() {
 		defer s.workers.Done()
@@ -237,63 +251,7 @@ func (s *Server) startAcceptedCheckpoints() {
 			case <-s.ctx.Done():
 				return
 			case <-tick.C:
-				s.mu.RLock()
-				stores := make([]*volume.Volume, 0, len(s.volumes))
-				for _, v := range s.volumes {
-					stores = append(stores, v.store)
-				}
-				s.mu.RUnlock()
-				for _, v := range stores {
-					_ = v.FlushAccepted()
-				}
-				// Prune confirmed volume references, including closed/detached
-				// stores, so a long-running bucket does not retain old devices.
-				s.opMu.Lock()
-				s.durability.mu.Lock()
-				type cleanup struct {
-					state *bucketDurability
-					cut   uint64
-					refs  []durabilityVolume
-				}
-				work := []cleanup{}
-				for _, state := range s.durability.buckets {
-					if len(state.volumes) == 0 {
-						continue
-					}
-					item := cleanup{state: state, cut: state.sequence}
-					for v, g := range state.volumes {
-						item.refs = append(item.refs, durabilityVolume{v, g})
-					}
-					work = append(work, item)
-				}
-				s.durability.mu.Unlock()
-				s.opMu.Unlock()
-				for _, item := range work {
-					ok := true
-					for _, ref := range item.refs {
-						if err := ref.v.CheckpointThrough(ref.generation); err != nil {
-							ok = false
-							break
-						}
-					}
-					if !ok {
-						continue
-					}
-					s.durability.mu.Lock()
-					for _, ref := range item.refs {
-						if item.state.volumes[ref.v] == ref.generation {
-							delete(item.state.volumes, ref.v)
-						}
-					}
-					if item.state.durable < item.cut {
-						item.state.durable = item.cut
-					}
-					if len(item.state.volumes) == 0 {
-						item.state.active = nil
-					}
-					s.durability.mu.Unlock()
-				}
-
+				s.pruneDurability()
 			}
 		}
 	}()
