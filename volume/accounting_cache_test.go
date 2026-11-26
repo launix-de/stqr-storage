@@ -183,8 +183,8 @@ func TestAccountingCacheMissesNeverPublishZeroQuota(t *testing.T) {
 				t.Fatal("cache miss was authoritative", ready, err)
 			}
 			after := v.IOStats()
-			if after.ReadOps != before.ReadOps {
-				t.Fatal("Configure scanned record data")
+			if reads := startupAccountingReadOps(after) - startupAccountingReadOps(before); reads > 1 || after.WriteOps != before.WriteOps || after.SyncOps != before.SyncOps {
+				t.Fatal("Configure exceeded one root-page proof or wrote storage", before, after)
 			}
 			if h, err := v.Open(true); h != nil || !errors.Is(err, ErrAccountingNotReady) {
 				t.Fatal("unknown quota admitted mutation", h, err)
@@ -207,8 +207,12 @@ func TestAccountingCacheMissesNeverPublishZeroQuota(t *testing.T) {
 				}
 			}
 			h.Close()
+			beforeWarm := v.IOStats()
 			if err = v.WarmAccounting(context.Background()); err != nil || !v.AccountingReady() {
 				t.Fatal("background repair", err)
+			}
+			if afterWarm := v.IOStats(); startupAccountingReadOps(afterWarm)-startupAccountingReadOps(beforeWarm) <= 1 {
+				t.Fatal("cold census positive control did not read canonical records", beforeWarm, afterWarm)
 			}
 			if kind != "stale-generation" {
 				if got := accountingUsage(t, v); !reflect.DeepEqual(got, want) {
