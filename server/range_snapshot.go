@@ -522,7 +522,7 @@ func (r *rangeManager) sourceVolumes(p rangePlan) []*volume.Volume {
 	if err != nil {
 		return nil
 	}
-	description := b.Describe()
+	description := b.storageDescription()
 	if description.DesiredPolicy != nil && p.Before.Entries[0].PolicyVersion == description.DesiredPolicy.Version {
 		description.Policy = *description.DesiredPolicy
 	}
