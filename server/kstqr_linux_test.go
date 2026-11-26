@@ -699,6 +699,16 @@ rmmod kstqr
 				t.Fatal(e)
 			}
 			uc.Close()
+			// Real PXE boots use an ordinary service account: READ on the
+			// published lower, ALL only on this private upper. Administrator
+			// credentials would conceal object-reference permission failures.
+			grant := client.Encoder{}
+			grant.ID(id)
+			grant.ID(client.ID(uid))
+			grant.U32(uint32(BucketAllPermissions))
+			if _, status, _ := adminBucketMessage(t, s, client.BucketGrant, grant.B); status != 200 {
+				t.Fatal(status)
+			}
 			return id
 		}
 		nativeUpperID = makeUpper("native-upper", nil)
@@ -715,6 +725,16 @@ rmmod kstqr
 
 		policyID := makeUpper("native-policy", []string{"allowed", "work/"})
 		handshake := makeUpper("native-boot-upper", nil)
+		grant := client.Encoder{}
+		grant.ID(client.ID(empty.ID()))
+		grant.ID(client.ID(uid))
+		grant.U32(uint32(BucketAllPermissions))
+		if _, status, _ := adminBucketMessage(t, s, client.BucketGrant, grant.B); status != 200 {
+			t.Fatal(status)
+		}
+		if err = os.WriteFile(filepath.Join(initrdRoot, "credentials"), []byte("username="+user.Name+"\npassword=bucket-test-password\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
 		var held atomic.Bool
 		control := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if r.URL.Path == "/status" {
@@ -730,7 +750,7 @@ rmmod kstqr
 				return
 			}
 			defer wire.Close()
-			payload := fmt.Sprintf("STQR-BOOT-1\nuri=%s\nusername=%s\npassword=%s\nlower=%s\nupper=%s\n\n", endpoint, admin.Username, admin.Password, client.ID(b.ID()).String(), handshake.String())
+			payload := fmt.Sprintf("STQR-BOOT-1\nuri=%s\nusername=%s\npassword=%s\nlower=%s\nupper=%s\n\n", endpoint, user.Name, "bucket-test-password", client.ID(b.ID()).String(), handshake.String())
 			held.Store(true)
 			defer held.Store(false)
 			fmt.Fprintf(buffer, "HTTP/1.1 200 OK\r\nContent-Length: %d\r\n\r\n%s", len(payload), payload)
