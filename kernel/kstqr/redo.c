@@ -237,10 +237,11 @@ static int apply_edits(struct ks_fs *f, stqr_object_id tx, const struct buf *enc
 		if (err == -EAGAIN && f->references && !remove) {
 			void *observed = NULL;
 			size_t actual = 0;
-			int check = stqr_get(rpc->client, id, &observed, &actual, &info);
+			int check = get_object_locked(f, rpc, id, &observed, &actual, &info);
 			/* The exclusive descriptor claim keeps all heads marked. A
 			 * repeated create-only write may recognize its prior after-image
 			 * without retaining server PUT/CAS history. */
+			err = -EIO; /* A decided REDO failure must not restart a whole append. */
 			if (!check && ((full && actual == n && !memcmp(observed, data, n)) ||
 			    (!full && off <= actual && n <= actual - off &&
 			     !memcmp((u8 *)observed + off, data, n))))

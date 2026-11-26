@@ -105,19 +105,18 @@ int ks_object_reference(struct ks_fs *f, stqr_object_id id, stqr_id token, unsig
 			auth_retry = true;
 		else if (!ks_transport_retryable(rpc->client, err))
 			break;
+		/* Tokens are durable and idempotent across every reconnect. */
 		err = ks_reconnect_wait(f, rpc->client);
 		if (err)
 			break;
 	}
 	mutex_unlock(&rpc->lock);
 	return err;
-
 }
-static int get_object(struct ks_fs *f, stqr_object_id id, void **p, size_t *n, stqr_info *info)
+static int get_object_locked(struct ks_fs *f, struct ks_rpc *rpc, stqr_object_id id,
+			     void **p, size_t *n, stqr_info *info)
 {
-	struct ks_rpc *rpc = ks_rpc_lock(f, id);
 	int err;
-	atomic64_inc(&f->rpc_gets);
 	for (;;) {
 		err = stqr_get(rpc->client, id, p, n, info);
 		if (!ks_transport_retryable(rpc->client, err))
@@ -129,6 +128,13 @@ static int get_object(struct ks_fs *f, stqr_object_id id, void **p, size_t *n, s
 		if (err)
 			break;
 	}
+	return err;
+}
+static int get_object(struct ks_fs *f, stqr_object_id id, void **p, size_t *n, stqr_info *info)
+{
+	struct ks_rpc *rpc = ks_rpc_lock(f, id);
+	atomic64_inc(&f->rpc_gets);
+	int err = get_object_locked(f, rpc, id, p, n, info);
 	mutex_unlock(&rpc->lock);
 	return err;
 }
@@ -152,21 +158,22 @@ static int cas_object(struct ks_fs *f, stqr_object_id id, const void *p, size_t 
 	bool auth_retry = false, replayed = false;
 	for (;;) {
 		err = stqr_cas(rpc->client, id, 1, 0, expected, expected_size, p, n, &o, &info);
-		if (err == -EAGAIN && replayed && f->references) {
+		if (replayed && f->references && err == -EAGAIN && stqr_status(rpc->client) == 412) {
 			void *observed = NULL;
 			size_t size = 0;
-			int check = stqr_get(rpc->client, id, &observed, &size, &info);
-			/* Reference-aware CAS has no persisted retry history. Recognize
-			 * its exact after-image after an ambiguous reply; never replay a
-			 * whole append against a newer inode snapshot. */
-			err = !check && size == n && (!n || !memcmp(observed, p, n)) ? 0 : -EIO;
+			int check = get_object_locked(f, rpc, id, &observed, &size, &info);
+			/* Modern peers need no native CAS history. Resolve an uncertain
+			 * retry only by its exact after-image, never by replaying an entire
+			 * filesystem append against a newer inode snapshot. */
+			err = !check && size == n && !memcmp(observed, p, n) ? 0 : -EIO;
 			sq_free(observed);
 			break;
 		}
-		if (err == -EACCES && !auth_retry) {
+		if (err == -EACCES && !auth_retry)
 			auth_retry = true;
-		} else if (!ks_transport_retryable(rpc->client, err))
+		else if (!ks_transport_retryable(rpc->client, err))
 			break;
+		// Retain the same request identity throughout a temporary outage.
 		err = ks_reconnect_wait(f, rpc->client);
 		if (err)
 			break;
@@ -1113,8 +1120,7 @@ static int node_cas(struct ks_fs *f, struct ks_snapshot *old, struct ks_node *ne
 
 	struct buf b = {0};
 	int err;
-	/* One inode with no external edits is one atomic CAS. Reference support
-	 * alone does not justify a separately persisted recovery descriptor. */
+	/* An inode without external block edits needs only its own atomic CAS. */
 	if (next->edits) {
 		struct member m = {0};
 		err = member_set(&m, old, next);

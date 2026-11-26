@@ -24,7 +24,11 @@ func TestTicket32JavaScriptNativeCASReuse(t *testing.T) {
 	b, _ := createProtocolBucket(t, s, "js-reuse")
 	host := httptest.NewServer(s.Handler())
 	defer host.Close()
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	// Exercise the real dashboard session and native durable object requests.
+	// Keep a finite budget with headroom for slower race-instrumented CI runners
+	// and log progress to distinguish a stalled request from slow execution.
+	const budget = 30 * time.Second
+	ctx, cancel := context.WithTimeout(context.Background(), budget)
 	defer cancel()
 	admin := s.cfg.Auth.BootstrapAdmin
 	c, err := client.Dial(ctx, host.URL, admin.Username, admin.Password, client.BucketID(b.ID()), "fs")
@@ -38,15 +42,19 @@ func TestTicket32JavaScriptNativeCASReuse(t *testing.T) {
 	}
 	v := b.allVolumes()[0]
 	before := v.Stats()
-	input, err := json.Marshal(map[string]string{"url": host.URL, "username": admin.Username, "password": admin.Password, "bucket": b.ID().String(), "node": s.cfg.Node.ID, "object": hex.EncodeToString(id[:])})
+	input, err := json.Marshal(map[string]string{"url": host.URL, "username": admin.Username, "password": admin.Password, "bucket": b.ID().String(), "node": s.cfg.Node.ID, "object": hex.EncodeToString(id[:]), "format": "fs"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	cmd := exec.CommandContext(ctx, node, "--experimental-default-type=module", "dashboard_reclamation.mjs")
 	cmd.Stdin = bytes.NewReader(input)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("JavaScript/native interoperability: %v\n%s", err, out)
+	cmd.WaitDelay = 5 * time.Second
+	started := time.Now()
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("JavaScript/native interoperability after %s (test budget %s, context: %v): %v\n%s", time.Since(started), budget, ctx.Err(), err, out)
 	}
+	t.Logf("JavaScript/native workload completed in %s (test budget %s)\n%s", time.Since(started), budget, out)
 	got, _, err := c.Get(ctx, id)
 	if err != nil || !bytes.Equal(got, bytes.Repeat([]byte{99}, 8192)) {
 		t.Fatalf("Go could not read JS result: %v", err)
