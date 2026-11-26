@@ -195,11 +195,31 @@ func TestDaemonPhysicalQuotaHandoffPreservesCreditsAndRetries(t *testing.T) {
 	check := func() {
 		t.Helper()
 		var credits, used uint64
+		type snapshot struct {
+			node                      string
+			allowance, used, sequence uint64
+			allocation                *quotaAllocation
+			ranges                    *quotaRangeImage
+			outgoing, incoming        []quotaTransfer
+		}
+		var snapshots []snapshot
 		for _, n := range []*daemonTestNode{source, target} {
 			n.node.opMu.Lock()
 			b, _ := n.node.Bucket(b.ID())
 			u, e := b.physicalUsage()
 			a, ae := n.node.quotaAllowance(client.ID(b.ID()))
+			state := snapshot{node: n.node.cfg.Node.ID, allowance: a, used: u, allocation: findQuota(n.node.currentSystem.Load(), client.ID(b.ID())), ranges: n.node.quotaRanges.Load()}
+			ledger := n.node.quotas.ledger
+			ledger.mu.Lock()
+			state.sequence = ledger.sequence
+			for _, transfer := range ledger.outgoing {
+				state.outgoing = append(state.outgoing, *transfer)
+			}
+			for _, transfer := range ledger.incoming {
+				state.incoming = append(state.incoming, *transfer)
+			}
+			ledger.mu.Unlock()
+			snapshots = append(snapshots, state)
 			n.node.opMu.Unlock()
 			if e != nil || ae != nil || u > a {
 				t.Fatal("physical allowance invariant", n.node.cfg.Node.ID, "source", source.node.cfg.Node.ID, "used/credits", u, a, "allocation", findQuota(n.node.currentSystem.Load(), client.ID(b.ID())), "range image", n.node.quotaRanges.Load(), e, ae)
@@ -208,6 +228,9 @@ func TestDaemonPhysicalQuotaHandoffPreservesCreditsAndRetries(t *testing.T) {
 			used += u
 		}
 		if credits != 600<<10 || used < 512<<10 || used > credits {
+			for _, state := range snapshots {
+				t.Logf("quota observation: node=%s allowance=%d used=%d sequence=%d allocation=%+v ranges=%+v outgoing=%+v incoming=%+v", state.node, state.allowance, state.used, state.sequence, state.allocation, state.ranges, state.outgoing, state.incoming)
+			}
 			t.Fatal("global physical quota", used, credits)
 		}
 	}
