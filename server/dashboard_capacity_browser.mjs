@@ -55,7 +55,7 @@ try{
  // Controlled renderer states supplement the real two-node payload fixture;
  // they never replace its snapshots, totals or nonzero geometry assertions.
  await page.evaluate(async()=>{
-  const {capacityKnown,renderCapacitySummary}=await import('/assets/capacity.js');
+  const {capacityKnown,capacityAdmissionKnown,renderCapacitySummary}=await import('/assets/capacity.js');
   const probe=document.querySelector('#capacity-summary').cloneNode(true);
   for(const el of [probe,...probe.querySelectorAll('[id]')])el.removeAttribute('id');
   Object.assign(probe.style,{position:'fixed',left:'-2000px',width:'280px'});document.body.append(probe);
@@ -63,6 +63,8 @@ try{
   try{
    renderCapacitySummary(probe,totals,true);
    if(q('fill').getBoundingClientRect().width<=0)throw Error('Controlled known renderer has no positive fill');
+   renderCapacitySummary(probe,totals,true,capacityAdmissionKnown([{snapshot:{reason:1024n}}]));
+   if(q('used').textContent==='—'||!q('detail').textContent.includes('wird ermittelt')||q('detail').textContent.includes('nutzbar')||!q('meter').getAttribute('aria-label').includes('noch unbekannt')||q('reserve').style.width!=='0%')throw Error('Cold reservation recovery presented admission or reserves as ready');
    renderCapacitySummary(probe,totals,capacityKnown([{snapshot:{volumes:[]}}],2));
    if(q('total').textContent!=='—'||q('used').textContent!=='—'||q('fill').getBoundingClientRect().width!==0||!q('meter').getAttribute('aria-label').includes('unbekannt'))throw Error('Missing member report presented partial global capacity as known');
    renderCapacitySummary(probe,{capacity:0n,allocated:0n,reserved:0n,admission:0n},capacityKnown([{snapshot:{volumes:[]}}],1));

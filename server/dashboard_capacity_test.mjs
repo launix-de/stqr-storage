@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {capacityKnown,capacityModel} from './dashboard/capacity.js';
+import {capacityKnown,capacityAdmissionKnown,capacityModel} from './dashboard/capacity.js';
 import {currentSnapshots} from './dashboard/membership.js';
 
 test('capacity meter partitions occupied and protected free bytes with exact byte ticks',()=>{
@@ -48,4 +48,10 @@ test('a missing current-member report leaves global capacity unknown, not a part
  assert.equal(capacityKnown(currentSnapshots(view,states),2),true,'a reported empty member is known');
  assert.equal(capacityKnown([],2),false);
  assert.equal(capacityKnown(currentSnapshots({},states),states.size),true,'legacy report-only snapshots remain supported');
+});
+
+test('warm physical reports do not claim reservation/admission readiness',()=>{
+ assert.equal(capacityAdmissionKnown([{snapshot:{reason:1024n}}]),false);
+ assert.equal(capacityAdmissionKnown([{snapshot:{reason:0n}},{snapshot:{reason:1024n}}]),false);
+ assert.equal(capacityAdmissionKnown([{snapshot:{reason:0n}},{snapshot:{reason:2n}}]),true);
 });

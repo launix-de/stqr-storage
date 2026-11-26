@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-only
-import {capacityKnown,renderCapacitySummary} from './capacity.js';
+import {capacityKnown,capacityAdmissionKnown,renderCapacitySummary} from './capacity.js';
 import {setupVolumeGrowth} from './volume-growth.js';
 import {formatNumber,formatBytes} from './numbers.js';
 import {setupClusterJoin} from './join.js';
@@ -92,7 +92,7 @@ function totals(volumes){return volumes.reduce((a,v)=>({capacity:a.capacity+v.ca
 function renderMetrics(){
  const entries=currentSnapshots(configView,nodeStates);const memberCount=memberIDs(configView)?.size??entries.length;
  const volumes=entries.flatMap(e=>e.snapshot.volumes),t=totals(volumes);
- for(const prefix of ['', 'bucket-'])renderCapacitySummary($(prefix+'capacity-summary'),t,capacityKnown(entries,memberCount));
+ for(const prefix of ['', 'bucket-'])renderCapacitySummary($(prefix+'capacity-summary'),t,capacityKnown(entries,memberCount),capacityAdmissionKnown(entries));
  $('metric-volumes').textContent=formatNumber(volumes.length);
  const active=volumes.filter(v=>v.state===1).length,draining=volumes.filter(v=>v.state===2).length;
  $('metric-active').textContent=`${active} aktiv${draining?` · ${draining} im Drain`:''}`;$('nav-count').textContent=formatNumber(volumes.length);
