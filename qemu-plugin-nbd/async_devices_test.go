@@ -264,3 +264,35 @@ func TestBucketCloseDoesNotFlushConnection(t *testing.T) {
 		}
 	}
 }
+
+func TestCatalogMetadataNeverImplicitlyFences(t *testing.T) {
+	ctx := context.Background()
+	s := &metadataAcceptanceStore{testStore: newTestStore()}
+	c := NewCatalog(s)
+	m, err := c.Create(ctx, Metadata{Name: "metadata", Size: StripeSize})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = c.Resize(ctx, m, 2*StripeSize); err != nil {
+		t.Fatal(err)
+	}
+	if s.metadataAccepted != 2 || s.syncs != 0 {
+		t.Fatal("catalog metadata forced durability", s.metadataAccepted, s.syncs)
+	}
+	if err = c.Sync(ctx); err != nil || s.syncs != 1 {
+		t.Fatal("explicit catalog fence", err, s.syncs)
+	}
+}
+
+type metadataAcceptanceStore struct {
+	*testStore
+	metadataAccepted int
+}
+
+func (s *metadataAcceptanceStore) CAS(ctx context.Context, id client.ObjectID, off uint64, old, next []byte, opt client.CASOptions) (client.ObjectInfo, error) {
+	if !opt.Accepted {
+		return client.ObjectInfo{}, errors.New("catalog metadata requested durable native ACK")
+	}
+	s.metadataAccepted++
+	return s.testStore.CAS(ctx, id, off, old, next, opt)
+}

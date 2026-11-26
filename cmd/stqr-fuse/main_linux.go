@@ -150,7 +150,7 @@ func parseOptions(args []string, out io.Writer) (options, error) {
 	return opt, nil
 }
 
-func run(ctx context.Context, opt options, out io.Writer) (resultErr error) {
+func run(ctx context.Context, opt options, out io.Writer) error {
 	if !opt.fsck {
 		stat, err := os.Stat(opt.mountpoint)
 		if err != nil {
@@ -207,14 +207,7 @@ func run(ctx context.Context, opt options, out io.Writer) (resultErr error) {
 		if conn != nil {
 			cache := client.NewSubscriptionStore(conn, opt.metadataCacheBytes)
 			cache.EnableAcceptedWrites()
-			defer func() {
-				syncCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-				defer cancel()
-				if syncErr := cache.Sync(syncCtx); syncErr != nil {
-					resultErr = errors.Join(resultErr, fmt.Errorf("final sync: %w", syncErr))
-				}
-				cache.Close()
-			}()
+			defer cache.Close()
 			upperStore = cache
 		}
 		if lower != nil {

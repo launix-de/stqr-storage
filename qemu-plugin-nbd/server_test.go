@@ -6,6 +6,8 @@ import (
 	"encoding/binary"
 	"io"
 	"net"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -14,7 +16,8 @@ func TestNBDBoundsReadonlyAndFlush(t *testing.T) {
 	for _, ro := range []bool{false, true} {
 		t.Run(map[bool]string{true: "readonly", false: "writable"}[ro], func(t *testing.T) {
 			ctx := context.Background()
-			catalog := NewCatalog(newTestStore())
+			store := newTestStore()
+			catalog := NewCatalog(store)
 			_, e := catalog.Create(ctx, Metadata{Name: "disk", Size: 4096})
 			if e != nil {
 				t.Fatal(e)
@@ -82,8 +85,23 @@ func TestNBDBoundsReadonlyAndFlush(t *testing.T) {
 			if got := transact(3, 0, 0, nil); got != 0 {
 				t.Fatal("flush", got)
 			}
+			wantFences := 1
+			if !ro {
+				wantFences = 3
+			}
+			if store.syncs != wantFences {
+				t.Fatal("FLUSH/FUA fence count", store.syncs, wantFences)
+			}
+			if e = send(b, uint32(0x25609513), uint16(0), uint16(2), uint64(7), uint64(0), uint32(0)); e != nil {
+				t.Fatal(e)
+			}
+			if err := <-done; err != nil {
+				t.Fatal(err)
+			}
+			if store.syncs != wantFences {
+				t.Fatal("NBD DISC implicitly synced", store.syncs, wantFences)
+			}
 			b.Close()
-			<-done
 		})
 	}
 }
@@ -159,4 +177,40 @@ func TestNBDExportListAndUnknownName(t *testing.T) {
 	}
 	b.Close()
 	<-done
+}
+
+func TestNBDServeCancellationDoesNotSync(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	store := newTestStore()
+	catalog := NewCatalog(store)
+	socket := filepath.Join(t.TempDir(), "nbd.sock")
+	done := make(chan error, 1)
+	go func() { done <- Serve(ctx, socket, catalog, Options{}) }()
+	deadline := time.After(time.Second)
+	for {
+		if _, err := os.Stat(socket); err == nil {
+			break
+		}
+		select {
+		case err := <-done:
+			t.Fatal(err)
+		case <-deadline:
+			t.Fatal("socket not available")
+		default:
+			time.Sleep(time.Millisecond)
+		}
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("exporter did not stop")
+	}
+	if store.syncs != 0 {
+		t.Fatal("exporter cancellation implicitly synced", store.syncs)
+	}
 }
