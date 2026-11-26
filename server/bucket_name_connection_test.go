@@ -158,9 +158,15 @@ func TestBucketNameConnectionDoesNotReuseDeletingName(t *testing.T) {
 	host := httptest.NewServer(s.Handler())
 	defer host.Close()
 	a := s.cfg.Auth.BootstrapAdmin
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	old, err := client.DialBucket(ctx, host.URL, a.Username, a.Password, "reused-name", "fs")
+	// Bound each operation independently: deletion and rejected reconnects must
+	// not consume the replacement client's verification budget. A timeout is
+	// not proof that access to the deleted bucket was denied.
+	requestContext := func() context.Context {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		t.Cleanup(cancel)
+		return ctx
+	}
+	old, err := client.DialBucket(requestContext(), host.URL, a.Username, a.Password, "reused-name", "fs")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -178,13 +184,13 @@ func TestBucketNameConnectionDoesNotReuseDeletingName(t *testing.T) {
 		t.Fatal("delete", status)
 	}
 	replacement, _ := createProtocolBucket(t, s, "reused-name")
-	fresh, err := client.DialBucket(ctx, host.URL, a.Username, a.Password, "reused-name", "fs")
+	fresh, err := client.DialBucket(requestContext(), host.URL, a.Username, a.Password, "reused-name", "fs")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer fresh.Close()
 	id := client.ObjectID{27}
-	if _, err = fresh.Put(ctx, id, []byte("replacement"), client.PutOptions{}); err != nil {
+	if _, err = fresh.Put(requestContext(), id, []byte("replacement"), client.PutOptions{}); err != nil {
 		t.Fatal(err)
 	}
 	s.wsMu.Lock()
@@ -194,16 +200,16 @@ func TestBucketNameConnectionDoesNotReuseDeletingName(t *testing.T) {
 		}
 	}
 	s.wsMu.Unlock()
-	if _, _, err = old.Get(ctx, id); err == nil {
-		t.Fatal("deleted named connection read replacement bucket")
+	if _, _, err = old.Get(requestContext(), id); !errors.Is(err, client.ErrUnauthorized) {
+		t.Fatal("deleted named connection read was not denied", err)
 	}
-	if _, err = old.Put(ctx, id, []byte("wrong bucket"), client.PutOptions{}); err == nil {
-		t.Fatal("deleted named connection wrote replacement bucket")
+	if _, err = old.Put(requestContext(), id, []byte("wrong bucket"), client.PutOptions{}); !errors.Is(err, client.ErrUnauthorized) {
+		t.Fatal("deleted named connection write was not denied", err)
 	}
 	if old.BucketID() != client.ID(original.ID()) || fresh.BucketID() != client.ID(replacement.ID()) {
 		t.Fatal("canonical bucket identity changed")
 	}
-	data, _, err := fresh.Get(ctx, id)
+	data, _, err := fresh.Get(requestContext(), id)
 	if err != nil || string(data) != "replacement" {
 		t.Fatal("replacement changed", string(data), err)
 	}
