@@ -78,7 +78,7 @@ clean:
 
 help:
 	@printf '%s\n' \
-		'make all                Build every production component (default; Linux build host)' \
+		'make all                Build Linux components and Windows backend (default)' \
 		'make server             Build ./stqr' \
 		'make fuse               Build ./stqr-fuse (GOFLAGS=-race for race instrumentation)' \
 		'make c-client           Build static/shared C SDK libraries' \

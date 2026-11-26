@@ -223,9 +223,9 @@ make server fuse
 ./stqr
 ```
 
-Use the root Makefile for every component. `make` or `make all` builds all
-production components on a Linux build host; `make -j4 all` enables parallel
-builds. Individual targets keep their existing output paths:
+Use the root Makefile for every component. `make` or `make all` builds the Linux
+components and cross-compiles the Windows Go backend; `make -j4 all` enables
+parallel builds. Build the full WinUI bundle on Windows with `make windows-package`. Individual targets keep their existing output paths:
 
 | Target | Output |
 | --- | --- |

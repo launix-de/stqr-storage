@@ -201,7 +201,10 @@ jobs:
             Remove-Item bin/winui-smoke.txt -ErrorAction SilentlyContinue
             $ui = Start-Process (Join-Path bin $frontend) -ArgumentList '--smoke-test' -PassThru
             if (!$ui.WaitForExit(90000)) { $ui.Kill(); throw "WinUI smoke test timed out: $frontend" }
-            if ($ui.ExitCode -ne 0) { throw "WinUI smoke test failed: $frontend ($($ui.ExitCode))" }
+            if ($ui.ExitCode -ne 0) {
+              if (Test-Path bin/winui-smoke-error.txt) { Get-Content bin/winui-smoke-error.txt }
+              throw "WinUI smoke test failed: $frontend ($($ui.ExitCode))"
+            }
             if (!(Test-Path bin/winui-smoke.txt)) { throw "Missing WinUI smoke evidence: $frontend" }
             Get-Content bin/winui-smoke.txt
           }
@@ -215,6 +218,7 @@ jobs:
             windows/bin/stqr-windows.ui.exe
             windows/bin/stqr-winui.png
             windows/bin/winui-smoke.txt
+            windows/bin/winui-smoke-error.txt
           if-no-files-found: warn
           retention-days: 14
 

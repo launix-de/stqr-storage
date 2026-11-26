@@ -47,7 +47,16 @@ public sealed partial class MainWindow : Window
             await LoadDrive();
             if (smoke) await SmokeTest();
         }
-        catch (Exception ex) { ShowError(ex); if (smoke) Environment.Exit(1); }
+        catch (Exception ex)
+        {
+            ShowError(ex);
+            if (smoke)
+            {
+                var directory = Environment.GetEnvironmentVariable("STQR_UI_SMOKE_DIR") ?? Path.GetTempPath();
+                await File.WriteAllTextAsync(Path.Combine(directory, "winui-smoke-error.txt"), ex.ToString());
+                Environment.Exit(1);
+            }
+        }
     }
     private void Responsive(double width)
     {
