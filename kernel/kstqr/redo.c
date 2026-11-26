@@ -18,24 +18,37 @@ static void edits_free(struct ks_edit *w)
 }
 static int object_stat(struct ks_fs *f, stqr_object_id id, stqr_info *info)
 {
-	struct ks_rpc *rpc = ks_rpc_lock(f, id);
-	int err;
-	for (;;) {
-		if (rpc->receive_started) {
-            struct ks_async_result result={0};init_completion(&result.done);
-            err=stqr_stat_async(rpc->client,id,ks_async_completed,&result);
+    struct ks_rpc *rpc = ks_rpc_lock(f, id);
+    int err;
+    for (;;) {
+        u64 epoch = rpc->reconnect_epoch;
+        int status = 0;
+        if (rpc->receive_started) {
+            struct ks_async_result result = {0};
+            init_completion(&result.done);
+            err = stqr_stat_async(rpc->client, id, ks_async_completed, &result);
             mutex_unlock(&rpc->lock);
-            if(!err){wait_for_completion(&result.done);err=result.error;*info=result.info;}
-            sq_free(result.data);mutex_lock(&rpc->lock);
-        } else err = stqr_stat(rpc->client, id, info);
-		if (!ks_transport_retryable(rpc->client, err))
-			break;
-		err = ks_reconnect_wait(f, rpc->client);
-		if (err)
-			break;
-	}
-	mutex_unlock(&rpc->lock);
-	return err;
+            if (!err) {
+                wait_for_completion(&result.done);
+                err = result.error;
+                *info = result.info;
+                status = result.status;
+            }
+            sq_free(result.data);
+            mutex_lock(&rpc->lock);
+        } else {
+            err = stqr_stat(rpc->client, id, info);
+            status = stqr_status(rpc->client);
+        }
+        if (!(err == -EAGAIN ? (status == 0 || status == 503) :
+              ks_transport_retryable(NULL, err)))
+            break;
+        err = ks_rpc_retry(f, rpc, epoch, status);
+        if (err)
+            break;
+    }
+    mutex_unlock(&rpc->lock);
+    return err;
 }
 static int stable_id(stqr_object_id owner, unsigned kind, unsigned level, u64 slot,
 		     stqr_object_id *out)
@@ -279,17 +292,23 @@ static int apply_edits(struct ks_fs *f, stqr_object_id tx, const struct buf *enc
         }
 		bool auth_retry = false;
 		for (;;) {
+            u64 epoch = rpc->reconnect_epoch;
+            int status = 0;
 			if (remove)
-				err = ks_delete_locked(rpc, id, &opt);
-			else if (full)
+				err = ks_delete_locked(rpc, id, &opt, &status);
+			else if (full) {
 				err = stqr_put(rpc->client, id, data, n, &opt, &info);
-			else
+                status = stqr_status(rpc->client);
+            } else {
 				err = stqr_put_range(rpc->client, id, off, data, n, &opt, &info);
+                status = stqr_status(rpc->client);
+            }
 			if (err == -EACCES && !auth_retry)
 				auth_retry = true;
-			else if (!ks_transport_retryable(rpc->client, err))
+			else if (!(err == -EAGAIN ? (status == 0 || status == 503) :
+                       ks_transport_retryable(NULL, err)))
 				break;
-			err = ks_reconnect_wait(f, rpc->client);
+			err = ks_rpc_retry(f, rpc, epoch, status);
 			if (err)
 				break;
 		}
@@ -455,7 +474,7 @@ static void intent_retire(struct ks_fs *f, stqr_object_id id, const struct buf *
 		if (stqr_request_id(&opt.request_id))
 			continue;
 		rpc = ks_rpc_lock(f, part);
-		ks_delete_locked(rpc, part, &opt);
+		ks_delete_locked(rpc, part, &opt, NULL);
 		mutex_unlock(&rpc->lock);
 	}
 }

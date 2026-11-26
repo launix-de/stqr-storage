@@ -111,20 +111,25 @@ static void failed_writeback(const char *endpoint)
     REQUIRE(p != MAP_FAILED);
     memcpy(p, "initial", 7);
     REQUIRE(!msync(p, length, MS_SYNC));
-    control(endpoint, "lock");
+    /* Reject writes without replacing the authenticated native session. Lost
+     * accepted-prefix recovery is a separate outage-test contract. */
+    control(endpoint, "writeback-fail");
     memset(p, 'r', length);
     memcpy(p, "recovered", 9);
     err = msync(p, length, MS_SYNC);
-    REQUIRE(err < 0 && (errno == EACCES || errno == EIO || errno == EROFS));
+    /* The fixture's explicit native 500 maps to EREMOTEIO, not an
+     * authorization change or an unknown accepted-prefix ESTALE. */
+    REQUIRE(err < 0 && errno == EREMOTEIO);
     REQUIRE(!memcmp(p, "recovered", 9));
-    control(endpoint, "unlock");
+    control(endpoint, "writeback-retry");
     for (attempt = 0; attempt < 3; attempt++) {
         err = fsync(fd);
         if (!err)
             break;
-        REQUIRE(errno == EACCES || errno == EIO || errno == EROFS);
+        REQUIRE(errno == EREMOTEIO);
     }
     REQUIRE(!err);
+    control(endpoint, "writeback-verified");
     REQUIRE(!memcmp(p, "recovered", 9));
     for (size_t n=9;n<length;n++) REQUIRE(p[n]=='r');
     REQUIRE(!munmap(p, length));
