@@ -720,7 +720,7 @@ func (b *Bucket) mutateAttempt(ctx context.Context, p principal, id volume.Objec
 	// return backpressure. Buffer pressure is never permission to request Sync.
 	// Independent destinations are not durability dependencies. The connection
 	// and bucket fences already track every touched volume; only an explicit
-	// fence or the storage engine's bounded WAL requirements may flush them.
+	// fence or an explicitly durable mutation may flush them.
 	if !exists && opcode != 0x0102 && opcode != 0x0106 && b.lostRange(id) {
 		return volume.Result{}, fail(410, "partial mutation cannot recreate a lost object")
 	}

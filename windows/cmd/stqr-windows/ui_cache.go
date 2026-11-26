@@ -10,9 +10,16 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sync"
 )
 
+// Windows can deny replacing a file while another local startup is hashing it.
+// Serialize the cache validation/publication sequence within this process.
+var embeddedUICacheMu sync.Mutex
+
 func unpackWinUI(root string, payload []byte, expected string) (string, error) {
+	embeddedUICacheMu.Lock()
+	defer embeddedUICacheMu.Unlock()
 	if hash, err := hex.DecodeString(expected); err != nil || len(hash) != sha256.Size {
 		return "", fmt.Errorf("invalid embedded UI digest")
 	}

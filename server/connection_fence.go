@@ -224,8 +224,8 @@ func (ws *wsSession) executeConnectionSync(ctx context.Context, m client.Message
 			failures = append(failures, *job.failure)
 		}
 	}
-	// Every volume may already have been checkpointed by another socket or the
-	// another explicitly durable operation. CheckpointThrough then returns without I/O.
+	// Every volume may already have been checkpointed by another socket or an
+	// explicitly durable operation. CheckpointThrough then returns without I/O.
 	var wait sync.WaitGroup
 	errors := make(chan error, len(touches))
 	for v, g := range touches {
