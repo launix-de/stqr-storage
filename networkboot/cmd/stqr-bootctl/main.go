@@ -173,16 +173,6 @@ func connectImage(ctx context.Context, c config, name string, createMissing bool
 	}
 	return client.DialBucket(ctx, c.URI, c.Username, c.Password, name, "fs")
 }
-func connectRelease(ctx context.Context, c config, name string) (*client.Client, error) {
-	conn, err := connectImage(ctx, c, name, false)
-	var status *client.StatusError
-	if errors.As(err, &status) && status.Status == 409 {
-		// Read-only compatibility for already published split-bucket images.
-		// New publications always use the filesystem bucket itself.
-		return connect(ctx, c, name)
-	}
-	return conn, err
-}
 
 func publish(ctx context.Context, c config, bucket, dir string) error {
 	release, err := lockPublication(dir)
@@ -259,8 +249,8 @@ func publish(ctx context.Context, c config, bucket, dir string) error {
 	}
 	return conn.Sync(ctx)
 }
-func fetch(ctx context.Context, c config, bucket, dir string, native bool) error {
-	conn, err := connectRelease(ctx, c, bucket)
+func fetch(ctx context.Context, c config, bucket, dir string) error {
+	conn, err := connectImage(ctx, c, bucket, false)
 	if err != nil {
 		return err
 	}
@@ -270,12 +260,10 @@ func fetch(ctx context.Context, c config, bucket, dir string, native bool) error
 		return err
 	}
 	var m manifest
-	if err = json.Unmarshal(raw, &m); err != nil || (m.Schema != 1 && m.Schema != 2) {
+	if err = json.Unmarshal(raw, &m); err != nil || m.Schema != 2 || m.RootBucket != conn.BucketID() {
 		return client.ErrProtocol
 	}
-	if native && (m.Schema != 2 || m.RootBucket == (client.ID{})) {
-		return errors.New("legacy boot release: run prepare-system --publish-only BUCKET")
-	}
+
 	if err = os.MkdirAll(dir, 0700); err != nil {
 		return err
 	}
@@ -364,7 +352,7 @@ func run() error {
 		fmt.Println(conn.BucketID().String())
 		return nil
 	case "manifest":
-		conn, err := connectRelease(ctx, c, name)
+		conn, err := connectImage(ctx, c, name, false)
 		if err != nil {
 			return err
 		}
@@ -449,9 +437,9 @@ func run() error {
 		if cmd == "publish" {
 			return publish(ctx, c, name, args[2])
 		}
-		return fetch(ctx, c, name, args[2], cmd == "fetch-native")
+		return fetch(ctx, c, name, args[2])
 	case "gc":
-		conn, err := connectRelease(ctx, c, name)
+		conn, err := connectImage(ctx, c, name, false)
 		if err != nil {
 			return err
 		}
@@ -464,7 +452,7 @@ func run() error {
 			return err
 		}
 		var m manifest
-		if err = json.Unmarshal(raw, &m); err != nil || (m.Schema != 1 && m.Schema != 2) {
+		if err = json.Unmarshal(raw, &m); err != nil || m.Schema != 2 || m.RootBucket != conn.BucketID() {
 			return client.ErrProtocol
 		}
 		roots := []client.ObjectID{manifestID}
@@ -490,14 +478,7 @@ func run() error {
 		} else if !errors.Is(err, client.ErrNotFound) {
 			return err
 		}
-		if m.Schema == 2 && m.RootBucket == conn.BucketID() {
-			result, err := conn.CheckFilesystemWithOpaqueRoots(ctx, roots)
-			if err != nil {
-				return err
-			}
-			return json.NewEncoder(os.Stdout).Encode(result)
-		}
-		result, err := nbd.NewCatalog(conn).Collect(ctx, roots)
+		result, err := conn.CheckFilesystemWithOpaqueRoots(ctx, roots)
 		if err != nil {
 			return err
 		}

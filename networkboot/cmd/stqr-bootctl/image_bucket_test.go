@@ -263,7 +263,7 @@ func TestPublishedRootfsAndArtifactsUseNamedBucket(t *testing.T) {
 		t.Fatal(err)
 	}
 	dest := t.TempDir()
-	if err = fetch(ctx, cfg, "ubuntu", dest, true); err != nil {
+	if err = fetch(ctx, cfg, "ubuntu", dest); err != nil {
 		t.Fatal(err)
 	}
 	got, err := os.ReadFile(filepath.Join(dest, "initrd.img"))
@@ -335,7 +335,7 @@ func TestUninitializedPublishedRootCreatesNoTemporaryAccount(t *testing.T) {
 	}
 }
 
-func TestFetchLegacyBDBundleWithoutChangingItsFormat(t *testing.T) {
+func TestImageFetchRejectsBDBucketsWithoutChangingTheirFormat(t *testing.T) {
 	cfg, creates, _ := imageTestNode(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
@@ -363,13 +363,13 @@ func TestFetchLegacyBDBundleWithoutChangingItsFormat(t *testing.T) {
 	}
 	conn.Close()
 	dest := t.TempDir()
-	if err = fetch(ctx, cfg, "legacy-ubuntu", dest, true); err != nil {
-		t.Fatal(err)
+	if err = fetch(ctx, cfg, "legacy-ubuntu", dest); err == nil {
+		t.Fatal("boot fetch accepted a separate BD artifact bucket")
 	}
-	data, err := os.ReadFile(filepath.Join(dest, "initrd.img"))
-	if err != nil || string(data) != "existing-initrd.img" {
-		t.Fatal(string(data), err)
+	if _, err = os.Stat(filepath.Join(dest, "initrd.img")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("rejected BD image wrote boot artifacts", err)
 	}
+
 	conn, err = connect(ctx, cfg, "legacy-ubuntu")
 	if err != nil {
 		t.Fatal("legacy format changed", err)

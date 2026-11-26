@@ -99,7 +99,7 @@ def cache_release(args):
         ctl(args.config, 'fetch-native', args.base_bucket, work)
         manifest = json.loads((work / 'manifest.json').read_text())
         if manifest.get('schema') != 2:
-            raise RuntimeError('Legacy root image: run prepare-system --publish-only BUCKET to publish a native kstqr root')
+            raise RuntimeError('Image must contain a native filesystem and its own boot manifest')
         lower = manifest['root_bucket']
         if isinstance(lower, list) and len(lower) == 16:
             lower = bytes(lower).hex()
