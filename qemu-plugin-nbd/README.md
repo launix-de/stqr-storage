@@ -32,7 +32,7 @@ qemu-system-x86_64 \
 shown above can be used for a dedicated non-administrator.
 
 Create the bucket and grant the user READ+WRITE first. Names resolve through
-BUCKET_INFO; `--bucket-id` accepts a hexadecimal bucket ID instead. Flags precede
+the authenticated WebSocket upgrade; `--bucket-id` accepts a hexadecimal bucket ID instead. Flags precede
 the command. `--readonly` needs READ only. `--default-export NAME` optionally
 supports clients that request an empty export name. `-h` lists all flags.
 Credentials stay in the private exporter process; QEMU receives only the socket.

@@ -908,6 +908,10 @@ trap - EXIT
 poweroff -f
 `, native, client.ID(b.ID()).String(), control)
 	}
+	// Exercise names through the real kernel parameter parser and native upgrade;
+	// raw object tests and other fixture buckets retain hexadecimal IDs.
+	init = strings.ReplaceAll(init, "--bucket "+b.ID().String()+" ", "--bucket kernel-vm ")
+	init = strings.ReplaceAll(init, "--readonly-bucket "+b.ID().String()+" ", "--readonly-bucket kernel-vm ")
 	if err = os.WriteFile(filepath.Join(initrdRoot, "init"), []byte(init), 0755); err != nil {
 		t.Fatal(err)
 	}

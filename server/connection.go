@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"net/http"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -102,9 +103,9 @@ func (s *Server) authorizeConnection(r *http.Request, p principal, allowUnboundF
 		auth.expires = session.Expires
 	}
 	if raw := r.Header.Get(client.BucketHeader); raw != "" {
-		id, err := bucketID(raw)
+		id, err := s.connectionBucketID(raw)
 		if err != nil {
-			return nil, p, fail(400, "invalid bucket ID")
+			return nil, p, err
 		}
 		if auth.clusterPeer || id == systemBucket {
 			return nil, p, ErrBucketForbidden
@@ -161,7 +162,7 @@ func (s *Server) authorizeConnection(r *http.Request, p principal, allowUnboundF
 			auth.peerProfile = s.issuerProfile(p.frontendIssuer)
 		}
 	} else if !auth.admin && !auth.clusterPeer {
-		return nil, p, fail(400, "a bucket ID is required for client connections")
+		return nil, p, fail(400, "a bucket name or ID is required for client connections")
 	}
 	if (s.shortStopping.Load() || s.drainClosing.Load()) && !auth.clusterPeer {
 		return nil, p, fail(503, "node is shutting down")
@@ -229,4 +230,21 @@ func (s *Server) invalidateBucketConnections(b *Bucket, d BucketDescription) {
 			s.endRevokedSubscriptions(ws)
 		}
 	}
+}
+
+// Names are resolved exactly once after HTTP authentication. IDs remain the
+// sole authority on the object protocol and survive bucket renames. Explicit
+// name: disambiguates a name consisting of 32 hexadecimal characters.
+func (s *Server) connectionBucketID(selector string) (volume.ID, error) {
+	if !strings.HasPrefix(selector, "name:") {
+		if id, err := bucketID(selector); err == nil {
+			return id, nil
+		}
+	}
+	name := strings.TrimPrefix(selector, "name:")
+	b, err := s.BucketByName(name)
+	if err != nil {
+		return volume.ID{}, err
+	}
+	return b.ID(), nil
 }

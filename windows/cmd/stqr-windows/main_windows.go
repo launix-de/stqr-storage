@@ -5,7 +5,6 @@ package main
 
 import (
 	"context"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -18,7 +17,6 @@ import (
 	"time"
 
 	"github.com/launix-de/stqr-storage/client"
-	nbd "github.com/launix-de/stqr-storage/qemu-plugin-nbd"
 	winfs "github.com/launix-de/stqr-storage/windows"
 	"github.com/winfsp/cgofuse/fuse"
 	"golang.org/x/term"
@@ -189,17 +187,7 @@ func mount(ctx context.Context, c mountConfig, initialize bool, installation ins
 	if err := ensureWinFsp(); err != nil {
 		return err
 	}
-	var e error
-	var id client.ID
-	if decoded, err := hex.DecodeString(c.Bucket); err == nil && len(decoded) == len(id) {
-		copy(id[:], decoded)
-	} else {
-		id, e = nbd.ResolveBucket(ctx, nbd.Config{URL: c.httpURI(), Username: c.Username, Password: c.Password}, c.Bucket)
-		if e != nil {
-			return e
-		}
-	}
-	conn, e := client.Dial(ctx, c.URI, c.Username, c.Password, id, "fs")
+	conn, e := client.DialBucket(ctx, c.URI, c.Username, c.Password, c.Bucket, "fs")
 	if e != nil {
 		return e
 	}
@@ -239,24 +227,15 @@ func mount(ctx context.Context, c mountConfig, initialize bool, installation ins
 	if c.LowerBucket == "" {
 		fs, e = client.OpenFilesystem(ctx, store, options)
 	} else {
-		var lowerID client.ID
-		var err error
-		if decoded, decodeErr := hex.DecodeString(c.LowerBucket); decodeErr == nil && len(decoded) == len(lowerID) {
-			copy(lowerID[:], decoded)
-		} else {
-			lowerID, err = nbd.ResolveBucket(ctx, nbd.Config{URL: c.httpURI(), Username: c.Username, Password: c.Password}, c.LowerBucket)
-		}
-		if err != nil {
-			return err
-		}
-		if lowerID == id {
-			return fmt.Errorf("Basis und beschreibbares Bucket müssen verschieden sein")
-		}
-		lowerConn, err := client.Dial(ctx, c.URI, c.Username, c.Password, lowerID, "fs")
+		lowerConn, err := client.DialBucket(ctx, c.URI, c.Username, c.Password, c.LowerBucket, "fs")
 		if err != nil {
 			return err
 		}
 		defer lowerConn.Close()
+		lowerID := lowerConn.BucketID()
+		if lowerID == conn.BucketID() {
+			return fmt.Errorf("Basis und beschreibbares Bucket müssen verschieden sein")
+		}
 		lowerStore := client.NewSubscriptionStore(lowerConn, 8<<20)
 		defer lowerStore.Close()
 		stores = append(stores, lowerStore)

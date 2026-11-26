@@ -132,7 +132,12 @@ func (s *Server) serveWebSocket(w http.ResponseWriter, r *http.Request, p princi
 	// first, including session, lease and shutdown restrictions. The unset-format
 	// exception is only for this side-effect-free preflight, never registration.
 	s.opMu.Lock()
-	_, _, authErr := s.authorizeConnection(r, p, true)
+	preflight, _, authErr := s.authorizeConnection(r, p, true)
+	// Freeze the authorized ID before format binding releases admission. A name
+	// may be renamed/reused while a cluster metadata commit is in progress.
+	if authErr == nil && preflight.bucket != nil {
+		r.Header.Set(client.BucketHeader, preflight.bucketID.String())
+	}
 	s.opMu.Unlock()
 	if authErr != nil {
 		httpError(w, statusOf(authErr), authErr)
@@ -157,6 +162,9 @@ func (s *Server) serveWebSocket(w http.ResponseWriter, r *http.Request, p princi
 	}
 	up := websocket.Upgrader{Subprotocols: []string{"stqr.v2", "stqr.v1"}, CheckOrigin: sameOrigin, EnableCompression: false, ReadBufferSize: 4096, WriteBufferSize: 4096}
 	responseHeaders := http.Header{}
+	if authorization.bucket != nil {
+		responseHeaders.Set(client.BucketHeader, authorization.bucketID.String())
+	}
 	if p.isPeer() {
 		profile, err := decodeProfile(r.Header)
 		if err != nil {

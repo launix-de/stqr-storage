@@ -47,13 +47,19 @@ username=alice
 password=YOUR_PASSWORD
 ```
 
-Then mount, replacing `BUCKET_ID` with the 32-character hexadecimal bucket ID:
+Then mount, replacing `BUCKET` with the bucket name or 32-character hexadecimal ID:
 
 ```sh
 sudo mount.kstqr --uri http://127.0.0.1:7419 \
-  --bucket BUCKET_ID --credentials /etc/stqr/test.credentials \
+  --bucket BUCKET --credentials /etc/stqr/test.credentials \
   --init /mnt/stqr-test
 ```
+
+The kernel resolves names at authenticated connection bootstrap and keeps the
+canonical ID for all object operations and reconnects. `--readonly-bucket` and
+block-device mounts accept the same selectors. Use `name:NAME` to force literal
+lookup when a name has 32 hexadecimal characters. Names containing commas must
+use direct `--bucket` arguments instead of the comma-delimited `mount -o` form.
 
 `--init` creates a missing root, owned by the mounting UID/GID with mode 0755.
 It preserves an existing filesystem. Omit it for subsequent mounts. Set directory
@@ -64,7 +70,7 @@ The usual mount-helper syntax also works once the helper is installed:
 
 ```sh
 sudo mount -t kstqr http://127.0.0.1:7419 /mnt/stqr-test \
-  -o bucket=BUCKET_ID,credentials=/etc/stqr/test.credentials
+  -o bucket=BUCKET,credentials=/etc/stqr/test.credentials
 sudo umount /mnt/stqr-test
 sudo rmmod kstqr
 ```
@@ -401,7 +407,7 @@ native filesystem overlay options, `whitelist` or `nodev`.
 ```sh
 sudo mkdir -p /qstr/bucket1 /srv/data
 sudo mount -t kstqr http://127.0.0.1:7419 /qstr/bucket1 \
-  -o bd,bucket=BUCKET_ID,credentials=/etc/stqr/disks.credentials
+  -o bd,bucket=BUCKET,credentials=/etc/stqr/disks.credentials
 ```
 
 A bucket containing devices named `system` and `data` then exposes
@@ -419,7 +425,7 @@ To select one existing device and expose it as a single node named `bd`:
 
 ```sh
 sudo mount -t kstqr http://127.0.0.1:7419 /qstr/bucket1 \
-  -o bd,device=system,bucket=BUCKET_ID,credentials=/etc/stqr/disks.credentials
+  -o bd,device=system,bucket=BUCKET,credentials=/etc/stqr/disks.credentials
 sudo mount -t ext4 /qstr/bucket1/bd /srv/data
 ```
 
@@ -432,7 +438,7 @@ For a systemd-based `/etc/fstab`, make the dependency explicit rather than relyi
 on the order of lines:
 
 ```fstab
-http://127.0.0.1:7419 /qstr/bucket1 kstqr _netdev,bd,device=system,bucket=BUCKET_ID,credentials=/etc/stqr/disks.credentials 0 0
+http://127.0.0.1:7419 /qstr/bucket1 kstqr _netdev,bd,device=system,bucket=BUCKET,credentials=/etc/stqr/disks.credentials 0 0
 /qstr/bucket1/bd /srv/data ext4 _netdev,x-systemd.requires-mounts-for=/qstr/bucket1 0 0
 ```
 

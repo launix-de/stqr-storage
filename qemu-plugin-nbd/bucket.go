@@ -20,6 +20,19 @@ func Open(ctx context.Context, url, username, password string, id client.BucketI
 	if e != nil {
 		return nil, e
 	}
+	return openBucketConnection(ctx, c, readonly)
+}
+
+// OpenBucket lets the authenticated server resolve a name or ID at upgrade.
+func OpenBucket(ctx context.Context, url, username, password, selector string, readonly bool) (*Bucket, error) {
+	c, e := client.DialBucket(ctx, url, username, password, selector, "bd")
+	if e != nil {
+		return nil, e
+	}
+	return openBucketConnection(ctx, c, readonly)
+}
+func openBucketConnection(ctx context.Context, c *client.Client, readonly bool) (*Bucket, error) {
+	var e error
 	if e = c.BeginObjectLease(ctx, readonly); e != nil {
 		c.Close()
 		return nil, e

@@ -36,3 +36,5 @@
 #grow-slider{width:100%;accent-color:var(--accent)}
 
 .deletion-error{max-width:24rem;white-space:normal;overflow-wrap:anywhere}
+
+.bucket-id code{user-select:text;cursor:text}.bucket-id-copy{font-size:10px;padding:2px 5px}

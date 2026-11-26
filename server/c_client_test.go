@@ -7,6 +7,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"github.com/launix-de/stqr-storage/volume"
 	"net/http"
 	"net/http/httptest"
@@ -64,6 +65,68 @@ func TestCClient(t *testing.T) {
 			t.Fatalf("C client: %v\n%s", err, out)
 		}
 	}
+	t.Run("named", func(t *testing.T) {
+		s := testServer(t)
+		addTestVolume(t, s, "c-client-named", "hdd", 8<<20)
+		b, _ := createProtocolBucket(t, s, "c-client-named")
+		var upgrades atomic.Int32
+		replacement := make(chan *Bucket, 1)
+		handler := s.Handler()
+		host := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/api/ws" && upgrades.Add(1) == 2 {
+				d := b.Describe()
+				d.Name = "renamed-c-client"
+				if _, err := s.buckets.Save(d, d.Revision); err != nil {
+					t.Error(err)
+					http.Error(w, "fixture rename", 500)
+					return
+				}
+				other, _ := createProtocolBucket(t, s, "c-client-named")
+				replacement <- other
+				if r.Header.Get(client.BucketHeader) != b.ID().String() {
+					t.Error("C reconnect used mutable name")
+				}
+			}
+			handler.ServeHTTP(w, r)
+		}))
+		defer host.Close()
+		a := s.cfg.Auth.BootstrapAdmin
+		run(t, host.URL, a.Username, a.Password, b.ID().String(), "named")
+		other := <-replacement
+		raw, _ := hex.DecodeString("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
+		var id volume.ObjectID
+		copy(id[:], raw)
+		if _, _, err := other.Get(context.Background(), quotaPrincipal(t, s), id); !errors.Is(err, volume.ErrNotFound) {
+			t.Fatal("C named reconnect wrote replacement bucket")
+		}
+	})
+	t.Run("named-invalid-response", func(t *testing.T) {
+		for _, tc := range []struct {
+			name, selector string
+			headers        []string
+		}{
+			{"missing", "photos", nil}, {"malformed", "photos", []string{"bad"}},
+			{"zero", "photos", []string{(client.ID{}).String()}},
+			{"duplicate", "photos", []string{(client.ID{7}).String(), (client.ID{7}).String()}},
+			{"retarget", (client.ID{7}).String(), []string{(client.ID{8}).String()}},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				host := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					u := websocket.Upgrader{Subprotocols: []string{"stqr.v2"}}
+					conn, err := u.Upgrade(w, r, http.Header{client.BucketHeader: tc.headers})
+					if err == nil {
+						conn.Close()
+					}
+				}))
+				defer host.Close()
+				cmd := exec.Command(binary)
+				cmd.Env = append(os.Environ(), "STQR_TEST_URL="+host.URL, "STQR_TEST_BUCKET="+(client.ID{1}).String(), "STQR_TEST_SELECTOR="+tc.selector, "STQR_TEST_MODE=named-invalid-response")
+				if out, err := cmd.CombinedOutput(); err != nil {
+					t.Fatalf("C canonical response: %v\n%s", err, out)
+				}
+			})
+		}
+	})
 	t.Run("objects", func(t *testing.T) {
 		s := testServer(t)
 		addTestVolume(t, s, "c-client", "hdd", 32<<20)

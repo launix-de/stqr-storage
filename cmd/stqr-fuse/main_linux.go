@@ -6,6 +6,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/hex"
 	"errors"
@@ -23,14 +24,15 @@ import (
 
 type options struct {
 	uri, username, password, mountpoint             string
-	bucket                                          client.BucketID
-	readonlyBucket                                  client.BucketID
+	bucket                                          string
+	readonlyBucket                                  string
 	readonlyURI, readonlyUsername, readonlyPassword string
 	whitelist                                       []string
 	allowOther                                      bool
 	create, debug                                   bool
 	fsck                                            bool
 	passwordStdin                                   bool
+	passwordFile                                    string
 	connectTimeout                                  time.Duration
 	metadataCacheBytes                              uint64
 }
@@ -43,12 +45,13 @@ func parseOptions(args []string, out io.Writer) (options, error) {
 	flags.StringVar(&opt.uri, "uri", "", "STQR node URI (http://host:7419 or ws://host:7419/api/ws)")
 	flags.StringVar(&opt.username, "username", "", "STQR username")
 	flags.StringVar(&opt.password, "password", "", "STQR password")
+	flags.StringVar(&opt.passwordFile, "password-file", "", "read the password from FILE (one line; avoids command-line secrets)")
 	flags.BoolVar(&opt.passwordStdin, "password-stdin", false, "read the STQR password from one line on standard input")
-	flags.StringVar(&bucket, "bucket", "", "bucket ID (32 hexadecimal characters)")
-	flags.StringVar(&readonlyBucket, "readonly-bucket", "", "readonly bucket ID; with -bucket, use it as the native overlay lower")
-	flags.StringVar(&opt.readonlyURI, "readonly-uri", "", "readonly node URI (defaults to -uri)")
-	flags.StringVar(&opt.readonlyUsername, "readonly-username", "", "readonly username (defaults to -username)")
-	flags.StringVar(&opt.readonlyPassword, "readonly-password", "", "readonly password (defaults to -password)")
+	flags.StringVar(&bucket, "bucket", "", "bucket name or ID (32 hexadecimal characters)")
+	flags.StringVar(&readonlyBucket, "readonly-bucket", "", "readonly bucket name or ID; with --bucket, use it as the native overlay lower")
+	flags.StringVar(&opt.readonlyURI, "readonly-uri", "", "readonly node URI (defaults to --uri)")
+	flags.StringVar(&opt.readonlyUsername, "readonly-username", "", "readonly username (defaults to --username)")
+	flags.StringVar(&opt.readonlyPassword, "readonly-password", "", "readonly password (defaults to --password)")
 	flags.StringVar(&whitelist, "whitelist", "", "overlay writable paths, e.g. conf.json,fop-files/; persisted in the upper")
 	flags.BoolVar(&opt.allowOther, "allow-other", false, "allow other local UIDs (e.g. PHP workers); normal file permissions still apply")
 	flags.BoolVar(&opt.create, "init", false, "initialize a missing filesystem root; preserve an existing root")
@@ -57,53 +60,61 @@ func parseOptions(args []string, out io.Writer) (options, error) {
 	flags.Uint64Var(&opt.metadataCacheBytes, "metadata-cache-bytes", 32<<20, "subscription-backed metadata cache budget per bucket in bytes; 0 disables caching")
 	flags.DurationVar(&opt.connectTimeout, "connect-timeout", 30*time.Second, "connection and filesystem initialization timeout")
 	flags.Usage = func() {
-		fmt.Fprintln(out, "Usage: stqr-fuse -uri URI -username USER {-password PASSWORD | -password-stdin} [-readonly-bucket ID] [-bucket ID] [-init] MOUNTPOINT\n       stqr-fuse -uri URI -username USER {-password PASSWORD | -password-stdin} -bucket ID [-readonly-bucket ID] --fsck [MOUNTPOINT]\nOnly -readonly-bucket: readonly; only -bucket: read/write; both: native overlay.")
+		fmt.Fprintln(out, "Usage: stqr-fuse --uri URI --username USER {--password PASSWORD | --password-stdin | --password-file FILE} [--readonly-bucket NAME_OR_ID] [--bucket NAME_OR_ID] [--init] MOUNTPOINT\n       stqr-fuse --uri URI --username USER {--password PASSWORD | --password-stdin | --password-file FILE} --bucket NAME_OR_ID [--readonly-bucket NAME_OR_ID] --fsck [MOUNTPOINT]\nOnly --readonly-bucket: readonly; only --bucket: read/write; both: native overlay.")
+		var defaults bytes.Buffer
+		flags.SetOutput(&defaults)
 		flags.PrintDefaults()
+		flags.SetOutput(out)
+		fmt.Fprint(out, strings.ReplaceAll(defaults.String(), "  -", "  --"))
 	}
 	if err := flags.Parse(args); err != nil {
 		return opt, err
 	}
-	if (!opt.fsck && flags.NArg() != 1 || opt.fsck && flags.NArg() > 1) || opt.uri == "" || opt.username == "" || opt.password == "" && !opt.passwordStdin {
-		return opt, errors.New("URI, username, password and bucket ID are required; supply one mountpoint unless using --fsck (see -help)")
+	if (!opt.fsck && flags.NArg() != 1 || opt.fsck && flags.NArg() > 1) || opt.uri == "" || opt.username == "" || opt.password == "" && !opt.passwordStdin && opt.passwordFile == "" {
+		return opt, errors.New("URI, username, password and bucket name or ID are required; supply one mountpoint unless using --fsck (see --help)")
 	}
-	if opt.passwordStdin && opt.password != "" {
-		return opt, errors.New("use -password or -password-stdin, not both")
+	sources := 0
+	if opt.password != "" {
+		sources++
+	}
+	if opt.passwordStdin {
+		sources++
+	}
+	if opt.passwordFile != "" {
+		sources++
+	}
+	if sources > 1 {
+		return opt, errors.New("use exactly one of --password, --password-stdin or --password-file")
 	}
 	if opt.fsck && opt.create {
-		return opt, errors.New("--fsck and -init cannot be combined")
+		return opt, errors.New("--fsck and --init cannot be combined")
 	}
-	parseBucket := func(raw string) (client.BucketID, error) {
-		var id client.BucketID
+	validateSelector := func(raw string) error {
 		if raw == "" {
-			return id, nil
+			return nil
+		}
+		if len(raw) > 260 || strings.ContainsAny(raw, "\r\n\x00") {
+			return errors.New("invalid bucket name or ID")
 		}
 		b, err := hex.DecodeString(raw)
-		if err != nil || len(b) != len(id) {
-			return id, errors.New("bucket IDs must contain 32 hexadecimal characters")
+		if err == nil && len(b) == 16 && bytes.Equal(b, make([]byte, 16)) {
+			return errors.New("bucket IDs must be nonzero")
 		}
-		copy(id[:], b)
-		if id == (client.BucketID{}) {
-			return id, errors.New("bucket IDs must be nonzero")
-		}
-		return id, nil
+		return nil
 	}
 	var err error
-	opt.bucket, err = parseBucket(bucket)
-	if err != nil {
+	if err = validateSelector(bucket); err != nil {
 		return opt, err
 	}
-	opt.readonlyBucket, err = parseBucket(readonlyBucket)
-	if err != nil {
+	if err = validateSelector(readonlyBucket); err != nil {
 		return opt, err
 	}
-	if opt.bucket == (client.BucketID{}) && opt.readonlyBucket == (client.BucketID{}) {
-		return opt, errors.New("-bucket or -readonly-bucket is required")
+	opt.bucket, opt.readonlyBucket = bucket, readonlyBucket
+	if bucket == "" && readonlyBucket == "" {
+		return opt, errors.New("--bucket or --readonly-bucket is required")
 	}
-	if opt.bucket != (client.BucketID{}) && opt.bucket == opt.readonlyBucket {
-		return opt, errors.New("upper and readonly buckets must be different")
-	}
-	if opt.bucket == (client.BucketID{}) && (opt.create || opt.fsck) {
-		return opt, errors.New("-init and --fsck require a writable -bucket")
+	if bucket == "" && (opt.create || opt.fsck) {
+		return opt, errors.New("--init and --fsck require a writable --bucket")
 	}
 	whitelistSet := false
 	flags.Visit(func(f *flag.Flag) {
@@ -112,7 +123,7 @@ func parseOptions(args []string, out io.Writer) (options, error) {
 		}
 	})
 	if whitelistSet {
-		if opt.bucket == (client.BucketID{}) || opt.readonlyBucket == (client.BucketID{}) {
+		if bucket == "" || readonlyBucket == "" {
 			return opt, errors.New("--whitelist requires both buckets")
 		}
 		opt.whitelist, err = client.ParseFilesystemWhitelist(whitelist)
@@ -120,8 +131,8 @@ func parseOptions(args []string, out io.Writer) (options, error) {
 			return opt, err
 		}
 	}
-	if opt.readonlyBucket == (client.BucketID{}) && (opt.readonlyURI != "" || opt.readonlyUsername != "" || opt.readonlyPassword != "") {
-		return opt, errors.New("readonly connection overrides require -readonly-bucket")
+	if readonlyBucket == "" && (opt.readonlyURI != "" || opt.readonlyUsername != "" || opt.readonlyPassword != "") {
+		return opt, errors.New("readonly connection overrides require --readonly-bucket")
 	}
 	if opt.readonlyURI == "" {
 		opt.readonlyURI = opt.uri
@@ -153,30 +164,35 @@ func run(ctx context.Context, opt options, out io.Writer) (resultErr error) {
 	defer cancel()
 	var conn, lower *client.Client
 	var err error
-	if opt.bucket != (client.BucketID{}) {
-		conn, err = client.Dial(startup, opt.uri, opt.username, opt.password, opt.bucket, "fs")
+	var lowerID client.BucketID
+	if opt.bucket != "" {
+		conn, err = client.DialBucket(startup, opt.uri, opt.username, opt.password, opt.bucket, "fs")
 		if err != nil {
 			return fmt.Errorf("connect upper: %w", err)
 		}
 		defer conn.Close()
 	}
-	if opt.readonlyBucket != (client.BucketID{}) {
-		lower, err = client.Dial(startup, opt.readonlyURI, opt.readonlyUsername, opt.readonlyPassword, opt.readonlyBucket, "fs")
+	if opt.readonlyBucket != "" {
+		lower, err = client.DialBucket(startup, opt.readonlyURI, opt.readonlyUsername, opt.readonlyPassword, opt.readonlyBucket, "fs")
 		if err != nil {
 			return fmt.Errorf("connect readonly: %w", err)
 		}
 		defer lower.Close()
+		lowerID = lower.BucketID()
+		if conn != nil && conn.BucketID() == lowerID {
+			return errors.New("upper and readonly buckets must be different")
+		}
 	}
 	if opt.fsck {
 		cancel() // Startup timeout must not limit a full bucket traversal.
 		var result client.FSCheckResult
 		if lower != nil {
 			if opt.whitelist != nil {
-				if _, err = client.OpenOverlayFilesystem(ctx, lower, conn, client.OverlayOptions{LowerBucketID: opt.readonlyBucket, Whitelist: opt.whitelist}); err != nil {
+				if _, err = client.OpenOverlayFilesystem(ctx, lower, conn, client.OverlayOptions{LowerBucketID: lowerID, Whitelist: opt.whitelist}); err != nil {
 					return err
 				}
 			}
-			result, err = conn.CheckOverlayFilesystem(ctx, lower, opt.readonlyBucket)
+			result, err = conn.CheckOverlayFilesystem(ctx, lower, lowerID)
 		} else {
 			result, err = conn.CheckFilesystem(ctx)
 		}
@@ -209,7 +225,7 @@ func run(ctx context.Context, opt options, out io.Writer) (resultErr error) {
 	}
 	var filesystem client.FilesystemView
 	if conn != nil && lower != nil {
-		filesystem, err = client.OpenOverlayFilesystem(startup, lowerStore, upperStore, client.OverlayOptions{Create: opt.create, LowerBucketID: opt.readonlyBucket, Whitelist: opt.whitelist})
+		filesystem, err = client.OpenOverlayFilesystem(startup, lowerStore, upperStore, client.OverlayOptions{Create: opt.create, LowerBucketID: lowerID, Whitelist: opt.whitelist})
 	} else {
 		store := upperStore
 		readonly := false
@@ -220,7 +236,7 @@ func run(ctx context.Context, opt options, out io.Writer) (resultErr error) {
 		filesystem, err = client.OpenFilesystem(startup, store, client.FSOptions{Create: opt.create, ReadOnly: readonly, UID: uint32(os.Getuid()), GID: uint32(os.Getgid())})
 	}
 	if err != nil {
-		return fmt.Errorf("open filesystem (use -init for a new root): %w", err)
+		return fmt.Errorf("open filesystem (use --init for a new root): %w", err)
 	}
 	if err = ctx.Err(); err != nil {
 		return err
@@ -255,15 +271,20 @@ func main() {
 		fmt.Fprintln(os.Stderr, "stqr-fuse:", err)
 		os.Exit(2)
 	}
-	if opt.passwordStdin {
-		line, e := bufio.NewReaderSize(io.LimitReader(os.Stdin, 4098), 4098).ReadString('\n')
-		if e != nil && !errors.Is(e, io.EOF) || len(line) > 4096 {
-			fmt.Fprintln(os.Stderr, "stqr-fuse: cannot read bounded password line")
-			os.Exit(2)
+	if opt.passwordFile != "" || opt.passwordStdin {
+		var source io.Reader = os.Stdin
+		if opt.passwordFile != "" {
+			f, e := os.Open(opt.passwordFile)
+			if e != nil {
+				fmt.Fprintln(os.Stderr, "stqr-fuse: cannot open password file:", e)
+				os.Exit(2)
+			}
+			defer f.Close()
+			source = f
 		}
-		opt.password = strings.TrimSuffix(strings.TrimSuffix(line, "\n"), "\r")
-		if opt.password == "" {
-			fmt.Fprintln(os.Stderr, "stqr-fuse: empty password")
+		opt.password, err = readPassword(source)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "stqr-fuse:", err)
 			os.Exit(2)
 		}
 		if opt.readonlyPassword == "" {
@@ -276,4 +297,18 @@ func main() {
 		fmt.Fprintln(os.Stderr, "stqr-fuse:", err)
 		os.Exit(1)
 	}
+}
+
+// Both credential sources use one bounded line and preserve password spaces.
+// Errors never include file contents or the supplied password.
+func readPassword(source io.Reader) (string, error) {
+	line, err := bufio.NewReaderSize(io.LimitReader(source, 4098), 4098).ReadString('\n')
+	if err != nil && !errors.Is(err, io.EOF) || len(line) > 4096 {
+		return "", errors.New("cannot read bounded password line")
+	}
+	password := strings.TrimSuffix(strings.TrimSuffix(line, "\n"), "\r")
+	if password == "" {
+		return "", errors.New("empty password")
+	}
+	return password, nil
 }

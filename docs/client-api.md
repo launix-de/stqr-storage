@@ -1,6 +1,7 @@
 # Bucket-bound object connection
 
-The network constructor always receives URL, username, password and a bucket ID:
+The network constructor receives URL, username, password and a bucket selector.
+Existing ID-based code uses `Dial`; names or hexadecimal IDs use `DialBucket`:
 
 ```go
 conn, err := client.Dial(ctx, nodeURL, username, password, bucketID, "fs")
@@ -13,12 +14,26 @@ info, err := conn.Put(ctx, objectID, payload, client.PutOptions{
 })
 ```
 
+```go
+conn, err := client.DialBucket(ctx, nodeURL, username, password, "photos", "fs")
+// conn.BucketID() is the canonical ID returned by the authenticated server.
+```
+
+At HTTP/WebSocket upgrade, `X-STQR-Bucket` accepts a name or a 32-digit
+hexadecimal ID. The server returns the canonical hexadecimal ID in that same
+response header. `name:` forces literal name lookup for hexadecimal-looking
+names. Names are case-sensitive. The selection is resolved once; object wire
+messages, placement routing and reconnects always use the stable ID. Renaming
+or reusing a name cannot retarget an existing client. ACLs, system-bucket
+protection, leases and format checks are identical for both selectors. This
+requires no new object opcode or format-aware server behavior.
+
 `Client` exposes only object operations inside that bucket: Get/GetRange,
 Put/PutRange, Append, Trunc, Delete, Stat, CAS, the necessary streaming variants,
 Space, Sync and Close. `Space(ctx)` reports bucket usage and remaining eligible
 cluster space, capped by a finite quota; [FUSE and kernel `df` reporting](space.md)
 use this same snapshot. Object IDs are native `[32]byte` addresses. No per-call bucket argument,
-Bucket(name), global multi-bucket handle, key-address alias API, administration
+per-operation Bucket(name), global multi-bucket handle, key-address alias API, administration
 or cluster metrics are offered. Another bucket requires another connection.
 The shared wire codec/statistics types remain in this package to avoid server /
 client import cycles; they do not add administrative methods to the connection.
@@ -35,24 +50,35 @@ The in-memory filesystem backend is an explicitly volatile development backend,
 not an unauthenticated network connection. Real network connections always require
 all constructor arguments.
 
+FUSE accepts names and IDs in `--bucket` and `--readonly-bucket`. Passwords can
+come from exactly one of `--password`, `--password-stdin` or
+`--password-file=PATH`. The latter two read one bounded line and remove an
+optional LF/CRLF terminator while preserving password spaces. Help/examples use
+GNU-style `--` long options; historical single-hyphen aliases remain compatible.
+
+```sh
+./stqr-fuse --uri http://localhost:7419 --username alice \
+  --bucket photos --password-file=/run/secrets/stqr-password /mnt/photos
+```
+
 Build the separate Linux FUSE client with:
 
 ```sh
 go build -o stqr-fuse ./cmd/stqr-fuse
 mkdir -p /mnt/stqr
-./stqr-fuse -uri http://localhost:7419 -username alice -password 'PASSWORD' \
-    -bucket 0123456789abcdef0123456789abcdef -init /mnt/stqr
+./stqr-fuse --uri http://localhost:7419 --username alice --password 'PASSWORD' \
+    --bucket 0123456789abcdef0123456789abcdef --init /mnt/stqr
 ```
 
 The bucket must already exist and grant the user the required object permissions.
-`-init` creates a missing filesystem root; it never reformats an existing root.
+`--init` creates a missing filesystem root; it never reformats an existing root.
 Omit it when opening an existing filesystem. A new root belongs to the mounting
 process's UID/GID and has mode 0755. Options precede the final mountpoint argument.
 The process runs in the foreground and handles SIGINT/SIGTERM by unmounting before
 closing its bucket connection. External `fusermount3 -u /mnt/stqr` also stops it.
 If signal-triggered unmount fails, the process keeps serving until an external
-unmount succeeds. `-connect-timeout` defaults to 30s and only bounds startup;
-`-debug` enables FUSE protocol logging. The adapter uses go-fuse's direct Linux
+unmount succeeds. `--connect-timeout` defaults to 30s and only bounds startup;
+`--debug` enables FUSE protocol logging. The adapter uses go-fuse's direct Linux
 kernel interface; it does not link to C libfuse. Linux FUSE support, `/dev/fuse`
 and an appropriate fusermount helper are required for an unprivileged mount.
 On such a host, `STQR_TEST_FUSE=1 go test ./client -run '^TestFilesystemKernelMount$' -v`
@@ -63,13 +89,13 @@ separately exercise the native network and persistent volume path.
 Unmount every client of a filesystem bucket before collecting unreachable objects:
 
 ```sh
-./stqr-fuse -uri http://localhost:7419 -username alice -password 'PASSWORD' \
-    -bucket 0123456789abcdef0123456789abcdef --fsck
+./stqr-fuse --uri http://localhost:7419 --username alice --password 'PASSWORD' \
+    --bucket 0123456789abcdef0123456789abcdef --fsck
 ```
 
 `--fsck` validates and cleans the bucket, prints counts and removed payload bytes,
 then exits without mounting. An optional final mountpoint argument is accepted but
-unused. It cannot be combined with `-init`, and requires read and delete grants.
+unused. It cannot be combined with `--init`, and requires read and delete grants.
 The bucket must be dedicated to this filesystem: every live object not reachable
 from its fixed root is a collection candidate, including unrelated application
 objects placed in the same bucket.
