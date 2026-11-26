@@ -28,7 +28,7 @@ public sealed partial class MainWindow : Window
         Title = "STQR · Laufwerke";
         ExtendsContentIntoTitleBar = true;
         SetTitleBar(TitleBar);
-        Drive.ItemsSource = Enumerable.Range('D', 23).Select(c => $"{(char)c}:").ToArray();
+        Drive.ItemsSource = Enumerable.Range('A', 26).Select(c => $"{(char)c}:").ToArray();
         Drive.SelectedItem = drive;
         Drive.SelectionChanged += async (_, _) => { if (!loading) await LoadDrive(); };
         Root.SizeChanged += (_, e) => Responsive(e.NewSize.Width);
@@ -88,7 +88,7 @@ public sealed partial class MainWindow : Window
     {
         var reply = await backend.Send(new Request("status"));
         loading = true;
-        SavedProfiles.ItemsSource = reply.Profiles ?? [];
+        SavedProfiles.ItemsSource = (reply.Profiles ?? []).OrderBy(p => p.Drive).ToArray();
         SavedProfiles.Visibility = reply.Profiles?.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
         loading = false;
         DriverNotice.IsOpen = !reply.WinFsp;
@@ -143,7 +143,7 @@ public sealed partial class MainWindow : Window
         return new MountConfig { URI = Server.Text.Trim(), Username = Username.Text.Trim(), Password = Password.Password,
             Bucket = Bucket.Text.Trim(), Drive = SelectedDrive, ReadOnly = ReadOnly.IsOn,
             LowerBucket = Overlay.IsOn ? LowerBucket.Text.Trim() : "",
-            Whitelist = Overlay.IsOn ? WritablePaths.Text.Split('\n', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries) : null,
+            Whitelist = Overlay.IsOn && !string.IsNullOrWhiteSpace(WritablePaths.Text) ? WritablePaths.Text.Split('\n', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries) : null,
             UID = ID(UID.Value), GID = ID(GID.Value) };
     }
     private async void ConnectClicked(object sender, RoutedEventArgs e)
