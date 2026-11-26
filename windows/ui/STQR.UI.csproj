@@ -13,6 +13,7 @@
     <PlatformTarget>x64</PlatformTarget>
     <EnableMsixTooling>true</EnableMsixTooling>
     <IncludeAllContentForSelfExtract>true</IncludeAllContentForSelfExtract>
+    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
     <PublishSingleFile>true</PublishSingleFile>
     <PublishTrimmed>false</PublishTrimmed>
     <Nullable>enable</Nullable>

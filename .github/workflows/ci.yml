@@ -195,11 +195,17 @@ jobs:
         shell: pwsh
         run: |
           $env:STQR_UI_SMOKE_DIR = (Resolve-Path bin).Path
-          Copy-Item bin/stqr-windows.exe bin/stqr-windows-installed.exe
-          Copy-Item bin/stqr-windows.ui.exe bin/stqr-windows-installed.ui.exe
+          $bundle = Join-Path $env:RUNNER_TEMP 'stqr-deployment-check'
+          New-Item -ItemType Directory -Force -Path $bundle | Out-Null
+          Copy-Item bin/stqr-windows.exe (Join-Path $bundle 'stqr-windows.exe')
+          Copy-Item bin/stqr-windows.ui.exe (Join-Path $bundle 'stqr-windows.ui.exe')
           foreach ($frontend in @('stqr-windows.ui.exe', 'stqr-windows-installed.ui.exe')) {
+            if ($frontend -eq 'stqr-windows-installed.ui.exe') {
+              Rename-Item (Join-Path $bundle 'stqr-windows.exe') 'stqr-windows-installed.exe'
+              Rename-Item (Join-Path $bundle 'stqr-windows.ui.exe') $frontend
+            }
             Remove-Item bin/winui-smoke.txt -ErrorAction SilentlyContinue
-            $ui = Start-Process (Join-Path bin $frontend) -ArgumentList '--smoke-test' -PassThru
+            $ui = Start-Process (Join-Path $bundle $frontend) -WorkingDirectory $bundle -ArgumentList '--smoke-test' -PassThru
             if (!$ui.WaitForExit(90000)) { $ui.Kill(); throw "WinUI smoke test timed out: $frontend" }
             if ($ui.ExitCode -ne 0) {
               if (Test-Path bin/winui-smoke-error.txt) { Get-Content bin/winui-smoke-error.txt }
