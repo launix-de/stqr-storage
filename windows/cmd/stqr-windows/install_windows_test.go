@@ -120,6 +120,9 @@ func TestInstallWinUIBundle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if filepath.Base(first) != "stqr-windows.exe" || filepath.Base(uiPath(first)) != "stqr-windows.ui.exe" {
+		t.Fatal("WinUI executable basename changed", first)
+	}
 	if raw, err := os.ReadFile(uiPath(first)); err != nil || string(raw) != "frontend-v1" {
 		t.Fatal("UI not installed", err)
 	}
@@ -132,6 +135,9 @@ func TestInstallWinUIBundle(t *testing.T) {
 	second, err := i.installExecutable(source)
 	if err != nil || second == first {
 		t.Fatal("UI update did not version the bundle", err)
+	}
+	if filepath.Base(first) != "stqr-windows.exe" || filepath.Base(uiPath(first)) != "stqr-windows.ui.exe" {
+		t.Fatal("WinUI executable basename changed", first)
 	}
 	if raw, err := os.ReadFile(uiPath(first)); err != nil || string(raw) != "frontend-v1" {
 		t.Fatal("running UI version was replaced", err)
