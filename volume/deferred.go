@@ -47,6 +47,21 @@ func (v *Volume) beginDeferred() error {
 			off = chosen
 			break
 		}
+		if errors.Is(err, ErrFull) && size <= 8*PageSize {
+			// Fixed operational scratch is never client capacity. It can buffer
+			// small accepted deletes/metadata even when no free extent remains.
+			scratch := allocation{4 * PageSize, scratchPages * PageSize, false}
+			blocked := false
+			if v.fence != nil {
+				for _, r := range v.fence.reserved {
+					blocked = blocked || overlap(scratch, r)
+				}
+			}
+			if !blocked {
+				off, size = scratch.off, scratch.n
+				break
+			}
+		}
 		if !errors.Is(err, ErrFull) || size <= 8*PageSize {
 			return err
 		}

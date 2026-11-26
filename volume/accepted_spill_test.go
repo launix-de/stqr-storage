@@ -545,3 +545,47 @@ func TestAcceptedSpillExternalMergePassesAreBounded(t *testing.T) {
 		t.Fatal("external merge changed memory/directory bound", count)
 	}
 }
+
+func TestAcceptedSpillFullVolumeDeleteUsesScratchWithoutSync(t *testing.T) {
+	d := newCrash(1 << 20)
+	v, err := Format(d, FormatOptions{Class: SSD})
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := testKey(1)
+	payload := bytes.Repeat([]byte("p"), (1<<20)-int(dataStart)-objectHeader-spanBytes-2*PageSize)
+	if _, err = testPut(v, key, payload, Options{}); err != nil {
+		t.Fatal(err)
+	}
+	if v.Header().FreeBytes >= deferredJournalBytes {
+		t.Fatal("fixture is not nearly full", v.Header().FreeBytes)
+	}
+	before := v.IOStats()
+	h, err := v.Open(true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = h.Delete(key, Options{Accepted: true})
+	h.Close()
+	if err != nil {
+		t.Fatal("full accepted delete should use fixed scratch", err)
+	}
+	if got := v.IOStats(); got.SyncOps != before.SyncOps || got.WriteOps != before.WriteOps {
+		t.Fatal("accepted delete synced/wrote backend", before, got)
+	}
+	old, err := Open(d.crash(), OpenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustGet(t, old, key, payload)
+	if err = v.Sync(); err != nil {
+		t.Fatal(err)
+	}
+	recovered, err := Open(d.crash(), OpenOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err = testGet(recovered, key); !errors.Is(err, ErrNotFound) {
+		t.Fatal(err)
+	}
+}
