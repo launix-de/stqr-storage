@@ -78,7 +78,7 @@ public sealed partial class MainWindow : Window
         StatusDetail.Text = pending ? "STQR öffnet das Dateisystem. Du kannst den Vorgang jederzeit trennen." : active ? "Deine Dateien stehen im Explorer bereit. Beim Trennen werden ausstehende Änderungen synchronisiert." : "Deine Dateien erscheinen als eigenes Laufwerk im Explorer.";
         Server.IsEnabled = Username.IsEnabled = Password.IsEnabled = Bucket.IsEnabled = !active && !pending;
         ReadOnly.IsEnabled = Remember.IsEnabled = Overlay.IsEnabled = UID.IsEnabled = GID.IsEnabled = !active && !pending;
-        OverlayFields.IsEnabled = !active && !pending;
+        LowerBucket.IsEnabled = WritablePaths.IsEnabled = !active && !pending;
         Drive.IsEnabled = SavedProfiles.IsEnabled = !pending && workerDrive is null;
     }
     private async Task RefreshProfiles()
