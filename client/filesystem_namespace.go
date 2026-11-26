@@ -97,7 +97,7 @@ const (
 )
 
 // RenameWithFlags supports POSIX replacement, NOREPLACE and EXCHANGE. Parent
-// changes and replacement-directory removal share one durable decision.
+// changes and replacement-directory removal share one visible decision.
 func (f *Filesystem) RenameWithFlags(ctx context.Context, parent ObjectID, name string, newParent ObjectID, newName string, flags uint32) error {
 	if f.readOnly {
 		return syscall.EROFS

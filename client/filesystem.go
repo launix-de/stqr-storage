@@ -11,7 +11,8 @@ import (
 )
 
 // FilesystemStore is the native object subset needed by the filesystem. Every
-// successful CAS must already meet the backend's durability contract. Immutable
+// successful CAS must meet the backend's visibility contract. Native filesystem
+// mutations are accepted in memory; explicit Sync requests persistence. Immutable
 // objects and mutable inode heads are both ordinary bucket objects.
 type FilesystemStore interface {
 	Get(context.Context, ObjectID) ([]byte, ObjectInfo, error)
@@ -21,7 +22,7 @@ type FilesystemStore interface {
 var _ FilesystemStore = (*Client)(nil)
 
 // Filesystem is a bucket-local filesystem with a fixed root inode. It has no
-// global writer lock: inode writes use CAS, namespace transactions use durable
+// global writer lock: inode writes use CAS, namespace transactions use visible
 // per-inode intents. Mutable data/index blocks keep their identities; replaced
 // blocks and intents are retired after publication on reference-capable stores.
 // Cooperative opens pin unlinked inodes until last close; crashed holders and
@@ -59,6 +60,7 @@ func OpenFilesystem(ctx context.Context, store FilesystemStore, opt FSOptions) (
 	if opt.Create && opt.ReadOnly {
 		return nil, syscall.EROFS
 	}
+	store = filesystemDeferredStore(store)
 	f := &Filesystem{directoryCache: newFilesystemDirectoryCache(), store: store, directoryMemoryLimit: limit, readOnly: opt.ReadOnly}
 	if raw, _, err := store.Get(ctx, FilesystemRootID()); err == nil && len(raw) >= 4 && string(raw[:4]) == "STOR" {
 		return nil, ErrOverlayNeedsLower

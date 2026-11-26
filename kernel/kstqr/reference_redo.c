@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
-/* A helper never removes inode markers while another helper may replay REDO. */
+/* A helper never removes inode markers while another helper may replay REDO.
+ * Intent/decision/head phase ordering uses accepted visibility completions;
+ * none of these normal client phases requests a physical checkpoint. */
 static int drop_pinned_intent(struct ks_fs *f, stqr_object_id id, struct buf *head,
 			      stqr_info *info, unsigned state)
 {

@@ -21,7 +21,13 @@ static int object_stat(struct ks_fs *f, stqr_object_id id, stqr_info *info)
 	struct ks_rpc *rpc = ks_rpc_lock(f, id);
 	int err;
 	for (;;) {
-		err = stqr_stat(rpc->client, id, info);
+		if (rpc->receive_started) {
+            struct ks_async_result result={0};init_completion(&result.done);
+            err=stqr_stat_async(rpc->client,id,ks_async_completed,&result);
+            mutex_unlock(&rpc->lock);
+            if(!err){wait_for_completion(&result.done);err=result.error;*info=result.info;}
+            sq_free(result.data);mutex_lock(&rpc->lock);
+        } else err = stqr_stat(rpc->client, id, info);
 		if (!ks_transport_retryable(rpc->client, err))
 			break;
 		err = ks_reconnect_wait(f, rpc->client);
@@ -182,23 +188,61 @@ static int redo_request(stqr_object_id tx, u64 index, stqr_id *rid)
 	drop(&b);
 	return err;
 }
+/* Only independent object edits form a no-ACK burst. Repeated edits of one
+ * object retain their explicit data dependency even though the wire transport
+ * is free to execute independent messages in any order. */
+struct ks_edit_key { struct hlist_node hash; stqr_object_id id; };
+static bool edits_independent(const struct buf *encoded,bool legacy)
+{
+ DECLARE_HASHTABLE(keys,6);
+ struct buf d=*encoded;
+ unsigned count=readnum(&d,4),i;
+ struct ks_edit_key *entries;
+ bool independent=true;
+ if(d.err||count>d.n/44)return false;
+ entries=kcalloc(count,sizeof(*entries),GFP_NOFS);
+ if(!entries)return false;
+ hash_init(keys);
+ for(i=0;i<count;i++) {
+  const u8 *id=take(&d,32);struct ks_edit_key *prior;size_t ignored;u32 key;
+  if(!id){independent=false;break;}
+  memcpy(entries[i].id.bytes,id,32);memcpy(&key,id,sizeof(key));
+  hash_for_each_possible(keys,prior,hash,key)if(eqid(prior->id,entries[i].id)){independent=false;break;}
+  if(!independent)break;
+  hash_add(keys,&entries[i].hash,key);
+  if(legacy)readnum(&d,8);
+  boolean(&d);boolean(&d);boolean(&d);readnum(&d,8);readblob(&d,&ignored);
+  if(!legacy)readblob(&d,&ignored);
+  if(d.err){independent=false;break;}
+ }
+ kfree(entries);return independent&&!done(&d);
+}
+struct ks_edit_completion {
+ struct ks_async_result result;
+ stqr_object_id id;
+ const void *data;
+ size_t size;
+ u64 offset;
+ bool full, submitted;
+};
 static int apply_edits(struct ks_fs *f, stqr_object_id tx, const struct buf *encoded, bool legacy,
 		       u64 *index)
 {
 	struct buf d = *encoded;
 	unsigned count = readnum(&d, 4), i;
+    bool independent=edits_independent(encoded,legacy);
 	int err = 0;
+    struct ks_edit_completion *results = independent ? kcalloc(count,sizeof(*results),GFP_NOFS) : NULL;
 	for (i = 0; i < count; i++) {
 		stqr_object_id id;
-		stqr_options opt = {0};
+		stqr_options opt = {.accepted=1};
 		stqr_info info;
 		struct ks_rpc *rpc;
 		const u8 *p = take(&d, 32), *data;
 		size_t n;
 		bool full, remove;
 		u64 off;
-		if (!p)
-			return -EUCLEAN;
+		if (!p) {err=-EUCLEAN;goto complete;}
 		memcpy(id.bytes, p, 32);
 		if (legacy)
 			readnum(&d, 8); /* obsolete counter: decode only */
@@ -211,17 +255,32 @@ static int apply_edits(struct ks_fs *f, stqr_object_id tx, const struct buf *enc
 			size_t ignored;
 			readblob(&d, &ignored);
 		}
-		if (d.err)
-			return -EUCLEAN;
+		if (d.err) {err=-EUCLEAN;goto complete;}
 		err = redo_request(tx, (*index)++, &opt.request_id);
-		if (err)
-			return err;
+		if (err)goto complete;
 		rpc = ks_rpc_lock(f, id);
 		ks_cache_forget(f, id);
+        /* Accepted replies establish visibility and expose operation errors;
+         * physical durability is requested only by the caller's sync. */
+        if(results && !remove &&
+           (stqr_capabilities(rpc->client)&STQR_CAP_CONNECTION_SYNC)) {
+            struct ks_edit_completion *job=&results[i];
+            init_completion(&job->result.done);job->id=id;job->data=data;job->size=n;
+            job->offset=off;job->full=full;
+            if(opt.absent&&full)
+                err=stqr_cas_async(rpc->client,id,1,0,NULL,0,data,n,&opt,ks_async_completed,&job->result);
+            else if(full)
+                err=stqr_put_result_async(rpc->client,id,data,n,&opt,ks_async_completed,&job->result);
+            else
+                err=stqr_put_range_result_async(rpc->client,id,off,data,n,&opt,ks_async_completed,&job->result);
+            mutex_unlock(&rpc->lock);
+            if(err)goto complete;
+            job->submitted=true;continue;
+        }
 		bool auth_retry = false;
 		for (;;) {
 			if (remove)
-				err = stqr_delete(rpc->client, id, &opt);
+				err = ks_delete_locked(rpc, id, &opt);
 			else if (full)
 				err = stqr_put(rpc->client, id, data, n, &opt, &info);
 			else
@@ -252,10 +311,26 @@ static int apply_edits(struct ks_fs *f, stqr_object_id tx, const struct buf *enc
 		ks_cache_forget(f, id);
 		if (remove && err == -ENOENT)
 			err = 0;
-		if (err)
-			return err;
+		if (err)goto complete;
 	}
-	return done(&d);
+    err=done(&d);
+complete:
+    if(results)for(unsigned j=0;j<count;j++)if(results[j].submitted) {
+        struct ks_edit_completion *job=&results[j];int result;
+        wait_for_completion(&job->result.done);result=job->result.error;
+        if(result==-EAGAIN && job->result.status==412 && f->references) {
+            void *observed=NULL;size_t size=0;stqr_info info;
+            int check=get_object(f,job->id,&observed,&size,&info);
+            result=-EIO;
+            if(!check && ((job->full&&size==job->size&&!memcmp(observed,job->data,size)) ||
+               (!job->full&&job->offset<=size&&job->size<=size-job->offset&&
+                !memcmp((u8 *)observed+job->offset,job->data,job->size))))result=0;
+            sq_free(observed);
+        }
+        sq_free(job->result.data);if(!err)err=result;
+    }
+    kfree(results);
+    return err;
 }
 static int intent_get(struct ks_fs *f, stqr_object_id id, struct buf *raw, struct buf *head,
 		      stqr_info *info)
@@ -380,7 +455,7 @@ static void intent_retire(struct ks_fs *f, stqr_object_id id, const struct buf *
 		if (stqr_request_id(&opt.request_id))
 			continue;
 		rpc = ks_rpc_lock(f, part);
-		stqr_delete(rpc->client, part, &opt);
+		ks_delete_locked(rpc, part, &opt);
 		mutex_unlock(&rpc->lock);
 	}
 }

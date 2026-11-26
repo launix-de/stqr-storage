@@ -53,7 +53,22 @@ static void verify(int fd,const char *expected,size_t size) {
 static void benchmark(void) {
     const size_t length=1U<<20; char *source=malloc(length); CHECK(source); memset(source,'D',length);
     for(int rep=0;rep<3;rep++) {
-        int fd=newfile("direct",rep,0); struct counters c=counters(); double start=now();
+        /* Normal create/write/read/close/reopen is a visibility workload. Keep
+         * its physical Sync delta separate from the subsequent explicit fsync. */
+        struct counters c=counters();double start=now();
+        int fd=newfile("unsynced",rep,0);
+        for(unsigned n=0;n<32;n++) {
+            memset(source+n*4096,'a'+n%26,4096);
+            CHECK(write(fd,source+n*4096,4096)==4096);
+        }
+        verify(fd,source,32*4096);CHECK(!close(fd));
+        char unsynced[128];snprintf(unsynced,sizeof(unsynced),"/mnt/wb-unsynced-%d",rep);
+        fd=open(unsynced,O_RDWR);CHECK(fd>=0);verify(fd,source,32*4096);
+        report("small_write_no_fsync",rep,start,32.0*4096/(1U<<20),"MiB/s",c);
+        c=counters();start=now();CHECK(!fsync(fd));
+        report("small_write_explicit_fsync",rep,start,1,"fences/s",c);CHECK(!close(fd));
+        memset(source,'D',length);
+        fd=newfile("direct",rep,0); c=counters(); start=now();
         for(int n=0;n<8;n++)CHECK(write(fd,source,length)==(ssize_t)length);
         CHECK(!fsync(fd)); report("direct_write_fsync",rep,start,8,"MiB/s",c); CHECK(!close(fd));
         fd=newfile("dense",rep,length); char *p=mmap(NULL,length,PROT_READ|PROT_WRITE,MAP_SHARED,fd,0); CHECK(p!=MAP_FAILED);

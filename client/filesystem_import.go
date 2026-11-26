@@ -41,6 +41,7 @@ type importInode struct {
 // extracted through host symlinks. Failed imports leave unreachable objects for
 // collection; callers should import into a fresh release bucket.
 func ImportFilesystemTar(ctx context.Context, store FilesystemStore, source io.Reader) (result error) {
+	store = filesystemDeferredStore(store)
 	if _, _, err := store.Get(ctx, FilesystemRootID()); !errors.Is(err, ErrNotFound) {
 		if err == nil {
 			return syscall.EEXIST
@@ -407,17 +408,8 @@ send:
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	syncStore, canSync := store.(interface{ Sync(context.Context) error })
-	if canSync {
-		if err := syncStore.Sync(ctx); err != nil {
-			return err
-		}
-	}
 	if _, err := store.CAS(ctx, root.id, 0, nil, encodeFSNode(root.node), CASOptions{Scope: CASObject, MutationOptions: MutationOptions{Absent: true, RequestID: NewRequestID()}}); err != nil {
 		return err
-	}
-	if canSync {
-		return syncStore.Sync(ctx)
 	}
 	return nil
 }

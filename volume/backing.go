@@ -16,7 +16,17 @@ func (v *Volume) EnsurePhysicalBacking() error {
 		return err
 	}
 	if f, ok := v.dev.(*FileIO); ok {
-		return ensureFileBacking(f.file, int64(v.sb.Identity.Size))
+		if err := v.flushDeferred(); err != nil {
+			return err
+		}
+		var backingErr error
+		if err := v.checkpointIO(func(ioView *Volume) error {
+			backingErr = ensureFileBacking(f.file, int64(ioView.sb.Identity.Size))
+			return nil
+		}); err != nil {
+			return err
+		}
+		return backingErr
 	}
 	return nil
 }

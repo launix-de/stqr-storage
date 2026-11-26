@@ -66,14 +66,20 @@ single-owner bucket that spans several local volumes can retain that exact
 unpinned map as its seed. Its optional alternatives account for each retained
 cohort part; a split does not become a mandatory move or consolidation.
 
-The immutable map now indexes bucket spans and primary counts, so PG workers
-do not repeatedly scan unrelated ranges. Metadata-only size measurements are
-cached for 30 seconds; at most eight healthy ranges are refreshed in a changing
-window per build: four oldest hot measurements take priority, and the remaining
-slots explore cold ranges. Required measurements bypass that sampling limit. Cost
-measurement, greedy initialization and final map materialization are outside
-the improvement deadline and measured separately. Every executed handoff still
-remeasures/reserves its actual cost.
+The immutable map indexes bucket spans and primary counts, so PG workers do not
+repeatedly scan unrelated ranges. Scoring reads maintained, immutable RAM
+accounting images and per-range traffic counters only. No object, receipt or
+replica census is allowed on a periodic tick, cache expiry, missing measurement,
+invalid placement or policy change. There is no timed metadata-refresh window.
+Unknown accounting stays unknown. Known bucket/volume physical totals include
+metadata and receipts and change as storage operations commit. Whole-bucket
+estimates retain these totals directly; after splitting, byte estimates are
+apportioned by hash width normalized to the ranges held on each source volume.
+Such child estimates are explicitly provisional: skew and compression changes
+are not inferred from hash width. They never grant space or quota authority.
+Only a selected concrete map difference enters exact inventory/reservation;
+execution rechecks real capacity and quota before activation. Cost estimation,
+greedy initialization and final map materialization are measured separately.
 
 Actual range read/write bytes are collected for successful frontend operations,
 including ranged/streamed reads and APPEND. They use the existing RangeStats wire

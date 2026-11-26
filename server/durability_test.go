@@ -238,6 +238,11 @@ func TestAcceptedCrossOwnerSubscriptionDependency(t *testing.T) {
 	}
 	source.node.mu.RUnlock()
 	generation := origin.Header().Generation
+	// Explicit dependency publication: a connection/owner change itself must
+	// no longer force a checkpoint on the format-agnostic transport.
+	if err = observer.Sync(ctx); err != nil {
+		t.Fatal(err)
+	}
 	if _, err = observer.Put(ctx, second, []byte("reference to accepted dependency"), client.PutOptions{Accepted: true}); err != nil {
 		t.Fatal(err)
 	}

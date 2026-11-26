@@ -31,8 +31,7 @@ func Open(ctx context.Context, url, username, password string, id client.BucketI
 	}
 	return &Bucket{Catalog: catalog, Client: c, ReadOnly: readonly}, nil
 }
-func (b *Bucket) Close() error {
-	err := b.Client.Sync(context.Background())
-	b.Client.Close()
-	return err
-}
+
+// Close releases the connection without a durability fence. Call Sync for
+// explicit FLUSH/FUA semantics before closing when durability is required.
+func (b *Bucket) Close() error { return b.Client.Close() }

@@ -265,39 +265,6 @@ func TestPlacementImproveRandomHardConstraints(t *testing.T) {
 	}
 }
 
-func TestPlacementImproveHotSampling(t *testing.T) {
-	r := &rangeManager{}
-	shapes := make([]placementShape, 20)
-	work := make([]placementWorkload, len(shapes))
-	for i := range shapes {
-		shapes[i] = placementShape{bucket: client.ID{byte(i + 1)}, bits: 0}
-		if i < 10 {
-			key := rangeMetricKey{shapes[i].bucket, shapes[i].start, shapes[i].bits}
-			r.metrics.Store(key, &rangeMetric{sampled: time.Now(), readRate: 100})
-			at := time.Unix(int64(100+i), 0)
-			if i == 0 {
-				at = time.Now()
-			}
-			r.measurements.Store(key, placementMeasurement{at: at})
-		}
-	}
-	selected := r.placementSamples(shapes, work, 17)
-	count := 0
-	for _, yes := range selected {
-		if yes {
-			count++
-		}
-	}
-	if count != 8 {
-		t.Fatal("measurement budget", count)
-	}
-	for _, i := range []int{1, 2, 3, 4} {
-		if !selected[i] {
-			t.Fatal("old hot range lost behind cold exploration", i, selected)
-		}
-	}
-}
-
 func BenchmarkPlacementRangeTraffic(b *testing.B) {
 	s := &Server{}
 	r := &rangeManager{server: s, node: client.ID{1}}

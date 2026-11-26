@@ -19,9 +19,9 @@ func newFSID() ObjectID {
 }
 
 // putImmutable allocates an identity for a genuinely new object or transient
-// redo chunk. Publish its bytes durably before another object can reference it.
+// redo chunk. Make its bytes visible before another object can reference it.
 func (f *Filesystem) putImmutable(ctx context.Context, data []byte) (ObjectID, error) {
-	ctx = context.WithValue(ctx, fsDurableKey{}, true)
+	ctx = context.WithValue(ctx, fsFreshReadKey{}, true)
 	if f.readOnly {
 		return ObjectID{}, syscall.EROFS
 	}

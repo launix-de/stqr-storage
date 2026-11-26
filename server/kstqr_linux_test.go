@@ -514,6 +514,7 @@ export PATH=/bin
 /bin/busybox --install -s /bin
 trap 'echo KSTQR_VM_FAIL; poweroff -f' EXIT
 mount -t proc proc /proc
+echo 30 > /proc/sys/kernel/hung_task_timeout_secs
 mount -t sysfs sys /sys
 mount -t devtmpfs dev /dev
 ip link set lo up
@@ -553,10 +554,10 @@ echo KSTQR_SANDBOX_BEGIN
 /sandbox @@URL@@ @@BUCKET@@
 echo KSTQR_SANDBOX_END
 cat /proc/self/mountstats
+ls -l /mnt
 echo KSTQR_CRASH_RECONNECT_BEGIN
 /crash-reconnect @@URL@@
 echo KSTQR_CRASH_RECONNECT_END
-ls -l /mnt
 if grep 'password=' /proc/mounts; then exit 1; fi
 umount /readonly
 umount /other
@@ -578,7 +579,7 @@ poweroff -f
 		begin := strings.Index(init, "for attempt in 1 2 3 4; do")
 		end := strings.Index(init, "if dmesg |")
 		script := `/mount.kstqr --uri ` + endpoint + ` --bucket ` + client.ID(b.ID()).String() + ` --credentials /readonly-credentials --readonly /readonly
-/throughput
+/throughput ` + endpoint + `
 cat /proc/self/mountstats
 umount /readonly
 rmmod kstqr
@@ -591,6 +592,19 @@ umount /mnt
 rmmod kstqr
 `
 		}
+		init = init[:begin] + script + init[end:]
+	}
+
+	if os.Getenv("STQR_KERNEL_RESTART_ONLY") == "1" {
+		begin := strings.Index(init, "for attempt in 1 2 3 4; do")
+		end := strings.Index(init, "if dmesg |")
+		script := `/mount.kstqr --uri ` + endpoint + ` --bucket ` + client.ID(b.ID()).String() + ` --credentials /credentials /mnt
+/mount.kstqr --uri ` + endpoint + ` --bucket ` + client.ID(b.ID()).String() + ` --credentials /readonly-credentials --readonly /readonly
+/crash-reconnect ` + endpoint + `
+umount /readonly
+umount /mnt
+rmmod kstqr
+`
 		init = init[:begin] + script + init[end:]
 	}
 
@@ -689,6 +703,7 @@ export PATH=/bin
 /bin/busybox --install -s /bin
 trap 'echo KSTQR_VM_FAIL; poweroff -f' EXIT
 mount -t proc proc /proc
+echo 30 > /proc/sys/kernel/hung_task_timeout_secs
 mount -t sysfs sys /sys
 mount -t devtmpfs dev /dev
 ip link set lo up
@@ -827,6 +842,7 @@ export PATH=/bin
 /bin/busybox --install -s /bin
 trap 'echo KSTQR_VM_FAIL; poweroff -f' EXIT
 mount -t proc proc /proc
+echo 30 > /proc/sys/kernel/hung_task_timeout_secs
 mount -t sysfs sys /sys
 mount -t devtmpfs dev /dev
 ip link set lo up
@@ -874,6 +890,7 @@ export PATH=/bin
 /bin/busybox --install -s /bin
 trap 'echo KSTQR_VM_FAIL; poweroff -f' EXIT
 mount -t proc proc /proc
+echo 30 > /proc/sys/kernel/hung_task_timeout_secs
 mount -t sysfs sys /sys
 mount -t devtmpfs dev /dev
 ip link set lo up
@@ -935,6 +952,13 @@ poweroff -f
 	}
 	if err != nil || !strings.Contains(string(output), "KSTQR_VM_PASS") || strings.Contains(string(output), "KSTQR_VM_FAIL") {
 		t.Fatalf("kernel VM: %v\n%s", err, output)
+	}
+	if os.Getenv("STQR_KERNEL_RESTART_ONLY") == "1" {
+		if !strings.Contains(string(output), "KSTQR_CRASH_RECONNECT_PASS") {
+			t.Fatal("targeted restart regression did not complete")
+		}
+		t.Log("Readonly reopen and fresh accepted writes survive restart; lost prefixes remain unconfirmed")
+		return
 	}
 	if os.Getenv("STQR_KERNEL_OVERLAY") == "1" {
 		uc, e := client.Dial(ctx, host.URL, admin.Username, admin.Password, nativeUpperID, "fs")
