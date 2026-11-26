@@ -30,8 +30,8 @@ func TestRangePUTKeepsRawAllocationAndBoundsIO(t *testing.T) {
 	if after.WriteBytes-before.WriteBytes > 20*PageSize {
 		t.Fatal("ranged PUT wrote untouched payload", after.WriteBytes-before.WriteBytes)
 	}
-	if after.ReadBytes-before.ReadBytes > BlockSize+20*PageSize {
-		t.Fatal("ranged PUT read unrelated checksum blocks", after.ReadBytes-before.ReadBytes)
+	if testReadWorkBytes(after)-testReadWorkBytes(before) > BlockSize+20*PageSize {
+		t.Fatal("ranged PUT read unrelated checksum blocks", testReadWorkBytes(after)-testReadWorkBytes(before))
 	}
 	copy(payload[BlockSize+17:], update)
 	mustGet(t, reopen(t, v, d), key, payload)

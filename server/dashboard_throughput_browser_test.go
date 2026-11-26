@@ -33,6 +33,17 @@ func TestDashboardThroughputBrowser(t *testing.T) {
 	if _, err := b.Put(ctx, actor, id, make([]byte, 4096), volume.Options{RequestID: volume.ID(client.NewRequestID())}); err != nil {
 		t.Fatal(err)
 	}
+	// mmap views are real payload reads but are not positioned backend I/O.
+	// Assert both families here; the browser must not demand a fabricated
+	// nonzero physical-read rate merely because the logical payload is read.
+	before := v.IOStats()
+	if _, _, err := b.GetRange(ctx, actor, id, 0, 4096); err != nil {
+		t.Fatal(err)
+	}
+	after := v.IOStats()
+	if after.ViewReadOps <= before.ViewReadOps || after.ViewReadBytes <= before.ViewReadBytes || after.ReadOps != before.ReadOps || after.ReadBytes != before.ReadBytes {
+		t.Fatal("mapped payload read was not separated from positioned I/O", before, after)
+	}
 	done := make(chan struct{})
 	go func() {
 		defer close(done)

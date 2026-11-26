@@ -126,7 +126,7 @@ func (v *Volume) node(off uint64) (treeNode, error) {
 	if n, ok := v.nodes.get(off); ok {
 		return n, nil
 	}
-	b, e := v.readPage(off)
+	b, e := v.readOnlyPage(off)
 	if e != nil {
 		return treeNode{}, e
 	}
@@ -441,10 +441,10 @@ func treeWalk(read func(uint64) (treeNode, error), root uint64, fn func(treeEntr
 	return nil
 }
 func (v *Volume) lookup(key indexKey) (uint64, error) {
-	return treeLookup(v.node, v.sb.ObjectRoot, key)
+	return v.lookupView(key)
 }
 func (v *Volume) walkIndex(fn func(indexEntry) error) error {
-	return treeWalk(v.node, v.sb.ObjectRoot, func(e treeEntry) error { return fn(indexEntry{e.key, e.value}) })
+	return v.walkIndexView(nil, nil, fn)
 }
 
 // neighbor descends only the search path (and, at a boundary, its neighboring
@@ -499,7 +499,7 @@ func treeNeighbor(read func(uint64) (treeNode, error), root uint64, key indexKey
 // migration/cleanup must not rescan every preceding object or another bucket
 // on every page. Bounds are inclusive lower / exclusive upper.
 func (v *Volume) walkIndexBounds(lower, upper indexKey, fn func(indexEntry) error) error {
-	return treeWalkBounds(v.node, v.sb.ObjectRoot, lower, upper, 0, func(e treeEntry) error { return fn(indexEntry{e.key, e.value}) })
+	return v.walkIndexView(&lower, &upper, fn)
 }
 func treeWalkBounds(read func(uint64) (treeNode, error), root uint64, lower, upper indexKey, depth int, fn func(treeEntry) error) error {
 	n, err := read(root)

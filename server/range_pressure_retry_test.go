@@ -31,13 +31,13 @@ func TestCapacityRetriesDoNotRescanPendingOrActiveHandoff(t *testing.T) {
 	}
 	check := func(name string) {
 		t.Helper()
-		before := src.IOStats().ReadBytes
+		before := testStorageReadBytes(src.IOStats())
 		for i := 0; i < 100; i++ {
 			if !r.requestSpace(b.ID(), id, 64<<10, src.Identity().VolumeID) {
 				t.Fatal(name, "lost pending wait")
 			}
 		}
-		if reads := src.IOStats().ReadBytes - before; reads != 0 {
+		if reads := testStorageReadBytes(src.IOStats()) - before; reads != 0 {
 			t.Errorf("%s retries reread %d index bytes", name, reads)
 		}
 	}

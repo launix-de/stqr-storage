@@ -188,9 +188,11 @@ jobs:
         env:
           STQR_TEST_WINFSP: '1'
         run: go test . -run '^TestWindowsMounted(Filesystem|NativeOverlay)$' -count=1 -v -timeout=3m
-      - name: Publish self-contained WinUI application and Go backend
+      - name: Publish one self-contained Windows executable
         shell: pwsh
         run: ./build.ps1
+      - name: Embedded UI cache and installation checks
+        run: go test -tags embedded_ui ./cmd/stqr-windows -count=1 -v -timeout=3m
       - name: Native WinUI startup, validation and responsive layout
         shell: pwsh
         run: |
@@ -198,13 +200,17 @@ jobs:
           $bundle = Join-Path $env:RUNNER_TEMP 'stqr-deployment-check'
           New-Item -ItemType Directory -Force -Path $bundle | Out-Null
           Copy-Item bin/stqr-windows.exe (Join-Path $bundle 'stqr-windows.exe')
-          Copy-Item bin/stqr-windows.ui.exe (Join-Path $bundle 'stqr-windows.ui.exe')
+          $cache = Join-Path $env:LOCALAPPDATA 'STQR/runtime'
+          $hadCache = Test-Path $cache
+          $headless = Start-Process (Join-Path $bundle 'stqr-windows.exe') -ArgumentList '-h' -PassThru
+          if (!$headless.WaitForExit(15000) -or $headless.ExitCode -ne 0) { throw 'Headless CLI failed' }
+          if (!$hadCache -and (Test-Path $cache)) { throw 'Headless invocation unpacked the UI' }
           $installed = Join-Path $bundle 'versioned-installation'
           New-Item -ItemType Directory -Force -Path $installed | Out-Null
           Copy-Item (Join-Path $bundle '*.exe') $installed
           foreach ($directory in @($bundle, $installed)) {
             Remove-Item bin/winui-smoke.txt -ErrorAction SilentlyContinue
-            $ui = Start-Process (Join-Path $directory stqr-windows.ui.exe) -WorkingDirectory $directory -ArgumentList '--smoke-test' -PassThru
+            $ui = Start-Process (Join-Path $directory stqr-windows.exe) -WorkingDirectory $directory -ArgumentList '--ui-smoke-test' -PassThru
             if (!$ui.WaitForExit(90000)) { $ui.Kill(); throw "WinUI smoke test timed out: $directory" }
             if ($ui.ExitCode -ne 0) {
               if (Test-Path bin/winui-smoke-error.txt) { Get-Content bin/winui-smoke-error.txt }
@@ -213,14 +219,13 @@ jobs:
             if (!(Test-Path bin/winui-smoke.txt)) { throw "Missing WinUI smoke evidence: $directory" }
             Get-Content bin/winui-smoke.txt
           }
-      - name: Retain the complete Windows bundle and actual UI screenshot
+      - name: Retain the single Windows executable and actual UI screenshot
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: windows-winui
           path: |
             windows/bin/stqr-windows.exe
-            windows/bin/stqr-windows.ui.exe
             windows/bin/stqr-winui.png
             windows/bin/winui-smoke.txt
             windows/bin/winui-smoke-error.txt

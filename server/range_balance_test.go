@@ -49,7 +49,7 @@ func TestLazyHealthyPlacementDoesNotMoveOrReadPayload(t *testing.T) {
 		t.Fatal("healthy placement scheduled a move", p)
 	}
 	after := src.IOStats()
-	if after.ReadBytes != before.ReadBytes || after.WriteBytes != before.WriteBytes {
+	if testStorageReadBytes(after) != testStorageReadBytes(before) || after.WriteBytes != before.WriteBytes {
 		t.Fatal("idle planner accessed volume data", before, after)
 	}
 }

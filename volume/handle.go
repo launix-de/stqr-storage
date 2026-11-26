@@ -49,6 +49,9 @@ type handleLease struct {
 // callers do not need to retry transient internal admission contention.
 // The returned handle is the only supported way to compose locked operations.
 func (v *Volume) Open(write bool) (*Handle, error) {
+	if write && !v.AccountingReady() {
+		return nil, ErrAccountingNotReady
+	}
 	if write {
 		v.mu.Lock()
 		// Blocking admission waits for exclusive allocator maintenance/private
@@ -68,6 +71,9 @@ func (v *Volume) Open(write bool) (*Handle, error) {
 // TryOpen is for idle maintenance: busy volumes are skipped instead of queuing
 // a background writer ahead of foreground requests. acquired=false is not an error.
 func (v *Volume) TryOpen(write bool) (h *Handle, acquired bool, err error) {
+	if write && !v.AccountingReady() {
+		return nil, false, ErrAccountingNotReady
+	}
 	if write {
 		acquired = v.mu.TryLock()
 	} else {
@@ -199,8 +205,8 @@ func (h *Handle) AllocatedPhysical(k Key) (uint64, error) {
 
 // CopyTo streams a range to dst under the existing lock, clipping at EOF.
 // It never closes the handle. Both metadata and any further CopyTo calls remain
-// protected until Close. This writer API allows future direct-transfer paths;
-// the current engine reads/checks/decompresses bounded blocks.
+// protected until Close. RAW mapped spans are checked and passed directly to
+// dst; compressed spans and fallback backends use bounded decoded buffers.
 func (h *Handle) CopyTo(k Key, offset, length uint64, dst io.Writer) (uint64, error) {
 	return withHandle(h, false, func(v *Volume) (uint64, error) {
 		return v.copyToLocked(k, offset, length, dst)

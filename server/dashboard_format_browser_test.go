@@ -17,7 +17,7 @@ func TestDashboardBucketFormatBrowser(t *testing.T) {
 		t.Skip("set STQR_TEST_BROWSER_MODULE for Playwright")
 	}
 	s := testServer(t)
-	ids := map[string]string{}
+	ids := map[string]string{"system": systemBucket.String()}
 	for _, format := range []string{"fs", "s3", "bd", "memcp", ""} {
 		name := "format-" + format
 		if format == "" {
