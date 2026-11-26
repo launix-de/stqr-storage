@@ -63,6 +63,7 @@ public sealed partial class MainWindow : Window
     }
     private void Responsive(double width)
     {
+        Body.Width = Math.Max(0, Math.Min(940, width - 64));
         bool narrow = width < 850;
         ContentGrid.ColumnSpacing = narrow ? 0 : 24;
         Grid.SetRow(Forget, width < 650 ? 1 : 0);
@@ -287,7 +288,7 @@ public sealed partial class MainWindow : Window
         AppWindow.Resize(new SizeInt32(700, 800)); await Task.Delay(600);
         if (Grid.GetRow(Aside) != 1) throw new Exception("Compact layout failed");
         AppWindow.Resize(new SizeInt32(1060, 940)); await Task.Delay(800);
-        if (Grid.GetColumn(Aside) != 1 || ConnectButton.ActualWidth < 100) throw new Exception("Wide layout failed");
+        if (Grid.GetColumn(Aside) != 1 || ConnectButton.ActualWidth < 100 || Body.ActualWidth > Root.ActualWidth - 63) throw new Exception("Wide layout failed");
         var directory = Environment.GetEnvironmentVariable("STQR_UI_SMOKE_DIR") ?? Path.GetTempPath();
         var folder = await StorageFolder.GetFolderFromPathAsync(Path.GetFullPath(directory));
         var bitmap = new RenderTargetBitmap(); await bitmap.RenderAsync(Root);

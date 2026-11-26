@@ -2,8 +2,8 @@
  <Grid x:Name="Root" Background="{ThemeResource ApplicationPageBackgroundThemeBrush}">
   <Grid.RowDefinitions><RowDefinition Height="48"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
   <Grid x:Name="TitleBar" Margin="24,0,160,0"><StackPanel Orientation="Horizontal" Spacing="10" VerticalAlignment="Center"><FontIcon Glyph="&#xE8B7;" FontSize="18" Foreground="#008B82"/><TextBlock Text="STQR" FontWeight="SemiBold" CharacterSpacing="180"/></StackPanel></Grid>
-  <ScrollViewer Grid.Row="1" HorizontalScrollBarVisibility="Disabled" Padding="32,16,32,24">
-   <StackPanel MaxWidth="940" HorizontalAlignment="Stretch" Spacing="24">
+  <ScrollViewer Grid.Row="1" HorizontalScrollBarVisibility="Disabled" HorizontalContentAlignment="Stretch" Padding="32,16,32,24">
+   <StackPanel x:Name="Body" MaxWidth="940" HorizontalAlignment="Center" Spacing="24">
     <StackPanel Spacing="8"><TextBlock Text="Dein Speicher. Dein Laufwerk." Style="{ThemeResource TitleTextBlockStyle}" TextWrapping="Wrap"/><TextBlock Text="Verbinde STQR mit deinem Windows-Explorer." Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap"/></StackPanel>
     <InfoBar x:Name="Notice" IsOpen="False" IsClosable="True"/>
     <Grid ColumnSpacing="24" x:Name="ContentGrid">
