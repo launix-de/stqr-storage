@@ -123,6 +123,9 @@ func TestAcceptedPhysicalAdmissionAndReconstruction(t *testing.T) {
 	if err != nil || !reflect.DeepEqual(before, after) {
 		t.Fatalf("rejected accepted write changed accounting: %+v -> %+v %v", before, after, err)
 	}
+	if err = v.Sync(); err != nil {
+		t.Fatal(err)
+	} // reconstruction requires an explicit persistence request
 	v = reopen(t, v, disk)
 	if err := v.SetAdmission(admission); err != nil {
 		t.Fatal(err)

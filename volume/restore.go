@@ -55,7 +55,7 @@ func (v *Volume) restoreLocked(k Key, info Info, source ExtentSource, opts Optio
 	// never sparse zero ranges, then allocate its final packed region exactly once.
 	var spool *encodedSpool
 	if !replayable {
-		spool = &encodedSpool{noSpill: v.sb.Identity.Class == RAM}
+		spool = &encodedSpool{noSpill: v.sb.Identity.Class == RAM || v.sb.Identity.Class == RAMCache}
 		defer spool.Close()
 	}
 	h := fingerprint(opSnapshot, k, 0, info.Length, opts, nil)
