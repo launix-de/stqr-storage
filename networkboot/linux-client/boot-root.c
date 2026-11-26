@@ -40,14 +40,19 @@ static int hex(const char *p, size_t n) {
   return 1;
 }
 static void mounted(const char *uri, const char *upper, const char *lower,
-                    int lifetime, const char *target) {
+                    int lifetime, const char *target, int edit) {
   char life[32];
   snprintf(life, sizeof life, "%d", lifetime);
   pid_t child = fork();
   if (child < 0)
     fail("fork");
   if (!child) {
-    execl("/bin/mount.kstqr", "mount.kstqr", "--uri", uri, "--bucket", upper,
+    if (edit)
+      execl("/bin/mount.kstqr", "mount.kstqr", "--uri", uri, "--bucket", upper,
+            "--credentials", "/run/stqr/credentials", "--boot-lifetime-fd", life,
+            target, NULL);
+    else
+      execl("/bin/mount.kstqr", "mount.kstqr", "--uri", uri, "--bucket", upper,
           "--readonly-bucket", lower, "--credentials", "/run/stqr/credentials",
           "--boot-lifetime-fd", life, target, NULL);
     fail("mount.kstqr");
@@ -59,7 +64,7 @@ static void mounted(const char *uri, const char *upper, const char *lower,
   if (!WIFEXITED(status) || WEXITSTATUS(status)) {
     unlink("/run/stqr/credentials");
     errno = EIO;
-    fail("kstqr native overlay mount");
+    fail("kstqr native root mount");
   }
 }
 
@@ -135,7 +140,7 @@ int main(int argc, char **argv) {
   }
   body[used] = 0;
   char *cursor = body, *line = strsep(&cursor, "\n"), *uri = NULL, *user = NULL,
-       *pass = NULL, *lower = NULL, *upper = NULL;
+       *pass = NULL, *lower = NULL, *upper = NULL, *mode = "overlay";
   if (!line || strcmp(line, "STQR-BOOT-1")) {
     errno = EPROTO;
     fail("claim format");
@@ -157,11 +162,18 @@ int main(int argc, char **argv) {
       lower = value;
     else if (!strcmp(line, "upper"))
       upper = value;
+    else if (!strcmp(line, "mode"))
+      mode = value;
   }
   if (!uri || strncmp(uri, "http://", 7) || !user || !*user || !pass ||
       !*pass || !lower || !hex(lower, 32) || !upper || !hex(upper, 32)) {
     errno = EPROTO;
     fail("claim credentials");
+  }
+  int edit = !strcmp(mode, "edit");
+  if ((!edit && strcmp(mode, "overlay")) || (!strcmp(upper, lower)) != edit) {
+    errno = EPROTO;
+    fail("claim mount mode");
   }
   mkdir("/run/stqr", 0700);
   int cred = open("/run/stqr/credentials",
@@ -171,7 +183,7 @@ int main(int argc, char **argv) {
   if (dprintf(cred, "username=%s\npassword=%s\n", user, pass) < 0)
     fail("credentials write");
   close(cred);
-  mounted(uri, upper, lower, fd, argv[4]);
+  mounted(uri, upper, lower, fd, argv[4], edit);
   unlink("/run/stqr/credentials");
   explicit_bzero(body, sizeof body);
   close(fd);

@@ -33,11 +33,15 @@ func (s *Server) installSystemView(view *systemView) error {
 	if err := decodeControlRecord(view.accounts, &next); err != nil {
 		return err
 	}
+	accounts, err := newAccountsIndex(next)
+	if err != nil {
+		return err
+	}
 	list := make([]byte, 0, len(view.manifest.Buckets)*32)
 	for _, id := range view.manifest.Buckets {
 		list = append(list, id[:]...)
 	}
-	if err := s.metadataWrite(func(h *volume.Handle) error {
+	if err := s.metadataWriteAndPublish(func(h *volume.Handle) error {
 		for _, item := range []struct {
 			key  volume.Key
 			data []byte
@@ -47,7 +51,7 @@ func (s *Server) installSystemView(view *systemView) error {
 			}
 		}
 		return nil
-	}); err != nil {
+	}, func() { s.accounts.Store(accounts) }); err != nil {
 		return err
 	}
 	s.placementGroups.Store(view.groupImage)
@@ -64,7 +68,7 @@ func (s *Server) installSystemView(view *systemView) error {
 			s.bucketsByID[id] = b
 		}
 		b.mu.Lock()
-		b.description = cloneBucketDescription(d)
+		b.setDescription(d)
 		b.mu.Unlock()
 		if !d.DeletionComplete {
 			names[d.Name] = b
@@ -130,7 +134,7 @@ func (s *Server) installSystemView(view *systemView) error {
 	// Restoring a global checkpoint must never roll it backwards.
 	s.cfg.Generation = max(s.cfg.Generation, view.manifest.Generation)
 	s.cfg.BucketCatalogVersion, s.cfg.PlacementGroupsVersion = 1, 1
-	err := saveConfig(s.configPath, s.cfg)
+	err = saveConfig(s.configPath, s.cfg)
 	s.mu.Unlock()
 	return err
 }

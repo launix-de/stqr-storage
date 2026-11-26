@@ -47,3 +47,7 @@ __pycache__/
 # WinUI intermediate build files.
 /windows/ui/obj/
 /windows/ui/.vs/
+
+# Generated UI resource included in the single Windows executable.
+/windows/cmd/stqr-windows/assets/
+/windows/cmd/stqr-windows/ui_payload_generated_windows.go

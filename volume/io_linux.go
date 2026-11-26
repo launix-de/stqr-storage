@@ -111,3 +111,26 @@ func syncVolumeFile(f *os.File) error {
 	}
 	return syncErr
 }
+
+// Read-only MAP_SHARED observes the existing positioned-write path through the
+// same page cache. No MAP_POPULATE, mlock or eager touching: disk-sized volumes
+// consume virtual address space and fault only the pages actually accessed.
+func mapVolumeFile(file *os.File, size int64) ([]byte, error) {
+	if size == 0 {
+		return nil, nil
+	}
+	if size < 0 || uint64(size) > uint64(^uint(0)>>1) {
+		return nil, ErrRange
+	}
+	data, err := syscall.Mmap(int(file.Fd()), 0, int(size), syscall.PROT_READ, syscall.MAP_SHARED)
+	if err != nil {
+		return nil, fmt.Errorf("map volume: %w", err)
+	}
+	return data, nil
+}
+func unmapVolumeFile(data []byte) error {
+	if data == nil {
+		return nil
+	}
+	return syscall.Munmap(data)
+}

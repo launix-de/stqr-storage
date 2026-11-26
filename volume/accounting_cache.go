@@ -143,6 +143,11 @@ func (v *Volume) WarmAccounting(ctx context.Context) error {
 	err = func() error {
 		v.mu.Lock()
 		defer v.mu.Unlock()
+		// An existing reader may delay publication after the scan completed.
+		// Cancellation during that wait must not turn unknown totals ready.
+		if err = ctx.Err(); err != nil {
+			return err
+		}
 		if err = v.check(false); err != nil {
 			return err
 		}
@@ -181,7 +186,11 @@ func ownershipKey(stamp any, include func(Key, bool) bool) ([32]byte, bool) {
 		return key.OwnershipCheckpointKey(), true
 	}
 	if include == nil {
-		return sha256.Sum256([]byte("stqr-accounting-all-records-v1")), true
+		// A bucket proof can override the nil fallback and exclude records.
+		// Such a predicate still needs an explicit stable checkpoint key.
+		if _, hasBucketProof := stamp.(OwnershipBucketTotals); !hasBucketProof {
+			return sha256.Sum256([]byte("stqr-accounting-all-records-v1")), true
+		}
 	}
 	return [32]byte{}, false
 }

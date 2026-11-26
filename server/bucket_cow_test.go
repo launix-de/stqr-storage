@@ -946,7 +946,7 @@ func TestBucketCOWRecursiveRangeReadCopiesOnlyObservedBytes(t *testing.T) {
 	reads := func() uint64 {
 		var n uint64
 		for _, v := range a.allVolumes() {
-			n += v.IOStats().ReadBytes
+			n += testStorageReadBytes(v.IOStats())
 		}
 		return n
 	}

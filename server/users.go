@@ -49,22 +49,21 @@ func (s *Server) executeUsers(m client.Message, p principal) ([]byte, int, error
 	if closed {
 		return nil, 0, fail(503, "server is stopping")
 	}
-	var image accountsImage
-	if e := s.readBlob("accounts", &image); e != nil {
-		return nil, 0, e
+	index, err := s.accountIndex()
+	if err != nil {
+		return nil, 0, err
 	}
+	image := index.image
 	// Authorization is checked again inside the mutation lock so an already queued
 	// request cannot survive deletion, password change or role revocation.
 	authorized := p.connection != nil && p.isAdmin()
 	if p.connection == nil {
-		for _, u := range image.Users {
-			if u.ID == p.User.ID && u.Role == "ADMIN" && !u.Disabled && constantEqual(u.PasswordHash, p.User.PasswordHash) {
-				authorized = true
-				break
-			}
+		if i, exists := index.byID[p.User.ID]; exists {
+			u := image.Users[i]
+			authorized = u.Role == "ADMIN" && !u.Disabled && constantEqual(u.PasswordHash, p.User.PasswordHash)
 		}
-
 	}
+
 	if !authorized {
 		return nil, 0, fail(403, "administrator required")
 	}
@@ -90,15 +89,14 @@ func (s *Server) executeUsers(m client.Message, p principal) ([]byte, int, error
 		if d.Done() != nil {
 			return nil, 0, fail(400, "invalid key list request")
 		}
-		for _, u := range image.Users {
-			if u.ID == target.String() {
-				e := client.Encoder{}
-				e.V(uint64(len(u.S3Keys)))
-				for _, k := range u.S3Keys {
-					e.Text(k.ID)
-				}
-				return e.B, 200, nil
+		if i, exists := index.byID[target.String()]; exists {
+			u := image.Users[i]
+			e := client.Encoder{}
+			e.V(uint64(len(u.S3Keys)))
+			for _, k := range u.S3Keys {
+				e.Text(k.ID)
 			}
+			return e.B, 200, nil
 		}
 		return nil, 0, fail(404, "user not found")
 	}
@@ -111,13 +109,12 @@ func (s *Server) executeUsers(m client.Message, p principal) ([]byte, int, error
 	mac.Write([]byte{byte(m.Opcode), byte(m.Opcode >> 8)})
 	mac.Write(m.Body)
 	digest := hex.EncodeToString(mac.Sum(nil))
-	for _, receipt := range image.Receipts {
-		if receipt.ID == m.ID.String() {
-			if receipt.Actor != p.User.ID || !constantEqual(receipt.Digest, digest) {
-				return nil, 0, fail(400, "operation ID reused with different input")
-			}
-			return encodeAck(Operation{ID: receipt.ID, State: "fulfilled"}), receipt.Status, nil
+	if i, exists := index.byReceipt[m.ID.String()]; exists {
+		receipt := image.Receipts[i]
+		if receipt.Actor != p.User.ID || !constantEqual(receipt.Digest, digest) {
+			return nil, 0, fail(400, "operation ID reused with different input")
 		}
+		return encodeAck(Operation{ID: receipt.ID, State: "fulfilled"}), receipt.Status, nil
 	}
 	target := d.ID()
 	var name, password, accessID, accessSecret string
@@ -151,20 +148,14 @@ func (s *Server) executeUsers(m client.Message, p principal) ([]byte, int, error
 		if !validUsername(name) || role > 1 {
 			return nil, 0, fail(400, "invalid username or role")
 		}
-		for _, u := range image.Users {
-			if m.Opcode == client.UserCreate && u.ID == target.String() || u.Name == name && u.ID != target.String() {
-				return nil, 0, fail(409, "username or user ID already exists")
-			}
+		_, duplicateID := index.byID[target.String()]
+		nameIndex, duplicateName := index.byName[name]
+		if m.Opcode == client.UserCreate && duplicateID || duplicateName && image.Users[nameIndex].ID != target.String() {
+			return nil, 0, fail(409, "username or user ID already exists")
 		}
 	}
+	targetIndex, found := index.byID[target.String()]
 	if m.Opcode != client.UserCreate {
-		found := false
-		for _, u := range image.Users {
-			if u.ID == target.String() {
-				found = true
-				break
-			}
-		}
 		if !found {
 			return nil, 0, fail(404, "user not found")
 		}
@@ -193,14 +184,12 @@ func (s *Server) executeUsers(m client.Message, p principal) ([]byte, int, error
 		if m.Opcode == client.UserS3KeySet && (len(accessSecret) < 16 || len(accessSecret) > 128 || !utf8.ValidString(accessSecret)) {
 			return nil, 0, fail(400, "secret must contain 16 to 128 UTF-8 bytes")
 		}
-		for _, u := range image.Users {
-			for _, k := range u.S3Keys {
-				if k.ID == accessID && u.ID != target.String() {
-					return nil, 0, fail(409, "access key already belongs to another user")
-				}
-			}
+		if key, exists := index.byAccessKey[accessID]; exists && image.Users[key.user].ID != target.String() {
+			return nil, 0, fail(409, "access key already belongs to another user")
 		}
 	}
+	// Only mutation preparation needs a writable copy of the account image.
+	image = cloneAccountsImage(image)
 	status := 200
 	switch m.Opcode {
 	case client.UserCreate:
@@ -211,28 +200,16 @@ func (s *Server) executeUsers(m client.Message, p principal) ([]byte, int, error
 		image.Users = append(image.Users, account{ID: target.String(), Name: name, Role: roleName, Disabled: disabled, PasswordHash: string(hash)})
 		status = 201
 	case client.UserUpdate:
-		for i := range image.Users {
-			if image.Users[i].ID == target.String() {
-				image.Users[i].Name = name
-				image.Users[i].Role = "USER"
-				if role == 1 {
-					image.Users[i].Role = "ADMIN"
-				}
-				image.Users[i].Disabled = disabled
-			}
+		u := &image.Users[targetIndex]
+		u.Name, u.Role, u.Disabled = name, "USER", disabled
+		if role == 1 {
+			u.Role = "ADMIN"
 		}
 	case client.UserSetPassword:
-		for i := range image.Users {
-			if image.Users[i].ID == target.String() {
-				image.Users[i].PasswordHash = string(hash)
-			}
-		}
+		image.Users[targetIndex].PasswordHash = string(hash)
 	case client.UserS3KeySet, client.UserS3KeyDelete:
-		for i := range image.Users {
-			u := &image.Users[i]
-			if u.ID != target.String() {
-				continue
-			}
+		{
+			u := &image.Users[targetIndex]
 			found := -1
 			for j, k := range u.S3Keys {
 				if k.ID == accessID {
@@ -266,12 +243,7 @@ func (s *Server) executeUsers(m client.Message, p principal) ([]byte, int, error
 				return nil, 0, err
 			}
 		}
-		for i := range image.Users {
-			if image.Users[i].ID == target.String() {
-				image.Users = append(image.Users[:i], image.Users[i+1:]...)
-				break
-			}
-		}
+		image.Users = append(image.Users[:targetIndex], image.Users[targetIndex+1:]...)
 	}
 	image.Receipts = append(image.Receipts, accountReceipt{ID: m.ID.String(), Actor: p.User.ID, Digest: digest, Status: status})
 	if e := s.writeBlob("accounts", image); e != nil {

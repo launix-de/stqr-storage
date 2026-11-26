@@ -43,20 +43,20 @@ func TestPinnedLogicalUsageUsesMaintainedCounters(t *testing.T) {
 		t.Fatal(err)
 	}
 	v.SetCacheLimits(0, 0)
-	before := v.IOStats().ReadOps
+	before := testStorageReadOps(v.IOStats())
 	used, err := b.logicalUsage()
 	if err != nil || used != uint64(len("selected")) {
 		t.Fatal(used, err)
 	}
 	var exact bool
-	if v.IOStats().ReadOps != before {
+	if testStorageReadOps(v.IOStats()) != before {
 		t.Fatal("scalar accounting read object metadata")
 	}
 	reference, err := b.scanLogicalObjectUsage()
-	if err != nil || reference != used || v.IOStats().ReadOps == before {
+	if err != nil || reference != used || testStorageReadOps(v.IOStats()) == before {
 		t.Fatal("object-scan positive control", reference, err)
 	}
-	t.Logf("maintained count: 0 storage reads; object-scan control: %d", v.IOStats().ReadOps-before)
+	t.Logf("maintained count: 0 storage reads; object-scan control: %d", testStorageReadOps(v.IOStats())-before)
 	h, err := v.Open(true)
 	if err != nil {
 		t.Fatal(err)
@@ -257,14 +257,14 @@ func TestNativeStatFSColdQuotaUsesPinnedCounters(t *testing.T) {
 	b.usage.mu.Lock()
 	b.usage.valid = false
 	b.usage.mu.Unlock()
-	reads := src.IOStats().ReadOps
+	reads := testStorageReadOps(src.IOStats())
 	begin := time.Now()
 	space, err := c.Space(ctx)
 	elapsed := time.Since(begin)
 	if err != nil || space.Used != objects*4 {
 		t.Fatal(space, err)
 	}
-	delta := src.IOStats().ReadOps - reads
+	delta := testStorageReadOps(src.IOStats()) - reads
 	if delta >= objects {
 		t.Fatalf("statfs scanned object count: %d reads for %d objects", delta, objects)
 	}

@@ -108,8 +108,8 @@ func TestRestoreDeltaScatteredPagesReadChecksumBlockOnce(t *testing.T) {
 	}
 	h.Close()
 	after := v.IOStats()
-	if after.ReadBytes-before.ReadBytes > BlockSize+(128<<10) || after.WriteBytes-before.WriteBytes > 256<<10 {
-		t.Fatal("scattered delta reread or rewrote unchanged data", after.ReadBytes-before.ReadBytes, after.WriteBytes-before.WriteBytes)
+	if testReadWorkBytes(after)-testReadWorkBytes(before) > BlockSize+(128<<10) || after.WriteBytes-before.WriteBytes > 256<<10 {
+		t.Fatal("scattered delta reread or rewrote unchanged data", testReadWorkBytes(after)-testReadWorkBytes(before), after.WriteBytes-before.WriteBytes)
 	}
 	mustGet(t, v, key, payload)
 }

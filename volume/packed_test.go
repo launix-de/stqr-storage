@@ -120,7 +120,7 @@ func TestBTreeUpdatesOnlyAffectedPages(t *testing.T) {
 	if e != nil {
 		t.Fatal(e)
 	}
-	if w.IOStats().ReadOps > 12 {
+	if testReadWorkOps(w.IOStats()) > 12 {
 		t.Fatal("Open scanned the object directory", w.IOStats())
 	}
 	for i := uint64(0); i < 1000; i += 7 {
@@ -307,8 +307,8 @@ func TestTinyAppendDoesNotRereadExistingPayload(t *testing.T) {
 		t.Fatal(e)
 	}
 	after := v.IOStats()
-	if after.ReadBytes-before.ReadBytes > 16*PageSize {
-		t.Fatal("small APPEND reread its existing payload", after.ReadBytes-before.ReadBytes)
+	if testReadWorkBytes(after)-testReadWorkBytes(before) > 16*PageSize {
+		t.Fatal("small APPEND reread its existing payload", testReadWorkBytes(after)-testReadWorkBytes(before))
 	}
 	mustGet(t, v, k, append(payload, []byte("small")...))
 	k = testKey(2)

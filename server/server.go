@@ -98,6 +98,7 @@ type Server struct {
 	versions               versionObservations
 	directory              atomic.Pointer[peerDirectoryImage]
 	placementGroups        atomic.Pointer[placementGroupImage]
+	accounts               atomic.Pointer[accountsIndex]
 	control                *controlRuntime // initialized before accepting control RPCs
 	metadataPreview        bool            // isolated metadata draft; never owns data volumes
 	controller             *clusterController
@@ -297,7 +298,7 @@ func Open(opts Options) (s *Server, err error) {
 		// The pending node accepts peer traffic and delegated local-volume admin
 		// only; ordinary authentication waits for committed system bootstrap.
 		var users accountsImage
-		e = s.readBlob("accounts", &users)
+		e = s.loadAccounts(&users)
 		if errors.Is(e, volume.ErrNotFound) && newSystem && s.system.Stats().Objects == 0 {
 			e = s.writeBlob("accounts", accountsImage{Schema: 1, Users: []account{}})
 		}

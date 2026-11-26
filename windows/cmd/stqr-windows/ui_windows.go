@@ -13,8 +13,6 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
-	"path/filepath"
-	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -72,18 +70,28 @@ func readUIRequest(input io.Reader) (uiRequest, error) {
 	}
 	return request, nil
 }
-func uiPath(exe string) string { return strings.TrimSuffix(exe, filepath.Ext(exe)) + ".ui.exe" }
 func launchWinUI() error {
 	exe, err := os.Executable()
 	if err != nil {
 		return err
 	}
-	frontend := uiPath(exe)
-	if _, err = os.Stat(frontend); err != nil {
-		return fmt.Errorf("Die Konfigurationsoberfläche fehlt. Bitte das vollständige STQR-Windows-Paket verwenden")
+	installation, err := userInstallation()
+	if err != nil {
+		return err
 	}
-	args := append([]string{"--dialog"}, os.Args[1:]...)
+	frontend, err := installation.prepareWinUI()
+	if err != nil {
+		return err
+	}
+	args := []string{"--dialog"}
+	for _, arg := range os.Args[1:] {
+		if arg == "--ui-smoke-test" {
+			arg = "--smoke-test"
+		}
+		args = append(args, arg)
+	}
 	cmd := exec.Command(frontend, args...)
+	cmd.Env = append(os.Environ(), "STQR_BACKEND_EXE="+exe)
 	cmd.SysProcAttr = &syscall.SysProcAttr{CreationFlags: windows.CREATE_NO_WINDOW}
 	return cmd.Run()
 }

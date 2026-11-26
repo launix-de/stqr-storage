@@ -118,7 +118,7 @@ func (b *Bucket) withPinnedVolumes(all []*volume.Volume) []*volume.Volume {
 	}
 	return all
 }
-func (b *Bucket) localVolumes() []*volume.Volume { return b.volumesFor(b.Describe()) }
+func (b *Bucket) localVolumes() []*volume.Volume { return b.volumesFor(b.storageDescription()) }
 func (b *Bucket) volumesFor(d BucketDescription) []*volume.Volume {
 	all := b.server.placementVolumesAt(d.Policy.PlacementGroup, d.Policy.PlacementMaskVersion)
 	if len(d.LocalVolumes) == 0 {
