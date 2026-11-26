@@ -36,9 +36,15 @@ func (v *Volume) beginDeferred() error {
 	size := uint64(deferredJournalBytes)
 	var off uint64
 	for {
-		_, _, chosen, err := t.findSpace(size, PageSize, false)
+		start, length, chosen, err := t.findSpace(size, PageSize, false)
 		if err == nil {
 			off = chosen
+			// Keep payloads before the temporary journal, avoiding a persistent
+			// prefix hole once the buffered group is checkpointed.
+			if tail, ok := t.candidate(start, length, size, PageSize,
+				(start+length-size)/PageSize*PageSize); ok {
+				off = tail
+			}
 			break
 		}
 		if !errors.Is(err, ErrFull) || size <= 8*PageSize {
