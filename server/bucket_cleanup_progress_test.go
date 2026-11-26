@@ -411,3 +411,17 @@ func TestCleanupNewParticipantStartsBeforePassedReceipts(t *testing.T) {
 		}
 	}
 }
+
+func TestCleanupRemovesObsoleteSweepParticipants(t *testing.T) {
+	s, v, _ := cleanupFixture(t, 2)
+	seedCleanup(t, s, v, 256)
+	s.refreshCleanupJobs(s.currentSystem.Load())
+	if !s.cleanupReceiptPage(false) || len(s.cleanupReceipts) != 1 {
+		t.Fatal("sweep did not start")
+	}
+	// A completed/removed catalog entry must not retain old per-volume jobs.
+	s.refreshCleanupJobs(&systemView{})
+	if len(s.cleanupJobs) != 0 || len(s.cleanupReceipts) != 0 {
+		t.Fatal("obsolete sweep retained completed jobs")
+	}
+}

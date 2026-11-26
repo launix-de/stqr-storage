@@ -226,6 +226,16 @@ func (s *Server) refreshCleanupJobs(view *systemView) {
 			delete(s.cleanupJobs, id)
 		}
 	}
+	for volumeID, sweep := range s.cleanupReceipts {
+		for id := range sweep.buckets {
+			if !pending[id] {
+				delete(sweep.buckets, id)
+			}
+		}
+		if len(sweep.buckets) == 0 {
+			delete(s.cleanupReceipts, volumeID)
+		}
+	}
 	// Keep existing sweeps/cursors across unrelated catalog edits. Removed
 	// participants are revalidated against the current description before work.
 	s.cleanupView = view
