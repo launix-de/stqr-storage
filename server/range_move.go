@@ -332,7 +332,7 @@ func (r *rangeManager) cleanup(ctx context.Context, p rangePlan) error {
 func (r *rangeManager) cleanupPage(ctx context.Context, p rangePlan, v *volume.Volume, work func(*volume.Handle) error) error {
 	// Give an unfinished bucket purge a bounded turn after releasing this page's
 	// locks and priority. Polling alone can miss every inter-page idle window.
-	defer r.server.reclaimBucketStep()
+	defer r.server.reclaimBucketStep(true)
 	if err := ctx.Err(); err != nil {
 		return err
 	}
