@@ -18,6 +18,9 @@ public sealed partial class MainWindow : Window
     private bool loading;
     private bool connecting;
     private bool mounted;
+    private bool profileLoading;
+    private long profileLoadGeneration;
+    private string? loadedDrive;
     private string? workerDrive;
     private string SelectedDrive => Drive.SelectedItem as string ?? "S:";
 
@@ -82,8 +85,9 @@ public sealed partial class MainWindow : Window
     private void SetState(bool active, bool pending = false)
     {
         mounted = active; connecting = pending;
-        ConnectButton.IsEnabled = !active && !pending && workerDrive is null;
-        Disconnect.IsEnabled = active || pending;
+        ConnectButton.IsEnabled = !active && !pending && !profileLoading && loadedDrive == SelectedDrive && workerDrive is null;
+        Disconnect.IsEnabled = !profileLoading && (active || pending);
+        Forget.IsEnabled = !profileLoading && loadedDrive == SelectedDrive && !pending && workerDrive is null;
         Busy.IsActive = pending; Busy.Visibility = pending ? Visibility.Visible : Visibility.Collapsed;
         StatusIcon.Glyph = active ? "\uE73E" : "\uE8B7";
         StatusTitle.Text = pending ? "Verbindung wird aufgebaut" : active ? $"{SelectedDrive} ist verbunden" : "Bereit zum Verbinden";
@@ -102,11 +106,24 @@ public sealed partial class MainWindow : Window
         loading = false;
         DriverNotice.IsOpen = !reply.WinFsp;
     }
-    private async Task LoadDrive()
+    private void InvalidateProfileLoad()
     {
+        profileLoadGeneration++;
+        profileLoading = false;
+    }
+    private async Task LoadDrive(Func<string, Task<Reply>>? load = null)
+    {
+        if (workerDrive is not null || connecting) return;
+        var drive = SelectedDrive;
+        var generation = ++profileLoadGeneration;
+        profileLoading = true;
+        loadedDrive = null;
+        SetState(false);
+        bool Current() => generation == profileLoadGeneration && drive == SelectedDrive && workerDrive is null && !connecting;
         try
         {
-            var reply = await backend.Send(new Request("load", SelectedDrive));
+            var reply = await (load is null ? backend.Send(new Request("load", drive)) : load(drive));
+            if (!Current()) return;
             if (reply.Config is { } config)
             {
                 Server.Text = config.URI; Username.Text = config.Username; Password.Password = config.Password;
@@ -119,9 +136,18 @@ public sealed partial class MainWindow : Window
             else Remember.IsChecked = false;
             Forget.Visibility = reply.Saved ? Visibility.Visible : Visibility.Collapsed;
             DriverNotice.IsOpen = !reply.WinFsp;
+            loadedDrive = drive;
             SetState(reply.Running);
         }
-        catch (Exception ex) { ShowError(ex); }
+        catch (Exception ex) { if (Current()) ShowError(ex); }
+        finally
+        {
+            if (generation == profileLoadGeneration)
+            {
+                profileLoading = false;
+                SetState(mounted, connecting);
+            }
+        }
     }
     private async void SavedChanged(object sender, SelectionChangedEventArgs e)
     {
@@ -157,10 +183,11 @@ public sealed partial class MainWindow : Window
     }
     private async void ConnectClicked(object sender, RoutedEventArgs e)
     {
-        if (connecting || mounted || workerDrive is not null) return;
+        if (connecting || mounted || profileLoading || loadedDrive != SelectedDrive || workerDrive is not null) return;
         try
         {
             var config = ReadConfig();
+            InvalidateProfileLoad();
             Notice.IsOpen = false; workerDrive = config.Drive; SetState(false, true);
             await foreach (var reply in backend.Stream(new Request("mount", Config: config, Persist: Remember.IsChecked == true, Initialize: !config.ReadOnly)))
             {
@@ -179,6 +206,7 @@ public sealed partial class MainWindow : Window
     {
         try
         {
+            InvalidateProfileLoad();
             Disconnect.IsEnabled = false;
             await backend.Send(new Request("stop", SelectedDrive));
             for (int n = 0; n < 100; n++)
@@ -200,19 +228,57 @@ public sealed partial class MainWindow : Window
                 Content = "Das Laufwerk wird getrennt. Gespeicherte Zugangsdaten und Autostart werden entfernt. Deine Dateien bleiben im Bucket erhalten.",
                 PrimaryButtonText = "Entfernen", CloseButtonText = "Abbrechen", DefaultButton = ContentDialogButton.Close };
             if (await dialog.ShowAsync() != ContentDialogResult.Primary) return;
+            InvalidateProfileLoad();
             await backend.Send(new Request("forget", SelectedDrive));
             Password.Password = ""; await RefreshAfterAction();
         }
         catch (Exception ex) { ShowError(ex); }
     }
+    private async Task SmokeProfileLoads()
+    {
+        void Select(string drive) { loading = true; Drive.SelectedItem = drive; loading = false; }
+        static Reply Settings(string bucket) => new(1, "settings", null,
+            new MountConfig { URI = "http://127.0.0.1:7419", Username = bucket, Password = bucket, Bucket = bucket },
+            null, false, true, true);
+        var old = new TaskCompletionSource<Reply>();
+        var latest = new TaskCompletionSource<Reply>();
+        Select("S:");
+        var first = LoadDrive(_ => old.Task);
+        if (ConnectButton.IsEnabled) throw new Exception("Connect remained enabled during profile load");
+        Select("T:");
+        var second = LoadDrive(_ => latest.Task);
+        latest.SetResult(Settings("latest"));
+        await second;
+        old.SetResult(Settings("obsolete"));
+        await first;
+        if (SelectedDrive != "T:" || Bucket.Text != "latest" || Username.Text != "latest" || !ConnectButton.IsEnabled)
+            throw new Exception("Out-of-order profile loads changed the selected drive's settings");
+        var pending = new TaskCompletionSource<Reply>();
+        var stale = LoadDrive(_ => pending.Task);
+        InvalidateProfileLoad();
+        workerDrive = SelectedDrive; SetState(false, true);
+        pending.SetResult(Settings("stale"));
+        await stale;
+        if (Bucket.Text != "latest" || !connecting || ConnectButton.IsEnabled)
+            throw new Exception("Obsolete profile load overwrote connection state");
+        workerDrive = null; SetState(false);
+        await LoadDrive(_ => Task.FromException<Reply>(new IOException("simulated profile load failure")));
+        if (ConnectButton.IsEnabled) throw new Exception("Failed profile load enabled connection with stale settings");
+        Notice.IsOpen = false;
+        Select(initialDrive);
+        await LoadDrive();
+        if (Notice.IsOpen) throw new Exception($"Profile regression cleanup failed: {Notice.Message}");
+    }
     private async Task SmokeTest()
     {
         if (!Server.Focus(FocusState.Keyboard)) throw new Exception("Server field cannot receive keyboard focus");
-        if (!Microsoft.UI.Xaml.Input.FocusManager.TryMoveFocus(Microsoft.UI.Xaml.Input.FocusNavigationDirection.Next)) throw new Exception("Keyboard navigation failed");
+        if (!Microsoft.UI.Xaml.Input.FocusManager.TryMoveFocus(Microsoft.UI.Xaml.Input.FocusNavigationDirection.Next,
+            new Microsoft.UI.Xaml.Input.FindNextElementOptions { SearchRoot = Root })) throw new Exception("Keyboard navigation failed");
         Server.Text = "invalid";
         try { ReadConfig(); throw new Exception("Invalid server was accepted"); }
         catch (InvalidOperationException) { }
         if (Notice.IsOpen) throw new Exception("Backend status failed");
+        await SmokeProfileLoads();
         Server.Text = "https://storage.example:7419"; Username.Text = "alice"; Password.Password = "temporary-test-secret"; Bucket.Text = "documents";
         ReadOnly.IsOn = true; Overlay.IsOn = true; LowerBucket.Text = "base"; WritablePaths.Text = "home/";
         var config = ReadConfig();
@@ -235,7 +301,7 @@ public sealed partial class MainWindow : Window
                 (uint)bitmap.PixelWidth, (uint)bitmap.PixelHeight, 96, 96, pixels.ToArray());
             await encoder.FlushAsync();
         }
-        await File.WriteAllTextAsync(Path.Combine(directory, "winui-smoke.txt"), "PASS: native WinUI startup, backend IPC, input validation, overlay/readonly controls and responsive layouts\n");
+        await File.WriteAllTextAsync(Path.Combine(directory, "winui-smoke.txt"), "PASS: native WinUI startup, backend IPC, profile load ordering, input validation, overlay/readonly controls and responsive layouts\n");
         Application.Current.Exit();
     }
 }
