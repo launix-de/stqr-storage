@@ -4,7 +4,7 @@ const require=createRequire(import.meta.url),{chromium}=require(process.env.STQR
 let input='';for await(const chunk of process.stdin)input+=chunk;
 const cfg=JSON.parse(input),browser=await chromium.launch({executablePath:process.env.STQR_TEST_BROWSER_EXECUTABLE??'/usr/bin/google-chrome',headless:true,args:['--no-sandbox']});
 try{
- const page=await browser.newPage({viewport:{width:1280,height:800}}),ops=[],errors=[];
+ const page=await browser.newPage({bypassCSP:true,viewport:{width:1280,height:800}}),ops=[],errors=[];
  page.on('pageerror',e=>errors.push(e.message));page.on('websocket',ws=>ws.on('framesent',({payload})=>{const b=Buffer.from(payload);if(b.length>=4)ops.push(b.readUInt16LE(2))}));
  await page.goto(cfg.url);await page.locator('#username').fill(cfg.username);await page.locator('#password').fill(cfg.password);await page.locator('#login-form button[type=submit]').click();
  await page.locator('[data-view="users"]').click();await page.waitForFunction(()=>document.querySelectorAll('#user-rows [data-user]').length===50);

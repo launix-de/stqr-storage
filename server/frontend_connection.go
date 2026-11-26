@@ -144,14 +144,9 @@ func (s *Server) authenticateFrontend(r *http.Request, name, password string) (p
 	if len(verified) != 0 {
 		return denied()
 	}
-	var image accountsImage
-	if err := s.readBlob("accounts", &image); err != nil {
-		return principal{}, err
-	}
-	for _, account := range image.Users {
-		if account.ID == user.String() && !account.Disabled && (account.Role == "ADMIN" || account.Role == "USER") && frontendAccountRevision(account) == revision {
-			return principal{User: account, frontendPermission: required, frontendIssuer: issuer}, nil
-		}
+	account, err := s.findAccountID(user.String())
+	if err == nil && (account.Role == "ADMIN" || account.Role == "USER") && frontendAccountRevision(account) == revision {
+		return principal{User: account, frontendPermission: required, frontendIssuer: issuer}, nil
 	}
 	return denied()
 }

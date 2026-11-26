@@ -102,6 +102,7 @@ func userListPage(body []byte, image accountsImage, source ...*Server) ([]byte, 
 		page = append(page, entry)
 	}
 	var node, boot string
+	var totalRead, totalWrite uint64
 	if len(source) > 0 {
 		s := source[0]
 		node = s.quotaNode.String()
@@ -109,6 +110,9 @@ func userListPage(body []byte, image accountsImage, source ...*Server) ([]byte, 
 		valid := make(map[string]bool, len(image.Users))
 		for _, u := range image.Users {
 			valid[u.ID] = true
+			read, write := s.userTraffic(u.ID)
+			totalRead = addCapacity(totalRead, read)
+			totalWrite = addCapacity(totalWrite, write)
 		}
 		s.userIO.Range(func(key, value any) bool {
 			if !valid[key.(string)] {
@@ -118,14 +122,16 @@ func userListPage(body []byte, image accountsImage, source ...*Server) ([]byte, 
 		})
 	}
 	return jsonText(struct {
-		Users    []userPageEntry `json:"users"`
-		Next     string          `json:"next"`
-		Total    int             `json:"total"`
-		AllTotal int             `json:"all_total"`
-		Node     string          `json:"node"`
-		Boot     string          `json:"boot"`
-		Captured string          `json:"captured_ns"`
-	}{page, next, total, len(users), node, boot, strconv.FormatInt(time.Now().UnixNano(), 10)}), 200, nil
+		Users           []userPageEntry `json:"users"`
+		Next            string          `json:"next"`
+		Total           int             `json:"total"`
+		AllTotal        int             `json:"all_total"`
+		Node            string          `json:"node"`
+		Boot            string          `json:"boot"`
+		Captured        string          `json:"captured_ns"`
+		ReadBytesTotal  uint64          `json:"read_bytes_total,string"`
+		WriteBytesTotal uint64          `json:"write_bytes_total,string"`
+	}{page, next, total, len(users), node, boot, strconv.FormatInt(time.Now().UnixNano(), 10), totalRead, totalWrite}), 200, nil
 }
 func (s *Server) executeBucketListPage(body []byte, p principal) ([]byte, int, error) {
 	if err := s.requireAdmin(p); err != nil {
@@ -148,6 +154,7 @@ func (s *Server) executeBucketListPage(body []byte, p principal) ([]byte, int, e
 	full := false
 	ctx, cancel := context.WithTimeout(s.ctx, 3*time.Second)
 	defer cancel()
+	usageImage := s.dashboardBucketUsage()
 	for _, b := range list {
 		if b.DeletionComplete {
 			continue
@@ -185,6 +192,8 @@ func (s *Server) executeBucketListPage(body []byte, p principal) ([]byte, int, e
 			} else {
 				entry.UsedBytes = &used
 			}
+		} else {
+			usageImage.annotate(&entry)
 		}
 		s.addQuotaDiagnostics(&entry)
 		raw, e := json.Marshal(entry)
