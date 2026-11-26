@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
-import {formatNumber} from './numbers.js';
-import {entityRate,throughputHTML} from './throughput.js';
+import {formatNumber,formatBytes,formatRate} from './numbers.js';
+import {entityRate,throughputHTML,userTrafficSummary,recordRateSnapshot} from './throughput.js';
 import {EndlessList} from './endless.js';
 import {newID} from './protocol.js';
 import {setupS3Keys} from './s3-keys.js';
@@ -15,6 +15,7 @@ export function setupUserViews({connection,currentUsername,escape,toast,showView
  function render({append=false,added=users,loading=false}={}){
  if(loading){if(!users.length)$('user-rows').innerHTML='<tr><td colspan="5" class="empty">Benutzer werden geladen …</td></tr>';return}
   $('user-count').textContent=formatNumber(pageMeta.total??users.length);$('nav-users-count').textContent=formatNumber(pageMeta.all_total??users.length);
+  refreshSummary();
   const html=(append?added:users).map(u=>{
    const self=u.name===currentUsername(),job=deleteJobs.get(u.id),pending=job?.state==='pending';
    return `<tr data-user="${u.id}"><td><div class="user-cell"><span class="user-avatar">${escape(u.name.slice(0,1).toUpperCase())}</span><div><div class="volume-name">${escape(u.name)}${self?'<span class="system-label">DU</span>':''}</div><div class="volume-path">${escape(u.id)}</div></div></div></td><td><select class="user-role-select" data-user-role="${u.id}" ${self?'disabled title="Die eigene Rolle kann nicht geändert werden"':pending?'disabled':''} aria-label="Rolle für ${escape(u.name)}"><option value="0" ${u.role===0?'selected':''}>User</option><option value="1" ${u.role===1?'selected':''}>Administrator</option></select></td><td data-user-throughput="${u.id}">${userThroughput(u.id)}</td><td><span class="state-badge ${pending?'draining':job?.state==='failed'?'failed':u.disabled?'detached':''}"><i></i>${pending?'Löschung ausstehend':job?.state==='failed'?'Löschung fehlgeschlagen':u.disabled?'Deaktiviert':'Aktiv'}</span>${job?.state==='failed'?'<div class="error deletion-error">'+escape(job.error)+'</div>':''}</td><td><div class="row-actions"><button class="row-action" data-user-s3="${u.id}" ${pending?'disabled':''}>S3-Schlüssel</button><button class="row-action" data-user-password="${u.id}" ${pending?'disabled':''}>Passwort ändern</button><button class="row-action danger-action" data-user-delete="${u.id}" ${self?'disabled title="Das eigene Konto kann nicht gelöscht werden"':pending?'disabled':''}>${job?.state==='failed'?'Erneut versuchen':'Löschen'}</button></div></td></tr>`;
@@ -30,10 +31,10 @@ export function setupUserViews({connection,currentUsername,escape,toast,showView
 
  function observeTraffic(page){
   if(!page.node||!page.boot||!page.captured_ns)return;
-  const snapshot={boot:page.boot,captured:BigInt(page.captured_ns),users:page.users.map(u=>({id:u.id,io:{logicalRead:BigInt(u.read_bytes??0),logicalWrite:BigInt(u.write_bytes??0)}}))};
+  const snapshot={boot:page.boot,captured:BigInt(page.captured_ns),io:{logicalRead:page.read_bytes_total==null?null:BigInt(page.read_bytes_total),logicalWrite:page.write_bytes_total==null?null:BigInt(page.write_bytes_total)},users:page.users.map(u=>({id:u.id,io:{logicalRead:BigInt(u.read_bytes??0),logicalWrite:BigInt(u.write_bytes??0)}}))};
   const old=traffic.get(page.node);
   if(old&&snapshot.boot===old.snapshot.boot&&snapshot.captured<=old.snapshot.captured)return;
-  traffic.set(page.node,{snapshot,previous:old?.snapshot,received:Date.now()});
+  traffic.set(page.node,recordRateSnapshot(old??{},snapshot));
  }
  function userThroughput(id){
   const nodes=new Set(statsEntries().map(e=>e.snapshot.node));
@@ -41,18 +42,26 @@ export function setupUserViews({connection,currentUsername,escape,toast,showView
   const rates=['logicalRead','logicalWrite'].map(key=>{let total=0n;for(const node of nodes){const value=entityRate(traffic.get(node),'users',id,key);if(value==null)return null;total+=value}return nodes.size?total:null});
   return throughputHTML(...rates,true);
  }
- function refreshThroughput(){for(const cell of $('user-rows').querySelectorAll('[data-user-throughput]'))cell.innerHTML=userThroughput(cell.dataset.userThroughput)}
+ function refreshSummary(){
+  const nodes=new Set(statsEntries().map(e=>e.snapshot.node));if(!nodes.size)for(const node of traffic.keys())nodes.add(node);
+  const summary=userTrafficSummary([...nodes].map(node=>({node,entry:traffic.get(node)})));
+  $('user-metric-count').textContent=formatNumber(pageMeta.all_total??users.length);
+  $('user-metric-total').textContent=summary.read==null||summary.write==null?'—':formatBytes(summary.read+summary.write);
+  $('user-metric-read').textContent=formatRate(summary.readRate);$('user-metric-write').textContent=formatRate(summary.writeRate);
+  $('user-metric-read-total').textContent=formatBytes(summary.read);$('user-metric-write-total').textContent=formatBytes(summary.write);
+ }
+ function refreshThroughput(){refreshSummary();for(const cell of $('user-rows').querySelectorAll('[data-user-throughput]'))cell.innerHTML=userThroughput(cell.dataset.userThroughput)}
  function scheduleTraffic(){clearTimeout(trafficPoll);if(!$('users-view').hidden)trafficPoll=setTimeout(refreshTraffic,3000)}
  async function refreshTraffic(){
   if($('users-view').hidden)return;
   const seq=loading,ids=users.slice(0,1000).map(u=>u.id);
-  if(!ids.length){scheduleTraffic();return}
   try{
    const connectionNow=connection();
-   const page=await connectionNow.listUsersPage('',ids.length,'',ids);if(seq!==loading)return;observeTraffic(page);
+   const page=await connectionNow.listUsersPage('',Math.max(1,ids.length),'',ids);if(seq!==loading)return;observeTraffic(page);
    const local=page.node;
-   await Promise.all(statsEntries().filter(e=>e.snapshot.node!==local).map(async entry=>{
-    try{const remote=await connectionNow.forNode(entry.snapshot.node).listUsersPage('',ids.length,'',ids);if(seq===loading)observeTraffic(remote)}catch{}
+   const remoteNodes=new Set(statsEntries().map(e=>e.snapshot.node));remoteNodes.delete(local);
+   await Promise.all([...remoteNodes].map(async node=>{
+    try{const remote=await connectionNow.forNode(node).listUsersPage('',Math.max(1,ids.length),'',ids);if(seq===loading)observeTraffic(remote)}catch{}
    }));
    if(seq===loading)refreshThroughput();
   }catch(e){if(seq===loading)$('users-error').textContent=e.message}finally{if(seq===loading)scheduleTraffic()}

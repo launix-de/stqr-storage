@@ -20,26 +20,23 @@ func (s *Server) publicS3Principal(b *Bucket) (principal, error) {
 	if d.State != BucketActive || b.ID() == systemBucket {
 		return principal{}, ErrBucketForbidden
 	}
-	var image accountsImage
-	if err := s.readBlob("accounts", &image); err != nil {
+	x, err := s.accountIndex()
+	if err != nil {
 		return principal{}, err
 	}
-	for _, u := range image.Users {
-		if u.Disabled {
+	for _, grant := range d.Grants {
+		if grant.Permissions&BucketRead == 0 {
 			continue
 		}
-		if u.Role == "USER" {
-			for _, g := range d.Grants {
-				if g.UserID == u.ID && g.Permissions&BucketRead != 0 {
-					return principal{User: u}, nil
-				}
+		if i, exists := x.byID[grant.UserID]; exists {
+			u := x.image.Users[i]
+			if !u.Disabled && u.Role == "USER" {
+				return principal{User: cloneAccount(u)}, nil
 			}
 		}
 	}
-	for _, u := range image.Users {
-		if !u.Disabled && u.Role == "ADMIN" {
-			return principal{User: u}, nil
-		}
+	if x.admin >= 0 {
+		return principal{User: cloneAccount(x.image.Users[x.admin])}, nil
 	}
 	return principal{}, ErrBucketForbidden
 }
