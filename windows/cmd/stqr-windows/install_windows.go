@@ -139,29 +139,12 @@ func (i installation) installExecutable(source string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	frontend := uiPath(source)
-	frontendDigest, uiErr := executableDigest(frontend)
-	if uiErr != nil && !errors.Is(uiErr, os.ErrNotExist) {
-		return "", uiErr
-	}
-	// Version the pair so updating only the UI never replaces a running program.
-	bundle := sha256.New()
-	bundle.Write(backendDigest[:])
-	if uiErr == nil {
-		bundle.Write(frontendDigest[:])
-	}
 	if err = os.MkdirAll(i.directory, 0700); err != nil {
 		return "", err
 	}
-	// WinUI resource activation requires a stable executable basename.
-	dest := filepath.Join(i.directory, fmt.Sprintf("%x", bundle.Sum(nil)[:8]), "stqr-windows.exe")
+	dest := filepath.Join(i.directory, fmt.Sprintf("%x", backendDigest[:8]), "stqr-windows.exe")
 	if err = os.MkdirAll(filepath.Dir(dest), 0700); err != nil {
 		return "", err
-	}
-	if uiErr == nil {
-		if err = installFile(frontend, uiPath(dest), frontendDigest); err != nil {
-			return "", err
-		}
 	}
 	if err = installFile(source, dest, backendDigest); err != nil {
 		return "", err
