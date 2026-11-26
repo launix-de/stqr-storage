@@ -39,6 +39,21 @@ type accountsImage struct {
 }
 
 func (s *Server) readBlob(name string, dst any) error {
+	if name == "accounts" {
+		if out, ok := dst.(*accountsImage); ok {
+			x, err := s.accountIndex()
+			if err != nil {
+				return err
+			}
+			*out = cloneAccountsImage(x.image)
+			return nil
+		}
+	}
+	return s.readStoredBlob(name, dst)
+}
+
+// readStoredBlob is reserved for startup/recovery and nonresident local records.
+func (s *Server) readStoredBlob(name string, dst any) error {
 	store, e := s.metadataStore()
 	if e != nil {
 		return e
@@ -62,13 +77,32 @@ func (s *Server) writeBlob(name string, value any) error {
 	if e != nil {
 		return e
 	}
-	return s.metadataWrite(func(h *volume.Handle) error {
+	var index *accountsIndex
+	if name == "accounts" {
+		var image accountsImage
+		if e = json.Unmarshal(b, &image); e != nil {
+			return e
+		}
+		if index, e = newAccountsIndex(image); e != nil {
+			return e
+		}
+	}
+	return s.metadataWriteAndPublish(func(h *volume.Handle) error {
 		_, e := h.Put(systemKey(name), b, volume.Options{})
 		return e
+	}, func() {
+		if index != nil {
+			s.accounts.Store(index)
+		}
 	})
 }
 
 func (s *Server) metadataWrite(write func(*volume.Handle) error) error {
+	return s.metadataWriteAndPublish(write, nil)
+}
+
+// Keep persistence and RAM publication in the same writer critical section.
+func (s *Server) metadataWriteAndPublish(write func(*volume.Handle) error, publish func()) error {
 	s.systemMu.Lock()
 	defer s.systemMu.Unlock()
 	store, e := s.metadataStore()
@@ -83,6 +117,9 @@ func (s *Server) metadataWrite(write func(*volume.Handle) error) error {
 		e = write(h)
 		h.Close()
 		if !errors.Is(e, volume.ErrFull) || errors.Is(e, volume.ErrRecovery) {
+			if e == nil && publish != nil {
+				publish()
+			}
 			return e
 		}
 		current := store.Size()
@@ -114,7 +151,7 @@ func (s *Server) metadataWrite(write func(*volume.Handle) error) error {
 }
 func (s *Server) initAccounts(allowBootstrap bool) error {
 	var users accountsImage
-	e := s.readBlob("accounts", &users)
+	e := s.loadAccounts(&users)
 	if errors.Is(e, volume.ErrNotFound) && allowBootstrap {
 		// Only an empty newly adopted system volume may bootstrap. A corrupt/missing
 		// account blob in an existing configured system volume is a recovery error.
@@ -136,15 +173,28 @@ func (s *Server) initAccounts(allowBootstrap bool) error {
 	}
 	return nil
 }
-func (s *Server) findAccount(name string) (account, error) {
-	var image accountsImage
-	if e := s.readBlob("accounts", &image); e != nil {
-		return account{}, e
+
+// loadAccounts reconstructs the serving index from persistent recovery state.
+// It is called only while opening a node, before it can accept requests.
+func (s *Server) loadAccounts(out *accountsImage) error {
+	if err := s.readStoredBlob("accounts", out); err != nil {
+		return err
 	}
-	for _, u := range image.Users {
-		if u.Name == name && !u.Disabled {
-			return u, nil
-		}
+	x, err := newAccountsIndex(*out)
+	if err != nil {
+		return err
+	}
+	s.accounts.Store(x)
+	return nil
+}
+
+func (s *Server) findAccount(name string) (account, error) {
+	x, err := s.accountIndex()
+	if err != nil {
+		return account{}, err
+	}
+	if i, exists := x.byName[name]; exists && !x.image.Users[i].Disabled {
+		return cloneAccount(x.image.Users[i]), nil
 	}
 	return account{}, errors.New("unknown account")
 }

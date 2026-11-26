@@ -8,8 +8,10 @@ export function nodeMembership(view,id,snapshot){
  if(view.excluded_nodes?.includes(id))return 'excluded';
  return snapshot?.state===4?'joining':'departed';
 }
-export function currentSnapshots(view,states){
- return [...states.entries()].filter(([id,e])=>e.snapshot&&!e.placeholder&&nodeMembership(view,id,e.snapshot)==='member').map(([,e])=>e);
+// User totals include member placeholders: a node without its first report is
+// unknown, not permission to show a smaller cluster total.
+export function currentSnapshots(view,states,includePlaceholders=false){
+ return [...states.entries()].filter(([id,e])=>e.snapshot&&(includePlaceholders||!e.placeholder)&&nodeMembership(view,id,e.snapshot)==='member').map(([,e])=>e);
 }
 export function seedMembers(view,states){
  const members=memberIDs(view);if(!members)return;

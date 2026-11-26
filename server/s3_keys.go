@@ -68,19 +68,16 @@ func (s *Server) openS3Secret(user string, k s3AccessKey) (string, error) {
 	return string(out), err
 }
 func (s *Server) s3KeyUser(id string) (account, string, error) {
-	var image accountsImage
-	if err := s.readBlob("accounts", &image); err != nil {
+	x, err := s.accountIndex()
+	if err != nil {
 		return account{}, "", err
 	}
-	for _, u := range image.Users {
-		if u.Disabled || u.Role != "USER" && u.Role != "ADMIN" {
-			continue
-		}
-		for _, k := range u.S3Keys {
-			if k.ID == id {
-				secret, err := s.openS3Secret(u.ID, k)
-				return u, secret, err
-			}
+	entry, found := x.byAccessKey[id]
+	if found {
+		u := x.image.Users[entry.user]
+		if !u.Disabled && (u.Role == "USER" || u.Role == "ADMIN") {
+			secret, err := s.openS3Secret(u.ID, u.S3Keys[entry.key])
+			return cloneAccount(u), secret, err
 		}
 	}
 	return account{}, "", fail(403, "unknown access key")
