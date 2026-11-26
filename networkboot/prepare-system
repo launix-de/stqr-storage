@@ -4,7 +4,9 @@ import argparse
 import subprocess
 from pathlib import Path
 from common import (cli, ctl, extract, nbd, qemu, require, staging,
-                    prepared_release, remember_preparation, forget_preparation)
+                    prepared_release, remember_preparation, forget_preparation,
+                    installed_disk, remember_installation, forget_installation,
+                    temporary_installation_name)
 
 def main():
     p = argparse.ArgumentParser(description='Install a Linux VM directly on a bucket-backed NBD disk, then publish its rootfs')
@@ -41,15 +43,26 @@ def main():
         p.error("memory must be at least 512 MiB and CPU count positive")
     if (not args.publish_only and not args.install_image.is_file()) or args.disk_gib <= 0:
         p.error('a local installer image and positive disk size are required')
-    if args.resume:
-        ctl(args.config, '--size', str(args.disk_gib << 30), 'check-install-disk', args.bucket)
+    disk = installed_disk(args.config, args.bucket)
+    if args.resume or (args.publish_only and not prepared):
+        if not disk:
+            raise RuntimeError('no canonical installation record; recover the original '
+                               'temporary disk identity manually instead of adopting '
+                               + temporary_installation_name(args.bucket) + ' by name')
+        ctl(args.config, '--size', str(args.disk_gib << 30), 'check-install-disk', disk)
     elif not args.publish_only:
-        ctl(args.config, 'create', args.bucket)
-        ctl(args.config, '--size', str(args.disk_gib << 30), 'init-disk', args.bucket)
+        if disk:
+            p.error('an unfinished temporary installation exists; use --resume')
+        # Capture creation's canonical identity before any long-running work.
+        # If creation/recording is interrupted, a retry fails closed rather
+        # than adopting a different bucket which reused this visible label.
+        disk = ctl(args.config, 'create', temporary_installation_name(args.bucket), capture=True)
+        remember_installation(args.config, args.bucket, disk)
+        ctl(args.config, '--size', str(args.disk_gib << 30), 'init-disk', disk)
     options = {'existing': prepared['work']} if prepared else {}
     with staging(args.work_dir, 'stqr-prepare-', **options) as work:
         if not prepared:
-            with nbd(args.config, args.bucket, work) as socket:
+            with nbd(args.config, disk, work) as socket:
                 if not args.publish_only:
                     qemu(socket, args, args.install_image)
                 print('Preparing networkboot release from the installed disk...', flush=True)
@@ -57,15 +70,17 @@ def main():
             remember_preparation(args.config, args.bucket, work)
         else:
             print('Resuming prepared image', args.bucket, flush=True)
-        if not prepared or prepared['phase'] != 'published':
+        if not prepared or prepared['phase'] != 'published' or prepared.get('image_layout') != 2:
             print('Uploading and publishing networkboot release...', flush=True)
             ctl(args.config, 'publish', args.bucket, work)
             remember_preparation(args.config, args.bucket, work, 'published')
         print('Published', args.bucket, flush=True)
         try:
-            ctl(args.config, 'gc', args.bucket)
+            if disk:
+                ctl(args.config, 'delete', disk)
+                forget_installation(args.config, args.bucket)
         except subprocess.CalledProcessError:
-            raise RuntimeError(f'Image {args.bucket} is published, but cleanup failed. Disconnect bucket clients and retry: networkboot/prepare-system {args.bucket}') from None
+            raise RuntimeError(f'Image {args.bucket} is published, but temporary installation disk cleanup failed. Retry: networkboot/prepare-system {args.bucket}') from None
     forget_preparation(args.config, args.bucket)
     print('Cleanup complete', flush=True)
 

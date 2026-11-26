@@ -219,19 +219,27 @@ func (v *Volume) loadDedupe(id ID) (dedupe, bool, error) {
 	if e != nil || ptr == 0 {
 		return d, false, e
 	}
+	d, e = v.dedupeAt(ptr)
+	return d, e == nil, e
+}
+
+// dedupeAt decodes an already located receipt without searching its index key
+// again. Callers hold the volume lock or use an immutable transaction view.
+func (v *Volume) dedupeAt(ptr uint64) (dedupe, error) {
+	var d dedupe
 	b := make([]byte, receiptBytes)
-	if e = v.readBytes(b, ptr); e != nil {
-		return d, false, e
+	if e := v.readBytes(b, ptr); e != nil {
+		return d, e
 	}
 	if string(b[:4]) != "REQ2" || checksum(b[:140]) != diskOrder.Uint32(b[140:]) {
-		return d, false, ErrCorrupt
+		return d, ErrCorrupt
 	}
 	d.importShadow = b[102]&1 != 0
 	copy(d.Key.Bucket[:], b[4:20])
 	copy(d.Key.Object[:], b[20:52])
 	copy(d.Fingerprint[:], b[52:84])
 	d.Result = Result{Info: Info{Length: diskOrder.Uint64(b[92:]), Compression: Compression(b[100]), Deleted: b[101] != 0}, Offset: diskOrder.Uint64(b[104:])}
-	return d, true, nil
+	return d, nil
 }
 func (t *transaction) saveReceipt(id ID, d dedupe) error {
 	if id == (ID{}) {
