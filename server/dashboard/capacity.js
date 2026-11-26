@@ -18,6 +18,8 @@ export function capacityModel(t){
 export function renderCapacitySummary(root,totals,known=true,admissionKnown=true){
  if(!root)return;
  const m=capacityModel(totals),q=name=>root.querySelector(`[data-capacity-${name}]`);
+ root.classList.toggle('capacity-admission-unknown',!known||!admissionKnown);
+ q('available-label').textContent=known&&admissionKnown?'Nutzbar':'Frei (ungeklärt)';
  q('used').textContent=known?formatBytes(m.used):'—';
  q('total').textContent=known?formatBytes(m.capacity):'—';
  q('detail').textContent=known?`${formatBytes(m.free)} frei · ${admissionKnown?formatBytes(m.usable)+' nutzbar':'Nutzbarkeit wird ermittelt'}`:'Warte auf Statistikdaten';

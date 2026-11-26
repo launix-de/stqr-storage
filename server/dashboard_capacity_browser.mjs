@@ -63,8 +63,12 @@ try{
   try{
    renderCapacitySummary(probe,totals,true);
    if(q('fill').getBoundingClientRect().width<=0)throw Error('Controlled known renderer has no positive fill');
+   const readyColor=getComputedStyle(probe.querySelector('.capacity-track')).backgroundColor;
    renderCapacitySummary(probe,totals,true,capacityAdmissionKnown([{snapshot:{reason:1024n}}]));
    if(q('used').textContent==='—'||!q('detail').textContent.includes('wird ermittelt')||q('detail').textContent.includes('nutzbar')||!q('meter').getAttribute('aria-label').includes('noch unbekannt')||q('reserve').style.width!=='0%')throw Error('Cold reservation recovery presented admission or reserves as ready');
+   if(getComputedStyle(probe.querySelector('.capacity-track')).backgroundColor===readyColor||q('available-label').textContent.includes('Nutzbar')||getComputedStyle(q('reserve-legend')).display!=='none'||q('fill').getBoundingClientRect().width<=0)throw Error('Cold capacity visually claims usable free space or hides known occupation');
+   renderCapacitySummary(probe,totals,true,true);
+   if(getComputedStyle(probe.querySelector('.capacity-track')).backgroundColor!==readyColor||q('available-label').textContent!=='Nutzbar'||getComputedStyle(q('reserve-legend')).display==='none')throw Error('Ready admission did not restore reserve/usable legend');
    renderCapacitySummary(probe,totals,capacityKnown([{snapshot:{volumes:[]}}],2));
    if(q('total').textContent!=='—'||q('used').textContent!=='—'||q('fill').getBoundingClientRect().width!==0||!q('meter').getAttribute('aria-label').includes('unbekannt'))throw Error('Missing member report presented partial global capacity as known');
    renderCapacitySummary(probe,{capacity:0n,allocated:0n,reserved:0n,admission:0n},capacityKnown([{snapshot:{volumes:[]}}],1));
