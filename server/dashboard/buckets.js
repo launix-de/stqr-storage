@@ -8,9 +8,13 @@ import {formatSize,sizeLabel,sizeSteps} from './size.js';
 const $=id=>document.getElementById(id),SYSTEM='53545152535953010000000000000000';
 const quotaText=n=>BigInt(n)<1024n?`${n}B`:formatSize(BigInt(n));
 const policyBytes=b=>String(writeBucketPolicy(new Writer(),b).bytes());
-function quotaUsageBase(b,escape){
+export function quotaUsageBase(b,escape){
  const l=b.policy.limits,accounting=l.quota_accounting==='logical'?'Logisch':'Physisch';
- if(l.absolute_unlimited)return `<span class="bucket-quota">Unbegrenzt</span><div class="bucket-sub">${accounting}</div>`;
+ if(l.absolute_unlimited){
+  const physical=b.occupied_physical_bytes==null?null:BigInt(b.occupied_physical_bytes),used=b.used_bytes==null?null:BigInt(b.used_bytes),shown=physical??used;
+  const detail=physical!=null?'Physisch belegt'+(l.quota_accounting==='logical'?(used==null?' · logische Belegung nicht verfügbar':' · '+(used<1024n?quotaText(used):sizeLabel(used))+' logisch'):''):accounting;
+  return `<div class="bucket-usage"><div class="usage-label"><strong ${shown==null?'':`title="${shown} Bytes belegt"`}>${shown==null?'Belegung nicht verfügbar':escape(shown<1024n?quotaText(shown):sizeLabel(shown))}</strong><span>Unbegrenzt</span></div><div class="bucket-sub" title="${escape(b.usage_error??'')}">${escape(detail)}</div></div>`;
+ }
  const quota=BigInt(l.absolute_quota_bytes);
  if(b.used_bytes==null)return `<span class="bucket-quota">${escape(sizeLabel(quota))}</span><div class="bucket-sub" title="${escape(b.usage_error??'')}">Belegung nicht verfügbar · ${accounting}</div>`;
  const used=BigInt(b.used_bytes),percent=quota>0n?Number((used*10000n/quota)>10000n?10000n:used*10000n/quota)/100:used>0n?100:0;
@@ -34,7 +38,7 @@ export function setupBucketViews({connection,escape,toast,showView,onUsersChange
  const deletionJobs=new Map();
  const pager=new EndlessList({container:$('bucket-rows').closest('.storage-panel'),visible:()=>!$('buckets-view').hidden,fetchPage:(after,limit,query)=>connection().listBucketsPage(after,limit,query),entries:page=>page.buckets,onUpdate:(items,state)=>{buckets=items;pageMeta=state.meta;render(state);schedulePoll();syncStats()},onError:e=>{$('buckets-error').textContent=e.message},onLoading:busy=>{$('refresh-buckets').disabled=busy}});
  async function load(){checkedCatalog.clear();const seq=++epoch;clearTimeout(poll);$('buckets-error').textContent='';try{groups=await fetchGroups();if(seq!==epoch)return;await pager.reset($('bucket-search').value.trim())}catch(e){if(seq===epoch)$('buckets-error').textContent=e.message}}
- function schedulePoll(){clearTimeout(poll);if(!$('buckets-view').hidden&&buckets.some(b=>!b.policy.limits.absolute_unlimited||BigInt(b.policy.limits.guaranteed_quota_bytes)>0n||b.desired_policy||b.state==='deleting'))poll=setTimeout(refreshVisible,3000)}
+ function schedulePoll(){clearTimeout(poll);if(!$('buckets-view').hidden&&buckets.length)poll=setTimeout(refreshVisible,3000)}
  async function refreshVisible(){
   if($('buckets-view').hidden)return;const seq=epoch;
   const ids=[...$('bucket-rows').querySelectorAll('[data-bucket]')].filter(row=>{const r=row.getBoundingClientRect();return r.bottom>=0&&r.top<=innerHeight}).map(row=>row.dataset.bucket);
