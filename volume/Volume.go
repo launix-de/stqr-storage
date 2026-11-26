@@ -34,7 +34,10 @@ import (
 //   - Checkpoint I/O runs against a pinned, immutable accepted-write buffer
 //     outside the metadata lock. Readers may continue; subsequent in-place
 //     writers use a separate bounded overlay until the WAL space is reusable.
-//   - A successful disk mutation has synced payload and redo WAL before updating affected pages. RAM has the same atomicity but no restart durability.
+//   - Durable mutations/explicit Sync use ordered payload and redo WAL fences.
+//     Accepted mutations never Sync, including on size/pressure/error paths.
+//     They spill unsynced or backpressure; Close discards an unrequested tail.
+//     RAM has the same visibility/atomicity, but no disk spill/restart durability.
 //   - After an ambiguous I/O/flush failure the instance is fenced until reopened.
 //     A retry with the same nonzero RequestID recovers its original result.
 //
@@ -45,6 +48,7 @@ type Volume struct {
 	deferred          *deferredGroup
 	fence             *writeFence
 	staging           map[uint64][]byte
+	stageStore        *dirtyStore
 	durableGeneration uint64
 
 	mu                sync.RWMutex
@@ -397,19 +401,19 @@ func (v *Volume) Close() error {
 	if v.closed {
 		return nil
 	}
-	var flushErr error
-	if v.failed == nil && v.deferred != nil {
-		// New publications are rejected while the final accepted buffer is
-		// checkpointed, so clean close cannot discard a later overlay.
-		flushErr = v.checkpointIO((*Volume).flushDeferredIO)
+	// Closing is NOT a durability request. Only a client's explicit fence may
+	// confirm accepted bytes; discard any unrequested tail after waiting for the
+	// already-running fence above.
+	if v.deferred != nil {
+		v.deferred.store.close()
 	}
-	if flushErr == nil && v.failed == nil {
-		// Derived cache failure never changes an acknowledged storage result.
-		_ = v.saveAccountingCacheLocked()
+	if v.stageStore != nil {
+		v.stageStore.close()
 	}
+	_ = v.saveAccountingCacheLocked()
 	v.closed = true
 	v.state = Detached
-	e := errors.Join(flushErr, v.dev.Close())
+	e := v.dev.Close()
 	v.deferred, v.staging = nil, nil
 	if v.onClose != nil {
 		v.onClose()

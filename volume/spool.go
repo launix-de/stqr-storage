@@ -62,7 +62,7 @@ func (s *encodedSpool) Close() {
 	}
 }
 func (t *transaction) storeCompressed(pieces []payloadPiece, codec Compression) ([]dataSpan, error) {
-	spool := &encodedSpool{noSpill: t.sb.Identity.Class == RAM}
+	spool := &encodedSpool{noSpill: t.sb.Identity.Class == RAM || t.sb.Identity.Class == RAMCache}
 	defer spool.Close()
 	buffer := make([]byte, BlockSize)
 	var spans []dataSpan

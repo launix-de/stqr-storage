@@ -138,6 +138,13 @@ func (v *Volume) node(off uint64) (treeNode, error) {
 }
 func (t *transaction) node(off uint64) (treeNode, error) {
 	_, spilled := t.spilled[off]
+	if t.acceptedPages != nil {
+		flag, err := t.acceptedPages.flag(off)
+		if err != nil {
+			return treeNode{}, err
+		}
+		spilled = spilled || flag != 0
+	}
 	if t.pages[off] != nil || spilled {
 		b, e := t.page(off)
 		if e != nil {

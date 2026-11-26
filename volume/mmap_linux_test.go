@@ -394,7 +394,7 @@ func (d *failedMappedSync) Sync() error {
 	}
 	return d.FileIO.Sync()
 }
-func TestMmapFailedCloseStillUnmaps(t *testing.T) {
+func TestMmapCloseDoesNotStartFailedSyncAndStillUnmaps(t *testing.T) {
 	file, err := CreateFile(filepath.Join(t.TempDir(), "failed-close"), 8<<20)
 	if err != nil {
 		t.Fatal(err)
@@ -410,8 +410,12 @@ func TestMmapFailedCloseStillUnmaps(t *testing.T) {
 		t.Fatal(err)
 	}
 	dev.fail.Store(true)
-	if err = v.Close(); err == nil {
-		t.Fatal("injected checkpoint failure hidden")
+	beforeClose := v.IOStats()
+	if err = v.Close(); err != nil {
+		t.Fatal("Close initiated forbidden Sync", err)
+	}
+	if v.IOStats().SyncOps != beforeClose.SyncOps {
+		t.Fatal("Close synced an accepted tail")
 	}
 	if file.mapping != nil {
 		t.Fatal("failed Close leaked mapping")
