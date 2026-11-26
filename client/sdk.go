@@ -4,6 +4,7 @@ package client
 import (
 	"context"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -21,7 +22,7 @@ import (
 )
 
 // Client is an authenticated connection to exactly one bucket. Object methods
-// cannot switch buckets, resolve bucket names, administer the cluster or fetch
+// cannot switch buckets, administer the cluster or fetch
 // cluster statistics. IDs are native 256-bit object addresses, never rehashed.
 // It is safe to call methods concurrently; Close is idempotent.
 type Client struct {
@@ -37,6 +38,7 @@ type Client struct {
 	endpoint, username, password string
 	format                       string
 	bucket                       BucketID
+	bucketSelector               string
 	runtime                      ID
 	mu                           sync.Mutex
 	transport                    *objectTransport
@@ -64,6 +66,34 @@ type Client struct {
 // mandatory. ctx controls establishment; individual operations take their own
 // contexts. There is no TLS or implicit HTTP redirect/credential forwarding.
 func Dial(ctx context.Context, rawURL, username, password string, bucket BucketID, format string) (*Client, error) {
+	if bucket == (BucketID{}) {
+		return nil, errors.New("client: a nonzero bucket ID is required")
+	}
+	return dialBucket(ctx, rawURL, username, password, bucket, bucket.String(), format)
+}
+
+// DialBucket accepts a bucket name or hexadecimal ID. The authenticated server
+// resolves it once and returns its canonical ID during upgrade. A name: prefix
+// selects a literal name, including names that look like IDs. Reconnect and
+// placement-owner sessions always use the canonical ID, never a mutable name.
+func DialBucket(ctx context.Context, rawURL, username, password, selector, format string) (*Client, error) {
+	if selector == "" || len(selector) > 260 || !utf8.ValidString(selector) || strings.ContainsFunc(selector, func(r rune) bool { return r < 32 || r == 127 }) || strings.TrimSpace(selector) != selector {
+		return nil, errors.New("client: a valid bucket name or ID is required")
+	}
+	var id BucketID
+	if raw, err := hex.DecodeString(selector); err == nil && len(raw) == 16 {
+		copy(id[:], raw)
+		if id == (BucketID{}) {
+			return nil, errors.New("client: a nonzero bucket ID is required")
+		}
+	}
+	return dialBucket(ctx, rawURL, username, password, id, selector, format)
+}
+
+// BucketID is the immutable bucket selected when the connection was opened.
+func (c *Client) BucketID() BucketID { return c.bucket }
+
+func dialBucket(ctx context.Context, rawURL, username, password string, bucket BucketID, selector, format string) (*Client, error) {
 	if e := ctx.Err(); e != nil {
 		return nil, e
 	}
@@ -71,7 +101,7 @@ func Dial(ctx context.Context, rawURL, username, password string, bucket BucketI
 	if e != nil || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || u.Scheme != "http" && u.Scheme != "ws" || u.Path != "" && u.Path != "/" && u.Path != "/api/ws" {
 		return nil, errors.New("client: URL must be http://host:port or ws://host:port/api/ws without embedded credentials")
 	}
-	if username == "" || strings.Contains(username, ":") || password == "" || bucket == (BucketID{}) {
+	if username == "" || strings.Contains(username, ":") || password == "" {
 		return nil, errors.New("client: URL, username, password and a nonzero bucket ID are required")
 	}
 	u.Scheme = "ws"
@@ -81,7 +111,7 @@ func Dial(ctx context.Context, rawURL, username, password string, bucket BucketI
 		cancel()
 		return nil, errors.New("client: a nonempty bucket format is required")
 	}
-	c := &Client{endpoint: u.String(), username: username, password: password, bucket: bucket, format: format, done: make(chan struct{}), dialGate: make(chan struct{}, 1), life: life, cancel: cancel}
+	c := &Client{endpoint: u.String(), username: username, password: password, bucket: bucket, bucketSelector: selector, format: format, done: make(chan struct{}), dialGate: make(chan struct{}, 1), life: life, cancel: cancel}
 	t, e := c.connect(ctx)
 	if e != nil {
 		cancel()
@@ -100,7 +130,11 @@ func (c *Client) connectEndpoint(ctx context.Context, endpoint string) (*objectT
 	defer cancel()
 	ctx = merged
 	headers := http.Header{}
-	headers.Set(BucketHeader, c.bucket.String())
+	if c.bucket == (BucketID{}) {
+		headers.Set(BucketHeader, c.bucketSelector)
+	} else {
+		headers.Set(BucketHeader, c.bucket.String())
+	}
 	headers.Set(FormatHeader, c.format)
 	c.mu.Lock()
 	token := c.maintenanceToken
@@ -141,6 +175,23 @@ func (c *Client) connectEndpoint(ctx context.Context, endpoint string) (*objectT
 			return nil, &StatusError{Status: response.StatusCode, Message: message}
 		}
 		return nil, e
+	}
+	// A named connection must learn its canonical ID before any wire request.
+	if values := response.Header.Values(BucketHeader); len(values) > 0 {
+		raw, err := hex.DecodeString(values[0])
+		var id BucketID
+		copy(id[:], raw)
+		if err != nil || len(values) != 1 || len(raw) != 16 || id == (BucketID{}) || c.bucket != (BucketID{}) && c.bucket != id {
+			conn.Close()
+			return nil, ErrProtocol
+		}
+		if c.bucket == (BucketID{}) {
+			c.bucket = id
+		}
+	}
+	if c.bucket == (BucketID{}) {
+		conn.Close()
+		return nil, ErrProtocol
 	}
 	if conn.Subprotocol() != "stqr.v2" {
 		conn.Close()

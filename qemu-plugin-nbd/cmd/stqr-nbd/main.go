@@ -64,13 +64,16 @@ func run() (result error) {
 			e = fmt.Errorf("bucket ID must have 32 hexadecimal digits")
 		}
 		copy(id[:], raw)
-	} else {
-		id, e = nbd.ResolveBucket(ctx, c, *bucket)
 	}
 	if e != nil {
 		return e
 	}
-	b, e := nbd.Open(ctx, c.URL, c.Username, c.Password, id, *ro)
+	var b *nbd.Bucket
+	if *bucketID != "" {
+		b, e = nbd.Open(ctx, c.URL, c.Username, c.Password, id, *ro)
+	} else {
+		b, e = nbd.OpenBucket(ctx, c.URL, c.Username, c.Password, *bucket, *ro)
+	}
 	if e != nil {
 		return e
 	}

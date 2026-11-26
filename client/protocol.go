@@ -9,7 +9,8 @@ import (
 	"unicode/utf8"
 )
 
-// BucketHeader selects the native bucket once during HTTP/WebSocket upgrade.
+// BucketHeader selects a bucket by name or hexadecimal ID during upgrade.
+// A successful bucket-bound upgrade echoes its canonical hexadecimal ID.
 const BucketHeader = "X-STQR-Bucket"
 
 // FormatHeader declares the opaque client format when opening a bucket.

@@ -542,9 +542,14 @@ func TestDaemonReplicaHandoffRestartBoundaries(t *testing.T) {
 						primary = target.node
 					}
 					bucket, _ := primary.Bucket(b.ID())
-					retry, err := bucket.Append(ctx, actor, id, []byte("durable"), request)
-					if err != nil || retry != original {
-						t.Fatalf("lost original reply: %+v %v", retry, err)
+					// The resumed handoff can finish before its PG policy fence is
+					// released. Retry the same logical append across that 503;
+					// its original reply and one-copy payload must survive.
+					retry := retryReplicaMutation(t, ctx, func() (volume.Result, error) {
+						return bucket.Append(ctx, actor, id, []byte("durable"), request)
+					})
+					if retry != original {
+						t.Fatalf("lost original reply: %+v != %+v", retry, original)
 					}
 					nextRequest := volume.Options{RequestID: volume.ID(client.NewRequestID())}
 					retryReplicaMutation(t, ctx, func() (volume.Result, error) { return bucket.Append(ctx, actor, id, []byte("!"), nextRequest) })
