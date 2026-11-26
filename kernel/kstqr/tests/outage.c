@@ -77,6 +77,9 @@ int main(int argc, char **argv) {
     fds[i] = open(name, O_RDONLY);
     CHECK(fds[i] >= 0);
   }
+  /* Make open-reference mutations durable before intentionally losing the
+   * socket. This scenario tests read recovery, not lost unsynced writes. */
+  CHECK(!fsync(fd));
   control(argv[1], "offline");
   pid_t children[13];
   for (int i = 0; i < 12; i++) {
@@ -113,7 +116,11 @@ int main(int argc, char **argv) {
   started = now();
   CHECK(write(append, "once", 4) == 4);
   CHECK(now() - started >= 1.0);
-  CHECK(!fsync(append));
+  /* The CAS can recover visibility by its exact after-image. Its lost reply
+   * cannot certify all older uncheckpointed requests on that connection;
+   * explicit fsync must retain that uncertainty rather than invent durability. */
+  errno = 0;
+  CHECK(fsync(append) == -1 && errno == ESTALE);
   struct stat info;
   CHECK(!fstat(append, &info));
   CHECK(info.st_size == 4);
