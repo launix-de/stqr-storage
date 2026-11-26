@@ -515,6 +515,7 @@ static int decode_mark(struct buf *b, stqr_commit_mark *m) {
     if (done(b) || zero(m->boot.bytes, 16) || !m->sequence) return -EPROTO;
     return 0;
 }
+static void note_active(stqr_client *, const stqr_commit_mark *);
 static int observe_mark(stqr_client *c, struct buf *b) {
     stqr_commit_mark m; int err = decode_mark(b, &m);
     if (err) return err;
@@ -524,6 +525,13 @@ static int observe_mark(stqr_client *c, struct buf *b) {
     if (!memcmp(c->synced_mark.boot.bytes, m.boot.bytes, 16) && m.sequence <= c->synced_mark.sequence) return 0;
     if (!c->pending_mark.sequence || m.sequence > c->pending_mark.sequence) c->pending_mark = m;
     return 0;
+}
+/* Header 49 confirms an exact server-boot/bucket prefix already on storage.
+ * A generic accepted mark (48) alone never proves that checkpoint completed. */
+static int confirm_mark(stqr_client *c, struct buf *b) {
+    stqr_commit_mark m;int err=decode_mark(b,&m);if(err)return err;
+    if(c->pending_mark.sequence&&memcmp(c->pending_mark.boot.bytes,m.boot.bytes,16))c->durability_lost=1;
+    note_active(c,&m);return 0;
 }
 static int dispatch_update(stqr_client *c, unsigned opcode, struct buf *m) {
     if (opcode == 0x11a) return observe_mark(c, m);
@@ -674,9 +682,9 @@ static int reply(stqr_client *c, unsigned op, stqr_id id, struct buf *result, st
                     int decoded = redirect_patch(c,value,n);
                     if (decoded) headers.err = decoded;
                 }
-                if (tags[i] == 48 && !headers.err) {
+                if ((tags[i] == 48 || tags[i] == 49) && !headers.err) {
                     struct buf mark = {.p = (stqr_u8 *)value, .n = n};
-                    int observed = observe_mark(c, &mark);
+                    int observed = tags[i]==48?observe_mark(c, &mark):confirm_mark(c, &mark);
                     if (observed) headers.err = observed;
                 }
               }

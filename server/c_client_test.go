@@ -216,6 +216,82 @@ func TestCClient(t *testing.T) {
 			t.Fatal(err)
 		}
 	})
+	t.Run("legacy-reconnect", func(t *testing.T) {
+		upgrade := websocket.Upgrader{Subprotocols: []string{"stqr.v2"}}
+		var connections, syncs atomic.Int32
+		mark := client.CommitMark{Boot: client.ID{8}, Sequence: 7}
+		host := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			conn, err := upgrade.Upgrade(w, r, nil)
+			if err != nil {
+				return
+			}
+			defer conn.Close()
+			connections.Add(1)
+			for {
+				_, raw, err := conn.ReadMessage()
+				if err != nil {
+					return
+				}
+				m, err := client.DecodeMessage(raw)
+				if err != nil {
+					t.Error(err)
+					return
+				}
+				result := client.Encoder{}
+				includeMark := false
+				switch m.Opcode {
+				case client.Hello:
+					result.U16(2)
+					result.U64(client.CapabilityDurability)
+					result.ID(client.ID{})
+					result.ID(client.ID{})
+					result.U64(0)
+					result.U64(0)
+				case client.ObjectAccepted:
+					result.U64(5)
+					result.Bool(false)
+					result.U32(0)
+					result.ID(client.ID{})
+					result.U8(0)
+					result.U16(5)
+					includeMark = true
+				case client.BucketSync:
+					d := client.Decoder{B: m.Body}
+					d.ID()
+					requested := client.CommitMark{Boot: d.ID(), Sequence: d.U64()}
+					if d.Done() != nil || requested != mark {
+						t.Error("wrong legacy SyncThrough target")
+						return
+					}
+					result.B = mark.MarshalBinary()
+					syncs.Add(1)
+				default:
+					t.Errorf("unexpected legacy opcode %x", m.Opcode)
+					return
+				}
+				body := client.ResponseBody(200, result.B, "")
+				if includeMark {
+					e := client.Encoder{}
+					e.V(200)
+					h := client.Encoder{}
+					h.V(1)
+					h.V(client.DurabilityHeader)
+					h.Blob(mark.MarshalBinary())
+					e.Blob(h.B)
+					e.B = append(e.B, result.B...)
+					body = e.B
+				}
+				if conn.WriteMessage(websocket.BinaryMessage, client.EncodeMessage(client.Message{Kind: client.Response, Opcode: m.Opcode, ID: m.ID, Body: body})) != nil {
+					return
+				}
+			}
+		}))
+		defer host.Close()
+		run(t, host.URL, "user", "password", client.ID{1}.String(), "legacy-reconnect")
+		if connections.Load() != 2 || syncs.Load() != 1 {
+			t.Fatalf("legacy reconnect/fence: connections=%d syncs=%d", connections.Load(), syncs.Load())
+		}
+	})
 	t.Run("independent-fence", func(t *testing.T) {
 		upgrade := websocket.Upgrader{Subprotocols: []string{"stqr.v2"}}
 		syncStarted, statSeen := make(chan struct{}), make(chan struct{})

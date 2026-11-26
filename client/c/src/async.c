@@ -44,11 +44,12 @@ static void async_finish(stqr_client *c,struct sq_async *p,int error,int status,
 }
 static void async_fail(stqr_client *c,struct sq_channel *channel,int error) {
     unsigned i;
-    /* A replacement socket cannot fence its predecessor's accepted prefix,
-     * including acknowledged requests whose async ticket was already freed. */
+    /* A replacement connection fence cannot certify its predecessor's prefix.
+     * Legacy peers instead retain boot-qualified marks for SyncThrough, which
+     * can certify the same prefix over a replacement socket. */
     if (channel==c->active) {
-        if (c->pending_mark.sequence) c->durability_lost=1;
-    } else if (channel && channel->pending.sequence) channel->lost=1;
+        if ((c->capabilities&STQR_CAP_CONNECTION_SYNC) && c->pending_mark.sequence) c->durability_lost=1;
+    } else if (channel && (channel->capabilities&STQR_CAP_CONNECTION_SYNC) && channel->pending.sequence) channel->lost=1;
     if (channel==c->active && channel && c->durability_lost) channel->lost=1;
     for (i=0;i<64;i++) {
         struct sq_async *p=c->async[i],*next;
@@ -133,7 +134,7 @@ static int async_headers(stqr_client *c,struct sq_async *p,struct buf *m,int *st
         tags[i]=readvar(&headers);for(j=0;j<i;j++)if(tags[j]==tags[i])headers.err=-EPROTO;
         raw=readblob(&headers,&n);
         if(tags[i]==2 && (*status==301||*status==302) && !headers.err)headers.err=redirect_patch(c,raw,n);
-        if(tags[i]==48 && !headers.err){struct buf mark={.p=(stqr_u8 *)raw,.n=n};headers.err=observe_mark(c,&mark);}
+        if((tags[i]==48||tags[i]==49) && !headers.err){struct buf mark={.p=(stqr_u8 *)raw,.n=n};headers.err=tags[i]==48?observe_mark(c,&mark):confirm_mark(c,&mark);}
     }
     if(m->err||done(&headers)||*status<100||*status>599)return -EPROTO;
     return 0;

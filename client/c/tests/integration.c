@@ -62,6 +62,16 @@ int main(void) {
     CHECK(!stqr_parse_id(getenv("STQR_TEST_BUCKET"), &bucket));
     CHECK(!stqr_parse_object_id("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", &id));
     CHECK(!stqr_dial(&c, url, getenv("STQR_TEST_USER"), getenv("STQR_TEST_PASSWORD"), bucket,"fs", 3000));
+    if (mode && !strcmp(mode,"legacy-reconnect")) {
+        stqr_commit_mark mark;
+        CHECK(!(stqr_capabilities(c)&STQR_CAP_CONNECTION_SYNC));
+        o=fresh();o.accepted=1;CHECK(!stqr_put(c,id,"hello",5,&o,&info));
+        CHECK(!stqr_pending_mark(c,&mark)&&mark.sequence==7);
+        CHECK(!stqr_reconnect(c));
+        CHECK(!stqr_pending_mark(c,&mark)&&mark.sequence==7);
+        CHECK(!stqr_sync(c));CHECK(!stqr_pending_mark(c,&mark)&&!mark.sequence);
+        stqr_close(c);puts("legacy reconnect confirms retained mark through SyncThrough");return 0;
+    }
     if (mode && !strcmp(mode,"accepted-cas-reconnect")) {
         struct async_result result={0},fence={0};stqr_commit_mark mark;
         o=fresh();CHECK(!stqr_put(c,id,"before",6,&o,&info));
