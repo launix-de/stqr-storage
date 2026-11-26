@@ -1,19 +1,22 @@
 # STQR drives on Windows
 
-`stqr-windows` mounts a normal STQR filesystem bucket as a Windows drive using
+`stqr-windows` mounts a normal STQR filesystem bucket or native lower/upper overlay as a Windows drive using
 [WinFsp](https://winfsp.dev/). It speaks the native STQR protocol directly to the
 nodes and uses the same STFS inode format as Linux FUSE and `kstqr`.
 
-Install WinFsp on the Windows machine, then double-click `stqr-windows.exe`.
+Install WinFsp on the Windows machine, unpack the complete Windows bundle
+(`stqr-windows.exe` and `stqr-windows.ui.exe` together), then double-click
+`stqr-windows.exe`. The native WinUI 3 frontend is self-contained: users do not
+need to install .NET or the Windows App SDK separately.
 The application runs without a console window. A WinFsp download button opens
 the official runtime download when needed. Enter the server URI, STQR username/password, bucket and drive letter. Select
-**“Bei der Anmeldung verbinden und Passwort merken”** to install the client for your
+**“Bei der Windows-Anmeldung verbinden”** to install the client for your
 Windows account and reconnect the drive automatically at **user login**. No
 administrator rights are needed for this per-user setup. This is not a system
 service or a drive available before anyone has logged in.
 
-The setup copies the executable into `%LOCALAPPDATA%\STQR` using a versioned
-filename, registers one `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`
+The setup copies both executables into `%LOCALAPPDATA%\STQR` using versioned
+filenames, registers one `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`
 entry per drive, and stores an encrypted profile under `HKCU\Software\STQR\Mounts`.
 The profile, including the password, is protected with **Windows DPAPI in user
 scope**. No plaintext password is written into files, startup arguments or the
@@ -26,8 +29,9 @@ initialize an empty bucket; it rejects buckets containing other application data
 Readonly mounts never initialize a filesystem. The bucket and user grants must
 already exist on the server.
 
-Open the EXE again and select **“Trennen und Autostart entfernen”** to unmount
-and remove the startup entry and saved credentials for the selected drive.
+Open the EXE again and select a saved drive. **“Trennen”** unmounts it;
+**“Verbindung entfernen”** also removes the startup entry and saved credentials
+after confirmation.
 Installed executable versions are kept so removing one drive cannot break
 another configured drive. Use `--setup --saved-drive T:` to edit another saved
 profile. Removing a profile never deletes its server-side bucket or data.
@@ -73,8 +77,16 @@ not a Unix-to-Windows identity directory or a full Windows ACL implementation.
 
 The namespace is case-sensitive. Files created on Linux with names that Windows
 applications cannot represent may remain inaccessible to those applications.
-Native overlays, alternate data streams, Windows security descriptors and xattr
-callbacks are not implemented. WinFsp itself does not support Windows hardlink
+Native overlays are available under **Erweiterte Optionen** or with
+`--lower-bucket BASE --writable-paths "home/"`. The selected bucket is the upper;
+the lower must remain immutable. Rules are persisted in the upper and must match
+on later mounts. A readonly overlay never initializes, copies up or cleans up
+objects. Both stores are subscribed for notifications. As on Linux, overlay
+hardlink/special-node creation and xattr mutation remain unsupported.
+
+Windows extended attributes map to shared `user.*` xattrs. The configured Unix
+UID does not grant access to privileged `trusted.*` attributes, which remain
+preserved. Alternate data streams and Windows security descriptors are not implemented. WinFsp itself does not support Windows hardlink
 creation; the adapter returns an explicit unsupported error for that operation.
 Existing Linux hardlinks share their inode and content when read from Windows.
 
@@ -91,20 +103,40 @@ client's `--fsck`.
 
 ## Build and verification
 
-From the repository root, `make windows` cross-compiles an amd64 executable into
-`windows/bin/stqr-windows.exe`; no C compiler is required. The WinFsp runtime is required
-on the Windows machine, not on the build host. The adapter uses cgofuse's Windows
-binding with `CGO_ENABLED=0`. The executable uses the Windows GUI subsystem,
-Segoe UI and themed controls with DPI scaling. Its application manifest is a
-checked-in resource; `make windows-resources` regenerates it using LLVM resource
-tools when its sources changed; `make windows` checks that dependency as well.
+The full bundle requires Windows x64, the .NET 10 SDK and Go:
+
+```powershell
+./windows/build.ps1
+# Or, with GNU Make on Windows:
+make windows-package
+```
+
+The build publishes a self-contained WinUI 3 frontend (Windows App SDK 2.7) and
+Go/WinFsp backend into `windows/bin`. Keep the two EXEs together. WinUI requires
+Windows 10 version 1809 or newer; supported deployments also require an OS still
+covered by Microsoft support. The XAML compiler requires a Windows host.
+
+On Linux, `make windows` cross-compiles **only the Go backend**; the frontend must
+come from the Windows build/CI artifact. CLI and background mounts work without
+it. No C compiler is required for the cgofuse Windows binding. The GUI launcher
+reports a missing frontend explicitly. Configuration is passed through private
+redirected process pipes, never through command-line passwords or plaintext
+configuration files. Closing the frontend leaves a mounted drive running; reopen
+it to disconnect. Per-user startup copies and versions both executables together.
+
+The backend's manifest is a checked-in resource; `make windows-resources`
+regenerates it with LLVM tools. CI publishes the full bundle, executes a real
+WinUI startup/validation/layout check and captures its rendered interface.
+See [Microsoft's unpackaged WinUI guidance](https://learn.microsoft.com/en-us/windows/apps/package-and-deploy/unpackage-winui-app)
+for the self-contained deployment properties.
 
 `make -C windows check` tests the portable filesystem layer and builds Windows callback
 tests. These cover open handles across rename/unlink, sparse and segmented I/O,
 concurrent append, readonly rejection and metadata callbacks. The setup tests
 cover DPAPI roundtrips and tamper rejection, executable copying, startup quoting,
-profile removal and per-drive exclusion/stop events. These tests can run under
-Wine; `STQR_TEST_WINDOWS_UI=1` also exercises the native checkbox dialog. A drive mount and application compatibility still require
+profile removal and per-drive exclusion/stop events. The backend tests can run under
+Wine. The WinUI frontend requires real Windows; use `--smoke-test` with
+`STQR_UI_SMOKE_DIR` pointing to an existing output directory. A drive mount and application compatibility still require
 testing on real Windows with WinFsp; Wine callback tests do not load its driver.
 
 For incremental backups with hardlinks, use Linux FUSE or `kstqr` and

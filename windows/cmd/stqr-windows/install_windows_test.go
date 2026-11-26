@@ -156,3 +156,36 @@ func TestSetupDialogCheckbox(t *testing.T) {
 		t.Fatal("dialog did not preserve checkbox/config")
 	}
 }
+
+func TestInstallWinUIBundle(t *testing.T) {
+	source := filepath.Join(t.TempDir(), "stqr-windows.exe")
+	i := installation{directory: filepath.Join(t.TempDir(), "installed")}
+	for path, content := range map[string]string{source: "backend", uiPath(source): "frontend-v1"} {
+		if err := os.WriteFile(path, []byte(content), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	first, err := i.installExecutable(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if raw, err := os.ReadFile(uiPath(first)); err != nil || string(raw) != "frontend-v1" {
+		t.Fatal("UI not installed", err)
+	}
+	if same, err := i.installExecutable(source); err != nil || same != first {
+		t.Fatal("unchanged bundle was not reused", err)
+	}
+	if err := os.WriteFile(uiPath(source), []byte("frontend-v2"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	second, err := i.installExecutable(source)
+	if err != nil || second == first {
+		t.Fatal("UI update did not version the bundle", err)
+	}
+	if raw, err := os.ReadFile(uiPath(first)); err != nil || string(raw) != "frontend-v1" {
+		t.Fatal("running UI version was replaced", err)
+	}
+	if raw, err := os.ReadFile(uiPath(second)); err != nil || string(raw) != "frontend-v2" {
+		t.Fatal("UI update missing", err)
+	}
+}

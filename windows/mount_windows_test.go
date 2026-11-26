@@ -46,10 +46,10 @@ func TestWindowsMountedFilesystem(t *testing.T) {
 	if _, err = f.Volume.WriteAt(ctx, info.ID, []byte("shared format"), 0); err != nil {
 		t.Fatal(err)
 	}
-	if err = f.Volume.SetXattr(ctx, info.ID, "user.preserved", []byte("linux metadata"), 0); err != nil {
+	if err = volume.SetXattr(ctx, info.ID, "user.preserved", []byte("linux metadata"), 0); err != nil {
 		t.Fatal(err)
 	}
-	if _, err = f.Volume.Link(ctx, root, "hardlink", info.ID); err != nil {
+	if _, err = volume.Link(ctx, root, "hardlink", info.ID); err != nil {
 		t.Fatal(err)
 	}
 	host := fuse.NewFileSystemHost(&Adapter{FS: f})
@@ -103,7 +103,7 @@ func TestWindowsMountedFilesystem(t *testing.T) {
 	if got, err := os.ReadFile(p("from-go")); err != nil || string(got) != "from Windows" {
 		t.Fatal("existing Linux hardlink", string(got), err)
 	}
-	if value, err := f.Volume.GetXattr(ctx, info.ID, "user.preserved"); err != nil || string(value) != "linux metadata" {
+	if value, err := volume.GetXattr(ctx, info.ID, "user.preserved"); err != nil || string(value) != "linux metadata" {
 		t.Fatal("lost Linux xattr", string(value), err)
 	}
 	if err = os.Mkdir(p("directory"), 0755); err != nil {

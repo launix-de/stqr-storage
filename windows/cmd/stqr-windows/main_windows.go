@@ -6,6 +6,7 @@ package main
 import (
 	"context"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -31,6 +32,8 @@ func run() error {
 	username := flags.String("username", "", "STQR username")
 	bucket := flags.String("bucket", "", "filesystem bucket name or ID")
 	ro := flags.Bool("readonly", false, "readonly mount")
+	lowerBucket := flags.String("lower-bucket", "", "optional readonly native-overlay base bucket")
+	whitelist := flags.String("writable-paths", "", "newline-separated writable overlay paths; directories end in /")
 	initialize := flags.Bool("init", false, "initialize an empty filesystem bucket")
 	stdin := flags.Bool("password-stdin", false, "read password from redirected standard input")
 	uid := flags.Uint64("uid", ^uint64(0), "Unix owner for new files (default: root inode owner)")
@@ -104,7 +107,14 @@ func run() error {
 		if flags.NArg() != 1 || *username == "" || *bucket == "" {
 			return fmt.Errorf("username, bucket and drive letter required; use --setup for the dialog")
 		}
-		c = mountConfig{URI: *uri, Username: *username, Bucket: *bucket, Drive: flags.Arg(0), ReadOnly: *ro}
+		c = mountConfig{URI: *uri, Username: *username, Bucket: *bucket, Drive: flags.Arg(0), ReadOnly: *ro, LowerBucket: *lowerBucket}
+		if *whitelist != "" {
+			for _, line := range strings.Split(*whitelist, "\n") {
+				if line = strings.TrimSpace(line); line != "" {
+					c.Whitelist = append(c.Whitelist, line)
+				}
+			}
+		}
 		for _, v := range []uint64{*uid, *gid} {
 			if v != ^uint64(0) && v > uint64(^uint32(0)) {
 				return fmt.Errorf("uid/gid must fit into 32 bits")
@@ -220,7 +230,13 @@ func mount(ctx context.Context, c mountConfig, initialize bool, installation ins
 	}
 	defer conn.Close()
 	store := client.NewSubscriptionStore(conn, 8<<20)
+	store.EnableAcceptedWrites()
 	defer store.Close()
+	defer func() {
+		syncCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		result = errors.Join(result, conn.Sync(syncCtx))
+	}()
 	options := client.FSOptions{Create: initialize, ReadOnly: c.ReadOnly}
 	if c.UID != nil {
 		options.UID = *c.UID
@@ -241,7 +257,28 @@ func mount(ctx context.Context, c mountConfig, initialize bool, installation ins
 			return e
 		}
 	}
-	fs, e := client.OpenFilesystem(ctx, store, options)
+	stores := []*client.SubscriptionStore{store}
+	var fs winfs.FilesystemView
+	if c.LowerBucket == "" {
+		fs, e = client.OpenFilesystem(ctx, store, options)
+	} else {
+		lowerID, err := nbd.ResolveBucket(ctx, nbd.Config{URL: c.httpURI(), Username: c.Username, Password: c.Password}, c.LowerBucket)
+		if err != nil {
+			return err
+		}
+		if lowerID == id {
+			return fmt.Errorf("Basis und beschreibbares Bucket müssen verschieden sein")
+		}
+		lowerConn, err := client.Dial(ctx, c.URI, c.Username, c.Password, lowerID, "fs")
+		if err != nil {
+			return err
+		}
+		defer lowerConn.Close()
+		lowerStore := client.NewSubscriptionStore(lowerConn, 8<<20)
+		defer lowerStore.Close()
+		stores = append(stores, lowerStore)
+		fs, e = client.OpenOverlayFilesystem(ctx, lowerStore, store, client.OverlayOptions{Create: initialize, ReadOnly: c.ReadOnly, LowerBucketID: lowerID, Whitelist: c.Whitelist})
+	}
 	if e != nil {
 		return e
 	}
@@ -276,7 +313,7 @@ func mount(ctx context.Context, c mountConfig, initialize bool, installation ins
 	host := fuse.NewFileSystemHost(adapter)
 	host.SetCapCaseInsensitive(false)
 	host.SetCapReaddirPlus(true)
-	stopNotifications := watchWindowsChanges(ctx, store, adapter.FS, host)
+	stopNotifications := watchWindowsChanges(ctx, stores, adapter.FS, host)
 	defer stopNotifications()
 	opts := []string{"-o", "volname=STQR,uid=-1,gid=-1,umask=077,FileInfoTimeout=0,DirInfoTimeout=0,attr_timeout=0,entry_timeout=0,negative_timeout=0"}
 	if c.ReadOnly {
@@ -284,6 +321,7 @@ func mount(ctx context.Context, c mountConfig, initialize bool, installation ins
 	}
 	done := make(chan struct{})
 	defer close(done)
+	adapter.OnReady = func() { go waitForUIDrive(ctx, done, c.Drive) }
 	go func() {
 		select {
 		case <-ctx.Done():
@@ -321,12 +359,24 @@ func mount(ctx context.Context, c mountConfig, initialize bool, installation ins
 	if !host.Mount(c.Drive, opts) {
 		return fmt.Errorf("%w: mount failed; check WinFsp installation and drive availability", errMountUnavailable)
 	}
-	syncCtx, syncCancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer syncCancel()
-	return conn.Sync(syncCtx)
+	return nil
 }
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "--ui-rpc" {
+		if err := runUIRPC(); err != nil {
+			_ = json.NewEncoder(os.Stdout).Encode(uiReply{Version: uiProtocolVersion, Type: "error", Message: err.Error()})
+			os.Exit(1)
+		}
+		return
+	}
+	if len(os.Args) == 1 || hasSetupFlag(os.Args[1:]) {
+		if err := launchWinUI(); err != nil {
+			messageBox(0, "STQR", err.Error(), 0x10)
+			os.Exit(1)
+		}
+		return
+	}
 	attachCLIConsole()
 	if e := run(); e != nil && !errors.Is(e, flag.ErrHelp) {
 		if len(os.Args) == 1 || hasSetupFlag(os.Args[1:]) {

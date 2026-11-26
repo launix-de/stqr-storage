@@ -1,0 +1,48 @@
+<Window x:Class="Stqr.UI.MainWindow" xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+ <Grid x:Name="Root" Background="{ThemeResource ApplicationPageBackgroundThemeBrush}">
+  <Grid.RowDefinitions><RowDefinition Height="48"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+  <Grid x:Name="TitleBar" Margin="24,0,160,0"><StackPanel Orientation="Horizontal" Spacing="10" VerticalAlignment="Center"><FontIcon Glyph="&#xE8B7;" FontSize="18" Foreground="#008B82"/><TextBlock Text="STQR" FontWeight="SemiBold" CharacterSpacing="180"/></StackPanel></Grid>
+  <ScrollViewer Grid.Row="1" HorizontalScrollBarVisibility="Disabled" Padding="32,16,32,24">
+   <StackPanel MaxWidth="940" HorizontalAlignment="Stretch" Spacing="24">
+    <StackPanel Spacing="8"><TextBlock Text="Dein Speicher. Dein Laufwerk." Style="{ThemeResource TitleTextBlockStyle}" TextWrapping="Wrap"/><TextBlock Text="Verbinde STQR mit deinem Windows-Explorer." Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap"/></StackPanel>
+    <InfoBar x:Name="Notice" IsOpen="False" IsClosable="True"/>
+    <Grid ColumnSpacing="24" x:Name="ContentGrid">
+     <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="260"/></Grid.ColumnDefinitions>
+     <StackPanel Spacing="16">
+      <Border Background="{ThemeResource CardBackgroundFillColorDefaultBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1" CornerRadius="12" Padding="24">
+       <StackPanel Spacing="18">
+        <TextBlock Text="Verbindung" Style="{ThemeResource SubtitleTextBlockStyle}"/>
+        <ComboBox x:Name="SavedProfiles" Header="Gespeicherte Laufwerke" PlaceholderText="Neue Verbindung" DisplayMemberPath="Label" HorizontalAlignment="Stretch" SelectionChanged="SavedChanged" AutomationProperties.Name="Gespeicherte Laufwerke"/>
+        <TextBox x:Name="Server" Header="Server" PlaceholderText="http://storage:7419" Text="http://127.0.0.1:7419" AutomationProperties.AutomationId="Server"/>
+        <Grid ColumnSpacing="16"><Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition/></Grid.ColumnDefinitions><TextBox x:Name="Username" Header="Benutzername" AutomationProperties.AutomationId="Username"/><PasswordBox x:Name="Password" Grid.Column="1" Header="Passwort" AutomationProperties.AutomationId="Password"/></Grid>
+        <Grid ColumnSpacing="16"><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="100"/></Grid.ColumnDefinitions><TextBox x:Name="Bucket" Header="Bucket" PlaceholderText="Name oder ID" AutomationProperties.AutomationId="Bucket"/><ComboBox x:Name="Drive" Grid.Column="1" Header="Laufwerk" HorizontalAlignment="Stretch" AutomationProperties.AutomationId="Drive"/></Grid>
+       </StackPanel>
+      </Border>
+      <Border Background="{ThemeResource CardBackgroundFillColorDefaultBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1" CornerRadius="12" Padding="24">
+       <StackPanel Spacing="16">
+        <ToggleSwitch x:Name="ReadOnly" Header="Schreibgeschützter Zugriff" OnContent="Nur lesen" OffContent="Lesen und schreiben" AutomationProperties.AutomationId="ReadOnly"/>
+        <CheckBox x:Name="Remember" Content="Bei der Windows-Anmeldung verbinden" AutomationProperties.AutomationId="Remember"/>
+        <StackPanel Orientation="Horizontal" Spacing="8"><FontIcon Glyph="&#xE72E;" FontSize="14" Foreground="{ThemeResource TextFillColorSecondaryBrush}"/><TextBlock Text="Zugangsdaten werden in deinem Windows-Konto geschützt." TextWrapping="Wrap" FontSize="12" Foreground="{ThemeResource TextFillColorSecondaryBrush}"/></StackPanel>
+       </StackPanel>
+      </Border>
+      <Expander Header="Erweiterte Optionen" HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch">
+       <StackPanel Spacing="16" Padding="0,8">
+        <ToggleSwitch x:Name="Overlay" Header="Native Overlay-Ansicht" OnContent="Basis + beschreibbares Bucket" OffContent="Normales Dateisystem" Toggled="OverlayChanged"/>
+        <StackPanel x:Name="OverlayFields" Spacing="12" Visibility="Collapsed"><TextBox x:Name="LowerBucket" Header="Schreibgeschütztes Basisbucket" PlaceholderText="Name oder ID"/><TextBox x:Name="WritablePaths" Header="Beschreibbare Pfade" PlaceholderText="home/&#10;config/settings.json" AcceptsReturn="True" MinHeight="100" TextWrapping="Wrap"/><TextBlock Text="Verwende eine unveränderliche Basis. Ordner enden mit /. Leer: gespeicherte Regeln übernehmen." TextWrapping="Wrap" FontSize="12" Foreground="{ThemeResource TextFillColorSecondaryBrush}"/></StackPanel>
+        <Grid ColumnSpacing="16"><Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition/></Grid.ColumnDefinitions><NumberBox x:Name="UID" Header="Unix-Benutzer-ID (optional)" Minimum="0" Maximum="4294967295" SmallChange="1"/><NumberBox x:Name="GID" Grid.Column="1" Header="Unix-Gruppen-ID (optional)" Minimum="0" Maximum="4294967295" SmallChange="1"/></Grid>
+       </StackPanel>
+      </Expander>
+     </StackPanel>
+     <StackPanel x:Name="Aside" Grid.Column="1" Spacing="16">
+      <Border Background="{ThemeResource CardBackgroundFillColorDefaultBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1" CornerRadius="12" Padding="24">
+       <StackPanel Spacing="16"><FontIcon x:Name="StatusIcon" Glyph="&#xE8B7;" FontSize="36" HorizontalAlignment="Left" Foreground="#008B82"/><TextBlock x:Name="StatusTitle" Text="Bereit zum Verbinden" Style="{ThemeResource SubtitleTextBlockStyle}" TextWrapping="Wrap"/><TextBlock x:Name="StatusDetail" Text="Deine Dateien erscheinen als eigenes Laufwerk im Explorer." TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}"/><ProgressRing x:Name="Busy" IsActive="False" Visibility="Collapsed" Width="28" Height="28" HorizontalAlignment="Left"/></StackPanel>
+      </Border>
+      <InfoBar x:Name="DriverNotice" IsOpen="False" IsClosable="False" Severity="Warning" Title="WinFsp fehlt" Message="Installiere den Dateisystemtreiber, um Laufwerke zu verbinden."><InfoBar.ActionButton><HyperlinkButton Content="WinFsp herunterladen" NavigateUri="https://winfsp.dev/rel/"/></InfoBar.ActionButton></InfoBar>
+      <TextBlock Text="Alle Verbindungen werden unter deinem Windows-Benutzer verwaltet." TextWrapping="Wrap" FontSize="12" Foreground="{ThemeResource TextFillColorSecondaryBrush}" Margin="8,0"/>
+     </StackPanel>
+    </Grid>
+   </StackPanel>
+  </ScrollViewer>
+  <Border Grid.Row="2" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}" BorderBrush="{ThemeResource DividerStrokeColorDefaultBrush}" BorderThickness="0,1,0,0" Padding="32,16"><Grid ColumnSpacing="12"><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions><Button x:Name="Forget" Content="Verbindung entfernen" Click="ForgetClicked" Visibility="Collapsed"/><Button x:Name="Disconnect" Grid.Column="1" Content="Trennen" Click="DisconnectClicked" IsEnabled="False"/><Button x:Name="Connect" Grid.Column="2" Content="Verbinden" Style="{ThemeResource AccentButtonStyle}" Click="ConnectClicked" MinWidth="140" AutomationProperties.AutomationId="Connect"/></Grid></Border>
+ </Grid>
+</Window>
