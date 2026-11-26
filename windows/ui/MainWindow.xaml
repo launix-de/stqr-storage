@@ -20,7 +20,8 @@
       </Border>
       <Border Background="{ThemeResource CardBackgroundFillColorDefaultBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1" CornerRadius="12" Padding="24">
        <StackPanel Spacing="16">
-        <ToggleSwitch x:Name="ReadOnly" Header="Schreibgeschützter Zugriff" OnContent="Nur lesen" OffContent="Lesen und schreiben" AutomationProperties.AutomationId="ReadOnly"/>
+        <ToggleSwitch x:Name="WriteAccess" Header="Schreibzugriff" IsOn="True" OnContent="Lesen und schreiben" OffContent="Nur lesen" AutomationProperties.AutomationId="WriteAccess"/>
+        <TextBlock x:Name="AccessMode" Text="Mit Schreibberechtigung verbinden wir lesend und schreibend, sonst schreibgeschützt." TextWrapping="Wrap" FontSize="12" Foreground="{ThemeResource TextFillColorSecondaryBrush}"/>
         <CheckBox x:Name="Remember" Content="Bei der Windows-Anmeldung verbinden" AutomationProperties.AutomationId="Remember"/>
         <StackPanel Orientation="Horizontal" Spacing="8"><FontIcon Glyph="&#xE72E;" FontSize="14" Foreground="{ThemeResource TextFillColorSecondaryBrush}"/><TextBlock Text="Zugangsdaten werden in deinem Windows-Konto geschützt." TextWrapping="Wrap" FontSize="12" Foreground="{ThemeResource TextFillColorSecondaryBrush}"/></StackPanel>
        </StackPanel>

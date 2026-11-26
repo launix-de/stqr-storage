@@ -27,7 +27,7 @@ func TestDashboardUnlimitedUsageUsesRAMAndIncludesOccupiedBytes(t *testing.T) {
 	if err := scanRangeRequests(s.ctx, dataVolume, func(volume.RequestRecord) error { return nil }); err != nil {
 		t.Fatal(err)
 	}
-	if after := dataVolume.IOStats(); after.ReadOps <= control.ReadOps {
+	if after := dataVolume.IOStats(); testStorageReadOps(after) <= testStorageReadOps(control) {
 		t.Fatal("metadata IO positive control did not read", control, after)
 	}
 	before := map[*volume.Volume]volume.IOStats{s.system: s.system.IOStats(), dataVolume: dataVolume.IOStats()}
@@ -43,7 +43,7 @@ func TestDashboardUnlimitedUsageUsesRAMAndIncludesOccupiedBytes(t *testing.T) {
 		t.Fatal("physical occupancy missing", entry)
 	}
 	for store, prior := range before {
-		if after := store.IOStats(); after.ReadOps != prior.ReadOps || after.WriteOps != prior.WriteOps || after.SyncOps != prior.SyncOps {
+		if after := store.IOStats(); testStorageReadOps(after) != testStorageReadOps(prior) || after.WriteOps != prior.WriteOps || after.SyncOps != prior.SyncOps {
 			t.Fatal("unlimited listing touched storage", prior, after)
 		}
 	}

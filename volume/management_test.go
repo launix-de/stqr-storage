@@ -245,7 +245,7 @@ func TestPhysicalIOCounters(t *testing.T) {
 		t.Fatal(e)
 	}
 	after := v.Stats().IO
-	if after.SyncOps-before.SyncOps != 4 || after.ReadBytes <= before.ReadBytes || after.WriteBytes-before.WriteBytes <= 10 {
+	if after.SyncOps-before.SyncOps != 4 || testReadWorkBytes(after) <= testReadWorkBytes(before) || after.WriteBytes-before.WriteBytes <= 10 {
 		t.Fatalf("physical counters %+v => %+v", before, after)
 	}
 }

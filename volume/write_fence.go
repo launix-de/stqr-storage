@@ -58,6 +58,9 @@ func (v *Volume) drainMaintenance() error {
 // Other maintenance/publication paths still use check(true) and wait before
 // building their changes, rather than constructing a stale allocator image.
 func (v *Volume) checkBuffered() error {
+	if !v.AccountingReady() {
+		return ErrAccountingNotReady
+	}
 	if v.maintenance != 0 {
 		return ErrBusy
 	}
@@ -118,6 +121,9 @@ func (v *Volume) checkHandle(write bool) error {
 // TryOpenBuffered is foreground admission for bounded buffered mutations. Idle
 // maintenance must retain TryOpen, which never enters a running checkpoint.
 func (v *Volume) TryOpenBuffered() (h *Handle, acquired bool, err error) {
+	if !v.AccountingReady() {
+		return nil, false, ErrAccountingNotReady
+	}
 	if !v.mu.TryLock() {
 		return nil, false, nil
 	}

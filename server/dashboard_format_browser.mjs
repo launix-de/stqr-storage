@@ -11,8 +11,11 @@ try{
  const removed=await page.request.get(new URL('/assets/block-devices.js',cfg.url).href);if(removed.status()!==404)throw Error('Removed disk asset is still served');
  for(const [name,id]of Object.entries(cfg.ids)){
   const cell=page.locator(`[data-bucket="${id}"] .bucket-format`);await cell.waitFor();
-  if(await cell.textContent()!==(name==='format-fresh'?'-':name.slice(7)))throw Error('Wrong bucket format: '+name);
+  if(await cell.textContent()!==(name==='system'?'admin':name==='format-fresh'?'-':name.slice(7)))throw Error('Wrong bucket format: '+name);
  }
+ const systemRow=page.locator(`[data-bucket="${cfg.ids.system}"]`);
+ if(!await systemRow.locator('[data-bucket-edit]').isDisabled())throw Error('System settings are editable');
+ for(const action of ['clone','rename','delete'])if(!await systemRow.locator(`[data-bucket-action="${action}"]`).isDisabled())throw Error('System action is editable: '+action);
  const format='<img src=x onerror="window.formatInjected=true">',id=cfg.ids['format-fresh'];
  // Exercise explicit format binding on an administrative object socket.
  await page.evaluate(async({id,format})=>{
@@ -25,7 +28,8 @@ try{
   });
  },{id,format});
  await page.locator('#refresh-buckets').click();
- await page.waitForFunction(({id,format})=>document.querySelector(`[data-bucket="${id}"] .bucket-format`)?.textContent===format,{id,format});
+ const changed=page.locator(`[data-bucket="${id}"] .bucket-format`);
+ for(let attempt=0;await changed.textContent()!==format;attempt++){if(attempt===100)throw Error('First-open format did not refresh');await page.waitForTimeout(50)}
  if(await page.locator(`[data-bucket="${id}"] .bucket-format img`).count()||await page.evaluate(()=>!!window.formatInjected))throw Error('Unescaped format');
  if(errors.length)throw Error(errors.join('\n'));console.log('All declared formats, fresh dash, live first-open refresh and HTML escaping passed.');
 }finally{await browser.close()}

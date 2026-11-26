@@ -122,11 +122,11 @@ func TestCatchupWritesOnlyChangedPages(t *testing.T) {
 	if err = r.fence(plan.id()); err != nil {
 		t.Fatal(err)
 	}
-	rb, wb := src.IOStats().ReadBytes, dst.IOStats().WriteBytes
+	rb, wb := testStorageReadBytes(src.IOStats()), dst.IOStats().WriteBytes
 	if _, _, err = r.sendSnapshot(ctx, plan, true); err != nil {
 		t.Fatal(err)
 	}
-	read, written := src.IOStats().ReadBytes-rb, dst.IOStats().WriteBytes-wb
+	read, written := testStorageReadBytes(src.IOStats())-rb, dst.IOStats().WriteBytes-wb
 	t.Logf("catch-up source reads=%d target writes=%d", read, written)
 	h, e := dst.Open(false)
 	if e != nil {

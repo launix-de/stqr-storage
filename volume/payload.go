@@ -405,73 +405,30 @@ func (v *Volume) readSpan(s dataSpan, dst []byte, offset uint64) error {
 	if offset > s.Length || uint64(len(dst)) > s.Length-offset {
 		return ErrRange
 	}
-	if s.Direct {
-		raw, e := v.directChunk(s)
-		if e != nil {
-			return e
-		}
-		copy(dst, raw[s.Skip+offset:])
-		return nil
-	}
-	position := s.Skip + offset
 	for len(dst) > 0 {
-		index := position / BlockSize
-		within := position % BlockSize
-		var raw []byte
-		if s.Codec == Raw {
-			n := min(uint64(BlockSize), s.Stored-index*BlockSize)
-			raw = make([]byte, n)
-			if e := v.readBytes(raw, s.Location+index*BlockSize); e != nil {
-				return e
-			}
-			crc := s.CRC
-			if s.Checksums != 0 {
-				var b [4]byte
-				if e := v.readBytes(b[:], s.Checksums+index*4); e != nil {
-					return e
-				}
-				crc = diskOrder.Uint32(b[:])
-			}
-			if checksum(raw) != crc {
-				return ErrCorrupt
-			}
-		} else {
-			entry := make([]byte, 32)
-			if e := v.readBytes(entry, s.Location+8+index*32); e != nil {
-				return e
-			}
-			off := diskOrder.Uint64(entry)
-			n := diskOrder.Uint32(entry[8:])
-			decoded := diskOrder.Uint32(entry[12:])
-			if off > s.Stored || uint64(n) > s.Stored-off || decoded > BlockSize || n > BlockSize {
-				return ErrCorrupt
-			}
-			encoded := make([]byte, n)
-			if e := v.readBytes(encoded, s.Location+off); e != nil {
-				return e
-			}
-			if checksum(encoded) != diskOrder.Uint32(entry[20:]) {
-				return ErrCorrupt
-			}
-			var e error
-			raw, e = decompressBlock(Compression(entry[24]), encoded, decoded)
-			if e != nil {
-				return e
-			}
-			if checksum(raw) != diskOrder.Uint32(entry[16:]) {
-				return ErrCorrupt
-			}
+		n := min(len(dst), BlockSize-int((s.Skip+offset)%BlockSize))
+		parts, err := v.spanReadView(s, offset, uint64(n))
+		if err != nil {
+			return err
 		}
-		if within >= uint64(len(raw)) {
+		at := 0
+		for _, part := range parts {
+			if part.Data == nil {
+				clear(dst[at : at+int(part.Length)])
+			} else {
+				copy(dst[at:], part.Data)
+			}
+			at += int(part.Length)
+		}
+		if at != n {
 			return ErrCorrupt
 		}
-		n := min(len(dst), len(raw)-int(within))
-		copy(dst, raw[within:within+uint64(n)])
+		offset += uint64(n)
 		dst = dst[n:]
-		position += uint64(n)
 	}
 	return nil
 }
+
 func (v *Volume) readObject(o *object, dst []byte, offset uint64) error {
 	if offset > o.Info.Length || uint64(len(dst)) > o.Info.Length-offset {
 		return ErrRange

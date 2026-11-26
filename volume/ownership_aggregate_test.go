@@ -45,7 +45,7 @@ func TestOwnershipAggregatePopulatedBucketNeedsNoIO(t *testing.T) {
 			t.Fatal(err)
 		}
 		after := v.IOStats()
-		if calls != 0 || after.ReadOps != before.ReadOps || after.WriteOps != before.WriteOps {
+		if calls != 0 || testReadWorkOps(after) != testReadWorkOps(before) || after.WriteOps != before.WriteOps {
 			t.Fatal("whole-bucket transition scanned storage", calls, before, after)
 		}
 		if observed != notifications+1 {

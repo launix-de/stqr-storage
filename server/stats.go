@@ -92,7 +92,7 @@ func (s *Server) CollectStats(filter client.StatsFilter) client.StatsSnapshot {
 	for _, m := range s.volumes {
 		v := m.store.Stats()
 		id := client.ID(v.Identity.VolumeID)
-		io := client.IOStats{PhysicalReadBytes: v.IO.ReadBytes, PhysicalWriteBytes: v.IO.WriteBytes, Errors: v.IO.Errors, Flushes: v.IO.SyncOps, FlushNS: v.IO.SyncNanoseconds}
+		io := volumeAccessIO(v.IO)
 		state := uint8(m.store.State())
 		if len(m.config.PlacementGroupsPending) > 0 {
 			state = 0

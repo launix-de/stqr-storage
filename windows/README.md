@@ -4,9 +4,7 @@
 [WinFsp](https://winfsp.dev/). It speaks the native STQR protocol directly to the
 nodes and uses the same STFS inode format as Linux FUSE and `kstqr`.
 
-Install WinFsp on the Windows machine, unpack the complete Windows bundle
-(`stqr-windows.exe` and `stqr-windows.ui.exe` together), then double-click
-`stqr-windows.exe`. The native WinUI 3 frontend is self-contained: users do not
+Install WinFsp on the Windows machine, download the single `stqr-windows.exe`, then double-click it. The native WinUI 3 frontend is self-contained: users do not
 need to install .NET or the Windows App SDK separately.
 The application runs without a console window. A WinFsp download button opens
 the official runtime download when needed. Enter the server URI, STQR username/password, bucket and drive letter. Select
@@ -15,8 +13,8 @@ Windows account and reconnect the drive automatically at **user login**. No
 administrator rights are needed for this per-user setup. This is not a system
 service or a drive available before anyone has logged in.
 
-The setup copies both executables into `%LOCALAPPDATA%\STQR` using versioned
-bundle directories, registers one `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`
+The setup copies the complete executable into `%LOCALAPPDATA%\STQR` using versioned
+application directories, registers one `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`
 entry per drive, and stores an encrypted profile under `HKCU\Software\STQR\Mounts`.
 The profile, including the password, is protected with **Windows DPAPI in user
 scope**. No plaintext password is written into files, startup arguments or the
@@ -29,10 +27,18 @@ initialize an empty bucket; it rejects buckets containing other application data
 Readonly mounts never initialize a filesystem. The bucket and user grants must
 already exist on the server.
 
+**Schreibzugriff** is enabled by default: enabled means read/write, disabled
+means read-only. Before opening the filesystem, the client queries the
+authenticated bucket permissions without probing them with a write. A missing
+write grant or a locked bucket forces read-only access and the dialog explains
+the effective mode. This automatic restriction is not saved as a user-selected
+read-only preference, so a later reconnect can use newly granted write access.
+Servers predating the bound-ID metadata query require the bucket name here.
+
 Open the EXE again and select a saved drive. **“Trennen”** unmounts it;
 **“Verbindung entfernen”** also removes the startup entry and saved credentials
 after confirmation.
-Installed bundle versions are kept so removing one drive cannot break
+Installed application versions are kept so removing one drive cannot break
 another configured drive. Use `--setup --saved-drive T:` to edit another saved
 profile. Removing a profile never deletes its server-side bucket or data.
 
@@ -105,7 +111,7 @@ client's `--fsck`.
 
 ## Build and verification
 
-The full bundle requires Windows x64, the .NET 10 SDK and Go:
+The complete executable requires Windows x64, the .NET 10 SDK and Go:
 
 ```powershell
 ./windows/build.ps1
@@ -113,23 +119,26 @@ The full bundle requires Windows x64, the .NET 10 SDK and Go:
 make windows-package
 ```
 
-The build publishes a self-contained WinUI 3 frontend (Windows App SDK 2.7) and
-Go/WinFsp backend into `windows/bin`. Keep both EXEs together with their original names; WinUI resource activation
-requires the frontend basename to remain stable. Installations use versioned
-directories so updates do not replace a running program. WinUI requires
+The build publishes one `windows/bin/stqr-windows.exe`, containing both the
+Go/WinFsp client and its WinUI 3 interface (Windows App SDK 2.7). No second EXE
+must be downloaded or kept beside it. On the first interactive start, the client
+unpacks its included UI resource into a private, content-addressed runtime cache
+under `%LOCALAPPDATA%\STQR\runtime`. The resource is verified by SHA256 and
+reused on later starts. Background/CLI invocations do not unpack or show the UI.
+Versioned installations copy only the complete public executable. WinUI requires
 Windows 10 version 1809 or newer; supported deployments also require an OS still
 covered by Microsoft support. The XAML compiler requires a Windows host.
 
-On Linux, `make windows` cross-compiles **only the Go backend**; the frontend must
-come from the Windows build/CI artifact. CLI and background mounts work without
-it. No C compiler is required for the cgofuse Windows binding. The GUI launcher
+On Linux, `make windows` cross-compiles **only a development backend**, named
+`windows/bin/stqr-windows-backend.exe`. The distributable `stqr-windows.exe` must
+come from the full Windows build, which includes the UI resource. No C compiler is required for the cgofuse Windows binding. The GUI launcher
 reports a missing frontend explicitly. Configuration is passed through private
 redirected process pipes, never through command-line passwords or plaintext
 configuration files. Closing the frontend leaves a mounted drive running; reopen
-it to disconnect. Per-user startup copies and versions both executables together.
+it to disconnect. Per-user startup copies and versions the complete executable.
 
-The backend's manifest is a checked-in resource; `make windows-resources`
-regenerates it with LLVM tools. CI publishes the full bundle, executes a real
+The application's manifest is a checked-in resource; `make windows-resources`
+regenerates it with LLVM tools. CI publishes the complete executable, executes a real
 WinUI startup/validation/layout check and captures its rendered interface.
 See [Microsoft's unpackaged WinUI guidance](https://learn.microsoft.com/en-us/windows/apps/package-and-deploy/unpackage-winui-app)
 for the self-contained deployment properties.
@@ -139,7 +148,7 @@ tests. These cover open handles across rename/unlink, sparse and segmented I/O,
 concurrent append, readonly rejection and metadata callbacks. The setup tests
 cover DPAPI roundtrips and tamper rejection, executable copying, startup quoting,
 profile removal and per-drive exclusion/stop events. The backend tests can run under
-Wine. The WinUI frontend requires real Windows; use `--smoke-test` with
+Wine. The WinUI frontend requires real Windows; run `stqr-windows.exe --ui-smoke-test` with
 `STQR_UI_SMOKE_DIR` pointing to an existing output directory. A drive mount and application compatibility still require
 testing on real Windows with WinFsp; Wine callback tests do not load its driver.
 

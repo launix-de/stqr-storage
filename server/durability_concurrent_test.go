@@ -30,7 +30,7 @@ func (d *serverFlushGate) Sync() error {
 	}
 	return d.VolumeIO.Sync()
 }
-func TestAcceptedVolumeSwitchDoesNotBlockOtherBuckets(t *testing.T) {
+func TestAcceptedVolumeSwitchWaitsOnlyForExplicitSync(t *testing.T) {
 	s := testServer(t)
 	for _, name := range []string{"a", "b", "other"} {
 		addTestVolume(t, s, name, "hdd", 32<<20)
@@ -111,9 +111,31 @@ func TestAcceptedVolumeSwitchDoesNotBlockOtherBuckets(t *testing.T) {
 		finished <- err
 	}()
 	select {
+	case err := <-finished:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-entered:
+		t.Fatal("changing destination started an unrequested flush")
+	case <-ctx.Done():
+		t.Fatal(ctx.Err())
+	}
+	mark, pending := s.acceptedMark(bucket.ID())
+	if !pending {
+		t.Fatal("missing accepted mark")
+	}
+	fence := client.Encoder{}
+	fence.ID(client.BucketID(bucket.ID()))
+	fence.ID(mark.Boot)
+	fence.U64(mark.Sequence)
+	go func() {
+		_, _, err := s.executeSync(ctx, client.Message{Opcode: client.BucketSync, Body: fence.B}, nil, p)
+		finished <- err
+	}()
+	select {
 	case <-entered:
 	case err := <-finished:
-		t.Fatalf("switch did not reach barrier: %v", err)
+		t.Fatalf("explicit fence did not reach storage: %v", err)
 	case <-ctx.Done():
 		t.Fatal(ctx.Err())
 	}
@@ -132,7 +154,7 @@ func TestAcceptedVolumeSwitchDoesNotBlockOtherBuckets(t *testing.T) {
 	}
 	select {
 	case err := <-finished:
-		t.Fatalf("switch passed an unfinished dependency: %v", err)
+		t.Fatalf("explicit Sync passed an unfinished checkpoint: %v", err)
 	default:
 	}
 	unblock()
