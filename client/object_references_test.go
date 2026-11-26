@@ -15,8 +15,8 @@ func TestObjectReferenceCapabilityNegotiation(t *testing.T) {
 	}{
 		// Independent wire allocations: format-only servers do not promise
 		// durable pins, even when they understand opaque bucket formats.
-		{"format-only", 1 << 17, false},
-		{"references", 1 << 18, true},
+		{"format-only", CapabilityBucketFormat, false},
+		{"references", CapabilityObjectReferences, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			peer, host := newWirePeer(t)
