@@ -86,7 +86,9 @@ hardlink/special-node creation and xattr mutation remain unsupported.
 
 Windows extended attributes map to shared `user.*` xattrs. The configured Unix
 UID does not grant access to privileged `trusted.*` attributes, which remain
-preserved. Alternate data streams and Windows security descriptors are not implemented. WinFsp itself does not support Windows hardlink
+preserved. A zero-length native Windows EA value requests deletion rather than
+storing an empty Linux attribute, following WinFsp/Windows EA semantics.
+Alternate data streams and Windows security descriptors are not implemented. WinFsp itself does not support Windows hardlink
 creation; the adapter returns an explicit unsupported error for that operation.
 Existing Linux hardlinks share their inode and content when read from Windows.
 

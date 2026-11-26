@@ -52,6 +52,9 @@ public sealed partial class MainWindow : Window
     private void Responsive(double width)
     {
         bool narrow = width < 850;
+        ContentGrid.ColumnSpacing = narrow ? 0 : 24;
+        Grid.SetRow(Forget, width < 650 ? 1 : 0);
+        Grid.SetColumnSpan(Forget, width < 650 ? 3 : 1);
         ContentGrid.ColumnDefinitions[1].Width = narrow ? new GridLength(0) : new GridLength(260);
         if (ContentGrid.RowDefinitions.Count == 0)
         {
@@ -70,7 +73,7 @@ public sealed partial class MainWindow : Window
     private void SetState(bool active, bool pending = false)
     {
         mounted = active; connecting = pending;
-        Connect.IsEnabled = !active && !pending && workerDrive is null;
+        ConnectButton.IsEnabled = !active && !pending && workerDrive is null;
         Disconnect.IsEnabled = active || pending;
         Busy.IsActive = pending; Busy.Visibility = pending ? Visibility.Visible : Visibility.Collapsed;
         StatusIcon.Glyph = active ? "\uE73E" : "\uE8B7";
@@ -86,6 +89,7 @@ public sealed partial class MainWindow : Window
         var reply = await backend.Send(new Request("status"));
         loading = true;
         SavedProfiles.ItemsSource = reply.Profiles ?? [];
+        SavedProfiles.Visibility = reply.Profiles?.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
         loading = false;
         DriverNotice.IsOpen = !reply.WinFsp;
     }
@@ -194,6 +198,8 @@ public sealed partial class MainWindow : Window
     }
     private async Task SmokeTest()
     {
+        if (!Server.Focus(FocusState.Keyboard)) throw new Exception("Server field cannot receive keyboard focus");
+        if (!Microsoft.UI.Xaml.Input.FocusManager.TryMoveFocus(Microsoft.UI.Xaml.Input.FocusNavigationDirection.Next, new Microsoft.UI.Xaml.Input.FindNextElementOptions { SearchRoot = Root })) throw new Exception("Keyboard navigation failed");
         Server.Text = "invalid";
         try { ReadConfig(); throw new Exception("Invalid server was accepted"); }
         catch (InvalidOperationException) { }
@@ -207,7 +213,7 @@ public sealed partial class MainWindow : Window
         AppWindow.Resize(new SizeInt32(700, 800)); await Task.Delay(600);
         if (Grid.GetRow(Aside) != 1) throw new Exception("Compact layout failed");
         AppWindow.Resize(new SizeInt32(1060, 940)); await Task.Delay(800);
-        if (Grid.GetColumn(Aside) != 1 || Connect.ActualWidth < 100) throw new Exception("Wide layout failed");
+        if (Grid.GetColumn(Aside) != 1 || ConnectButton.ActualWidth < 100) throw new Exception("Wide layout failed");
         var directory = Environment.GetEnvironmentVariable("STQR_UI_SMOKE_DIR") ?? Path.GetTempPath();
         var folder = await StorageFolder.GetFolderFromPathAsync(Path.GetFullPath(directory));
         var bitmap = new RenderTargetBitmap(); await bitmap.RenderAsync(Root);

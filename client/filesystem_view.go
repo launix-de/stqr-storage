@@ -3,7 +3,7 @@ package client
 
 import "context"
 
-// FilesystemView is the common FUSE-facing API of ordinary and native overlay
+// FilesystemView is the common client API of ordinary and native overlay
 // filesystems. Bucket selection stays in the constructors.
 type FilesystemView interface {
 	Stat(context.Context, ObjectID) (FSInfo, error)

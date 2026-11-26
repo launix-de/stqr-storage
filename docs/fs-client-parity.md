@@ -1,11 +1,12 @@
 # Filesystem client parity and production-readiness audit
 
 This audit compares the Linux kernel client (`kernel/kstqr`), Linux FUSE adapter
-(`client`) and Windows WinFsp adapter (`windows`). The frozen integration baseline
-is `969f705` on 2026-11-26. It includes open-PR functionality, especially the
-cooperative reference/reclamation protocol; those features are not all in master
-`18216ce`. A green result for the integration does not make an older master
-binary or an older mounted client equivalent. Upgrade all writers together.
+(`client`) and Windows WinFsp adapter (`windows`). The original audit used the
+frozen integration baseline `969f705` on 2026-11-26. Its reference/reclamation
+protocol was not all present in the older master `18216ce`; it was subsequently
+merged. The matrix below also includes the Windows follow-up in PR #50.
+A green result does not make an older mounted binary equivalent. Upgrade all
+writers together.
 
 No finite test run proves bug freedom. The supported common file operations are
 tested below; platform differences and remaining production limits are explicit.
@@ -126,7 +127,9 @@ now accepts the common filesystem-view interface, enforces `PrepareWrite` at
 writable open, exposes `user.*` extended attributes, and mounts native overlays
 with their persisted whitelist. The overlay core has an explicit readonly option
 that rejects copy-up/mutation and suppresses automatic orphan cleanup. Windows
-uses the same accepted-write mode as FUSE, with explicit durability barriers and
+also enables WinFsp delete-access preflight: readonly/whitelist failures are
+returned before Windows acknowledges deletion, because the driver ignores unlink
+errors during its later cleanup callback. Windows uses the same accepted-write mode as FUSE, with explicit durability barriers and
 a final bounded synchronization during orderly unmount.
 
 These changes do not add native Windows hardlink creation, POSIX IPC nodes,
