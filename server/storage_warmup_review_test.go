@@ -167,6 +167,10 @@ func TestStorageWarmupProductionOrdinaryCOWClientAndRoleBoundaries(t *testing.T)
 		t.Fatal("ordinary granted reader could not connect", err)
 	}
 	defer reader.Close()
+	permissions, err := reader.BucketAccess(dialctx)
+	if err != nil || permissions != client.BucketPermissionRead {
+		t.Fatal("cold effective permission discovery", permissions, err)
+	}
 	read := func() {
 		t.Helper()
 		c, cancel := context.WithTimeout(context.Background(), time.Second)

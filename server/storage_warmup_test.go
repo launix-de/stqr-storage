@@ -306,6 +306,14 @@ func TestStorageWarmupCancelAndUnknownUsage(t *testing.T) {
 	if snapshot.NodeState != 2 || snapshot.ReasonBits&(1<<10) == 0 || len(snapshot.Buckets) != 0 {
 		t.Fatal("cold counters advertised as ready/zero", snapshot)
 	}
+	var physical, provisionalAdmission uint64
+	for _, v := range snapshot.Volumes {
+		physical += v.CapacityPhysical
+		provisionalAdmission += v.AdmissionFreePhysical
+	}
+	if physical == 0 || provisionalAdmission == 0 {
+		t.Fatal("fixture must expose physical totals before admission readiness")
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	if err = s.WaitStorageReady(ctx); !errors.Is(err, context.Canceled) {
