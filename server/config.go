@@ -91,6 +91,9 @@ type Options struct {
 	values        map[string]string
 	transportOnly bool // isolated legacy/transport tests; never a daemon flag
 	manualRanges  bool // integration fixtures select explicit plans instead of auto planning
+
+	// Isolated I/O fault injection; never a daemon flag.
+	wrapDataVolumeIO func(volume.VolumeIO) volume.VolumeIO
 }
 
 func ParseOptions(args []string, output io.Writer) (Options, error) {

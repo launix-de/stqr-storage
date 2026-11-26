@@ -63,6 +63,9 @@ func (s *Server) openBucketFormat(ctx context.Context, raw, format string, p pri
 		}
 		return nil
 	}
+	if s.storageWarming.Load() {
+		return s.storageUnavailable()
+	}
 	// A client cannot keep an initial metadata decision waiting indefinitely.
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()

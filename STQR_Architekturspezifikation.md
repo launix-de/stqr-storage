@@ -965,6 +965,26 @@ Volume-Format **3** ergänzt die bestehende Formatfamilie `STQRVOL2` um Verwaltu
 - Payloads werden begrenzt/blockweise gelesen und geschrieben; bei Blockdevices bleiben physische Block-/Alignmentgrenzen gewahrt. Kein notwendiges Ganzobjekt-Mapping/-Buffering; mmap ist eine optionale spätere Optimierung.
 - Index/Metadaten werden für schnellen Zugriff im RAM gecacht. Bei vielen kleinen Objekten wird ein **begrenzter Cache plus On-Volume-Index** verwendet; Lookup/Recovery dürfen keinen unbegrenzten Vollindex oder sämtliche Payloads in RAM verlangen. Der konkrete Library-Stand dokumentiert Cachegrenzen, Disk-Fallback, Checkpoint/Compaction und deren Tests.
 
+### 8.3.2 Verfügbarkeit während der Wiederherstellung
+
+Vor dem HTTP-Start werden Identität, WAL, System-Konfiguration sowie Membership-,
+Placement- und Range-Journale einschließlich Source-Fences und Target-Aktivierungen
+validiert. Danach stehen Authentifizierung, Dashboard, Konfiguration, Statistiken
+und GET auf eindeutig autoritativen Ranges bereits zur Verfügung. Ein fehlender
+Aggregat-Checkpoint löst höchstens einen Hintergrundlauf mit begrenzten Caches
+unter Read-Locks aus; er verschiebt den Listener nicht hinter einen Objektzensus.
+Ein abgeleiteter, exakt an Volume-Checkpoint und Ownership-Prädikat gebundener
+Zähler-Cache enthält nur Aggregate pro Bucket, keine Objektverzeichnisse.
+
+Bis Zähler, Import-Reserven und lokale Recovery vollständig rekonstruiert sind,
+bedeutet fehlender Verbrauch **unbekannt**, niemals null oder freies Kontingent.
+Schreibende Requests und Kapazitäts-/Placement-Änderungen erhalten vor einem
+Write-Lock HTTP-/Protokollstatus 503. Migration, Rebalancing und schreibende
+Housekeeping-Worker starten erst danach. Die Node meldet vorübergehend den
+Laufzeitzustand pausiert mit Reason-Bit 10 (Speicher-Wiederherstellung); daraus
+folgt weder ein persistierter Drain noch eine Membership-Änderung. Dashboard und
+Leser dürfen nicht hinter einem wartenden Cold-Startup-Writer blockiert werden.
+
 ### 8.4 VolumeIO
 
 ```go

@@ -54,6 +54,16 @@ func startDaemonTestNode(t *testing.T, path string, config *Config, automatic ..
 		ln.Close()
 		t.Fatal(err)
 	}
+	// Most daemon fixtures require a write-ready node. Availability during
+	// cold recovery is tested independently through the real Run listener.
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	err = s.WaitStorageReady(ctx)
+	cancel()
+	if err != nil {
+		ln.Close()
+		s.Close()
+		t.Fatal(err)
+	}
 	h := &http.Server{Handler: s.Handler()}
 	go h.Serve(ln)
 	d := &daemonTestNode{node: s, http: h, listener: ln, path: path, automatic: auto}
@@ -73,6 +83,16 @@ func restartDaemonTestNode(t *testing.T, d *daemonTestNode) *daemonTestNode {
 	s, err := Open(Options{ConfigPath: d.path, manualRanges: !d.automatic})
 	if err != nil {
 		ln.Close()
+		t.Fatal(err)
+	}
+	// Most daemon fixtures require a write-ready node. Availability during
+	// cold recovery is tested independently through the real Run listener.
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	err = s.WaitStorageReady(ctx)
+	cancel()
+	if err != nil {
+		ln.Close()
+		s.Close()
 		t.Fatal(err)
 	}
 	h := &http.Server{Handler: s.Handler()}

@@ -27,6 +27,13 @@ type managedVolume struct {
 // Server currently owns one node. opMu serializes local administrative commits;
 // it is not a distributed lock or a substitute for placement authority.
 type Server struct {
+	storageWarming          atomic.Bool
+	storageAccountingWarmed atomic.Bool
+	storageWarmDone         chan struct{}
+	storageWarmDoneOnce     sync.Once
+	storageWarmError        atomic.Pointer[storageWarmFailure]
+	accountingDir           string
+
 	joinHosted      bool
 	joinRequested   atomic.Bool
 	joinSignal      chan struct{}
@@ -141,6 +148,8 @@ func Open(opts Options) (s *Server, err error) {
 	if e != nil {
 		return s, e
 	}
+	s.storageWarming.Store(!opts.transportOnly)
+	s.storageWarmDone = make(chan struct{})
 	s.cfg = c
 	s.authority = &volumeAuthorityState{records: make(map[volume.ID]volumeAuthorityRecord)}
 	s.authority.dirty.Store(true)
@@ -152,6 +161,7 @@ func Open(opts Options) (s *Server, err error) {
 		return s, e
 	}
 	dataDir := resolvePath(filepath.Dir(path), c.Node.DataDir)
+	s.accountingDir = filepath.Join(dataDir, "accounting")
 	s.volumesDir = resolvePath(dataDir, c.VolumesDir)
 	if e = os.MkdirAll(s.volumesDir, 0700); e != nil {
 		return s, e
@@ -195,7 +205,11 @@ func Open(opts Options) (s *Server, err error) {
 			if er != nil {
 				return s, fmt.Errorf("open configured volume %s: %w", vc.Name, er)
 			}
-			v, e = volume.Open(dev, volume.OpenOptions{})
+			var backend volume.VolumeIO = dev
+			if !vc.System && opts.wrapDataVolumeIO != nil {
+				backend = opts.wrapDataVolumeIO(dev)
+			}
+			v, e = volume.Open(backend, volume.OpenOptions{})
 			if e != nil {
 				dev.Close()
 			}
@@ -305,24 +319,25 @@ func Open(opts Options) (s *Server, err error) {
 	if e = s.initPeerDirectory(); e != nil {
 		return s, e
 	}
+	// Configure bounded accounting/cache hooks before any initial checkpoint
+	// can ask a legacy data volume for usage. Unknown usage stays gated.
+	if e = s.restoreQuotaProtection(); e != nil {
+		return s, e
+	}
 	if s.controller != nil {
 		if e = s.initQuota(dataDir); e != nil {
 			return s, e
 		}
-		if e = s.controller.initialCheckpoint(); e != nil {
-			return s, e
+		if s.storageAllAccountingReady() {
+			if e = s.controller.initialCheckpoint(); e != nil {
+				return s, e
+			}
 		}
 		if e = s.initRanges(dataDir); e != nil {
 			return s, e
 		}
 	}
 	if e = s.restoreQuotaProtection(); e != nil {
-		return s, e
-	}
-	if e = s.initReplicas(); e != nil {
-		return s, e
-	}
-	if e = s.recoverOperations(); e != nil {
 		return s, e
 	}
 	// A durable STOP received by the preceding process is fulfilled by this
@@ -334,12 +349,6 @@ func Open(opts Options) (s *Server, err error) {
 		}
 	}
 	if e = saveConfig(path, s.cfg); e != nil {
-		return s, e
-	}
-	s.opMu.Lock()
-	e = s.ensureVolumeAuthorityLocked()
-	s.opMu.Unlock()
-	if e != nil {
 		return s, e
 	}
 	s.running = s.cfg
@@ -355,43 +364,25 @@ func Open(opts Options) (s *Server, err error) {
 	if e = s.loadBucketLeases(); e != nil {
 		return s, e
 	}
-	s.startLeaseRecovery()
-	s.startAcceptedCheckpoints()
-	s.startBucketReclaimer()
-	// Transport fixtures drive recovery explicitly; autonomous housekeeping
-	// belongs to the production daemon lifecycle, including startup recovery.
-	if !opts.transportOnly {
-		s.startS3Maintenance()
-	}
+	// Restore transport-visible identities before launching the read-safe census.
+	s.replicas = newReplicaManager(s)
 	s.workers.Add(1)
 	go s.statsLoop()
-	for _, d := range s.bucketSnapshots() {
-		if !d.DeletionComplete && (d.State == BucketDeleting || d.DesiredPolicy != nil || d.CloneDetach) {
-			id, _ := bucketID(d.ID)
-			s.startBucketCleanup(id)
-		}
-	}
-	for _, v := range s.running.Volumes {
-		if v.State == "draining" {
-			id := v.OperationID
-			if id == "" {
-				id = newID()
-			}
-			s.startDrain(id, v.ID)
-		}
-	}
-	if s.quotas != nil {
-		s.startQuotaWorker()
-	}
 	s.startKnownPeers()
-	if s.controller != nil {
-		s.replicas.start()
-	}
-	if s.controller != nil {
-		s.controller.start()
-	}
-	if s.scopes != nil && !opts.manualRanges {
-		s.scopes.start()
+	if opts.transportOnly || s.storageCanFinishInline() {
+		if e = s.finishStorageWarmup(opts); e != nil {
+			return s, e
+		}
+	} else {
+		s.workers.Add(1)
+		go func() {
+			defer s.workers.Done()
+			err := s.warmStorage(opts)
+			if err != nil && s.ctx.Err() == nil {
+				s.storageWarmError.Store(&storageWarmFailure{err})
+			}
+			s.storageWarmDoneOnce.Do(func() { close(s.storageWarmDone) })
+		}()
 	}
 	if hint := opts.values["connect"]; hint != "" {
 		// An explicit helper is attempted once as a contact source. Only verified
@@ -496,6 +487,10 @@ func runNode(ctx context.Context, opts Options, output io.Writer) (restart bool,
 		s.cancel()
 		return false, h.Shutdown(context.Background())
 	case <-ctx.Done():
+		// Stop a cold shared-lock census before waiting on shutdown fences.
+		if s.storageWarming.Load() {
+			s.cancel()
+		}
 		// Process/supervisor/system shutdown is always SHORT (wait for return).
 		// Never infer a drain from cancellation; only explicit admin intent may
 		// initiate evacuation. An existing persisted drain remains resumable.

@@ -30,6 +30,9 @@ func (b *Bucket) usageStamp() (*placementImage, uint64) {
 }
 
 func (b *Bucket) logicalUsage() (uint64, error) {
+	if b.server.storageWarming.Load() {
+		return 0, b.server.storageUnavailable()
+	}
 	u := &b.usage
 	u.mu.Lock()
 	defer u.mu.Unlock()
@@ -87,6 +90,9 @@ func (b *Bucket) updateUsage(old, next uint64, repeated bool, err error) {
 // walking every object on a cold quota/dashboard read. Unbound maps, replicas
 // and inherited COW views keep the logical merge path.
 func (b *Bucket) pinnedLogicalUsage() (uint64, bool, error) {
+	if b.server.storageWarming.Load() {
+		return 0, true, b.server.storageUnavailable()
+	}
 	s := b.server
 	if s.controller == nil || len(b.storageDescription().ClonePeers) != 0 {
 		return 0, false, nil
