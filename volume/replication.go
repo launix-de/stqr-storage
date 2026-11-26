@@ -46,6 +46,7 @@ type ReplicaRecord struct {
 // IsSnapshot identifies physical snapshot installation, whose publication does
 // not represent an application-level content mutation.
 func (r ReplicaRecord) IsSnapshot() bool { return r.operation == opSnapshot }
+func (r ReplicaRecord) IsAppend() bool   { return r.operation == opAppend }
 
 const replicaBytes = 256
 

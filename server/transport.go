@@ -4,6 +4,7 @@ package server
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"errors"
 	"net/http"
 	"sync"
@@ -28,7 +29,6 @@ type terminalFrame struct {
 }
 
 type wsSession struct {
-	blockControl       atomic.Bool
 	durabilityCap      atomic.Bool
 	versionsSubscribed bool   // guarded by subMu
 	versionSent        string // guarded by subMu
@@ -101,16 +101,37 @@ func (s *Server) serveWebSocket(w http.ResponseWriter, r *http.Request, p princi
 		httpError(w, 400, errors.New("stqr.v2 subprotocol required"))
 		return
 	}
+	// Reject malformed upgrades before a first connection can bind a format.
+	key, keyErr := base64.StdEncoding.DecodeString(r.Header.Get("Sec-WebSocket-Key"))
+	if !websocket.IsWebSocketUpgrade(r) || r.Header.Get("Sec-WebSocket-Version") != "13" || keyErr != nil || len(key) != 16 {
+		httpError(w, 400, errors.New("valid WebSocket upgrade required"))
+		return
+	}
+	// Opening may persist an unset format. Check every connection prerequisite
+	// first, including session, lease and shutdown restrictions. The unset-format
+	// exception is only for this side-effect-free preflight, never registration.
 	s.opMu.Lock()
-	authorization, p, authErr := s.authorizeConnection(r, p)
+	_, _, authErr := s.authorizeConnection(r, p, true)
+	s.opMu.Unlock()
 	if authErr != nil {
-		s.opMu.Unlock()
 		httpError(w, statusOf(authErr), authErr)
 		return
 	}
-	if (s.shortStopping.Load() || s.drainClosing.Load()) && !p.isPeer() {
+	if raw := r.Header.Get(client.BucketHeader); raw != "" {
+		if err := s.openBucketFormat(r.Context(), raw, r.Header.Get(client.FormatHeader), p); err != nil {
+			httpError(w, statusOf(err), err)
+			return
+		}
+	}
+
+	// Binding uses the existing cluster metadata commit without holding opMu.
+	// Recheck the fresh capability and committed format under the registration
+	// lock so ACL/session/lease changes during that commit cannot admit a socket.
+	s.opMu.Lock()
+	authorization, p, authErr := s.authorizeConnection(r, p, false)
+	if authErr != nil {
 		s.opMu.Unlock()
-		httpError(w, 503, errors.New("node is shutting down"))
+		httpError(w, statusOf(authErr), authErr)
 		return
 	}
 	up := websocket.Upgrader{Subprotocols: []string{"stqr.v2", "stqr.v1"}, CheckOrigin: sameOrigin, EnableCompression: false, ReadBufferSize: 4096, WriteBufferSize: 4096}

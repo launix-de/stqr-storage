@@ -12,6 +12,9 @@ import (
 // BucketHeader selects the native bucket once during HTTP/WebSocket upgrade.
 const BucketHeader = "X-STQR-Bucket"
 
+// FormatHeader declares the opaque client format when opening a bucket.
+const FormatHeader = "X-STQR-Format"
+
 const MaxMessage = 16 << 20
 const (
 	FireAndForget uint8 = iota
@@ -31,6 +34,7 @@ const (
 	BucketMaintenance    uint16 = 0x0115
 	BucketScan           uint16 = 0x0116
 	BucketObjectList     uint16 = 0x0117
+	BucketFormatOpen     uint16 = 0x0120
 	BucketObjectLease    uint16 = 0x011c
 	// Deprecated: use BucketObjectLease; the server does not interpret device formats.
 	BucketBlockMaintenance         = BucketObjectLease
@@ -88,12 +92,7 @@ const (
 	UserDelete        uint16 = 0x200e
 )
 
-const (
-	BucketBlockControlRegister uint16 = 0x011e
-	BucketBlockControl         uint16 = 0x011f
-	BlockDeviceList            uint16 = 0x203e
-	BlockDeviceResize          uint16 = 0x203f
-)
+// Opcodes 0x011e/0x011f and 0x203e/0x203f are retired.
 
 type ID [16]byte
 
@@ -278,12 +277,3 @@ func DecodeStatsFilter(d *Decoder) StatsFilter {
 	}
 	return f
 }
-
-// Opaque lease-owner control. Historical Block* names are wire-compatible
-// aliases; neither the native transport nor the server parses client formats.
-const (
-	LeaseControlRead           = BlockDeviceList
-	LeaseControlWrite          = BlockDeviceResize
-	BucketLeaseControlRegister = BucketBlockControlRegister
-	BucketLeaseControl         = BucketBlockControl
-)

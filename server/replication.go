@@ -18,6 +18,7 @@ import (
 )
 
 const (
+	peerReplicaForget          uint16 = 0x1099
 	peerReplicaPrepare         uint16 = 0x101c
 	peerReplicaReady           uint16 = 0x101d
 	peerReplicaCommit          uint16 = 0x101e
@@ -482,6 +483,26 @@ func (s *Server) replicaPeerMessage(m client.Message, actor client.ID) ([]byte, 
 	}
 	defer h.Close()
 	switch m.Opcode {
+	case peerReplicaForget:
+		// Publication on every required copy has already completed. APPEND's
+		// replay identity is deliberately never released through this path.
+		if header.Opcode == 3 {
+			return nil, ErrBucketForbidden
+		}
+		record, ok, e := h.ReplicaStatus(header.Request.ID)
+		if e != nil {
+			return nil, e
+		}
+		if !ok {
+			return nil, nil
+		}
+		if record.IsAppend() {
+			return nil, ErrBucketForbidden
+		}
+		if record.State != volume.ReplicaPublished || record.Binding != header.Binding || record.Request != header.Request {
+			return nil, volume.ErrPrecondition
+		}
+		return nil, h.ForgetRequest(header.Request.ID)
 	case peerReplicaReady:
 		u := r.uploads[header.Request.ID]
 		if u == nil || u.actor != actor || !sameReplicaHeader(u.header, header) {
@@ -770,4 +791,53 @@ func (r *replicaManager) start() {
 			}
 		}
 	}()
+}
+
+// All copies are published before temporary non-APPEND operation evidence is
+// released. Missing evidence is idempotent; unfinished decisions are never GC'd.
+func (r *replicaManager) forgetCompletedPeers(ctx context.Context, entry client.RangeEntry, header replicaHeader) error {
+	return r.decisionPeers(ctx, entry, header, peerReplicaForget)
+}
+func (s *Server) referenceCapableReplicas(entry client.RangeEntry) bool {
+	s.peerStatsMu.RLock()
+	defer s.peerStatsMu.RUnlock()
+	for _, loc := range entry.Locations {
+		if s.control != nil && loc.Node == s.control.ledger.node {
+			continue
+		}
+		p := s.peerStats[loc.Node]
+		if p == nil || !p.online || p.connection == nil || p.connection.Capabilities&client.CapabilityObjectReferences == 0 {
+			return false
+		}
+	}
+	return true
+}
+
+func (b *Bucket) releaseCompletedResult(ctx context.Context, v *volume.Volume, entry client.RangeEntry, header replicaHeader) error {
+	s := b.server
+	if err := s.replicas.forgetCompletedPeers(ctx, entry, header); err != nil {
+		return fail(503, "published write is waiting for replica result cleanup: "+err.Error())
+	}
+	s.lockUserObjectIO()
+	defer s.unlockUserObjectIO()
+	current, known := s.placement.Load().lookup(client.ID(b.ID()), client.ObjectID(header.Request.Key.Object))
+	if !known || current.OwnerEpoch != header.Binding.Epoch || replicaSetHash(b.ID(), current) != header.Binding.SetHash {
+		return nil
+	}
+	h, err := v.Open(true)
+	if err != nil {
+		return err
+	}
+	defer h.Close()
+	record, ok, err := h.ReplicaStatus(header.Request.ID)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return nil
+	}
+	if record.State != volume.ReplicaPublished || record.Binding != header.Binding || record.Request != header.Request {
+		return volume.ErrPrecondition
+	}
+	return h.ForgetRequest(header.Request.ID)
 }

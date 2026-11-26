@@ -18,6 +18,7 @@ struct stqr_client {
     struct stqr_socket *socket;
     char host[256], authority[272];
     char *authorization;
+    char format[256];
     size_t authorization_len;
     unsigned port, timeout;
     stqr_id bucket, runtime, lease;
@@ -316,8 +317,8 @@ static int handshake(stqr_client *c) {
     request = sq_alloc(capacity); headers = sq_alloc(16385);
     if (!request || !headers) { err = -ENOMEM; goto out; }
     n = (size_t)snprintf(request, capacity,
-        "GET /api/ws HTTP/1.1\r\nHost: %s\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: %s\r\nSec-WebSocket-Protocol: stqr.v2\r\nAuthorization: Basic %s\r\nX-STQR-Bucket: %s\r\n%s\r\n",
-        c->authority, key, c->authorization, bucket, lease);
+        "GET /api/ws HTTP/1.1\r\nHost: %s\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: %s\r\nSec-WebSocket-Protocol: stqr.v2\r\nAuthorization: Basic %s\r\nX-STQR-Bucket: %s\r\nX-STQR-Format: %s\r\n%s\r\n",
+        c->authority, key, c->authorization, bucket, c->format, lease);
     if (n >= capacity) { err = -E2BIG; goto out; }
     if ((err = sq_send(c->socket, request, n))) goto out;
     for (n = 0; n < 16384; n++) {
@@ -648,7 +649,7 @@ static int request_payload(stqr_client *c, unsigned op, struct buf *body, stqr_i
     for (unsigned redirects=0;redirects<16;) {
         struct buf wrapped={0}; unsigned wire_op=op; struct buf *wire_body=body;
         c->status=0; c->redirect[0]=0;
-        c->query_valid=op>=0x100 && op<=0x110 && body->n>=80;
+        c->query_valid=((op>=0x100 && op<=0x110) || op==0x121) && body->n>=80;
         if (c->query_valid) memcpy(c->query.bytes,body->p+16,32);
         if (mutation>1 && (c->capabilities & STQR_CAP_DURABILITY)) {
             if (body->n<80) return -EINVAL;
@@ -706,7 +707,7 @@ static int reconnect_active(stqr_client *c) {
     if (!err) err = handshake(c);
     if (err) { broken(c); return err; }
     c->status = 0;
-    number(&body, 2, 2); number(&body, 2, 2); number(&body, STQR_CAP_DURABILITY, 8); blob(&body, "stqr-c", 6);
+    number(&body, 2, 2); number(&body, 2, 2); number(&body, STQR_CAP_DURABILITY|STQR_CAP_OBJECT_REFERENCES, 8); blob(&body, "stqr-c", 6);
     err = request(c, 1, &body, id, 0, &result, NULL);
     if (!err) {
         if (readnum(&result, 2) != 2) result.err = -EPROTO;
@@ -722,15 +723,18 @@ int stqr_reconnect(stqr_client *c) {
     disconnect_channels(c);
     return reconnect_active(c);
 }
-int stqr_dial(stqr_client **out, const char *url, const char *user, const char *password, stqr_id bucket, unsigned timeout) {
+int stqr_dial(stqr_client **out, const char *url, const char *user, const char *password, stqr_id bucket, const char *format, unsigned timeout) {
     stqr_client *c; char *plain; size_t u, p, n; int err;
     if (!out) return -EINVAL;
     *out = NULL;
     if (!user || !password || !*user || !*password || strchr(user, ':') || zero(bucket.bytes, 16) || !timeout || timeout > 3600000) return -EINVAL;
+    if (!format || !*format || strlen(format) > 255 || format[0] == ' ' || format[strlen(format)-1] == ' ') return -EINVAL;
+    for (n = 0; format[n]; n++) if ((unsigned char)format[n] < 32 || (unsigned char)format[n] == 127) return -EINVAL;
     u = strlen(user); p = strlen(password);
     if (u > 4096 || p > 4096) return -E2BIG;
     c = sq_alloc(sizeof(*c)); if (!c) return -ENOMEM;
     c->bucket = bucket; c->timeout = timeout;
+    memcpy(c->format, format, strlen(format)+1);
     if ((err = parse_url(c, url))) { sq_free(c); return err; }
     n = u+p+1; plain = sq_alloc(n);
     c->authorization_len = 4*((n+2)/3)+1; c->authorization = sq_alloc(c->authorization_len);
@@ -750,6 +754,36 @@ void stqr_close(stqr_client *c) {
 static void reference(stqr_client *c, struct buf *b, stqr_object_id id) {
     put(b, c->bucket.bytes, 16); put(b, id.bytes, 32); number(b, 0, 8); number(b, 0, 8); put(b, c->runtime.bytes, 16);
 }
+static int object_reference(stqr_client *c, stqr_object_id target, stqr_id token, unsigned action) {
+    static const char domain[]="STQR object references v1";
+    stqr_object_id root;
+    stqr_id request_id;
+    struct buf body={0}, result={0};
+    int err;
+    if (!c || !c->socket) return -ENOTCONN;
+    if (!(c->capabilities & STQR_CAP_OBJECT_REFERENCES)) return -EOPNOTSUPP;
+    if (zero(token.bytes,sizeof(token.bytes))) return -EINVAL;
+    err=sq_hash(256,domain,sizeof(domain)-1,root.bytes);
+    if (err) return err;
+    err=stqr_request_id(&request_id);
+    if (err) return err;
+    reference(c,&body,root);
+    put(&body,target.bytes,sizeof(target.bytes));
+    number(&body,action,1);put(&body,token.bytes,sizeof(token.bytes));
+    err=request(c,0x121,&body,request_id,1,&result,NULL);
+    if (!err) {
+        if (readnum(&result,1)!=1) result.err=-EPROTO;
+        err=done(&result);
+    }
+    drop(&body);drop(&result);
+    return err;
+}
+int stqr_object_pin(stqr_client *c, stqr_object_id target, stqr_id token) { return object_reference(c,target,token,0); }
+int stqr_object_unpin(stqr_client *c, stqr_object_id target, stqr_id token) { return object_reference(c,target,token,1); }
+int stqr_object_claim(stqr_client *c, stqr_object_id target, stqr_id token) { return object_reference(c,target,token,2); }
+int stqr_object_release_claim(stqr_client *c, stqr_object_id target, stqr_id token) { return object_reference(c,target,token,3); }
+int stqr_object_pin_dependency(stqr_client *c, stqr_object_id target, stqr_id token) { return object_reference(c,target,token,4); }
+int stqr_object_unpin_dependency(stqr_client *c, stqr_object_id target, stqr_id token) { return object_reference(c,target,token,5); }
 int stqr_object_lease(stqr_client *c, int readonly) {
     struct buf b = {0}, r = {0}; stqr_id id; int err;
     if (!c || !c->socket) return -ENOTCONN;
@@ -1130,6 +1164,7 @@ static int fence_capture_owner(stqr_fence *f, const stqr_client *source,
         memcpy(e->client->authority,authority,sizeof(e->client->authority));
         e->client->port=port; e->client->timeout=source->timeout;
         e->client->bucket=source->bucket;
+        memcpy(e->client->format,source->format,sizeof(e->client->format));
         e->client->authorization=sq_alloc(source->authorization_len+1);
         if (!e->client->authorization) {
             unsigned index=(unsigned)(e-f->entries); stqr_close(e->client);

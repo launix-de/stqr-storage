@@ -72,6 +72,11 @@ func TestFilesystemTreeAndReopen(t *testing.T) {
 	if err = f.Rename(ctx, dir.ID, "payload", dir.ID, "renamed"); err != nil {
 		t.Fatal(err)
 	}
+	openRef, err := reopened.Retain(ctx, file.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Release(ctx, file.ID, openRef)
 	if _, err = f.Lookup(ctx, dir.ID, "payload"); !errors.Is(err, syscall.ENOENT) {
 		t.Fatal(err)
 	}

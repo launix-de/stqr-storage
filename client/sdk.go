@@ -4,6 +4,7 @@ package client
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -13,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 	"weak"
 
 	"github.com/gorilla/websocket"
@@ -31,6 +33,7 @@ type Client struct {
 	subscriptions                map[ID]weak.Pointer[Subscription]
 	subscriptionSources          map[ID]*objectTransport
 	endpoint, username, password string
+	format                       string
 	bucket                       BucketID
 	runtime                      ID
 	mu                           sync.Mutex
@@ -38,8 +41,6 @@ type Client struct {
 	maintenanceToken             ID
 	distributedMaintenance       bool
 	maintenance                  *objectTransport // pinned session; never reconnect during fsck
-	blockControl                 func(context.Context, []byte) ([]byte, error)
-	blockControlBusy             bool
 	dialGate                     chan struct{}
 	closed                       bool
 	closeOnce                    sync.Once
@@ -57,10 +58,10 @@ type Client struct {
 	paused                       map[ID]bool
 }
 
-// Dial establishes the bucket connection. All four connection parameters are
+// Dial establishes the bucket connection. All connection parameters, including the opaque format, are
 // mandatory. ctx controls establishment; individual operations take their own
 // contexts. There is no TLS or implicit HTTP redirect/credential forwarding.
-func Dial(ctx context.Context, rawURL, username, password string, bucket BucketID) (*Client, error) {
+func Dial(ctx context.Context, rawURL, username, password string, bucket BucketID, format string) (*Client, error) {
 	if e := ctx.Err(); e != nil {
 		return nil, e
 	}
@@ -74,7 +75,11 @@ func Dial(ctx context.Context, rawURL, username, password string, bucket BucketI
 	u.Scheme = "ws"
 	u.Path = "/api/ws"
 	life, cancel := context.WithCancel(context.Background())
-	c := &Client{endpoint: u.String(), username: username, password: password, bucket: bucket, done: make(chan struct{}), dialGate: make(chan struct{}, 1), life: life, cancel: cancel}
+	if format == "" || len(format) > 255 || strings.ContainsFunc(format, func(r rune) bool { return r < 32 || r == 127 }) || !utf8.ValidString(format) || strings.TrimSpace(format) != format {
+		cancel()
+		return nil, errors.New("client: a nonempty bucket format is required")
+	}
+	c := &Client{endpoint: u.String(), username: username, password: password, bucket: bucket, format: format, done: make(chan struct{}), dialGate: make(chan struct{}, 1), life: life, cancel: cancel}
 	t, e := c.connect(ctx)
 	if e != nil {
 		cancel()
@@ -94,6 +99,7 @@ func (c *Client) connectEndpoint(ctx context.Context, endpoint string) (*objectT
 	ctx = merged
 	headers := http.Header{}
 	headers.Set(BucketHeader, c.bucket.String())
+	headers.Set(FormatHeader, c.format)
 	c.mu.Lock()
 	token := c.maintenanceToken
 	distributed := c.distributedMaintenance
@@ -121,8 +127,16 @@ func (c *Client) connectEndpoint(ctx context.Context, endpoint string) (*objectT
 	conn, response, e := dialer.DialContext(ctx, endpoint, headers)
 	if e != nil {
 		if response != nil {
+			detail, _ := io.ReadAll(io.LimitReader(response.Body, 4096))
 			response.Body.Close()
-			return nil, &StatusError{Status: response.StatusCode, Message: "connection rejected"}
+			message := "connection rejected"
+			var rejection struct {
+				Error string `json:"error"`
+			}
+			if json.Unmarshal(detail, &rejection) == nil && rejection.Error != "" {
+				message = rejection.Error
+			}
+			return nil, &StatusError{Status: response.StatusCode, Message: message}
 		}
 		return nil, e
 	}
@@ -134,7 +148,7 @@ func (c *Client) connectEndpoint(ctx context.Context, endpoint string) (*objectT
 	hello := Encoder{}
 	hello.U16(2)
 	hello.U16(2)
-	hello.U64(CapabilityDurability)
+	hello.U64(CapabilityDurability | CapabilityObjectReferences)
 	hello.Text("stqr-go")
 	r, e := t.roundTrip(ctx, Message{Kind: Request, Opcode: Hello, ID: NewRequestID(), Body: hello.B}, false, nil)
 	if e == nil {

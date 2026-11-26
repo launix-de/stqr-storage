@@ -31,7 +31,7 @@ func TestSecurityNativeCASRequiresRead(t *testing.T) {
 	}
 	host := httptest.NewServer(s.Handler())
 	defer host.Close()
-	c, err := client.Dial(ctx, host.URL, user.Name, "bucket-test-password", client.BucketID(b.ID()))
+	c, err := client.Dial(ctx, host.URL, user.Name, "bucket-test-password", client.BucketID(b.ID()), "s3")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -63,6 +63,7 @@ func TestSecurityNativeCASRequiresRead(t *testing.T) {
 		r := httptest.NewRequest("POST", "http://localhost/api/message", bytes.NewReader(wire))
 		r.RemoteAddr = "127.0.0.1:1"
 		r.SetBasicAuth(user.Name, "bucket-test-password")
+		r.Header.Set(client.FormatHeader, "s3")
 		w := httptest.NewRecorder()
 		s.Handler().ServeHTTP(w, r)
 		if w.Code != 403 {

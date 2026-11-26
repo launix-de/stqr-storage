@@ -31,7 +31,7 @@ func testIndependentVolumeQueries(t *testing.T, payload []byte) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	admin := s.cfg.Auth.BootstrapAdmin
-	c, err := client.Dial(ctx, s.cfg.Node.Advertise, admin.Username, admin.Password, client.ID(bucket.ID()))
+	c, err := client.Dial(ctx, s.cfg.Node.Advertise, admin.Username, admin.Password, client.ID(bucket.ID()), "fs")
 	if err != nil {
 		t.Fatal(err)
 	}

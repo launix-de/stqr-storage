@@ -22,6 +22,7 @@ const bucketLeaseHeader = "X-STQR-Maintenance"
 // Leases do not expire on a timer or peer disconnect. Only the owner releases
 // them; a restarted owner can release its preceding incarnation's orphan lease.
 type bucketLease struct {
+	ReferenceAware     bool        `json:",omitempty"`
 	Group              client.ID   `json:",omitempty"`
 	Mask               uint64      `json:",omitempty"`
 	Members            []client.ID `json:",omitempty"`
@@ -304,6 +305,30 @@ func (s *Server) receiveBucketLease(ctx context.Context, body []byte, actor clie
 		l.Released = true
 		return json.Marshal(l)
 	}
+	if req.Action == 5 || req.Action == 6 {
+		s.opMu.Lock()
+		defer s.opMu.Unlock()
+		current := s.leaseRecord(b)
+		if current == nil || current.Released || current.ObjectIO || !current.ReferenceAware || current.Token != l.Token || current.Sequence != l.Sequence || current.Epoch != l.Epoch || current.Owner != l.Owner || current.User != l.User {
+			return nil, ErrBucketForbidden
+		}
+		user, err := s.findAccount(current.Username)
+		if err != nil || user.ID != current.User {
+			return nil, ErrBucketForbidden
+		}
+		uid, err := bucketID(user.ID)
+		if err != nil {
+			return nil, ErrBucketForbidden
+		}
+		info, err := b.Info(uid, user.Role == "ADMIN")
+		if err != nil || info.Permissions&(BucketRead|BucketDelete) != (BucketRead|BucketDelete) {
+			return nil, ErrBucketForbidden
+		}
+		if err := s.reclaimBucketMetadataLocked(ctx, b, req.Action); err != nil {
+			return nil, err
+		}
+		return json.Marshal(*current)
+	}
 	if actor != ids[0] || l.Sequence == 0 {
 		return nil, ErrBucketForbidden
 	}
@@ -403,6 +428,11 @@ func (s *Server) reserveLeaseLocked(b *Bucket, l bucketLease) error {
 	if info.Permissions&required != required {
 		return ErrBucketForbidden
 	}
+	if !l.ObjectIO {
+		if err := s.checkReferenceAwareMaintenance(b, l.ReferenceAware); err != nil {
+			return err
+		}
+	}
 	if s.scopes != nil {
 		s.scopes.mu.Lock()
 		busy := false
@@ -494,7 +524,7 @@ func (s *Server) beginClusterLease(ctx context.Context, b *Bucket, ws *wsSession
 	if e != nil {
 		return e
 	}
-	l := bucketLease{Bucket: b.ID(), Epoch: epoch, Token: id, Request: id, Owner: s.control.ledger.node, Boot: s.boot, User: p.User.ID, Username: p.User.Name, ObjectIO: objectIO, ReadOnly: readonly}
+	l := bucketLease{ReferenceAware: ws.authorization.objectReferences.Load(), Bucket: b.ID(), Epoch: epoch, Token: id, Request: id, Owner: s.control.ledger.node, Boot: s.boot, User: p.User.ID, Username: p.User.Name, ObjectIO: objectIO, ReadOnly: readonly}
 	// Private clear/clone inventories pin their namespace. General object
 	// leases exclude competing clients while allowing durable placement handoffs.
 	l.AllowHandoff = objectIO && p.frontendPermission == 0 && ws.authorization.frontendPermission == 0

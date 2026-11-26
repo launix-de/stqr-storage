@@ -37,7 +37,7 @@ func TestBlockMaintenanceWaitsForCapacityHandoff(t *testing.T) {
 		time.Sleep(20 * time.Millisecond)
 	}
 	a := source.node.cfg.Auth.BootstrapAdmin
-	c, err := client.Dial(ctx, source.node.cfg.Node.Advertise, a.Username, a.Password, client.ID(b.ID()))
+	c, err := client.Dial(ctx, source.node.cfg.Node.Advertise, a.Username, a.Password, client.ID(b.ID()), "bd")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -104,7 +104,7 @@ func TestBlockMaintenanceWaitsForCapacityHandoff(t *testing.T) {
 	if current.Token != lease.Token || current.Released {
 		t.Fatal("handoff ended block lease")
 	}
-	if other, e := client.Dial(ctx, target.node.cfg.Node.Advertise, a.Username, a.Password, client.ID(b.ID())); e == nil {
+	if other, e := client.Dial(ctx, target.node.cfg.Node.Advertise, a.Username, a.Password, client.ID(b.ID()), "bd"); e == nil {
 		other.Close()
 		t.Fatal("handoff admitted competing client")
 	}
@@ -170,7 +170,7 @@ func TestOfflineInventoriesKeepPlacementFence(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	a := source.node.cfg.Auth.BootstrapAdmin
-	c, err := client.Dial(ctx, source.node.cfg.Node.Advertise, a.Username, a.Password, client.ID(b.ID()))
+	c, err := client.Dial(ctx, source.node.cfg.Node.Advertise, a.Username, a.Password, client.ID(b.ID()), "bd")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -198,7 +198,7 @@ func TestBlockLeaseWaitsForExistingHandoff(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	a := source.node.cfg.Auth.BootstrapAdmin
-	c, err := client.Dial(ctx, source.node.cfg.Node.Advertise, a.Username, a.Password, client.ID(b.ID()))
+	c, err := client.Dial(ctx, source.node.cfg.Node.Advertise, a.Username, a.Password, client.ID(b.ID()), "bd")
 	if err != nil {
 		t.Fatal(err)
 	}

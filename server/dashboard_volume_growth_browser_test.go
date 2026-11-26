@@ -29,7 +29,7 @@ func TestDashboardStorageVolumeGrowthBrowser(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
 	a := source.node.cfg.Auth.BootstrapAdmin
-	c, err := client.Dial(ctx, target.node.cfg.Node.Advertise, a.Username, a.Password, client.ID(b.ID()))
+	c, err := client.Dial(ctx, target.node.cfg.Node.Advertise, a.Username, a.Password, client.ID(b.ID()), "fs")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -75,7 +75,7 @@ func TestDashboardStorageVolumeGrowthBrowser(t *testing.T) {
 	if source.node.volumes[file.VolumeID].store.Size() != 8<<20 || source.node.volumes[file.VolumeID].config.SizeBytes != 8<<20 {
 		t.Fatal("storage growth lost at restart")
 	}
-	c, err = client.Dial(ctx, target.node.cfg.Node.Advertise, a.Username, a.Password, client.ID(b.ID()))
+	c, err = client.Dial(ctx, target.node.cfg.Node.Advertise, a.Username, a.Password, client.ID(b.ID()), "fs")
 	if err != nil {
 		t.Fatal(err)
 	}

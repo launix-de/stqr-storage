@@ -151,11 +151,19 @@ func (s *Server) cloneCow(ctx context.Context, m client.Message, p principal) ([
 			return fail(409, "clone component has reached its traversal limit")
 		}
 		a.ClonePeers = append(a.ClonePeers, BucketClonePeer{Bucket: b.ID, Link: m.ID.String()})
+		if b.Format != "" && b.Format != a.Format {
+			return fail(409, "clone destination format differs from source")
+		}
+		b.Format = a.Format
+		if b.Format != "" {
+			b.Schema = 2
+		}
 		b.ClonePeers = append(b.ClonePeers, BucketClonePeer{Bucket: a.ID, Link: m.ID.String()})
 		b.CloneDetach = !cowSameStorage(a.Policy, b.Policy)
 		receipt.Running = false
 		receipt.Status = 200
 		receipt.Objects = 0
+		a.Receipts = append(a.Receipts, receipt) // both endpoints retain external-reference sharing evidence
 		b.Receipts = append(b.Receipts, receipt)
 		return target.buckets.saveBatch([]BucketDescription{a, b})
 	}
@@ -171,6 +179,15 @@ func (s *Server) cloneCow(ctx context.Context, m client.Message, p principal) ([
 				return nil, fail(409, "previous clone failed")
 			}
 			return result.B, nil
+		}
+		for _, id := range []volume.ID{source, destination} {
+			b, err := s.Bucket(id)
+			if err != nil {
+				return nil, err
+			}
+			if b.underMaintenance() {
+				return nil, fail(409, "clone conflicts with bucket maintenance")
+			}
 		}
 		page, _, err := s.cowPhysicalPage(ctx, destination, nil, 1)
 		if err != nil {

@@ -145,6 +145,9 @@ func (f *Filesystem) snapshot(ctx context.Context, id ObjectID) (fsSnapshot, err
 		}
 		if locked {
 			if _, err = f.helpTransaction(ctx, txID, 0); err != nil {
+				if errors.Is(err, ErrNotFound) || errors.Is(err, ErrWouldBlock) {
+					continue
+				}
 				return fsSnapshot{}, err
 			}
 			continue
@@ -230,6 +233,17 @@ func (f *Filesystem) transact(ctx context.Context, members []fsTxMember) (bool, 
 	if len(raw) > fsMaxIntentBytes {
 		return false, syscall.E2BIG
 	}
+	if refs, ok := f.managedReferences(); ok {
+		id, pin := newFSID(), NewRequestID()
+		if err := refs.PinObject(ctx, id, pin); err != nil {
+			return false, err
+		}
+		if _, err := f.storeIntentAt(ctx, id, raw); err != nil {
+			fsDetachedCleanup(ctx, func(clean context.Context) error { return refs.UnpinObject(clean, id, pin) })
+			return false, err
+		}
+		return f.helpPinnedTransaction(ctx, id, 0, pin)
+	}
 	id, err := f.storeIntent(ctx, raw)
 	if err != nil {
 		return false, err
@@ -301,6 +315,9 @@ func (f *Filesystem) recoverNamespace(ctx context.Context) error {
 }
 
 func (f *Filesystem) helpTransaction(ctx context.Context, id ObjectID, depth int) (bool, error) {
+	if _, ok := f.managedReferences(); ok {
+		return f.helpPinnedTransaction(ctx, id, depth, ID{})
+	}
 	ctx = context.WithValue(ctx, fsDurableKey{}, true)
 	if depth >= 128 {
 		return false, syscall.EAGAIN

@@ -6,6 +6,7 @@ package server
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"errors"
 	"net/http/httptest"
 	"os"
@@ -17,6 +18,7 @@ import (
 	"time"
 
 	"github.com/launix-de/stqr-storage/client"
+	"github.com/launix-de/stqr-storage/volume"
 	"golang.org/x/sys/unix"
 )
 
@@ -45,7 +47,7 @@ func TestBucketNativeOverlayPHPCluster(t *testing.T) {
 	la, ua := lowerServer.cfg.Auth.BootstrapAdmin, upperServer.cfg.Auth.BootstrapAdmin
 	dial := func(uri, user, password string, id client.ID) *client.Client {
 		t.Helper()
-		c, e := client.Dial(ctx, uri, user, password, id)
+		c, e := client.Dial(ctx, uri, user, password, id, "fs")
 		if e != nil {
 			t.Fatal(e)
 		}
@@ -91,11 +93,84 @@ func TestBucketNativeOverlayPHPCluster(t *testing.T) {
 	if status != 200 {
 		t.Fatal(status)
 	}
-	before := lowerServer.volumes[lowerVolume.VolumeID].store.Stats().IO.WriteBytes
+	// READ-only handles legitimately persist lifetime pins in one managed
+	// coordination object. Physical WAL/allocator writes therefore cannot prove
+	// whether user data changed. Compare every other native address instead,
+	// including tombstones, payload bytes, lengths and compression metadata.
+	type lowerObject struct {
+		info   volume.Info
+		digest [32]byte
+	}
+	lowerBucketID := baseBucket.ID()
+	snapshotLower := func() map[volume.Key]lowerObject {
+		t.Helper()
+		h, err := lowerServer.volumes[lowerVolume.VolumeID].store.Open(false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer h.Close()
+		objects := map[volume.Key]lowerObject{}
+		var after *volume.Key
+		for {
+			page, err := h.ScanObjects(after, 4096)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(page) == 0 {
+				break
+			}
+			for _, record := range page {
+				state := lowerObject{info: record.Info}
+				var raw []byte
+				if !record.Info.Deleted {
+					var info volume.Info
+					raw, info, err = h.Get(record.Key)
+					if err != nil || info != record.Info || uint64(len(raw)) != record.Info.Length {
+						t.Fatal("lower inventory/payload mismatch", record.Key, err)
+					}
+					state.digest = sha256.Sum256(raw)
+				}
+				if record.Key == (volume.Key{Bucket: baseBucket.ID(), Object: volume.ObjectID(client.ObjectReferenceRootID())}) {
+					if record.Info.Deleted || len(raw) < 24 || !bytes.Equal(raw[4:20], lowerBucketID[:]) {
+						t.Fatal("invalid lower reference-root owner or state")
+					}
+					if _, err := decodeObjectReferences(raw, baseBucket.ID()); err != nil {
+						t.Fatal("invalid lower reference coordination", err)
+					}
+					continue // The only address allowed to change in this volume.
+				}
+				objects[record.Key] = state
+			}
+			last := page[len(page)-1].Key
+			after = &last
+		}
+		return objects
+	}
+	assertLowerUnchanged := func(before map[volume.Key]lowerObject) {
+		t.Helper()
+		after := snapshotLower()
+		if len(after) != len(before) {
+			t.Fatalf("readonly lower inventory changed: before=%d after=%d", len(before), len(after))
+		}
+		for key, expected := range before {
+			if actual, ok := after[key]; !ok || actual != expected {
+				t.Fatalf("readonly lower object changed: key=%+v before=%+v after=%+v present=%v", key, expected, actual, ok)
+			}
+		}
+	}
+	before := snapshotLower()
 	readerConnection := func() *client.Client {
 		return dial(lowerHost.URL, reader.Name, "bucket-test-password", client.ID(baseBucket.ID()))
 	}
 	l1, l2, ol1, ol2 := readerConnection(), readerConnection(), readerConnection(), readerConnection()
+	for _, id := range []client.ObjectID{conf.ID, client.ObjectReferenceRootID()} {
+		if _, err := l1.Put(ctx, id, []byte("forbidden"), client.PutOptions{}); !errors.Is(err, client.ErrUnauthorized) {
+			t.Fatal("READ-only account acquired direct WRITE", id, err)
+		}
+		if err := l1.Delete(ctx, id, client.DeleteOptions{}); !errors.Is(err, client.ErrUnauthorized) {
+			t.Fatal("READ-only account acquired direct DELETE", id, err)
+		}
+	}
 	u1, u2 := dial(upperHost.URL, ua.Username, ua.Password, client.ID(upper1.ID())), dial(upperHost.URL, ua.Username, ua.Password, client.ID(upper2.ID()))
 	ro1, err := client.OpenFilesystem(ctx, l1, client.FSOptions{ReadOnly: true})
 	if err != nil {
@@ -331,16 +406,14 @@ func TestBucketNativeOverlayPHPCluster(t *testing.T) {
 	}
 	stop1()
 	stop2()
-	if after := lowerServer.volumes[lowerVolume.VolumeID].store.Stats().IO.WriteBytes; after != before {
-		t.Fatal("readonly phase wrote lower", before, after)
-	}
+	assertLowerUnchanged(before)
 	maintenanceArgs := []string{"-uri", lowerHost.URL, "-username", la.Username, "-password", la.Password, "--bucket", baseBucket.ID().String()}
 	maintenancePoint, stopMaintenance := mount(base, false, maintenanceArgs)
 	if err = os.Remove(filepath.Join(maintenancePoint, "fop-files", "retired")); err != nil {
 		t.Fatal("lower maintenance delete", err)
 	}
 	stopMaintenance()
-	before = lowerServer.volumes[lowerVolume.VolumeID].store.Stats().IO.WriteBytes
+	before = snapshotLower()
 	// Remount and run upper fsck with actual cross-bucket references in place.
 	reopened, err := client.OpenOverlayFilesystem(ctx, ol1, u1, client.OverlayOptions{LowerBucketID: client.ID(baseBucket.ID())})
 	if err != nil {
@@ -382,9 +455,7 @@ func TestBucketNativeOverlayPHPCluster(t *testing.T) {
 			t.Fatalf("overlay fsck CLI: %v %s", e, output)
 		}
 	}
-	if after := lowerServer.volumes[lowerVolume.VolumeID].store.Stats().IO.WriteBytes; after != before {
-		t.Fatal("readonly lower received physical writes", before, after)
-	}
+	assertLowerUnchanged(before)
 	stopRO1()
 	stopRO2()
 	if !strings.Contains(string(got), "XX") {

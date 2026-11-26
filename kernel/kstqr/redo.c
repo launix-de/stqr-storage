@@ -234,6 +234,20 @@ static int apply_edits(struct ks_fs *f, stqr_object_id tx, const struct buf *enc
 			if (err)
 				break;
 		}
+		if (err == -EAGAIN && f->references && !remove) {
+			void *observed = NULL;
+			size_t actual = 0;
+			int check = get_object_locked(f, rpc, id, &observed, &actual, &info);
+			/* The exclusive descriptor claim keeps all heads marked. A
+			 * repeated create-only write may recognize its prior after-image
+			 * without retaining server PUT/CAS history. */
+			err = -EIO; /* A decided REDO failure must not restart a whole append. */
+			if (!check && ((full && actual == n && !memcmp(observed, data, n)) ||
+			    (!full && off <= actual && n <= actual - off &&
+			     !memcmp((u8 *)observed + off, data, n))))
+				err = 0;
+			sq_free(observed);
+		}
 		mutex_unlock(&rpc->lock);
 		ks_cache_forget(f, id);
 		if (remove && err == -ENOENT)
@@ -303,7 +317,7 @@ static int intent_get(struct ks_fs *f, stqr_object_id id, struct buf *raw, struc
 	raw->p[6] = head->p[6];
 	return 0;
 }
-static int intent_store(struct ks_fs *f, struct buf *raw, stqr_object_id *id)
+static int intent_store_at(struct ks_fs *f, struct buf *raw, stqr_object_id id)
 {
 	struct buf head = {0};
 	size_t at;
@@ -311,7 +325,7 @@ static int intent_store(struct ks_fs *f, struct buf *raw, stqr_object_id *id)
 	if (raw->n > (128U << 20))
 		return -E2BIG;
 	if (raw->n <= 65536)
-		return immutable(f, raw->p, raw->n, id);
+		return cas_object(f, id, raw->p, raw->n, NULL, 0, true);
 	put(&head, "STFJ\1\0", 6);
 	number(&head, 0, 1);
 	number(&head, raw->n, 4);
@@ -324,9 +338,14 @@ static int intent_store(struct ks_fs *f, struct buf *raw, stqr_object_id *id)
 		put(&head, part.bytes, 32);
 	}
 	if (!err)
-		err = head.err ? head.err : immutable(f, head.p, head.n, id);
+		err = head.err ? head.err : cas_object(f, id, head.p, head.n, NULL, 0, true);
 	drop(&head);
 	return err;
+}
+static int intent_store(struct ks_fs *f, struct buf *raw, stqr_object_id *id)
+{
+	int err = sq_random(id->bytes, 32);
+	return err ? err : intent_store_at(f, raw, *id);
 }
 static void intent_retire(struct ks_fs *f, stqr_object_id id, const struct buf *head,
 			  stqr_info *info, unsigned state)

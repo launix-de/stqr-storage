@@ -35,7 +35,7 @@ func TestBucketFsckNetworkExclusiveSweep(t *testing.T) {
 	admin := s.cfg.Auth.BootstrapAdmin
 	dial := func() *client.Client {
 		t.Helper()
-		c, e := client.Dial(ctx, host.URL, admin.Username, admin.Password, client.ID(b.ID()))
+		c, e := client.Dial(ctx, host.URL, admin.Username, admin.Password, client.ID(b.ID()), "fs")
 		if e != nil {
 			t.Fatal(e)
 		}
@@ -85,10 +85,85 @@ func TestBucketFsckNetworkExclusiveSweep(t *testing.T) {
 	}
 	c = dial()
 	defer c.Close()
+	// Measure the actual unreachable inventory independently of the sweep.
+	// This fixture has an inline root directory, one file, one index and one
+	// data object; completed intents are already retired online.
+	fixtureFS, err := client.OpenFilesystem(ctx, c, client.FSOptions{ReadOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	entries, err := fixtureFS.ReadDir(ctx, client.FilesystemRootID())
+	if err != nil || len(entries) != 1 || entries[0].ID != file.ID {
+		t.Fatal("unexpected live namespace", entries, err)
+	}
+	rootRaw, _, err := c.Get(ctx, client.FilesystemRootID())
+	if err != nil || len(rootRaw) < 36 || rootRaw[35] != 0 {
+		t.Fatal("fixture root is not inline", err)
+	}
+	fileRaw, _, err := c.Get(ctx, file.ID)
+	if err != nil || len(fileRaw) < 69 || string(fileRaw[:6]) != "STFS\x07\x00" || fileRaw[35] != 1 || fileRaw[36] != 1 {
+		t.Fatal("fixture file is not a depth-one STFS v7 file", err)
+	}
+	var indexID, dataID client.ObjectID
+	copy(indexID[:], fileRaw[37:69])
+	indexRaw, _, err := c.Get(ctx, indexID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := client.Decoder{B: indexRaw}
+	if string(d.Take(4)) != "STIX" || d.U16() != 1 || d.U32() != 1 || d.U64() != uint64(len(want)) {
+		t.Fatal("unexpected fixture data index")
+	}
+	copy(dataID[:], d.Take(32))
+	if d.U32() != 0 || d.Done() != nil {
+		t.Fatal("unexpected fixture data reference")
+	}
+	if data, _, err := c.Get(ctx, dataID); err != nil || !bytes.Equal(data, want) {
+		t.Fatal("fixture data differs", err)
+	}
+	reachable := map[client.ObjectID]bool{client.FilesystemRootID(): true, file.ID: true, indexID: true, dataID: true}
+	var expectedScanned, expectedDeleted, expectedBytes uint64
+	var after *client.ObjectID
+	for {
+		page, next, err := c.ScanObjects(ctx, after, 1000)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, object := range page {
+			expectedScanned++
+			if reachable[object.ID] {
+				continue
+			}
+			raw, _, err := c.Get(ctx, object.ID)
+			if err != nil || uint64(len(raw)) != object.Info.Length {
+				t.Fatal("inventory payload mismatch", err)
+			}
+			switch object.ID {
+			case orphan:
+				if string(raw) != "unreachable" {
+					t.Fatal("explicit orphan differs")
+				}
+			case client.ObjectReferenceRootID():
+				refs := client.Decoder{B: raw}
+				if string(refs.Take(4)) != "ORF1" || refs.ID() != client.ID(b.ID()) || refs.U32() != 0 || refs.Done() != nil {
+					t.Fatal("coordination root still has live references")
+				}
+			default:
+				t.Fatal("unexpected unreachable object", object.ID)
+			}
+			expectedDeleted++
+			expectedBytes += uint64(len(raw))
+		}
+		if next == nil {
+			break
+		}
+		after = next
+	}
+	if expectedDeleted == 0 || expectedScanned != uint64(len(reachable))+expectedDeleted {
+		t.Fatal("incomplete fixture inventory")
+	}
 	result, err := c.CheckFilesystem(ctx)
-	// The successful mutable write leaves only its seven-byte terminal
-	// decision; offline fsck collects it together with the explicit orphan.
-	if err != nil || result.Deleted != 2 || result.DeletedBytes != 18 {
+	if err != nil || result.Scanned != expectedScanned || result.Reachable != uint64(len(reachable)) || result.Deleted != expectedDeleted || result.DeletedBytes != expectedBytes {
 		t.Fatalf("%+v %v", result, err)
 	}
 	if _, _, err = c.Get(ctx, orphan); !errors.Is(err, client.ErrNotFound) {
@@ -105,7 +180,7 @@ func TestBucketFsckNetworkExclusiveSweep(t *testing.T) {
 	if _, err = c.Put(ctx, client.ObjectID{5}, []byte("blocked"), client.PutOptions{RequestID: client.NewRequestID()}); err == nil {
 		t.Fatal("maintenance connection can write new references")
 	}
-	newClient, err := client.Dial(ctx, host.URL, admin.Username, admin.Password, client.ID(b.ID()))
+	newClient, err := client.Dial(ctx, host.URL, admin.Username, admin.Password, client.ID(b.ID()), "fs")
 	if err == nil {
 		newClient.Close()
 		t.Fatal("another mount entered during fsck")
@@ -226,7 +301,7 @@ func TestBucketFsckRecoversInterruptedRmdir(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	admin := s.cfg.Auth.BootstrapAdmin
-	c, err := client.Dial(ctx, host.URL, admin.Username, admin.Password, client.ID(b.ID()))
+	c, err := client.Dial(ctx, host.URL, admin.Username, admin.Password, client.ID(b.ID()), "fs")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -254,7 +329,7 @@ func TestBucketFsckRecoversInterruptedRmdir(t *testing.T) {
 		}
 		time.Sleep(time.Millisecond)
 	}
-	c, err = client.Dial(ctx, host.URL, admin.Username, admin.Password, client.ID(b.ID()))
+	c, err = client.Dial(ctx, host.URL, admin.Username, admin.Password, client.ID(b.ID()), "fs")
 	if err != nil {
 		t.Fatal(err)
 	}

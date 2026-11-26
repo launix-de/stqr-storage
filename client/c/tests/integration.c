@@ -36,17 +36,69 @@ int main(void) {
     const char *url = getenv("STQR_TEST_URL"), *mode = getenv("STQR_TEST_MODE");
     CHECK(stqr_parse_id("not-an-id", &bucket) == -EINVAL);
     CHECK(stqr_parse_object_id("1234", &id) == -EINVAL);
-    CHECK(stqr_dial(&c, "http://localhost", "user", "pw", bucket, 1000) == -EINVAL);
+    CHECK(stqr_dial(&c, "http://localhost", "user", "pw", bucket,"fs", 1000) == -EINVAL);
     CHECK(c == NULL);
     { stqr_fence *empty=NULL;CHECK(stqr_fence_capture(NULL,&empty)==-EINVAL && empty==NULL);stqr_fence_close(empty); }
     if (!url) { puts("local API validation passed; network tests run through STQR_TEST_C=1 go test ./server"); return 0; }
     CHECK(!stqr_parse_id(getenv("STQR_TEST_BUCKET"), &bucket));
     CHECK(!stqr_parse_object_id("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", &id));
-    CHECK(!stqr_dial(&c, url, getenv("STQR_TEST_USER"), getenv("STQR_TEST_PASSWORD"), bucket, 3000));
+    CHECK(!stqr_dial(&c, url, getenv("STQR_TEST_USER"), getenv("STQR_TEST_PASSWORD"), bucket,"fs", 3000));
+    if (mode && !strcmp(mode,"references")) {
+        stqr_client *other=NULL;
+        stqr_id pin, claim, second;
+        CHECK(!stqr_request_id(&pin) && !stqr_request_id(&claim) && !stqr_request_id(&second));
+        CHECK(!stqr_dial(&other,url,getenv("STQR_TEST_USER"),getenv("STQR_TEST_PASSWORD"),bucket,"fs",3000));
+        CHECK(!stqr_object_pin(c,id,pin));
+        CHECK(!stqr_object_pin(c,id,pin));
+        CHECK(!stqr_reconnect(c));
+        CHECK(stqr_object_claim(other,id,claim)==-EBUSY);
+        CHECK(!stqr_object_unpin(c,id,pin));
+        CHECK(!stqr_object_unpin(c,id,pin));
+        CHECK(!stqr_object_claim(other,id,claim));
+        CHECK(!stqr_object_claim(other,id,claim));
+        CHECK(stqr_object_pin(c,id,second)==-EBUSY);
+        CHECK(!stqr_reconnect(other));
+        CHECK(stqr_object_pin(c,id,second)==-EBUSY);
+        CHECK(!stqr_object_release_claim(other,id,claim));
+        CHECK(!stqr_object_release_claim(other,id,claim));
+        CHECK(!stqr_object_pin(c,id,second));
+        CHECK(!stqr_object_unpin(c,id,second));
+        stqr_close(other);stqr_close(c);
+        puts("C durable pin/claim coordination passed");return 0;
+    }
+    if (mode && !strcmp(mode,"reuse")) {
+        unsigned char before[8192], after[8192], wrong[8192];
+        for (unsigned step=0;step<100;step++) {
+            memset(before,(int)step,sizeof(before));
+            memset(after,(int)(step^255),sizeof(after));
+            memset(wrong,(int)(step^127),sizeof(wrong));
+            o=fresh();CHECK(!stqr_put(c,id,before,sizeof(before),&o,&info));
+            CHECK(info.length==sizeof(before));
+            o=fresh();CHECK(stqr_cas(c,id,1,0,wrong,sizeof(wrong),after,sizeof(after),&o,&info)==-EAGAIN);
+            CHECK(stqr_status(c)==412);
+            CHECK(!stqr_get(c,id,&data,&n,&info));
+            CHECK(n==sizeof(before) && !memcmp(data,before,n));stqr_free(data);
+            o=fresh();CHECK(!stqr_cas(c,id,1,0,before,sizeof(before),after,sizeof(after),&o,&info));
+            CHECK(!stqr_get(c,id,&data,&n,&info));
+            CHECK(n==sizeof(after) && !memcmp(data,after,n));stqr_free(data);
+            if (!(step%25)) CHECK(!stqr_reconnect(c));
+        }
+        /* Reusing a deleted address must release the old payload without
+         * retaining another visible object for each generation. */
+        for (unsigned step=0;step<20;step++) {
+            o=fresh();CHECK(!stqr_delete(c,id,&o));
+            CHECK(stqr_get(c,id,&data,&n,&info)==-ENOENT && data==NULL);
+            o=fresh();o.absent=1;CHECK(!stqr_put(c,id,after,sizeof(after),&o,&info));
+        }
+        CHECK(!stqr_sync(c));CHECK(!stqr_reconnect(c));
+        CHECK(!stqr_get(c,id,&data,&n,&info));
+        CHECK(n==sizeof(after) && !memcmp(data,after,n));stqr_free(data);
+        stqr_close(c);puts("C PUT/CAS address-reuse lifecycle passed");return 0;
+    }
     if (mode && !strcmp(mode,"fence")) {
         stqr_fence *fence=NULL; stqr_commit_mark mark;
         struct fence_waiter waiter; pthread_t worker;
-        o=fresh();o.accepted=1;CHECK(!stqr_put(c,id,"hello",5,&o,&info));
+        o=fresh();o.accepted=1;{ int err=stqr_put(c,id,"hello",5,&o,&info);if(err)fprintf(stderr,"PUT: error %d HTTP %d\n",err,stqr_status(c));CHECK(!err); }
         CHECK(!stqr_fence_capture(c,&fence));
         CHECK(!stqr_fence_add(c,fence) && stqr_fence_count(fence)==1);
         waiter.fence=fence;waiter.error=1;
@@ -56,9 +108,9 @@ int main(void) {
         CHECK(!pthread_join(worker,NULL) && !waiter.error);
         stqr_fence_apply(c,fence);
         CHECK(!stqr_pending_mark(c,&mark) && !mark.sequence);
-        o=fresh();o.accepted=1;CHECK(!stqr_put(c,id,"hello",5,&o,&info));
+        o=fresh();o.accepted=1;{ int err=stqr_put(c,id,"hello",5,&o,&info);if(err)fprintf(stderr,"PUT: error %d HTTP %d\n",err,stqr_status(c));CHECK(!err); }
         CHECK(!stqr_fence_capture(c,&fence));
-        o=fresh();o.accepted=1;CHECK(!stqr_put(c,id,"hello",5,&o,&info));
+        o=fresh();o.accepted=1;{ int err=stqr_put(c,id,"hello",5,&o,&info);if(err)fprintf(stderr,"PUT: error %d HTTP %d\n",err,stqr_status(c));CHECK(!err); }
         CHECK(!stqr_fence_wait(fence));stqr_fence_apply(c,fence);
         CHECK(!stqr_pending_mark(c,&mark) && mark.sequence==3);
         CHECK(!stqr_fence_capture(c,&fence));
@@ -66,9 +118,9 @@ int main(void) {
         CHECK(!stqr_pending_mark(c,&mark) && !mark.sequence);
         {
             stqr_client *second=NULL,*other_bucket=NULL;stqr_id foreign=bucket;
-            CHECK(!stqr_dial(&second,url,getenv("STQR_TEST_USER"),getenv("STQR_TEST_PASSWORD"),bucket,3000));
+            CHECK(!stqr_dial(&second,url,getenv("STQR_TEST_USER"),getenv("STQR_TEST_PASSWORD"),bucket,"fs",3000));
             o=fresh();o.accepted=1;CHECK(!stqr_put(second,id,"hello",5,&o,&info));
-            o=fresh();o.accepted=1;CHECK(!stqr_put(c,id,"hello",5,&o,&info));
+            o=fresh();o.accepted=1;{ int err=stqr_put(c,id,"hello",5,&o,&info);if(err)fprintf(stderr,"PUT: error %d HTTP %d\n",err,stqr_status(c));CHECK(!err); }
             CHECK(!stqr_fence_reset(&fence));
             CHECK(!stqr_fence_add(second,fence) && !stqr_fence_add(c,fence));
             CHECK(stqr_fence_count(fence)==1); // maximum mark for the same owner
@@ -76,8 +128,8 @@ int main(void) {
             CHECK(!stqr_pending_mark(c,&mark) && !mark.sequence);
             CHECK(!stqr_pending_mark(second,&mark) && !mark.sequence);
             foreign.bytes[0]^=2;
-            CHECK(!stqr_dial(&other_bucket,url,getenv("STQR_TEST_USER"),getenv("STQR_TEST_PASSWORD"),foreign,3000));
-            o=fresh();o.accepted=1;CHECK(!stqr_put(c,id,"hello",5,&o,&info));
+            CHECK(!stqr_dial(&other_bucket,url,getenv("STQR_TEST_USER"),getenv("STQR_TEST_PASSWORD"),foreign,"fs",3000));
+            o=fresh();o.accepted=1;{ int err=stqr_put(c,id,"hello",5,&o,&info);if(err)fprintf(stderr,"PUT: error %d HTTP %d\n",err,stqr_status(c));CHECK(!err); }
             o=fresh();o.accepted=1;CHECK(!stqr_put(other_bucket,id,"hello",5,&o,&info));
             CHECK(!stqr_fence_capture(other_bucket,&fence));
             CHECK(!stqr_fence_wait(fence));stqr_fence_apply(c,fence);
@@ -117,7 +169,7 @@ int main(void) {
         for (unsigned step=0;step<8;step++) {
             memset(&id,0,sizeof(id)); id.bytes[0]=(step&1)?0x81:1;
             o=fresh();o.accepted=1;
-            CHECK(!stqr_put(c,id,"routed",6,&o,&info));
+            { int err=stqr_put(c,id,"routed",6,&o,&info);if(err)fprintf(stderr,"routed PUT: error %d HTTP %d\n",err,stqr_status(c));CHECK(!err); }
             CHECK(!stqr_get(c,id,&data,&n,&info));
             CHECK(n==6 && !memcmp(data,"routed",6));stqr_free(data);
         }
@@ -145,7 +197,7 @@ int main(void) {
             CHECK(!stqr_subscribe(c,right,b,0,0,0,NULL,&data,&n,&info,&cursor));stqr_free(data);
             CHECK(events.lost == lost); /* Routing must preserve the first subscription. */
             CHECK(stqr_subscribe(c,right,a,0,0,0,NULL,&data,&n,&info,&cursor)==-EBUSY);
-            CHECK(!stqr_dial(&writer,url,getenv("STQR_TEST_USER"),getenv("STQR_TEST_PASSWORD"),bucket,3000));
+            CHECK(!stqr_dial(&writer,url,getenv("STQR_TEST_USER"),getenv("STQR_TEST_PASSWORD"),bucket,"fs",3000));
             o=fresh();CHECK(!stqr_put(writer,left,"left",4,&o,&info));
             wait_change(c,&events,1);CHECK(!memcmp(events.last.subscription.bytes,a.bytes,16));
             o=fresh();CHECK(!stqr_put(writer,right,"right",5,&o,&info));
@@ -229,12 +281,12 @@ int main(void) {
         CHECK(space.total-space.free == space.used && space.available <= space.free);
     }
     o = fresh(); o.absent = 1;
-    CHECK(!stqr_put(c,id,"hello",5,&o,&info)); CHECK(info.length == 5);
+    { int err=stqr_put(c,id,"hello",5,&o,&info);if(err)fprintf(stderr,"PUT: error %d HTTP %d\n",err,stqr_status(c));CHECK(!err); } CHECK(info.length == 5);
     CHECK(!stqr_get(c,id,&data,&n,&info)); CHECK(n == 5 && !memcmp(data,"hello",5)); stqr_free(data);
     {
         stqr_commit_mark mark, wrong, durable;
         o = fresh(); o.accepted = 1;
-        CHECK(!stqr_put(c,id,"hello",5,&o,&info));
+        { int err=stqr_put(c,id,"hello",5,&o,&info);if(err)fprintf(stderr,"PUT: error %d HTTP %d\n",err,stqr_status(c));CHECK(!err); }
         CHECK(!stqr_pending_mark(c,&mark) && mark.sequence);
         wrong = mark; wrong.boot.bytes[0] ^= 1;
         CHECK(stqr_sync_through(c,&wrong,&durable) == -ESTALE);
@@ -244,7 +296,7 @@ int main(void) {
     {
         stqr_client *watch = NULL; stqr_id sid; stqr_u64 cursor;
         struct observer events = {0};
-        CHECK(!stqr_dial(&watch,url,getenv("STQR_TEST_USER"),getenv("STQR_TEST_PASSWORD"),bucket,3000));
+        CHECK(!stqr_dial(&watch,url,getenv("STQR_TEST_USER"),getenv("STQR_TEST_PASSWORD"),bucket,"fs",3000));
         CHECK(stqr_capabilities(watch) & STQR_CAP_SUBSCRIPTIONS);
         stqr_set_update_handler(watch,observe,&events);
         CHECK(!stqr_request_id(&sid));
@@ -255,13 +307,13 @@ int main(void) {
         CHECK(events.last.cursor == cursor+1 && events.last.length == info.length);
         CHECK(events.last.change == STQR_UPDATE_REPLACE && events.last.size == 3 && !memcmp(events.data,"ELL",3));
         CHECK(!stqr_unsubscribe(watch,sid));
-        o = fresh(); CHECK(!stqr_put(c,id,"hello",5,&o,&info));
+        o = fresh(); { int err=stqr_put(c,id,"hello",5,&o,&info);if(err)fprintf(stderr,"PUT: error %d HTTP %d\n",err,stqr_status(c));CHECK(!err); }
         CHECK(stqr_poll(watch,20) == 0);
         CHECK(!stqr_request_id(&sid));
         CHECK(!stqr_subscribe(watch,id,sid,0,0,0,NULL,&data,&n,&info,&cursor)); stqr_free(data);
         o = fresh(); CHECK(!stqr_delete(c,id,&o)); wait_change(watch,&events,2);
         CHECK(events.last.change == STQR_UPDATE_DELETE);
-        o = fresh(); CHECK(!stqr_put(c,id,"hello",5,&o,&info)); wait_change(watch,&events,3);
+        o = fresh(); { int err=stqr_put(c,id,"hello",5,&o,&info);if(err)fprintf(stderr,"PUT: error %d HTTP %d\n",err,stqr_status(c));CHECK(!err); } wait_change(watch,&events,3);
         CHECK(events.last.change == STQR_UPDATE_REPLACE && events.last.size == 5);
         cursor = events.last.cursor;
         CHECK(!stqr_reconnect(watch)); CHECK(events.lost == 1);
@@ -308,7 +360,7 @@ int main(void) {
     CHECK(!stqr_get(c,id,&data,&n,&info)); CHECK(n == 0); stqr_free(data);
     o = fresh(); CHECK(!stqr_delete(c,id,&o)); CHECK(stqr_get(c,id,&data,&n,&info) == -ENOENT);
     stqr_close(c); stqr_close(NULL);
-    CHECK(stqr_dial(&c,url,getenv("STQR_TEST_USER"),"wrong-password",bucket,3000) == -EACCES);
+    CHECK(stqr_dial(&c,url,getenv("STQR_TEST_USER"),"wrong-password",bucket,"fs",3000) == -EACCES);
     CHECK(!c);
     puts("C client integration passed");
     return 0;

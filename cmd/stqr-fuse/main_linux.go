@@ -154,14 +154,14 @@ func run(ctx context.Context, opt options, out io.Writer) (resultErr error) {
 	var conn, lower *client.Client
 	var err error
 	if opt.bucket != (client.BucketID{}) {
-		conn, err = client.Dial(startup, opt.uri, opt.username, opt.password, opt.bucket)
+		conn, err = client.Dial(startup, opt.uri, opt.username, opt.password, opt.bucket, "fs")
 		if err != nil {
 			return fmt.Errorf("connect upper: %w", err)
 		}
 		defer conn.Close()
 	}
 	if opt.readonlyBucket != (client.BucketID{}) {
-		lower, err = client.Dial(startup, opt.readonlyURI, opt.readonlyUsername, opt.readonlyPassword, opt.readonlyBucket)
+		lower, err = client.Dial(startup, opt.readonlyURI, opt.readonlyUsername, opt.readonlyPassword, opt.readonlyBucket, "fs")
 		if err != nil {
 			return fmt.Errorf("connect readonly: %w", err)
 		}

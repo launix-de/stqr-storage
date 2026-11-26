@@ -52,6 +52,20 @@ termination or forced shutdown cannot guarantee a completed flush.
 
 File and directory operations, ranged reads/writes, truncation, rename,
 symlinks, timestamps, permissions and live capacity reporting are implemented.
+The adapter uses the shared Go filesystem's mutable inode/index/data objects;
+repeated overwrites keep their persistent identities. An open handle continues
+to address its inode after rename or unlink, including reads and writes until
+close. Closing a Windows handle releases only that process's handle; it cannot
+assume other mounts have released the inode. On reference-capable backends the
+adapter retains a cooperative filesystem reference before publishing an open
+handle, and releases it only after that handle's pending operations finish.
+Unlink and last-close cleanup use the shared Go filesystem's orphan/reference
+protocol; an inode still retained by another handle or mount is preserved.
+Crashes, backends without reference support, and cleanup without the required
+write/delete grants retain discoverable orphans for a later eligible cleanup or
+exclusive filesystem check. The adapter does not sweep unrelated bucket objects
+or expose a separate raw PUT/CAS API.
+
 New inodes inherit the filesystem root's Unix UID/GID unless `--uid` or `--gid`
 overrides them. WinFsp presents the drive to the mounting Windows user; this is
 not a Unix-to-Windows identity directory or a full Windows ACL implementation.
@@ -70,8 +84,9 @@ remote creates, deletes and metadata/content changes, so Explorer can refresh
 without reopening the drive. Directory snapshots are bounded to 256 visited
 folders. Re-enumerating an existing directory handle also refreshes its view.
 Distributed application locks and writable memory-map coherence are not promised.
-As with the Linux clients, physical collection of unlinked objects is an offline
-operation: disconnect the drive and use the Linux client's `--fsck`.
+As with the Linux clients, offline collection remains the fallback for abandoned
+references and interrupted cleanup: disconnect all mounts and use the Linux
+client's `--fsck`.
 
 ## Build and verification
 

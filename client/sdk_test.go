@@ -21,6 +21,7 @@ import (
 // wireObjectPeer is an independent protocol fixture, not a second volume engine.
 // It validates the exact bucket/reference/precondition/transfer field ordering.
 type wireObjectPeer struct {
+	helloCaps        atomic.Uint64
 	stallHandshake   atomic.Bool
 	handshakeStarted chan struct{}
 	handshakeGate    chan struct{}
@@ -70,6 +71,11 @@ func (p *wireObjectPeer) serve(w http.ResponseWriter, r *http.Request) {
 	user, pass, ok := r.BasicAuth()
 	if !ok || user != "user" || pass != "credential" {
 		w.WriteHeader(401)
+		return
+	}
+	if r.Header.Get(FormatHeader) != "fs" {
+		p.t.Error("missing explicit format on initial or reconnected session")
+		http.Error(w, "missing format", 400)
 		return
 	}
 	if r.Header.Get(BucketHeader) != p.bucket.String() {
@@ -165,7 +171,7 @@ func (p *wireObjectPeer) serve(w http.ResponseWriter, r *http.Request) {
 			}
 			result := Encoder{}
 			result.U16(2)
-			result.U64(0)
+			result.U64(p.helloCaps.Load())
 			result.ID(ID{1})
 			result.ID(ID{2})
 			result.U64(1)
@@ -284,9 +290,13 @@ func (p *wireObjectPeer) serve(w http.ResponseWriter, r *http.Request) {
 				result.U64(uint64(len(data)))
 			}
 			if m.Opcode != objectStat && d.Bool() {
- if d.Bool() { d.U64() }; d.U64(); d.Blob()
- }
- if d.Done() != nil {
+				if d.Bool() {
+					d.U64()
+				}
+				d.U64()
+				d.Blob()
+			}
+			if d.Done() != nil {
 				p.t.Error("object reference or range layout")
 				return
 			}
@@ -351,7 +361,7 @@ func TestBucketConnectionObjectsStreamingAndRequestMultiplexing(t *testing.T) {
 	peer, server := newWirePeer(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	c, e := Dial(ctx, server.URL, "user", "credential", peer.bucket)
+	c, e := Dial(ctx, server.URL, "user", "credential", peer.bucket, "fs")
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -401,7 +411,7 @@ func TestBucketConnectionReconnectPreservesMutationID(t *testing.T) {
 	peer, server := newWirePeer(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	c, e := Dial(ctx, server.URL, "user", "credential", peer.bucket)
+	c, e := Dial(ctx, server.URL, "user", "credential", peer.bucket, "fs")
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -421,7 +431,7 @@ func TestBucketConnectionReconnectPreservesMutationID(t *testing.T) {
 }
 func TestBucketConnectionCancellationUnknownOutcome(t *testing.T) {
 	peer, server := newWirePeer(t)
-	c, e := Dial(context.Background(), server.URL, "user", "credential", peer.bucket)
+	c, e := Dial(context.Background(), server.URL, "user", "credential", peer.bucket, "fs")
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -447,7 +457,7 @@ func TestBucketConnectionRequiresAllConstructorFields(t *testing.T) {
 		url, user, pass string
 		bucket          ID
 	}{{"http://host", "", "password", ID{1}}, {"http://host", "user", "", ID{1}}, {"http://host", "user", "password", ID{}}, {"http://user:secret@host", "user", "password", ID{1}}, {"https://host", "user", "password", ID{1}}} {
-		if _, e := Dial(context.Background(), tc.url, tc.user, tc.pass, tc.bucket); e == nil {
+		if _, e := Dial(context.Background(), tc.url, tc.user, tc.pass, tc.bucket, "fs"); e == nil {
 			t.Fatal("missing/invalid connection field accepted")
 		}
 	}
@@ -470,7 +480,7 @@ func TestStreamCancellationAndDigestFailureRemoveSpoolFiles(t *testing.T) {
 	temp := t.TempDir()
 	t.Setenv("TMPDIR", temp)
 	peer, server := newWirePeer(t)
-	c, e := Dial(context.Background(), server.URL, "user", "credential", peer.bucket)
+	c, e := Dial(context.Background(), server.URL, "user", "credential", peer.bucket, "fs")
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -527,7 +537,7 @@ func TestStreamCancellationAndDigestFailureRemoveSpoolFiles(t *testing.T) {
 
 func TestWaitingForReconnectHonorsEachCallerContext(t *testing.T) {
 	peer, server := newWirePeer(t)
-	c, e := Dial(context.Background(), server.URL, "user", "credential", peer.bucket)
+	c, e := Dial(context.Background(), server.URL, "user", "credential", peer.bucket, "fs")
 	if e != nil {
 		t.Fatal(e)
 	}

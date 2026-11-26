@@ -2,7 +2,7 @@
 
 The C library connects directly to STQR over an authenticated, bucket-bound
 WebSocket. It does not embed Go, call a helper daemon, or implement its operations
-through another language's SDK. URL, username, password and bucket ID are required
+through another language's SDK. URL, username, password, bucket ID and format are required
 by `stqr_dial`. The server checks the grant at upgrade; it cannot be changed on an
 established connection.
 
@@ -32,7 +32,7 @@ int save_settings(const char *url, const char *user, const char *password,
     stqr_client *conn = NULL;
     stqr_options options = {0};
     stqr_info info;
-    int err = stqr_dial(&conn, url, user, password, bucket, 30000);
+    int err = stqr_dial(&conn, url, user, password, bucket, "fs", 30000);
     if (err) return err;
     err = stqr_request_id(&options.request_id);
     if (!err) err = stqr_put(conn, object, "hello", 5, &options, &info);
@@ -48,6 +48,19 @@ int save_settings(const char *url, const char *user, const char *password,
   parsing helpers are provided. The library never hashes an object ID again.
 - The API includes get/get-range, stat, put/put-range, append, truncate, delete
   and range/object CAS. Append returns the committed starting offset.
+- PUT and CAS address the caller's existing object ID. Repeated updates do not
+  introduce client-generated replacement objects; storage range reuse and
+  payload release are performed by the server. The C library has no filesystem
+  namespace, open-file reference tracker, snapshot manager or filesystem garbage
+  collector. Those operations belong to the Go filesystem or kernel adapter.
+- `stqr_object_pin`/`unpin` and `stqr_object_claim`/`release_claim` coordinate
+  object lifetimes when `STQR_CAP_OBJECT_REFERENCES` is advertised. Pins and
+  claims use caller-owned tokens, survive reconnect/restart/handoff, and must be
+  explicitly released. Claim conflict returns `-EBUSY`; unsupported servers
+  return `-EOPNOTSUPP`. These READ-authorized coordination operations do not grant
+  WRITE or DELETE permissions. Dependency pins have separate
+  `stqr_object_pin_dependency`/`unpin_dependency` APIs and must survive ordinary
+  open-handle recovery while an overlay or snapshot may still depend on them.
 - Return values are zero on success or negative errno. `stqr_status` exposes the
   last HTTP/STQR status, including 412 for an unmet precondition. There is no
   shared global error state. Dial failures leave the output pointer NULL.
@@ -96,6 +109,14 @@ all of them before applying, resetting or closing the fence. Confirmations are
 bucket-scoped and never erase later, unconfirmed writes. The existing `stqr_sync`
 API keeps its serialized-call contract. No new wire messages or storage format
 are introduced.
+
+## Migrating explicit format arguments
+
+`stqr_dial` takes the format between the bucket ID and timeout. This changes the
+C source and binary calling interface. Rebuild and relink C consumers against the
+matching header and library, and deploy those rebuilt consumers together with the
+library. Rebuild kernel modules using the matching client core as well. Upgrade
+all server members before relying on persistent format enforcement.
 
 ## Kernel reuse
 

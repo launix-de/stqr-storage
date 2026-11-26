@@ -102,6 +102,11 @@ func TestFilesystemPOSIXLinksAndAttributes(t *testing.T) {
 	if _, err = checkFilesystem(ctx, &fsckMemory{MemoryFilesystemStore: store}); err != nil {
 		t.Fatal(err)
 	}
+	openRef, err := f.Retain(ctx, file.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Release(ctx, file.ID, openRef)
 	if err = f.Unlink(ctx, root, "target"); err != nil {
 		t.Fatal(err)
 	}

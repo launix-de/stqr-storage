@@ -268,3 +268,54 @@ func TestFilesystemFUSECallbacks(t *testing.T) {
 		t.Fatal(errno)
 	}
 }
+
+func TestTicket32FUSEReleaseReclaimsOnlyAfterLastHandle(t *testing.T) {
+	ctx := context.Background()
+	filesystem, store := newTestFS(t)
+	root := filesystem.FUSERoot()
+	fusefs.NewNodeFS(root, &fusefs.Options{NullPermissions: true})
+	var out fuse.EntryOut
+	inode, handle, _, errno := root.Create(ctx, "held", syscall.O_RDWR, 0600, &out)
+	if errno != 0 {
+		t.Fatal(errno)
+	}
+	node := inode.Operations().(*FSNode)
+	if _, errno = node.Write(ctx, handle, []byte("open data"), 0); errno != 0 {
+		t.Fatal(errno)
+	}
+	if errno = root.Unlink(ctx, "held"); errno != 0 {
+		t.Fatal(errno)
+	}
+	if _, errno = node.Read(ctx, handle, make([]byte, 9), 0); errno != 0 {
+		t.Fatal(errno)
+	}
+	if errno = handle.(fusefs.FileReleaser).Release(ctx); errno != 0 {
+		t.Fatal(errno)
+	}
+	if _, _, err := store.Get(ctx, node.id); !errors.Is(err, ErrNotFound) {
+		t.Fatal("FUSE last close retained inode", err)
+	}
+	if _, errno = node.Read(ctx, handle, make([]byte, 1), 0); errno != syscall.EBADF {
+		t.Fatal("released handle still readable", errno)
+	}
+	dirInfo := testDirectory(t, filesystem, FilesystemRootID(), "directory")
+	dirInode, errno := root.Lookup(ctx, "directory", &out)
+	if errno != 0 {
+		t.Fatal(errno)
+	}
+	dir := dirInode.Operations().(*FSNode)
+	dirHandle, _, errno := dir.OpendirHandle(ctx, 0)
+	if errno != 0 {
+		t.Fatal(errno)
+	}
+	if errno = root.Rmdir(ctx, "directory"); errno != 0 {
+		t.Fatal(errno)
+	}
+	if _, _, err := store.Get(ctx, dirInfo.ID); err != nil {
+		t.Fatal("open directory reclaimed", err)
+	}
+	dirHandle.(fusefs.FileReleasedirer).Releasedir(ctx, 0)
+	if _, _, err := store.Get(ctx, dirInfo.ID); !errors.Is(err, ErrNotFound) {
+		t.Fatal("directory release retained inode", err)
+	}
+}

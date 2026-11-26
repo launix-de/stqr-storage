@@ -41,6 +41,10 @@ func (b *Bucket) authorize(p principal, permission BucketPermissions) (BucketDes
 		required := permission
 		if auth.frontendPermission != 0 {
 			required = auth.frontendPermission
+		} else if p.frontendPermission != 0 {
+			// Only server-created principals may grant this private operation.
+			// Keep the original socket identity for maintenance and revocation.
+			required = p.frontendPermission
 		}
 		if auth.invalid.Load() || auth.bucket != b || auth.permissions&required == 0 {
 			return d, ErrBucketForbidden
@@ -717,13 +721,24 @@ func (b *Bucket) mutateAttempt(ctx context.Context, p principal, id volume.Objec
 	if err := s.ensureVolumeAuthorityLocked(); err != nil {
 		return volume.Result{}, err
 	}
+	// Cooperative clients keep filesystem lifetime outside the engine. Only
+	// APPEND needs a durable replay result after a completed ordinary write.
+	// Legacy clients retain their previous retry contract during upgrade.
+	retainResult := opcode == 0x0104 || p.connection == nil || !p.connection.objectReferences.Load() || p.connection.frontendPermission != 0
+	if id == volume.ObjectID(client.ObjectReferenceRootID()) {
+		retainResult = false
+	}
 	// Inspect retry presence before applying current admission. The volume still
 	// validates the complete original fingerprint; status alone is not a success.
 	h, err := v.Open(false)
 	if err != nil {
 		return volume.Result{}, err
 	}
-	retry, repeated, err := h.OperationStatus(opt.RequestID)
+	var retry volume.Result
+	repeated := false
+	if retainResult || len(replicatedEntry.Locations) > 1 {
+		retry, repeated, err = h.OperationStatus(opt.RequestID)
+	}
 	if err == nil && len(replicatedEntry.Locations) > 1 && !repeated {
 		prepared, exists, e := h.ReplicaStatus(opt.RequestID)
 		if e != nil {
@@ -848,10 +863,20 @@ func (b *Bucket) mutateAttempt(ctx context.Context, p principal, id volume.Objec
 			}
 			return result, volume.ErrRecovery
 		}
-		if record.State == volume.ReplicaPublished {
-			return result, nil
-		}
 		header := replicaHeader{Volume: v.Identity().VolumeID, Request: record.Request, Binding: record.Binding, Opcode: replicaOpcode(opcode), Offset: offset, Length: length, Expected: expected, Options: opt, Snapshot: snapshotInfo}
+		releaseResult := !retainResult && s.referenceCapableReplicas(replicatedEntry)
+		if record.State == volume.ReplicaPublished {
+			if !releaseResult {
+				return result, nil
+			}
+			if mutationRelease != nil {
+				mutationRelease()
+				mutationRelease = nil
+			}
+			s.unlockUserObjectIO()
+			opLocked = false
+			return result, b.releaseCompletedResult(ctx, v, replicatedEntry, header)
+		}
 		if mutationRelease != nil {
 			mutationRelease()
 			mutationRelease = nil
@@ -907,6 +932,11 @@ func (b *Bucket) mutateAttempt(ctx context.Context, p principal, id volume.Objec
 			b.usage.valid = false
 			b.usage.mu.Unlock()
 		}
+		if e == nil && releaseResult {
+			s.unlockUserObjectIO()
+			opLocked = false
+			e = b.releaseCompletedResult(ctx, v, replicatedEntry, header)
+		}
 		return result, e
 	}
 	durableAck := !opt.Accepted && payloadLength <= 1<<20 && opcode != cowRestoreOpcode
@@ -942,6 +972,9 @@ func (b *Bucket) mutateAttempt(ctx context.Context, p principal, id volume.Objec
 		} else {
 			src = bucketContextReader{ctx: ctx, r: src}
 		}
+	}
+	if !retainResult {
+		opt.RequestID = volume.ID{} // WAL/atomicity remain; no historical result entry
 	}
 	var result volume.Result
 	defer func() {
@@ -990,6 +1023,24 @@ func (b *Bucket) mutateAttempt(ctx context.Context, p principal, id volume.Objec
 			s.objectSubscriptions.publish(key, published, h)
 		} else {
 			s.objectSubscriptions.resyncWhere(func(k volume.Key) bool { return k == key })
+		}
+	}
+	if err == nil && opcode == 0x0106 && !retainResult && !p.cowInternal && len(d.ClonePeers) == 0 && !b.lostRange(id) {
+		moving := false
+		if s.scopes != nil {
+			s.scopes.mu.Lock()
+			for _, txn := range s.scopes.txns {
+				if s.scopes.active(txn) && txn.plan.Before.Bucket == client.ID(b.ID()) && txn.plan.contains(id) {
+					moving = true
+					break
+				}
+			}
+			s.scopes.mu.Unlock()
+		}
+		// No copy/clone can still need this deletion marker. The node's
+		// admission lock prevents a new handoff from starting in this gap.
+		if !moving {
+			err = h.Purge(key)
 		}
 	}
 	// Release the write handle before consulting capacity/index statistics.

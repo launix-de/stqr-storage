@@ -326,7 +326,7 @@ func TestDaemonReplicationQuotaCountsLogicalOnceAndPhysicalPerCopy(t *testing.T)
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 		admin := source.node.cfg.Auth.BootstrapAdmin
-		c, err := client.Dial(ctx, source.node.cfg.Node.Advertise, admin.Username, admin.Password, id)
+		c, err := client.Dial(ctx, source.node.cfg.Node.Advertise, admin.Username, admin.Password, id, "fs")
 		if err != nil {
 			t.Fatal(err)
 		}

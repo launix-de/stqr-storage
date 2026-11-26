@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-only
 import contextlib
 import io
+import os
 from pathlib import Path
 import tempfile
 import subprocess
@@ -11,7 +12,7 @@ import check
 
 
 class CompatibilityRunner(unittest.TestCase):
-    def test_each_format_revision_requires_its_own_pre_change_checkpoint(self):
+    def test_source_edits_do_not_add_a_tag_or_ancestry_requirement(self):
         with tempfile.TemporaryDirectory() as tmp, patch.object(check, "ROOT", Path(tmp)):
             root = Path(tmp)
 
@@ -23,20 +24,26 @@ class CompatibilityRunner(unittest.TestCase):
             git("config", "user.email", "ci@example.invalid")
             (root / "volume").mkdir()
             file = root / "volume" / "format.go"
-            file.write_text("format 1\n")
-            git("add", "."); git("commit", "-qm", "first")
-            first = git("rev-parse", "HEAD")
-            git("tag", "release-1")
-            file.write_text("format 2\n")
-            git("add", "."); git("commit", "-qm", "second")
-            second = git("rev-parse", "HEAD")
-            check.require_checkpoint(first, ["refs/tags/release-1"])
-            file.write_text("format 3\n")
-            git("add", "."); git("commit", "-qm", "third")
-            with self.assertRaises(RuntimeError):
-                check.require_checkpoint(second, ["refs/tags/release-1"])
-            git("tag", "checkpoint-2", second)
-            check.require_checkpoint(second, ["refs/tags/release-1", "refs/tags/checkpoint-2"])
+            file.write_text("// unchanged disk encoding; old implementation\n")
+            git("add", "."); git("commit", "-qm", "retained format milestone")
+            git("tag", "format-checkpoint/released")
+            # A retained producer need not be an ancestor of today's base.
+            git("checkout", "--orphan", "current")
+            file.write_text("// same disk encoding; improved synchronization\n")
+            git("add", "."); git("commit", "-qm", "current base")
+            base = git("rev-parse", "HEAD")
+            file.write_text("// same disk encoding; further implementation fix\n")
+            git("add", "."); git("commit", "-qm", "candidate")
+            event = root / "event.json"
+            event.write_text('{"pull_request":{"base":{"sha":"' + base + '"}}}')
+            reports = root / "reports"
+            result = {"tag": "refs/tags/format-checkpoint/released", "cases": 23, "verified_restarts": 2}
+            with patch.dict(os.environ, {"GITHUB_EVENT_PATH": str(event)}), patch.object(check, "build") as build, patch.object(check, "check", return_value=result) as fixture, patch("sys.argv", ["check.py", "--reports", str(reports)]), contextlib.redirect_stdout(io.StringIO()):
+                check.main()
+            build.assert_called_once()
+            self.assertEqual(fixture.call_args.args[0], result["tag"])
+            fixture.assert_called_once()
+            self.assertEqual(len(list(root.glob("reports/summary.json"))), 1)
 
     def test_skipped_or_missing_tests_cannot_pass(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -69,7 +76,7 @@ class CompatibilityRunner(unittest.TestCase):
                     raise RuntimeError("old data cannot be read")
                 return {"tag": ref, "cases": 23, "verified_restarts": 2}
 
-            with patch.object(check, "tags", return_value=["first", "bad", "last"]), patch.object(check, "event_base", return_value=None), patch.object(check, "build"), patch.object(check, "check", side_effect=fixture), patch("sys.argv", ["check.py", "--reports", str(reports)]), contextlib.redirect_stderr(io.StringIO()):
+            with patch.object(check, "tags", return_value=["first", "bad", "last"]), patch.object(check, "build"), patch.object(check, "check", side_effect=fixture), patch("sys.argv", ["check.py", "--reports", str(reports)]), contextlib.redirect_stderr(io.StringIO()):
                 with self.assertRaises(RuntimeError):
                     check.main()
             self.assertEqual(calls, ["first", "bad", "last"])

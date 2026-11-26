@@ -37,7 +37,7 @@ func checkRecoveryCancelledSourceFence(t *testing.T, interrupt bool) {
 	admin := source.node.cfg.Auth.BootstrapAdmin
 	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
 	defer cancel()
-	c, err := client.Dial(ctx, source.node.cfg.Node.Advertise, admin.Username, admin.Password, client.BucketID(bucket.ID()))
+	c, err := client.Dial(ctx, source.node.cfg.Node.Advertise, admin.Username, admin.Password, client.BucketID(bucket.ID()), "fs")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -146,7 +146,7 @@ func checkRecoveryCancelledSourceFence(t *testing.T, interrupt bool) {
 	if status, _ := commitTestRecoveredVolumes(t, target, admin, id); status != 200 {
 		t.Fatal("restore cancelled source", status)
 	}
-	c, err = client.Dial(ctx, target.node.cfg.Node.Advertise, admin.Username, admin.Password, client.BucketID(bucket.ID()))
+	c, err = client.Dial(ctx, target.node.cfg.Node.Advertise, admin.Username, admin.Password, client.BucketID(bucket.ID()), "fs")
 	if err != nil {
 		t.Fatal(err)
 	}

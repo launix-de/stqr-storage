@@ -164,6 +164,9 @@ func (s *Server) captureSystemImage(membership client.Membership, sequence, gene
 	}
 	bundle := &systemBundle{Objects: make(map[volume.ObjectID][]byte)}
 	manifest := systemManifest{Schema: 1, Cluster: membership.Cluster, Sequence: sequence, Membership: membership, Generation: generation, Revision: revision}
+	if view := s.currentSystem.Load(); view != nil && view.manifest.Schema >= 2 {
+		manifest.Schema = 2
+	}
 	if view := s.currentSystem.Load(); view != nil {
 		manifest.QuotaProtocol = view.manifest.QuotaProtocol
 		manifest.ReplicationProtocol = view.manifest.ReplicationProtocol
@@ -190,6 +193,9 @@ func (s *Server) captureSystemImage(membership client.Membership, sequence, gene
 	}
 	manifest.Groups = bundle.add(raw)
 	for _, description := range s.bucketSnapshots() {
+		if description.Format != "" {
+			manifest.Schema = 2
+		}
 		// Legacy source-local volume choices cannot become a replicated bucket
 		// restriction on another node. Actual ownership lives in the range map.
 		description.LocalVolumes = nil
@@ -291,7 +297,7 @@ func decodeSystemView(root volume.ObjectID, load func(volume.ObjectID) ([]byte, 
 		return nil, err
 	}
 	m := view.manifest
-	if m.Schema != 1 || m.Sequence == 0 || m.Generation == 0 || m.Revision == 0 || m.Cluster != m.Membership.Cluster || !validateControlMembership(m.Membership) || m.Membership.Epoch == 0 {
+	if (m.Schema != 1 && m.Schema != 2) || m.Sequence == 0 || m.Generation == 0 || m.Revision == 0 || m.Cluster != m.Membership.Cluster || !validateControlMembership(m.Membership) || m.Membership.Epoch == 0 {
 		return nil, volume.ErrCorrupt
 	}
 	if stop := m.Shutdown; stop != nil && (stop.ID == (client.ID{}) || stop.Coordinator == (client.ID{}) || stop.Sequence == 0 || stop.Sequence > m.Sequence || stop.Membership == 0 || stop.Membership > m.Membership.Epoch) {
@@ -501,6 +507,19 @@ func (s *Server) validateSystemProposal(view *systemView, proposal controlPropos
 	m := view.manifest
 	if m.Cluster != proposal.Claim.Base.Membership.Cluster || m.Sequence != proposal.Claim.Base.Sequence+1 || !equalControlMembership(m.Membership, membership) || m.Generation != proposal.Claim.Base.Generation || m.Revision != proposal.Claim.Base.MapRevision {
 		return volume.ErrCorrupt
+	}
+	if current := s.currentSystem.Load(); current != nil && !s.joinPending() {
+		before := current
+		if before.root != volume.ObjectID(proposal.Claim.Base.SystemImage) {
+			var err error
+			before, err = s.loadSystemView(volume.ObjectID(proposal.Claim.Base.SystemImage))
+			if err != nil {
+				return err
+			}
+		}
+		if err := validateNewCloneReferenceEvidence(before.descriptions, view.descriptions); err != nil {
+			return err
+		}
 	}
 	if hasControlNode(membershipIDs(membership), node) {
 		store, err := s.metadataStore()

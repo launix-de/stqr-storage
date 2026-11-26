@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
-// Administrative browser transport for ordinary native objects. No filesystem
-// or disk formats belong here; all operations retain normal server checks.
-import {Writer,Reader,newID,sha256} from './protocol.js';
+// Test-only native object interoperability adapter. This helper is not served
+// by the dashboard; all operations retain real protocol and format checks.
+import {Writer,Reader,newID,sha256} from '../dashboard/protocol.js';
 export const hex=b=>Array.from(b,v=>v.toString(16).padStart(2,'0')).join('');
 export const unhex=s=>{if(!/^[0-9a-f]{64}$/.test(s))throw Error('Ungültige Objekt-ID');return Uint8Array.from(s.match(/../g),v=>parseInt(v,16))};
 export function readInfo(r){const length=r.u64();if(r.bool())r.take(32);r.u32();r.id();r.u8();r.u16();return {length}}

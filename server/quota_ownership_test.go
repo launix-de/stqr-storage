@@ -22,9 +22,9 @@ func TestQuotaOwnershipIgnoresMetadataButTracksOwnership(t *testing.T) {
 		}
 		return image
 	}
-	before := quotaOwnershipStamp{placement: build(patch), view: &systemView{}, general: true}
+	before := quotaOwnershipStamp{node: volume.ID{1}, volume: volume.ID{2}, placement: build(patch), view: &systemView{}, general: true}
 	patch.Membership, patch.Generation, patch.Revision = 2, 2, 2
-	after := quotaOwnershipStamp{placement: build(patch), view: &systemView{}, general: true}
+	after := quotaOwnershipStamp{node: volume.ID{1}, volume: volume.ID{2}, placement: build(patch), view: &systemView{}, general: true}
 	assert := func(next quotaOwnershipStamp, known bool, bucket volume.ID) {
 		t.Helper()
 		changed, gotKnown := next.ChangedOwnershipBuckets(before)
@@ -52,7 +52,8 @@ func TestQuotaOwnershipIgnoresMetadataButTracksOwnership(t *testing.T) {
 	assert(after, false, volume.ID{})
 	after.general = true
 	after.view = &systemView{manifest: systemManifest{VolumeRecoveries: []volumeRecoveryOrigin{{Complete: true, Volumes: []client.ID{{9}}}}}}
-	assert(after, false, volume.ID{})
+	// Recovery metadata does not add changes beyond the remote-owner move.
+	assert(after, true, volume.ID(patch.Bucket))
 	after = before
 	after.standalone = true
 	assert(after, false, volume.ID{})

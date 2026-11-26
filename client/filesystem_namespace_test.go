@@ -28,10 +28,20 @@ func TestFilesystemRmdir(t *testing.T) {
 	}
 	root := FilesystemRootID()
 	dir := testDirectory(t, f, root, "dir")
+	dirRef, err := other.Retain(ctx, dir.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer other.Release(ctx, dir.ID, dirRef)
 	file, err := f.Create(ctx, dir.ID, "file", 0600, 0, 0, false)
 	if err != nil {
 		t.Fatal(err)
 	}
+	fileRef, err := other.Retain(ctx, file.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer other.Release(ctx, file.ID, fileRef)
 	if err = f.Rmdir(ctx, root, "dir"); !errors.Is(err, syscall.ENOTEMPTY) {
 		t.Fatal(err)
 	}
@@ -107,6 +117,11 @@ func TestFilesystemRenameReplacementAndExchange(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	targetRef, err := f.Retain(ctx, dst.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Release(ctx, dst.ID, targetRef)
 	for _, x := range []struct {
 		id   ObjectID
 		data string

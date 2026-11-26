@@ -107,6 +107,9 @@ func (o *OverlayFilesystem) remove(ctx context.Context, parent ObjectID, name st
 			}
 			child.node.removed = true
 			child.metadata = true
+			if _, ok := o.upper.managedReferences(); ok {
+				s.orphaned = append(s.orphaned, id)
+			}
 		}
 		dir, err := o.directory(ctx, s, parent)
 		if err != nil {
@@ -115,6 +118,11 @@ func (o *OverlayFilesystem) remove(ctx context.Context, parent ObjectID, name st
 		dir.entries[name] = ObjectID{}
 		dir.node.mtime = uint64(time.Now().UnixNano())
 		dir.metadata = true
+		if !directory {
+			if err := o.markUpperOrphan(ctx, s, id); err != nil {
+				return err
+			}
+		}
 		return nil
 	})
 }
@@ -258,6 +266,13 @@ func (o *OverlayFilesystem) RenameWithFlags(ctx context.Context, parent ObjectID
 			}
 			dir.node.removed = true
 			dir.metadata = true
+			if _, ok := o.upper.managedReferences(); ok {
+				s.orphaned = append(s.orphaned, other)
+			}
+		} else if exists {
+			if err := o.markUpperOrphan(ctx, s, other); err != nil {
+				return err
+			}
 		}
 		now := uint64(time.Now().UnixNano())
 		left.metadata, right.metadata = true, true

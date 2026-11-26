@@ -304,7 +304,7 @@ func TestOverlayFsckDoesNotTreatLowerReadErrorAsAbsence(t *testing.T) {
 	}
 }
 
-func TestOverlayFsckPreservesUpperWhenOfflineLowerGcLostSource(t *testing.T) {
+func TestOverlayFsckPreservesDependencyAfterOfflineLowerCollection(t *testing.T) {
 	ctx := context.Background()
 	lower, o, guard, upper, conf, _ := overlayFixture(t, nil)
 	if _, err := lower.WriteAt(ctx, conf.ID, bytes.Repeat([]byte("content"), 2000), 0); err != nil {
@@ -321,15 +321,15 @@ func TestOverlayFsckPreservesUpperWhenOfflineLowerGcLostSource(t *testing.T) {
 	if _, err := o.ReadAt(ctx, conf.ID, make([]byte, 1), 0); err != nil {
 		t.Fatal(err)
 	}
-	// A separate lower fsck cannot discover dependencies in an offline upper.
+	// The upper registered a durable dependency, so lower collection must keep
+	// this inode and its data even while the upper is offline.
 
 	if _, err := checkFilesystem(ctx, &fsckMemory{MemoryFilesystemStore: guard.MemoryFilesystemStore}); err != nil {
 		t.Fatal(err)
 	}
-	before := len(upper.objects)
 	result, err := checkOverlayFilesystem(ctx, o, &fsckMemory{MemoryFilesystemStore: upper})
-	if !errors.Is(err, ErrNotFound) || result.Deleted != 0 || result.WhiteoutsRemoved != 0 || len(upper.objects) != before {
-		t.Fatal("missing lower source caused upper deletion", result, err)
+	if err != nil || result.WhiteoutsRemoved != 0 {
+		t.Fatal("referenced lower source did not survive collection", result, err)
 	}
 }
 
