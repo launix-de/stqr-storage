@@ -67,7 +67,8 @@ exclusive filesystem check. The adapter does not sweep unrelated bucket objects
 or expose a separate raw PUT/CAS API.
 
 New inodes inherit the filesystem root's Unix UID/GID unless `--uid` or `--gid`
-overrides them. WinFsp presents the drive to the mounting Windows user; this is
+overrides them. Within a setgid directory, new children inherit that directory's
+GID and new directories also inherit its setgid bit, matching Linux. WinFsp presents the drive to the mounting Windows user; this is
 not a Unix-to-Windows identity directory or a full Windows ACL implementation.
 
 The namespace is case-sensitive. Files created on Linux with names that Windows
