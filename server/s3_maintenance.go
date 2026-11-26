@@ -17,31 +17,25 @@ func (s *Server) maintainS3(ctx context.Context, now time.Time) error {
 	if s.joinPending() {
 		return nil
 	}
-	var accounts accountsImage
-	if e := s.readBlob("accounts", &accounts); e != nil {
-		return e
+	x, err := s.accountIndex()
+	if err != nil {
+		return err
 	}
-	var admin account
-	for _, u := range accounts.Users {
-		if u.Role == "ADMIN" && !u.Disabled {
-			admin = u
-			break
-		}
-	}
-	if admin.ID == "" {
+	if x.admin < 0 {
 		return ErrBucketForbidden
 	}
+	admin := x.image.Users[x.admin]
 	for _, d := range s.bucketSnapshots() {
 		if d.State != BucketActive || d.ID == systemBucket.String() || d.Format != "s3" {
 			continue
 		}
-		if e := s.maintainS3Bucket(ctx, now, d, accounts, admin); e != nil {
+		if e := s.maintainS3Bucket(ctx, now, d, x, admin); e != nil {
 			return e
 		}
 	}
 	return nil
 }
-func (s *Server) maintainS3Bucket(ctx context.Context, now time.Time, d BucketDescription, accounts accountsImage, admin account) error {
+func (s *Server) maintainS3Bucket(ctx context.Context, now time.Time, d BucketDescription, accounts *accountsIndex, admin account) error {
 	id, e := bucketID(d.ID)
 	if e != nil {
 		return e
@@ -61,7 +55,7 @@ func (s *Server) maintainS3Bucket(ctx context.Context, now time.Time, d BucketDe
 	}
 	return s.maintainS3Uploads(ctx, now, b, accounts, api, uploads)
 }
-func (s *Server) maintainS3Uploads(ctx context.Context, now time.Time, b *Bucket, accounts accountsImage, api *client.S3, uploads []client.S3Upload) error {
+func (s *Server) maintainS3Uploads(ctx context.Context, now time.Time, b *Bucket, accounts *accountsIndex, api *client.S3, uploads []client.S3Upload) error {
 	var e error
 	for _, upload := range uploads {
 		if upload.State != client.S3UploadPublishing {
@@ -71,11 +65,8 @@ func (s *Server) maintainS3Uploads(ctx context.Context, now time.Time, b *Bucket
 			continue
 		}
 		var owner account
-		for _, user := range accounts.Users {
-			if user.ID == upload.Owner {
-				owner = user
-				break
-			}
+		if i, exists := accounts.byID[upload.Owner]; exists {
+			owner = accounts.image.Users[i]
 		}
 		revoked := owner.ID == "" || owner.Disabled || (owner.Role != "ADMIN" && owner.Role != "USER")
 		if !revoked {
@@ -135,20 +126,14 @@ func (s *Server) maintainS3Page(ctx context.Context, now time.Time, cursor *s3Ma
 	if s.joinPending() {
 		return nil
 	}
-	var accounts accountsImage
-	if e := s.readBlob("accounts", &accounts); e != nil {
-		return e
+	x, err := s.accountIndex()
+	if err != nil {
+		return err
 	}
-	var admin account
-	for _, u := range accounts.Users {
-		if u.Role == "ADMIN" && !u.Disabled {
-			admin = u
-			break
-		}
-	}
-	if admin.ID == "" {
+	if x.admin < 0 {
 		return ErrBucketForbidden
 	}
+	admin := x.image.Users[x.admin]
 	descriptions := s.bucketSnapshots()
 	active := descriptions[:0]
 	for _, d := range descriptions {
@@ -199,7 +184,7 @@ func (s *Server) maintainS3Page(ctx context.Context, now time.Time, cursor *s3Ma
 	if e != nil {
 		return e
 	}
-	if e = s.maintainS3Uploads(ctx, now, b, accounts, api, uploads); e != nil {
+	if e = s.maintainS3Uploads(ctx, now, b, x, api, uploads); e != nil {
 		return e
 	}
 	cursor.after[d.ID] = next

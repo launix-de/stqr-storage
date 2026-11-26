@@ -3,7 +3,7 @@ GO ?= go
 .PHONY: all package check resources clean
 all:
 	mkdir -p bin
-	GOOS=windows GOARCH=amd64 CGO_ENABLED=0 $(GO) build -buildvcs=false -ldflags="-H=windowsgui" -o bin/stqr-windows.exe ./cmd/stqr-windows
+	GOOS=windows GOARCH=amd64 CGO_ENABLED=0 $(GO) build -buildvcs=false -ldflags="-H=windowsgui" -o bin/stqr-windows-backend.exe ./cmd/stqr-windows
 check:
 	mkdir -p bin
 	$(GO) test -race ./...

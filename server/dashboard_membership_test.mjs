@@ -23,4 +23,9 @@ assert.equal(states.get('x').snapshot.volumes[0].capacity,1000n,'historical snap
 seedMembers(view,states);
 assert.equal(states.get('a').placeholder,undefined,'a real report must not be replaced by a placeholder');
 assert.equal(currentSnapshots({},states).length,4,'legacy transport dashboards retain their report-only behavior');
+
+const includingUnknown=currentSnapshots(view,states,true);
+assert.equal(includingUnknown.length,2,'current members without a first sample must remain in user totals');
+assert.equal(includingUnknown.filter(e=>e.placeholder).length,1);
+
 console.log('Committed members, offline placeholders, exact epochs and retired capacity verified.');

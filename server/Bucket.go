@@ -125,6 +125,7 @@ type Bucket struct {
 	mu          sync.RWMutex
 	usage       bucketUsage
 	description BucketDescription
+	grants      map[string]BucketPermissions
 	server      *Server
 	maintenance *connectionAuthorization // exclusive native object/inventory owner
 }
@@ -138,7 +139,7 @@ func (b *Bucket) ID() volume.ID {
 func (b *Bucket) Describe() BucketDescription {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
-	return cloneBucketDescription(b.description)
+	return cloneBucketDescription(effectiveSystemFormat(b.description))
 }
 
 // Internal snapshots reference immutable slices: publication replaces the
@@ -146,7 +147,7 @@ func (b *Bucket) Describe() BucketDescription {
 func (b *Bucket) storageDescription() BucketDescription {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
-	return b.description
+	return effectiveSystemFormat(b.description)
 }
 func cloneBucketDescription(d BucketDescription) BucketDescription {
 	d.Grants = append([]BucketGrant(nil), d.Grants...)
@@ -166,6 +167,7 @@ func DefaultBucketPolicy() BucketPolicy {
 func NewBucket(id volume.ID, name string) (*Bucket, error) {
 	d := BucketDescription{Schema: 1, ID: id.String(), Name: name, State: BucketActive, Revision: 1, Policy: DefaultBucketPolicy()}
 	if id == systemBucket {
+		d.Schema, d.Format = 2, systemAdminFormat
 		d.Policy.PlacementMode = "everywhere"
 		d.Policy.Redundancy = BucketRedundancy{Mode: "replication", ACK: "all"}
 		d.Policy.PlacementGroup = systemPlacementGroup.String()
@@ -175,7 +177,7 @@ func NewBucket(id volume.ID, name string) (*Bucket, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Bucket{description: d}, nil
+	return bucketSnapshot(d), nil
 }
 func bucketID(s string) (volume.ID, error) {
 	var id volume.ID
@@ -256,6 +258,9 @@ func normalizeBucketDescription(d BucketDescription) (BucketDescription, error) 
 	if !validBucketFormat(d.Format, true) || d.Format != "" && d.Schema < 2 || d.Schema == 2 && d.Format == "" {
 		return d, ErrBucketInvalid
 	}
+	if d.Format == systemAdminFormat && id != systemBucket || id == systemBucket && d.Format != "" && d.Format != systemAdminFormat {
+		return d, ErrBucketInvalid
+	}
 	if _, ok := bucketEnum(string(d.State), "active", "locked", "deleting"); !ok {
 		return d, ErrBucketInvalid
 	}
@@ -331,23 +336,18 @@ type BucketInfo struct {
 }
 
 func (b *Bucket) Info(user volume.ID, admin bool) (BucketInfo, error) {
-	description := b.Describe()
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	description := b.description
 	if description.DeletionComplete {
 		return BucketInfo{}, ErrBucketNotFound
 	}
-	var permissions BucketPermissions
-	if admin {
-		permissions = BucketAllPermissions
-	} else {
-		if b.ID() == systemBucket {
+	permissions := BucketAllPermissions
+	if !admin {
+		if description.ID == systemBucket.String() {
 			return BucketInfo{}, ErrBucketForbidden
 		}
-		for _, g := range description.Grants {
-			if g.UserID == user.String() {
-				permissions = g.Permissions
-				break
-			}
-		}
+		permissions = b.grants[user.String()]
 		if permissions == 0 {
 			return BucketInfo{}, ErrBucketForbidden
 		}
@@ -357,6 +357,23 @@ func (b *Bucket) Info(user volume.ID, admin bool) (BucketInfo, error) {
 	}
 	return BucketInfo{description: description, Permissions: permissions}, nil
 }
+
+// Called while holding b.mu (or before publication). The description and ACL
+// index are replaced together, so readers never combine different revisions.
+func (b *Bucket) setDescription(d BucketDescription) {
+	b.description = cloneBucketDescription(d)
+	b.grants = make(map[string]BucketPermissions, len(d.Grants))
+	for _, grant := range d.Grants {
+		b.grants[grant.UserID] = grant.Permissions
+	}
+}
+
+func bucketSnapshot(d BucketDescription) *Bucket {
+	b := &Bucket{}
+	b.setDescription(d)
+	return b
+}
+
 func (i BucketInfo) Describe() BucketDescription {
 	d := cloneBucketDescription(i.description)
 	d.Grants = nil
@@ -534,7 +551,7 @@ func (c *BucketCatalog) List() ([]*Bucket, error) {
 	}
 	out := make([]*Bucket, 0, len(descriptions))
 	for _, d := range descriptions {
-		out = append(out, &Bucket{description: d})
+		out = append(out, bucketSnapshot(d))
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].description.Name < out[j].description.Name })
 	return out, nil
@@ -647,7 +664,7 @@ func (c *BucketCatalog) Save(d BucketDescription, expectedRevision uint64) (*Buc
 		if c.onSave != nil {
 			c.onSave(cloneBucketDescription(candidate))
 		}
-		return &Bucket{description: cloneBucketDescription(candidate)}, nil
+		return bucketSnapshot(candidate), nil
 	}
 	return nil, ErrBucketConflict
 }
