@@ -64,7 +64,7 @@ On the build/gateway host, install:
 Build from the repository root:
 
 ```sh
-make -C networkboot all pam
+make networkboot
 ```
 
 The builder packages matching kstqr sources with its helpers. It builds the

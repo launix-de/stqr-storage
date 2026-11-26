@@ -8,7 +8,7 @@ devices; sync and unmount the guest filesystem before removal.
 ## Build and run
 
 ```sh
-make -C qemu-plugin-nbd
+make nbd
 # Private credentials file, chmod 600:
 # {"uri":"http://localhost:7419","username":"vm-user","password":"..."}
 
@@ -189,7 +189,7 @@ legacy ioctl path for compatibility.
 
 Run `make -C qemu-plugin-nbd check` for range/sparse/format/NBD tests. The real
 STQR/QEMU integration is `STQR_TEST_NETWORKBOOT=1 go test ./server -run
-'^TestNetworkbootNBDWithQEMU$' -count=1` after `make -C networkboot`.
+'^TestNetworkbootNBDWithQEMU$' -count=1` after `make networkboot`.
 
 Disk management belongs to `stqr-nbd` and its private local control socket.
 The storage dashboard displays only the bucket format string; it does not list

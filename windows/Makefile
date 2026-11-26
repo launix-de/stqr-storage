@@ -1,13 +1,14 @@
 # SPDX-License-Identifier: GPL-3.0-only
+GO ?= go
 .PHONY: all check resources clean
 all:
 	mkdir -p bin
-	GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -buildvcs=false -ldflags="-H=windowsgui" -o bin/stqr-windows.exe ./cmd/stqr-windows
+	GOOS=windows GOARCH=amd64 CGO_ENABLED=0 $(GO) build -buildvcs=false -ldflags="-H=windowsgui" -o bin/stqr-windows.exe ./cmd/stqr-windows
 check:
 	mkdir -p bin
-	go test -race ./...
-	GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go test -c -o bin/windows-callbacks.test.exe .
-	GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go test -c -o bin/windows-setup.test.exe ./cmd/stqr-windows
+	$(GO) test -race ./...
+	GOOS=windows GOARCH=amd64 CGO_ENABLED=0 $(GO) test -c -o bin/windows-callbacks.test.exe .
+	GOOS=windows GOARCH=amd64 CGO_ENABLED=0 $(GO) test -c -o bin/windows-setup.test.exe ./cmd/stqr-windows
 clean:
 	rm -rf bin
 
