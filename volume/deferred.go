@@ -32,9 +32,17 @@ func (v *Volume) beginDeferred() error {
 	}
 	t := v.transaction()
 	defer t.close()
-	_, _, off, err := t.findSpace(deferredJournalBytes, PageSize, false)
+	start, length, off, err := t.findSpace(deferredJournalBytes, PageSize, false)
 	if err != nil {
 		return err
+	}
+	// Keep the temporary WAL at the end of its free extent. Reserving its
+	// prefix puts new payloads behind a large hole which survives checkpointing
+	// and can reject a later contiguous PUT despite sufficient free bytes.
+	// Recheck allocation exclusions rather than assuming the extent is unpinned.
+	if tail, ok := t.candidate(start, length, deferredJournalBytes, PageSize,
+		(start+length-deferredJournalBytes)/PageSize*PageSize); ok {
+		off = tail
 	}
 	v.deferred = &deferredGroup{journal: allocation{off, deferredJournalBytes, false}, pages: map[uint64][]byte{}, baseFreeRoot: v.sb.FreeRoot, baseNodes: newNodeCache(128, 1<<20)}
 	return nil

@@ -136,12 +136,33 @@ func TestCrashDuringCompaction(t *testing.T) {
 	if e != nil {
 		t.Fatal(e)
 	}
+	gap := testKey(99)
+	if _, e = testPut(v, gap, bytes.Repeat([]byte("gap"), 8192), Options{}); e != nil {
+		t.Fatal(e)
+	}
 	for i := uint64(0); i < 6; i++ {
 		if _, e = testPut(v, testKey(i), bytes.Repeat([]byte{byte(i)}, 9000), Options{RequestID: testID(i + 1)}); e != nil {
 			t.Fatal(e)
 		}
 	}
-	for step := 1; step < 100; step++ {
+	if e = testDelete(v, gap, Options{}); e != nil {
+		t.Fatal(e)
+	}
+	// Measure a successful run: layout and commit batching can legitimately
+	// change its I/O count. Cover every cut instead of assuming fewer than 100.
+	probe := base.crash()
+	baseline, e := Open(probe, OpenOptions{})
+	if e != nil {
+		t.Fatal(e)
+	}
+	if e = baseline.Compact(); e != nil {
+		t.Fatal(e)
+	}
+	steps := probe.steps
+	if steps == 0 {
+		t.Fatal("fixture did not exercise a physical compaction")
+	}
+	for step := 1; step <= steps+1; step++ {
 		d := base.crash()
 		w, e := Open(d, OpenOptions{})
 		if e != nil {
@@ -162,11 +183,13 @@ func TestCrashDuringCompaction(t *testing.T) {
 				t.Fatalf("step %d lost retry %d: %v", step, i, e)
 			}
 		}
-		if err == nil {
-			return
+		if step <= steps && !errors.Is(err, ErrRecovery) {
+			t.Fatalf("step %d/%d: fault was not exercised: %v", step, steps, err)
+		}
+		if step == steps+1 && err != nil {
+			t.Fatalf("successful control: %v", err)
 		}
 	}
-	t.Fatal("no successful compaction reached")
 }
 func TestCommittedCorruptionIsNotSilentlyTruncated(t *testing.T) {
 	d := newCrash(2 << 20)
