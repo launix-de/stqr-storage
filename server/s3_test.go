@@ -261,6 +261,13 @@ func TestS3AuthenticationGrantsAndKeyPersistence(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer reopened.Close()
+	// Open deliberately exposes reads before derived accounting/recovery is
+	// write-ready. This test deletes a persisted key after reopening.
+	readyCtx, readyCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer readyCancel()
+	if err = reopened.WaitStorageReady(readyCtx); err != nil {
+		t.Fatal("reopened storage did not become write-ready", err)
+	}
 	found, secret, err := reopened.s3KeyUser(testS3Access)
 	if err != nil || found.ID != user.ID || secret != testS3Secret {
 		t.Fatal("access key did not survive restart", err)
