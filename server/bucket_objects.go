@@ -704,9 +704,14 @@ func (b *Bucket) mutateAttempt(ctx context.Context, p principal, id volume.Objec
 	if opcode == 0x0105 || opcode == 0x0106 {
 		payloadLength = 0
 	}
-	if generation, pending := v.PendingCheckpoint(opt.Accepted || payloadLength <= 1<<20 && opcode != cowRestoreOpcode, payloadLength); pending {
+	if generation, pending := v.PendingCheckpoint(opt.Accepted || payloadLength <= 1<<20 && opcode != cowRestoreOpcode, payloadLength); pending && (generation == 0 || !v.IsDurableThrough(generation)) {
 		return volume.Result{}, &acceptedCheckpoint{v, generation}
 	}
+	// A rejected buffered mutation may leave an empty group at an already
+	// durable generation. Waiting through that generation cannot drain it.
+	// Continue to the normal handle path, which rechecks admission and drains
+	// the group before building a durable mutation. Later writes remain subject
+	// to the same handle/operation checks, not this preflight hint.
 	if !connectionFenced(ctx) {
 		if err := s.switchAcceptedVolume(b.ID(), v, opt.Accepted || payloadLength <= 1<<20 && opcode != cowRestoreOpcode); err != nil {
 			return volume.Result{}, err
