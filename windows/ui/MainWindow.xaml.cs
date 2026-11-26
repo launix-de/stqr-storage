@@ -34,7 +34,9 @@ public sealed partial class MainWindow : Window
         Root.SizeChanged += (_, e) => Responsive(e.NewSize.Width);
         Root.Loaded += Loaded;
         var area = Microsoft.UI.Windowing.DisplayArea.GetFromWindowId(AppWindow.Id, Microsoft.UI.Windowing.DisplayAreaFallback.Primary).WorkArea;
-        AppWindow.Resize(new SizeInt32(Math.Min(1060, area.Width - 32), Math.Min(940, area.Height - 32)));
+        var size = new SizeInt32(Math.Min(1060, area.Width - 32), Math.Min(940, area.Height - 32));
+        AppWindow.Resize(size);
+        AppWindow.Move(new PointInt32(area.X + (area.Width - size.Width) / 2, area.Y + (area.Height - size.Height) / 2));
     }
 
     private async void Loaded(object sender, RoutedEventArgs e)
