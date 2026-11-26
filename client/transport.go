@@ -49,6 +49,16 @@ type outboundObject struct {
 }
 type uploadFunc func(context.Context, *objectTransport, *pendingObject, ID) error
 type objectTransport struct {
+	// Initial messages and a connection fence share one admission order. Chunk
+	// frames retain their existing parent IDs and may follow a submitted fence.
+	submitMu               sync.Mutex
+	connectionSyncMu       sync.Mutex
+	connectionSequence     uint64
+	connectionReadSequence uint64
+	connectionReadSynced   uint64
+	connectionBoot         ID
+	connectionWrites       map[ID]*connectionSubmission
+
 	capabilities uint64
 	endpoint     string
 
@@ -82,6 +92,13 @@ func (t *objectTransport) fail(e error) {
 		t.mu.Lock()
 		t.cause = e
 		close(t.done)
+		for id, work := range t.connectionWrites {
+			if !work.noAck {
+				delete(t.connectionWrites, id)
+			} else if work.err == nil {
+				work.err = &UnknownOutcomeError{RequestID: id, Cause: e}
+			}
+		}
 		for id, p := range t.pending {
 			t.dropPendingLocked(id)
 			p.reply <- wireReply{err: e}
@@ -138,7 +155,7 @@ func (t *objectTransport) roundTrip(ctx context.Context, m Message, mutation boo
 	if wait {
 		limit = maxFilesystemPendingRequests
 	}
-	for len(t.pending) >= limit {
+	for len(t.pending) >= limit && t.capabilities&CapabilityConnectionSync == 0 {
 		if !wait {
 			t.mu.Unlock()
 			return wireReply{}, ErrWouldBlock
@@ -193,7 +210,7 @@ func (t *objectTransport) roundTrip(ctx context.Context, m Message, mutation boo
 		p.streamMu.Unlock()
 	}
 	defer cleanup()
-	if e := t.enqueue(ctx, outboundObject{message: m}, false); e != nil {
+	if e := t.enqueueOperation(ctx, m, mutation); e != nil {
 		return wireReply{}, e
 	}
 	if upload != nil {
@@ -328,6 +345,10 @@ func (t *objectTransport) readLoop() {
 		}
 		t.mu.Unlock()
 		if p == nil {
+			if err := t.receiveConnectionError(m); err != nil {
+				t.fail(err)
+				return
+			}
 			continue
 		}
 		if p.opcode != m.Opcode {
@@ -340,6 +361,7 @@ func (t *objectTransport) readLoop() {
 		if e == nil && r.status >= 300 {
 			e = &StatusError{Status: r.status, Message: responseDetail(r.headers), RequestID: m.ID, Headers: r.headers}
 		}
+		t.finishConnectionRequest(m.ID, r, e)
 		p.streamMu.Lock()
 		if p.canceled {
 			p.streamMu.Unlock()

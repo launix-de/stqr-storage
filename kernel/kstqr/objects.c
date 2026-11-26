@@ -38,6 +38,59 @@ static bool nullid(stqr_object_id id)
 {
 	return zero(id.bytes, 32);
 }
+/* A single owner connection can carry many requests. Only encoding/framing
+ * holds rpc->lock; reply callbacks complete independent callers and folios. */
+static void ks_rpc_receive(struct work_struct *work)
+{
+	struct ks_rpc *rpc = container_of(work, struct ks_rpc, receive);
+	int result;
+	mutex_lock(&rpc->lock);
+	do {
+		result = rpc->client ? stqr_poll(rpc->client, 0) : 0;
+	} while (result > 0);
+	mutex_unlock(&rpc->lock);
+}
+static void ks_rpc_readable(void *arg)
+{
+	struct ks_rpc *rpc = arg;
+	ks_queue_fence_work(&rpc->receive);
+}
+void ks_rpc_start(struct ks_rpc *rpc)
+{
+	INIT_WORK(&rpc->receive, ks_rpc_receive);
+	rpc->receive_started = true;
+	stqr_set_readable_handler(rpc->client, ks_rpc_readable, rpc);
+	ks_rpc_readable(rpc);
+}
+void ks_rpc_stop(struct ks_rpc *rpc)
+{
+	if (!rpc->receive_started)
+		return;
+	mutex_lock(&rpc->lock);
+	stqr_set_readable_handler(rpc->client, NULL, NULL);
+	mutex_unlock(&rpc->lock);
+	cancel_work_sync(&rpc->receive);
+	rpc->receive_started = false;
+}
+struct ks_async_result {
+	struct completion done;
+	int error, status;
+	void *data;
+	size_t length;
+	stqr_info info;
+};
+static void ks_async_completed(void *arg, int error, int status, void *data,
+			       size_t length, const stqr_info *info)
+{
+	struct ks_async_result *result = arg;
+	result->error = error;
+	result->status = status;
+	result->data = data;
+	result->length = length;
+	if (info)
+		result->info = *info;
+	complete(&result->done);
+}
 struct ks_rpc *ks_rpc_lock(struct ks_fs *f, stqr_object_id id)
 {
 	unsigned slot = (id.bytes[0] ^ id.bytes[7] ^ id.bytes[19] ^ id.bytes[31]) % KS_RPC_SLOTS;
@@ -100,7 +153,13 @@ int ks_object_reference(struct ks_fs *f, stqr_object_id id, stqr_id token, unsig
 	}
 	bool auth_retry = false;
 	for (;;) {
-		err = operation(rpc->client, id, token);
+		if(rpc->receive_started) {
+            struct ks_async_result result={0};init_completion(&result.done);
+            err=stqr_object_reference_async(rpc->client,id,token,action,ks_async_completed,&result);
+            mutex_unlock(&rpc->lock);
+            if(!err){wait_for_completion(&result.done);err=result.error;}
+            sq_free(result.data);mutex_lock(&rpc->lock);
+        }else err = operation(rpc->client, id, token);
 		if (err == -EACCES && !auth_retry)
 			auth_retry = true;
 		else if (!ks_transport_retryable(rpc->client, err))
@@ -132,11 +191,37 @@ static int get_object_locked(struct ks_fs *f, struct ks_rpc *rpc, stqr_object_id
 }
 static int get_object(struct ks_fs *f, stqr_object_id id, void **p, size_t *n, stqr_info *info)
 {
-	struct ks_rpc *rpc = ks_rpc_lock(f, id);
+	struct ks_rpc *rpc;
+	int err;
 	atomic64_inc(&f->rpc_gets);
-	int err = get_object_locked(f, rpc, id, p, n, info);
-	mutex_unlock(&rpc->lock);
-	return err;
+	for (;;) {
+		struct ks_async_result result = {0};
+		init_completion(&result.done);
+		rpc = ks_rpc_lock(f, id);
+		if (!rpc->receive_started) {
+			err = get_object_locked(f, rpc, id, p, n, info);
+			mutex_unlock(&rpc->lock);
+			return err;
+		}
+		err = stqr_get_async(rpc->client, id, ks_async_completed, &result);
+		mutex_unlock(&rpc->lock);
+		if (!err) {
+			wait_for_completion(&result.done);
+			err = result.error;
+			if (!err) {
+				*p = result.data; *n = result.length; *info = result.info;
+				return 0;
+			}
+			sq_free(result.data);
+		}
+		if (!(err==-EAGAIN ? (result.status==0||result.status==503) :
+              ks_transport_retryable(NULL,err)))return err;
+		mutex_lock(&rpc->lock);
+		err = ks_reconnect_wait(f, rpc->client);
+		mutex_unlock(&rpc->lock);
+		if (err)
+			return err;
+	}
 }
 static int cas_object(struct ks_fs *f, stqr_object_id id, const void *p, size_t n,
 		      const void *expected, size_t expected_size, bool absent)
@@ -156,9 +241,22 @@ static int cas_object(struct ks_fs *f, stqr_object_id id, const void *p, size_t 
 	ks_cache_forget(f, id);
 	atomic64_inc(&f->rpc_cas);
 	bool auth_retry = false, replayed = false;
+    int status=0;
 	for (;;) {
-		err = stqr_cas(rpc->client, id, 1, 0, expected, expected_size, p, n, &o, &info);
-		if (replayed && f->references && err == -EAGAIN && stqr_status(rpc->client) == 412) {
+		if (rpc->receive_started) {
+            struct ks_async_result result = {0};
+            init_completion(&result.done);
+            err = stqr_cas_async(rpc->client, id, 1, 0, expected, expected_size,
+                                 p, n, &o, ks_async_completed, &result);
+            mutex_unlock(&rpc->lock);
+            if (!err) { wait_for_completion(&result.done); err = result.error; info = result.info; status=result.status; }
+            sq_free(result.data);
+            mutex_lock(&rpc->lock);
+        } else {
+            err = stqr_cas(rpc->client, id, 1, 0, expected, expected_size, p, n, &o, &info);
+            status=stqr_status(rpc->client);
+        }
+		if (replayed && f->references && err == -EAGAIN && status == 412) {
 			void *observed = NULL;
 			size_t size = 0;
 			int check = get_object_locked(f, rpc, id, &observed, &size, &info);
@@ -171,7 +269,7 @@ static int cas_object(struct ks_fs *f, stqr_object_id id, const void *p, size_t 
 		}
 		if (err == -EACCES && !auth_retry)
 			auth_retry = true;
-		else if (!ks_transport_retryable(rpc->client, err))
+		else if (!(err==-EAGAIN ? (status==0||status==503) : ks_transport_retryable(NULL,err)))
 			break;
 		// Retain the same request identity throughout a temporary outage.
 		err = ks_reconnect_wait(f, rpc->client);
@@ -182,6 +280,16 @@ static int cas_object(struct ks_fs *f, stqr_object_id id, const void *p, size_t 
 	ks_cache_forget(f, id);
 	mutex_unlock(&rpc->lock);
 	return err;
+}
+static int ks_delete_locked(struct ks_rpc *rpc,stqr_object_id id,const stqr_options *opt)
+{
+ struct ks_async_result result={0};int err;
+ if(!rpc->receive_started)return stqr_delete(rpc->client,id,opt);
+ init_completion(&result.done);
+ err=stqr_delete_async(rpc->client,id,opt,ks_async_completed,&result);
+ mutex_unlock(&rpc->lock);
+ if(!err){wait_for_completion(&result.done);err=result.error;}
+ sq_free(result.data);mutex_lock(&rpc->lock);return err;
 }
 static int immutable(struct ks_fs *f, const void *p, size_t n, stqr_object_id *id)
 {
@@ -878,8 +986,18 @@ static int index_read(struct ks_fs *f, const struct ks_node *view, stqr_object_i
 			rpc = ks_rpc_lock(store, p->id);
 			atomic64_inc(&f->rpc_ranges);
 			for (;;) {
-				err = stqr_get_range(rpc->client, p->id, p->offset + offset, n,
-						     &data, &actual, &info);
+				if (rpc->receive_started) {
+                    struct ks_async_result result = {0};
+                    init_completion(&result.done);
+                    err = stqr_get_range_async(rpc->client, p->id, p->offset + offset,
+                                              n, ks_async_completed, &result);
+                    mutex_unlock(&rpc->lock);
+                    if (!err) { wait_for_completion(&result.done); err = result.error; }
+                    data = result.data; actual = result.length; info = result.info;
+                    mutex_lock(&rpc->lock);
+                } else
+                    err = stqr_get_range(rpc->client, p->id, p->offset + offset, n,
+                                         &data, &actual, &info);
 				if (!ks_transport_retryable(rpc->client, err))
 					break;
 				sq_free(data);
@@ -2180,6 +2298,20 @@ int ks_checkpoint(struct ks_fs *f)
  unsigned count = 0;
  int err;
  mutex_lock(&f->sync_lock);
+ /* Modern fences travel over the original owner sockets. Completion receives
+  * all previously admitted work; no cloned connection or lock-held wait. */
+ if (f->rpc[0].receive_started &&
+     (stqr_capabilities(f->rpc[0].client) & STQR_CAP_CONNECTION_SYNC)) {
+  struct ks_async_result result = {0};
+  init_completion(&result.done);
+  mutex_lock(&f->rpc[0].lock);
+  err = stqr_connection_sync_async(f->rpc[0].client, ks_async_completed, &result);
+  mutex_unlock(&f->rpc[0].lock);
+  if (!err) { wait_for_completion(&result.done); err = result.error; }
+  sq_free(result.data);
+  mutex_unlock(&f->sync_lock);
+  return err;
+ }
  err = stqr_fence_reset(&f->fence);
  // Capture local framing state only; merge marks from all slots and the
  // subscription reader so each owner receives one barrier, not five.

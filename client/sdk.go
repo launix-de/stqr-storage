@@ -29,6 +29,8 @@ type Client struct {
 
 	durability map[ID]pendingDurability
 
+	connectionTransports map[*objectTransport]struct{}
+
 	subMu                        sync.Mutex
 	subscriptions                map[ID]weak.Pointer[Subscription]
 	subscriptionSources          map[ID]*objectTransport
@@ -148,7 +150,7 @@ func (c *Client) connectEndpoint(ctx context.Context, endpoint string) (*objectT
 	hello := Encoder{}
 	hello.U16(2)
 	hello.U16(2)
-	hello.U64(CapabilityDurability | CapabilityObjectReferences)
+	hello.U64(CapabilityDurability | CapabilityObjectReferences | CapabilityConnectionSync)
 	hello.Text("stqr-go")
 	r, e := t.roundTrip(ctx, Message{Kind: Request, Opcode: Hello, ID: NewRequestID(), Body: hello.B}, false, nil)
 	if e == nil {
@@ -227,6 +229,9 @@ func (c *Client) Close() error {
 		for _, transport := range c.routed {
 			routed = append(routed, transport)
 		}
+		// Closing discards volatile durability tracking; it is never an implicit Sync.
+		c.connectionTransports = nil
+		c.durability = nil
 		c.mu.Unlock()
 		if t != nil {
 			t.fail(ErrClosed)
@@ -387,8 +392,10 @@ func (c *Client) do(ctx context.Context, opcode uint16, body []byte, id RequestI
 			}
 			outgoing := m
 			if mutation && upload == nil && ctx.Value(acceptedContextKey{}) == true && t.capabilities&CapabilityDurability != 0 {
-				if err := c.syncExcept(ctx, t); err != nil {
-					return wireReply{}, err
+				if t.capabilities&CapabilityConnectionSync == 0 {
+					if err := c.syncExcept(ctx, t); err != nil {
+						return wireReply{}, err
+					}
 				}
 				outgoing = acceptedMessage(m)
 			}

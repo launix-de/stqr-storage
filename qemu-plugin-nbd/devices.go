@@ -109,7 +109,15 @@ func decodeMetadata(raw []byte) (Metadata, error) {
 	return m, m.validate()
 }
 
+type pendingBlockRange struct{ begin, end uint64 }
+type asyncBlockStore interface {
+	PutAsync(context.Context, client.ObjectID, []byte, client.PutOptions) error
+	PutRangeAsync(context.Context, client.ObjectID, uint64, []byte, client.PutOptions) error
+}
 type Catalog struct {
+	writeMu sync.Mutex // orders only local admission and true overlapping dependencies
+	pending map[client.ID][]pendingBlockRange
+
 	store   Store
 	mu      sync.Mutex
 	writers map[client.ID]bool
@@ -262,6 +270,14 @@ func (c *Catalog) ReadAt(ctx context.Context, m Metadata, dst []byte, off uint64
 	if off > m.Size || uint64(len(dst)) > m.Size-off {
 		return client.ErrRange
 	}
+	c.writeMu.Lock()
+	if c.overlapsPending(m.ID, off, off+uint64(len(dst))) {
+		if err := c.syncPending(ctx); err != nil {
+			c.writeMu.Unlock()
+			return err
+		}
+	}
+	c.writeMu.Unlock()
 	clear(dst)
 	for len(dst) > 0 {
 		index, at := off/StripeSize, off%StripeSize
@@ -310,13 +326,29 @@ func (c *Catalog) WriteAt(ctx context.Context, m Metadata, data []byte, off uint
 	if off > m.Size || uint64(len(data)) > m.Size-off {
 		return client.ErrRange
 	}
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
+	async, pipelined := c.store.(asyncBlockStore)
+	// Independent stripes/ranges may execute in any order. An overlapping
+	// subsequent write must observe completion of the preceding one.
+	if pipelined && c.overlapsPending(m.ID, off, off+uint64(len(data))) {
+		if err := c.syncPending(ctx); err != nil {
+			return err
+		}
+	}
 	for len(data) > 0 {
 		at := off % StripeSize
 		n := min(uint64(len(data)), StripeSize-at)
 		id := StripeID(m.ID, off/StripeSize)
 		opt := client.PutOptions{Accepted: true, RequestID: client.NewRequestID()}
 		var e error
-		if at == 0 && n == StripeSize {
+		if pipelined {
+			if at == 0 && n == StripeSize {
+				e = async.PutAsync(ctx, id, data[:n], opt)
+			} else {
+				e = async.PutRangeAsync(ctx, id, at, data[:n], opt)
+			}
+		} else if at == 0 && n == StripeSize {
 			_, e = c.store.Put(ctx, id, data[:n], opt)
 		} else {
 			_, e = c.store.PutRange(ctx, id, at, data[:n], opt)
@@ -324,12 +356,62 @@ func (c *Catalog) WriteAt(ctx context.Context, m Metadata, data []byte, off uint
 		if e != nil {
 			return e
 		}
+		if pipelined {
+			c.notePending(m.ID, off, off+n)
+		}
 		data = data[n:]
 		off += n
 	}
 	return nil
 }
-func (c *Catalog) Sync(ctx context.Context) error { return c.store.Sync(ctx) }
+func (c *Catalog) Sync(ctx context.Context) error {
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
+	return c.syncPending(ctx)
+}
+func (c *Catalog) syncPending(ctx context.Context) error {
+	if err := c.store.Sync(ctx); err != nil {
+		return err
+	}
+	c.pending = nil
+	return nil
+}
+func (c *Catalog) overlapsPending(device client.ID, begin, end uint64) bool {
+	for _, interval := range c.pending[device] {
+		if begin < interval.end && interval.begin < end {
+			return true
+		}
+	}
+	return false
+}
+func (c *Catalog) notePending(device client.ID, begin, end uint64) {
+	if c.pending == nil {
+		c.pending = map[client.ID][]pendingBlockRange{}
+	}
+	old := c.pending[device]
+	merged := make([]pendingBlockRange, 0, len(old)+1)
+	added := false
+	for _, interval := range old {
+		if interval.end < begin {
+			merged = append(merged, interval)
+			continue
+		}
+		if end < interval.begin {
+			if !added {
+				merged = append(merged, pendingBlockRange{begin, end})
+				added = true
+			}
+			merged = append(merged, interval)
+			continue
+		}
+		begin = min(begin, interval.begin)
+		end = max(end, interval.end)
+	}
+	if !added {
+		merged = append(merged, pendingBlockRange{begin, end})
+	}
+	c.pending[device] = merged
+}
 
 // Trim deletes complete 1-MiB stripes and zeroes only the stored portion of
 // boundary stripes. Missing objects/tails already read as zero and stay sparse.
@@ -337,6 +419,13 @@ func (c *Catalog) Sync(ctx context.Context) error { return c.store.Sync(ctx) }
 func (c *Catalog) Trim(ctx context.Context, m Metadata, off, length uint64) error {
 	if off > m.Size || length > m.Size-off {
 		return client.ErrRange
+	}
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
+	if c.overlapsPending(m.ID, off, off+length) {
+		if err := c.syncPending(ctx); err != nil {
+			return err
+		}
 	}
 	var zeros []byte
 	for length > 0 {
@@ -381,6 +470,11 @@ func (c *Catalog) Trim(ctx context.Context, m Metadata, off, length uint64) erro
 // opaque roots. Acquire maintenance and read the application manifest first.
 // Memory is bounded by device metadata and one native scan page, not disk size.
 func (c *Catalog) Collect(ctx context.Context, opaque []client.ObjectID) (uint64, error) {
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
+	if err := c.syncPending(ctx); err != nil {
+		return 0, err
+	}
 	// Local exports, including read-only ones, can still address a generation
 	// whose descriptor was removed. Keep their stripes until the last export
 	// releases it and exclude new claims for the complete inventory/sweep.

@@ -52,29 +52,45 @@ incarnations or silently infer that an unconfirmed write survived. A mount with
 such unconfirmed writes can therefore need remount/recovery even if a background
 checkpoint happened to persist them. Confirmed marks are cleared on the clients.
 
+## Concurrent connection fences (capability 524288)
+
+`CONNECTION_SYNC` (`0x0122`, Request, empty body) returns `boot:ID,receive_cut:u64`.
+The receiver captures prior admitted work before scheduling its goroutines.
+Each storage message runs independently; replies may arrive out of order and are
+matched by request ID. Later messages cannot indefinitely extend a fence.
+There is one WebSocket writer and bounded framing buffers, not a storage worker
+pool. Per-upload chunk dependencies still protect offset/hash validation.
+
+Negotiated `OBJECT_ACCEPTED` FireAndForget writes have no success reply. Errors
+retain their opcode/ID and ordinary error/redirect envelope, and precede any
+covering fence reply. A fence checkpoints successful preceding work even when
+another preceding write failed, then reports that failure. A failed checkpoint
+never produces a success ACK. Disconnect before an ACK leaves an unknown outcome.
+
+Each connection keeps a RAM-only map from actual local volumes to their touched
+generations, including observed read/subscription dependencies. Volumes are
+checkpointed concurrently; an already durable generation requires no further
+flush. Bucket/volume switches do not flush on this negotiated path. Closing a
+client/socket does not request Sync: its tracking is discarded. Applications may
+omit Sync entirely. Independent background/pressure checkpoints or clean volume
+shutdown can still persist data without promising a client acknowledgement.
+
+The client connects directly to placement owners and fences used owner sockets
+concurrently; the server does not broadcast/proxy a connection fence. Existing
+bucket-bound authentication remains unchanged. For old peers the SDK retains
+legacy marks and conservative ordering.
+
 ## Causal references and multiple owners
 
-A filesystem inode can reference separately addressed data and index objects.
-Persisting only that inode could otherwise leave dangling references after a
-crash. The Go SDK tracks receipts from reads and subscription pushes as well as
-its own writes. Before publishing an accepted mutation on another owner, it
-checkpoints the observed prefix on preceding owners. `Client.Sync` confirms all
-remaining observed owners. An unavailable required issuer causes an error;
-the implementation does not manufacture a durability proof through failover.
-
-Within one node, each bucket uses at most one volatile destination volume at a
-time. Switching destination checkpoints the preceding volume first, including
-before a durable mutation on the new destination. Shared physical volumes can
-checkpoint several buckets together. No multi-object transaction or atomic
-multi-node commit is promised. Namespace intents retain their recovery semantics.
-Overlay copy-up checkpoints a lower bucket before publishing source references
-in its upper. The C/kernel client still has no cluster redirect routing; its
-parallel connections all address the same configured node/bucket.
-
-Upgrade all filesystem clients which publish such references before enabling
-accepted filesystem writes alongside them. A custom native application which
-builds cross-bucket references must explicitly checkpoint the referenced bucket
-before durably publishing its reference.
+Object IDs remain stable; the server does not interpret client formats. A format
+must join independent payload/index writes, then explicitly fence prerequisites
+before durably publishing dependent references or retiring recovery intent.
+There is no multi-object transaction. Overlapping block-device stripes retain
+their necessary causal order; independent stripes pipeline on one owner socket.
+Go exposes enqueue-only PutAsync/PutRangeAsync alongside result-returning methods.
+The C client exposes completion callbacks and a request-ID demultiplexer; kernel
+folio/writeback/async kiocb operations use event-driven completion, without holding
+the WebSocket framing lock over network/storage waits.
 
 ## Storage implementation and bounds
 

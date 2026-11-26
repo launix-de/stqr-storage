@@ -10,7 +10,7 @@
 int ks_transport_start(void);
 void ks_transport_stop(void);
 void ks_queue_fence_work(struct work_struct *);
-#define KS_RPC_SLOTS 4
+#define KS_RPC_SLOTS 1
 struct ks_fs;
 bool ks_transport_retryable(stqr_client *, int);
 int ks_reconnect_wait(struct ks_fs *, stqr_client *);
@@ -19,8 +19,12 @@ struct ks_overlay_state;
 struct ks_rpc {
 	struct mutex lock;
 	stqr_client *client;
-
+	struct work_struct receive;
+	bool receive_started;
 };
+void ks_rpc_start(struct ks_rpc *);
+void ks_rpc_stop(struct ks_rpc *);
+
 #define KS_DIR_LIMIT (16U << 20)
 struct ks_edit;
 /* Runtime-only cache identities. These fields are never encoded in STFS/STOR. */

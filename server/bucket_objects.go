@@ -392,6 +392,9 @@ func (b *Bucket) copyToCheckedUnmetered(ctx context.Context, p principal, id vol
 	if err != nil {
 		return info, 0, err
 	}
+	if g, e := h.Generation(); e == nil {
+		touchConnectionVolume(ctx, v, g)
+	}
 	if condition != nil {
 		if err := h.Check(key, *condition); err != nil {
 			return info, 0, err
@@ -680,8 +683,10 @@ func (b *Bucket) mutateAttempt(ctx context.Context, p principal, id volume.Objec
 	if generation, pending := v.PendingCheckpoint(opt.Accepted || payloadLength <= 1<<20 && opcode != cowRestoreOpcode, payloadLength); pending {
 		return volume.Result{}, &acceptedCheckpoint{v, generation}
 	}
-	if err := s.switchAcceptedVolume(b.ID(), v, opt.Accepted || payloadLength <= 1<<20 && opcode != cowRestoreOpcode); err != nil {
-		return volume.Result{}, err
+	if !connectionFenced(ctx) {
+		if err := s.switchAcceptedVolume(b.ID(), v, opt.Accepted || payloadLength <= 1<<20 && opcode != cowRestoreOpcode); err != nil {
+			return volume.Result{}, err
+		}
 	}
 	if !exists && opcode != 0x0102 && opcode != 0x0106 && b.lostRange(id) {
 		return volume.Result{}, fail(410, "partial mutation cannot recreate a lost object")
@@ -925,7 +930,7 @@ func (b *Bucket) mutateAttempt(ctx context.Context, p principal, id volume.Objec
 		result, e = h.PublishReplica(opt.RequestID, record.Binding)
 		if e == nil {
 			if !p.cowInternal && current.State != volume.ReplicaPublished && s.objectSubscriptions.watched(key) {
-				s.objectSubscriptions.publish(key, result.Info, h)
+				s.objectSubscriptions.publish(key, result.Info, h, v)
 			}
 			h.Close()
 			b.usage.mu.Lock()
@@ -1015,12 +1020,13 @@ func (b *Bucket) mutateAttempt(ctx context.Context, p principal, id volume.Objec
 			return result, gerr
 		}
 		s.recordAccepted(b.ID(), v, generation)
+		touchConnectionVolume(ctx, v, generation)
 		publishedGeneration = generation
 	}
 	if err == nil && !p.cowInternal && !repeated && s.objectSubscriptions.watched(key) {
 		published, readErr := h.RecordInfo(key)
 		if readErr == nil {
-			s.objectSubscriptions.publish(key, published, h)
+			s.objectSubscriptions.publish(key, published, h, v)
 		} else {
 			s.objectSubscriptions.resyncWhere(func(k volume.Key) bool { return k == key })
 		}

@@ -42,7 +42,8 @@ typedef struct {
     stqr_u8 compression;
 } stqr_info;
 /* Return 0 or negative errno. status() preserves the last HTTP/STQR status.
- * Calls on one connection must be serialized; close must not race a call.
+ * Submission and poll framing must be serialized; pending operations overlap.
+ * Close must not race framing; it cancels callbacks without a durability fence.
  * Owner redirects reuse bounded per-endpoint sessions, retaining subscriptions.
  * sync covers all sessions; pending_mark confirms other sessions before returning
  * one remaining node-local mark. Explicit reconnect invalidates all subscriptions.
@@ -65,6 +66,40 @@ int stqr_request_id(stqr_id *out);
 int stqr_parse_id(const char *hex, stqr_id *out);
 int stqr_parse_object_id(const char *hex, stqr_object_id *out);
 void stqr_free(void *data);
+/* Event-loop submissions share their existing owner connection. Submission
+ * serializes framing only; stqr_poll dispatches any completed ID, in wire order
+ * without waiting for earlier requests. The caller serializes submissions/poll;
+ * callbacks must not reenter this client. Successful data ownership transfers
+ * to the callback (stqr_free); info is borrowed only during callback execution.
+ * Transport failure of a possibly sent write reports -EINPROGRESS. */
+#define STQR_CAP_CONNECTION_SYNC 524288U
+typedef void (*stqr_completion)(void *arg, int error, int status,
+                                void *data, size_t length, const stqr_info *info);
+int stqr_get_async(stqr_client *, stqr_object_id, stqr_completion, void *);
+int stqr_get_range_async(stqr_client *, stqr_object_id, stqr_u64, stqr_u64,
+                        stqr_completion, void *);
+int stqr_stat_async(stqr_client *, stqr_object_id, stqr_completion, void *);
+int stqr_cas_async(stqr_client *, stqr_object_id, unsigned, stqr_u64,
+                  const void *, size_t, const void *, size_t,
+                  const stqr_options *, stqr_completion, void *);
+/* No individual success reply: explicit sync confirms these enqueued writes.
+ * Errors (including redirects which cannot be completed) survive until sync.
+ * Payload is copied/framed before submission returns; maximum one MiB. */
+int stqr_put_async(stqr_client *, stqr_object_id, const void *, size_t,
+                   const stqr_options *);
+int stqr_put_range_async(stqr_client *, stqr_object_id, stqr_u64,
+                         const void *, size_t, const stqr_options *);
+int stqr_object_reference_async(stqr_client *, stqr_object_id, stqr_id token, unsigned action, stqr_completion, void *);
+int stqr_delete_async(stqr_client *, stqr_object_id, const stqr_options *, stqr_completion, void *);
+int stqr_unsubscribe_async(stqr_client *, stqr_id subscription, stqr_completion, void *);
+int stqr_subscribe_async(stqr_client *, stqr_object_id, stqr_id subscription,
+                         stqr_u64 *cursor, stqr_completion, void *);
+int stqr_connection_sync_async(stqr_client *, stqr_completion, void *);
+unsigned stqr_async_pending(const stqr_client *);
+/* A readiness notification never processes replies and must not sleep. Kernel
+ * ports use socket data-ready; userspace event loops may simply call stqr_poll.
+ * Removing the handler before close/reconnect is serialized with that call. */
+void stqr_set_readable_handler(stqr_client *, void (*)(void *), void *);
 int stqr_get(stqr_client *, stqr_object_id, void **data, size_t *length, stqr_info *);
 int stqr_get_range(stqr_client *, stqr_object_id, stqr_u64 offset,
                    stqr_u64 length, void **data, size_t *actual, stqr_info *);

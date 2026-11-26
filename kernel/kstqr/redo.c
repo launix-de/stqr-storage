@@ -21,7 +21,13 @@ static int object_stat(struct ks_fs *f, stqr_object_id id, stqr_info *info)
 	struct ks_rpc *rpc = ks_rpc_lock(f, id);
 	int err;
 	for (;;) {
-		err = stqr_stat(rpc->client, id, info);
+		if (rpc->receive_started) {
+            struct ks_async_result result={0};init_completion(&result.done);
+            err=stqr_stat_async(rpc->client,id,ks_async_completed,&result);
+            mutex_unlock(&rpc->lock);
+            if(!err){wait_for_completion(&result.done);err=result.error;*info=result.info;}
+            sq_free(result.data);mutex_lock(&rpc->lock);
+        } else err = stqr_stat(rpc->client, id, info);
 		if (!ks_transport_retryable(rpc->client, err))
 			break;
 		err = ks_reconnect_wait(f, rpc->client);
@@ -187,6 +193,7 @@ static int apply_edits(struct ks_fs *f, stqr_object_id tx, const struct buf *enc
 {
 	struct buf d = *encoded;
 	unsigned count = readnum(&d, 4), i;
+    bool queued=false;
 	int err = 0;
 	for (i = 0; i < count; i++) {
 		stqr_object_id id;
@@ -218,10 +225,21 @@ static int apply_edits(struct ks_fs *f, stqr_object_id tx, const struct buf *enc
 			return err;
 		rpc = ks_rpc_lock(f, id);
 		ks_cache_forget(f, id);
+        /* The durable intent and marked heads already protect this burst.
+         * Existing payload/index edits can be submitted without individual
+         * fsync/ACK; final publication remains behind the owner fences. */
+        if(!remove && !opt.absent &&
+           (stqr_capabilities(rpc->client)&STQR_CAP_CONNECTION_SYNC)) {
+            err=full?stqr_put_async(rpc->client,id,data,n,&opt):
+                     stqr_put_range_async(rpc->client,id,off,data,n,&opt);
+            mutex_unlock(&rpc->lock);
+            if(err)return err;
+            queued=true;continue;
+        }
 		bool auth_retry = false;
 		for (;;) {
 			if (remove)
-				err = stqr_delete(rpc->client, id, &opt);
+				err = ks_delete_locked(rpc, id, &opt);
 			else if (full)
 				err = stqr_put(rpc->client, id, data, n, &opt, &info);
 			else
@@ -255,7 +273,9 @@ static int apply_edits(struct ks_fs *f, stqr_object_id tx, const struct buf *enc
 		if (err)
 			return err;
 	}
-	return done(&d);
+    err=done(&d);
+    if(queued) {int fenced=ks_checkpoint(f);if(!err)err=fenced;}
+    return err;
 }
 static int intent_get(struct ks_fs *f, stqr_object_id id, struct buf *raw, struct buf *head,
 		      stqr_info *info)
@@ -380,7 +400,7 @@ static void intent_retire(struct ks_fs *f, stqr_object_id id, const struct buf *
 		if (stqr_request_id(&opt.request_id))
 			continue;
 		rpc = ks_rpc_lock(f, part);
-		stqr_delete(rpc->client, part, &opt);
+		ks_delete_locked(rpc, part, &opt);
 		mutex_unlock(&rpc->lock);
 	}
 }

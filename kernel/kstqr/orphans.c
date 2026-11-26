@@ -152,7 +152,7 @@ static int delete_orphan_object(struct ks_fs *f, stqr_object_id id)
 	int err = stqr_request_id(&opt.request_id);
 	ks_cache_forget(f, id);
 	while (!err) {
-		err = stqr_delete(rpc->client, id, &opt);
+		err = ks_delete_locked(rpc, id, &opt);
 		if (!ks_transport_retryable(rpc->client, err))
 			break;
 		err = ks_reconnect_wait(f, rpc->client);

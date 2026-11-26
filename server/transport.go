@@ -13,13 +13,16 @@ import (
 
 	"github.com/gorilla/websocket"
 	"github.com/launix-de/stqr-storage/client"
+	"github.com/launix-de/stqr-storage/volume"
 )
 
-// Each node transport session has independent bounded receive and send queues.
-// The socket read loop only validates/enqueues; dispatch never blocks framing.
-// Requests retain replies, F messages get no reply, telemetry keeps the latest
-// complete snapshot. Authenticated peers and object APPEND use the same bounded
-// native transport; separate transport delivery classes remain future work.
+// Each storage-bearing message starts its own goroutine; the transport never
+// sorts completions or waits for a preceding operation before dispatch. Bounded
+// framing/send buffers provide TCP backpressure, not a storage worker pool.
+// One writer serializes WebSocket frames. Negotiated no-ACK mutations report
+// failures individually and through ConnectionSync; successful writes need no
+// reply. Closing a socket discards its RAM-only tracking without a checkpoint.
+// Telemetry keeps the latest complete snapshot. Delivery classes are future work.
 const receiveQueueCapacity = 16
 const sendQueueCapacity = 32
 
@@ -29,6 +32,15 @@ type terminalFrame struct {
 }
 
 type wsSession struct {
+	connectionFenceCap atomic.Bool
+	fenceMu            sync.Mutex
+	connectionSequence uint64
+	connectionJobs     map[client.ID]*connectionWork
+	connectionTouches  map[*volume.Volume]uint64
+	connectionFences   map[client.ID]*connectionFence
+	connectionFailures []connectionFailure
+	uploadTails        map[client.ID]chan struct{}
+
 	durabilityCap      atomic.Bool
 	versionsSubscribed bool   // guarded by subMu
 	versionSent        string // guarded by subMu
@@ -211,8 +223,6 @@ func (s *Server) serveWebSocket(w http.ResponseWriter, r *http.Request, p princi
 			case ws.leaseRequests <- m:
 			case <-ws.done:
 				return
-			default:
-				return
 			}
 			continue
 		}
@@ -221,10 +231,13 @@ func (s *Server) serveWebSocket(w http.ResponseWriter, r *http.Request, p princi
 			case ws.controlRequests <- m:
 			case <-ws.done:
 				return
-			default:
-				return
 			}
 			continue
+		}
+		if m.Opcode != 5 && m.Opcode != 6 && m.Opcode != 7 {
+			if !ws.admitConnectionMessage(m) {
+				return
+			}
 		}
 		if m.Opcode >= 0x0100 && m.Opcode <= 0x0108 || m.Opcode == client.ObjectSubscribe || m.Opcode == client.ObjectAccepted || m.Opcode == client.BucketObjectLease || m.Opcode == client.BucketMaintenanceEnd || m.Opcode == client.BucketStatFS || m.Opcode == client.BucketSync || m.Opcode == client.BucketMaintenance || m.Opcode == client.BucketScan {
 			if !ws.registerObjectContext(m.ID) {
@@ -252,8 +265,6 @@ func (s *Server) serveWebSocket(w http.ResponseWriter, r *http.Request, p princi
 		select {
 		case ws.requests <- m:
 		case <-ws.done:
-			return
-		default:
 			return
 		}
 	}
@@ -306,18 +317,24 @@ func (ws *wsSession) requestLoop() {
 			ws.discardUpload(id)
 		}
 	}()
-	slots := make(chan struct{}, receiveQueueCapacity)
 	var calls sync.WaitGroup
-	defer func() { ws.close(); calls.Wait() }()
+	defer func() {
+		ws.close()
+		calls.Wait()
+		// No checkpoint on disconnect. Drop RAM-only bookkeeping only after
+		// admitted callbacks have stopped writing their completion records.
+		ws.fenceMu.Lock()
+		ws.connectionJobs = nil
+		ws.connectionTouches = nil
+		ws.connectionFences = nil
+		ws.connectionFailures = nil
+		ws.uploadTails = nil
+		ws.fenceMu.Unlock()
+	}()
 	startCall := func(run func()) bool {
-		select {
-		case slots <- struct{}{}:
-			calls.Add(1)
-			go func() { defer calls.Done(); defer func() { <-slots }(); run() }()
-			return true
-		default:
-			return false
-		}
+		calls.Add(1)
+		go func() { defer calls.Done(); run() }()
+		return true
 	}
 	for {
 		select {
@@ -329,12 +346,26 @@ func (ws *wsSession) requestLoop() {
 				return
 			}
 			if m.Opcode == 5 || m.Opcode == 6 || m.Opcode == 7 {
-				if err := ws.objectTransfer(m, p, startCall); err != nil {
-					return
-				}
+				d := client.Decoder{B: m.Body}
+				id := d.ID()
+				previous, finished := ws.connectionUploadFrame(id)
+				startCall(func() {
+					defer ws.finishConnectionUploadFrames(id, finished)
+					if previous != nil {
+						select {
+						case <-previous:
+						case <-ws.done:
+							return
+						}
+					}
+					if err := ws.objectTransfer(m, p, startCall); err != nil {
+						ws.close()
+					}
+				})
 				continue
 			}
 			if ws.server.launchPGRequest(ws.ctx, m, p, func(body []byte) {
+				defer ws.completeConnectionMessage(m, 200, body)
 				wire := client.EncodeMessage(client.Message{Kind: client.Response, Opcode: m.Opcode, ID: m.ID, Body: body})
 				select {
 				case ws.responses <- wire:
@@ -343,36 +374,28 @@ func (ws *wsSession) requestLoop() {
 			}) {
 				continue
 			}
-			run := func() { ws.executeRequest(m, p) }
-			parallel := m.Kind == client.Request && (m.Opcode >= 0x0100 && m.Opcode <= 0x0108 || m.Opcode == client.ObjectAccepted || m.Opcode == client.ObjectSubscribe || m.Opcode == client.BucketStatFS || m.Opcode == client.BucketSync || m.Opcode == client.BucketObjectList)
-			// Upload headers and their following chunks may arrive back-to-back.
-			// Establish staging before consuming the next frame, even when the
-			// sender does not wait for a response to its upload header.
-			if objectUploadHeader(m) {
-				parallel = false
+			// Every storage operation gets its own goroutine. HELLO/PING and
+			// local placement-map lookup contain no storage and may finish inline.
+			if m.Opcode == client.Hello || m.Opcode == client.Ping {
+				ws.executeRequest(m, p)
+			} else {
+				startCall(func() { ws.executeRequest(m, p) })
 			}
-			if parallel {
-				if !startCall(run) {
-					ws.releaseObjectContext(m.ID)
-					if err := ws.sendMessage(client.Message{Kind: client.Response, Opcode: m.Opcode, ID: m.ID, Body: client.ResponseBody(503, nil, "client request concurrency budget exhausted")}); err != nil {
-						return
-					}
-				}
-				continue
-			}
-			run()
+
 		}
 	}
 }
 func (ws *wsSession) executeRequest(m client.Message, p principal) {
+	defer ws.connectionHeaderReady(m.ID)
 	body, status := ws.server.dispatchAs(m, ws, p)
 	if status == 0 {
 		return
 	}
+	defer ws.completeConnectionMessage(m, status, body)
 	if m.Opcode >= 0x0100 && m.Opcode <= 0x0108 || m.Opcode == client.ObjectSubscribe || m.Opcode == client.ObjectAccepted || m.Opcode == client.BucketObjectLease || m.Opcode == client.BucketMaintenanceEnd || m.Opcode == client.BucketStatFS || m.Opcode == client.BucketSync || m.Opcode == client.BucketMaintenance || m.Opcode == client.BucketScan {
 		ws.releaseObjectContext(m.ID)
 	}
-	if m.Kind == client.Request {
+	if m.Kind == client.Request || m.Kind == client.FireAndForget && (status >= 300 || m.Opcode == 0x0100 || m.Opcode == 0x0101 || m.Opcode == 0x0107 || m.Opcode == client.ConnectionSync) {
 		b := client.EncodeMessage(client.Message{Kind: client.Response, Opcode: m.Opcode, ID: m.ID, Body: body})
 		select {
 		case ws.responses <- b:
@@ -457,12 +480,12 @@ func (ws *wsSession) pushStats(snapshot client.StatsSnapshot) {
 	}
 }
 
-// Delegated administration may synchronously coordinate its caller. Keep one
-// bounded, separate worker so the ordinary peer queue can process those control
-// callbacks. Object operations retain their original ordered session worker.
+// Peer framing channels are drained independently; each storage-bearing
+// callback runs in its own goroutine, exactly like ordinary client messages.
 func (ws *wsSession) controlRequestLoop() { ws.auxiliaryRequestLoop(ws.controlRequests) }
 func (ws *wsSession) auxiliaryRequestLoop(queue <-chan client.Message) {
-	defer ws.close()
+	var calls sync.WaitGroup
+	defer func() { ws.close(); calls.Wait() }()
 	for {
 		select {
 		case <-ws.done:
@@ -472,24 +495,19 @@ func (ws *wsSession) auxiliaryRequestLoop(queue <-chan client.Message) {
 			if !ok {
 				return
 			}
-			if ws.server.launchPGRequest(ws.ctx, m, p, func(body []byte) {
-				wire := client.EncodeMessage(client.Message{Kind: client.Response, Opcode: m.Opcode, ID: m.ID, Body: body})
-				select {
-				case ws.responses <- wire:
-				case <-ws.done:
-				}
-			}) {
-				continue
-			}
-			body, status := ws.server.dispatchAs(m, ws, p)
-			if status != 0 && m.Kind == client.Request {
-				wire := client.EncodeMessage(client.Message{Kind: client.Response, Opcode: m.Opcode, ID: m.ID, Body: body})
-				select {
-				case ws.responses <- wire:
-				case <-ws.done:
+			calls.Add(1)
+			go func() {
+				defer calls.Done()
+				if ws.server.launchPGRequest(ws.ctx, m, p, func(body []byte) {
+					_ = ws.sendMessage(client.Message{Kind: client.Response, Opcode: m.Opcode, ID: m.ID, Body: body})
+				}) {
 					return
 				}
-			}
+				body, status := ws.server.dispatchAs(m, ws, p)
+				if status != 0 && (m.Kind == client.Request || status >= 300) {
+					_ = ws.sendMessage(client.Message{Kind: client.Response, Opcode: m.Opcode, ID: m.ID, Body: body})
+				}
+			}()
 		}
 	}
 }

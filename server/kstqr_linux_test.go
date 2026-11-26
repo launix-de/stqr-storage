@@ -553,10 +553,10 @@ echo KSTQR_SANDBOX_BEGIN
 /sandbox @@URL@@ @@BUCKET@@
 echo KSTQR_SANDBOX_END
 cat /proc/self/mountstats
+ls -l /mnt
 echo KSTQR_CRASH_RECONNECT_BEGIN
 /crash-reconnect @@URL@@
 echo KSTQR_CRASH_RECONNECT_END
-ls -l /mnt
 if grep 'password=' /proc/mounts; then exit 1; fi
 umount /readonly
 umount /other

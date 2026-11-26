@@ -24,6 +24,25 @@ struct fence_waiter { stqr_fence *fence; int error; };
 static void *wait_fence(void *arg) {
  struct fence_waiter *w=arg; w->error=stqr_fence_wait(w->fence); return NULL;
 }
+struct async_result {
+    unsigned done;
+    int error,status;
+    void *data;
+    size_t size;
+};
+static void async_completed(void *arg,int error,int status,void *data,size_t size,const stqr_info *info) {
+    struct async_result *result=arg;(void)info;
+    result->done++;result->error=error;result->status=status;
+    result->data=data;result->size=size;
+}
+static void async_wait(stqr_client *c,struct async_result *results,unsigned count) {
+    for(unsigned tries=0;tries<300;tries++) {
+        unsigned done=0;for(unsigned i=0;i<count;i++)done+=results[i].done;
+        if(done==count)return;
+        CHECK(stqr_poll(c,100)>=0);
+    }
+    CHECK(!"asynchronous completion timeout");
+}
 int main(void) {
     stqr_client *c = NULL;
     stqr_id bucket = {{0}};
@@ -43,6 +62,61 @@ int main(void) {
     CHECK(!stqr_parse_id(getenv("STQR_TEST_BUCKET"), &bucket));
     CHECK(!stqr_parse_object_id("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", &id));
     CHECK(!stqr_dial(&c, url, getenv("STQR_TEST_USER"), getenv("STQR_TEST_PASSWORD"), bucket,"fs", 3000));
+    if (mode && !strcmp(mode,"async-close")) {
+        struct async_result pending={0};
+        o=fresh();CHECK(!stqr_put_async(c,id,"unfenced",8,&o));
+        CHECK(!stqr_get_async(c,id,async_completed,&pending));
+        stqr_close(c);CHECK(pending.done&&pending.error);stqr_free(pending.data);
+        puts("C close cancelled pending work without a connection fence");return 0;
+    }
+    if (mode && !strcmp(mode,"async-progress")) {
+        struct async_result fence={0},read={0};
+        o=fresh();CHECK(!stqr_put_async(c,id,"hello",5,&o));
+        CHECK(!stqr_connection_sync_async(c,async_completed,&fence));
+        CHECK(!stqr_stat_async(c,id,async_completed,&read));
+        async_wait(c,&read,1);CHECK(!read.error);CHECK(!fence.done);
+        puts("READ_BEFORE_FENCE");fflush(stdout);
+        async_wait(c,&fence,1);CHECK(!fence.error);
+        stqr_close(c);puts("C same-socket read progressed during checkpoint");return 0;
+    }
+    if (mode && !strcmp(mode,"async")) {
+        enum { N=32 };
+        stqr_object_id ids[N];struct async_result result[N],fence={0};
+        CHECK(stqr_capabilities(c)&STQR_CAP_CONNECTION_SYNC);
+        for(unsigned i=0;i<N;i++) {
+            unsigned char payload[128];memset(payload,(int)i,sizeof(payload));
+            ids[i]=id;ids[i].bytes[0]=(unsigned char)i;
+            o=fresh();CHECK(!stqr_put_async(c,ids[i],payload,sizeof(payload),&o));
+        }
+        CHECK(stqr_async_pending(c)==N);
+        CHECK(!stqr_connection_sync_async(c,async_completed,&fence));
+        async_wait(c,&fence,1);CHECK(!fence.error&&fence.status==200);
+        CHECK(!stqr_async_pending(c));
+        memset(result,0,sizeof(result));
+        for(unsigned i=0;i<N;i++)CHECK(!stqr_get_async(c,ids[i],async_completed,&result[i]));
+        CHECK(stqr_async_pending(c)==N);
+        async_wait(c,result,N);
+        for(unsigned i=0;i<N;i++) {
+            unsigned char payload[128];memset(payload,(int)i,sizeof(payload));
+            CHECK(!result[i].error&&result[i].size==sizeof(payload));
+            CHECK(!memcmp(result[i].data,payload,sizeof(payload)));stqr_free(result[i].data);
+        }
+        memset(result,0,sizeof(result));
+        for(unsigned i=0;i<N;i++) {
+            unsigned char before[128],after[128];memset(before,(int)i,sizeof(before));memset(after,(int)(i+1),sizeof(after));
+            o=fresh();o.accepted=1;
+            CHECK(!stqr_cas_async(c,ids[i],1,0,before,sizeof(before),after,sizeof(after),&o,async_completed,&result[i]));
+        }
+        async_wait(c,result,N);
+        for(unsigned i=0;i<N;i++)CHECK(!result[i].error);
+        CHECK(!stqr_sync(c));
+        /* A rejected no-ACK write must remain visible at its connection fence. */
+        o=fresh();o.absent=1;CHECK(!stqr_put_async(c,ids[0],"wrong",5,&o));
+        memset(&fence,0,sizeof(fence));CHECK(!stqr_connection_sync_async(c,async_completed,&fence));
+        async_wait(c,&fence,1);CHECK(fence.error&&fence.status>=400);
+        CHECK(!stqr_async_pending(c));stqr_close(c);
+        puts("C asynchronous multiplexing, no-ACK writes and connection fences passed");return 0;
+    }
     if (mode && !strcmp(mode,"references")) {
         stqr_client *other=NULL;
         stqr_id pin, claim, second;

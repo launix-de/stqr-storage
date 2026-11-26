@@ -29,4 +29,5 @@ int sq_wait(struct stqr_socket *, unsigned ms);
 stqr_u64 sq_now_ms(void);
 int sq_pause(unsigned ms);
 void sq_disconnect(struct stqr_socket *);
+void sq_set_readable(struct stqr_socket *, void (*)(void *), void *);
 #endif

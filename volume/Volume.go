@@ -305,8 +305,10 @@ func (v *Volume) write(b []byte, off uint64) error {
 	if v.staging != nil {
 		return v.stageWrite(b, off)
 	}
-	if err := v.flushDeferred(); err != nil {
-		return err
+	// Allocation must never implicitly drop the metadata lock to flush a
+	// newer visible overlay after its caller has built a mutable plan.
+	if v.deferred != nil || v.checkpointing {
+		return ErrBusy
 	}
 	return v.rawWrite(b, off)
 }

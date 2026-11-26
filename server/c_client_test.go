@@ -2,6 +2,7 @@
 package server
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/sha256"
@@ -58,6 +59,104 @@ func TestCClient(t *testing.T) {
 		t.Cleanup(host.Close)
 		admin := s.cfg.Auth.BootstrapAdmin
 		run(t, host.URL, admin.Username, admin.Password, client.ID(b.ID()).String(), "")
+	})
+	for _, mode := range []string{"async", "async-close"} {
+		t.Run(mode, func(t *testing.T) {
+			s := testServer(t)
+			addTestVolume(t, s, "c-async", "hdd", 32<<20)
+			b, _ := createProtocolBucket(t, s, "c-async")
+			host := httptest.NewServer(s.Handler())
+			defer host.Close()
+			admin := s.cfg.Auth.BootstrapAdmin
+			run(t, host.URL, admin.Username, admin.Password, client.ID(b.ID()).String(), mode)
+		})
+	}
+	t.Run("async-progress", func(t *testing.T) {
+		s := testServer(t)
+		addTestVolume(t, s, "c-progress", "hdd", 32<<20)
+		var managed *managedVolume
+		s.mu.RLock()
+		for _, m := range s.volumes {
+			if m.config.Name == "c-progress" {
+				managed = m
+			}
+		}
+		s.mu.RUnlock()
+		if managed == nil {
+			t.Fatal("missing test volume")
+		}
+		identity := managed.store.Identity()
+		if err := managed.store.Close(); err != nil {
+			t.Fatal(err)
+		}
+		mem, err := volume.NewMemory(32 << 20)
+		if err != nil {
+			t.Fatal(err)
+		}
+		gate := &serverFlushGate{VolumeIO: mem}
+		v, err := volume.Format(gate, volume.FormatOptions{Class: volume.HDD, ClusterID: identity.ClusterID, NodeID: identity.NodeID, VolumeID: identity.VolumeID})
+		if err != nil {
+			t.Fatal(err)
+		}
+		s.mu.Lock()
+		managed.store = v
+		s.mu.Unlock()
+		b, _ := createProtocolBucket(t, s, "c-progress")
+		raw, err := hex.DecodeString("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
+		if err != nil {
+			t.Fatal(err)
+		}
+		var oid volume.ObjectID
+		copy(oid[:], raw)
+		if _, err = b.Put(context.Background(), quotaPrincipal(t, s), oid, []byte("seed"), volume.Options{RequestID: volume.ID(client.NewRequestID())}); err != nil {
+			t.Fatal(err)
+		}
+		host := httptest.NewServer(s.Handler())
+		defer host.Close()
+		entered, release := make(chan struct{}), make(chan struct{})
+		var once sync.Once
+		unblock := func() { once.Do(func() { close(release) }) }
+		defer unblock()
+		gate.mu.Lock()
+		gate.entered, gate.release = entered, release
+		gate.mu.Unlock()
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		cmd := exec.CommandContext(ctx, binary)
+		a := s.cfg.Auth.BootstrapAdmin
+		cmd.Env = append(os.Environ(), "STQR_TEST_URL="+host.URL, "STQR_TEST_USER="+a.Username, "STQR_TEST_PASSWORD="+a.Password, "STQR_TEST_BUCKET="+client.ID(b.ID()).String(), "STQR_TEST_MODE=async-progress")
+		out, err := cmd.StdoutPipe()
+		if err != nil {
+			t.Fatal(err)
+		}
+		var stderr bytes.Buffer
+		cmd.Stderr = &stderr
+		if err = cmd.Start(); err != nil {
+			t.Fatal(err)
+		}
+		seen := false
+		scan := bufio.NewScanner(out)
+		for scan.Scan() {
+			if scan.Text() != "READ_BEFORE_FENCE" {
+				continue
+			}
+			select {
+			case <-entered:
+				seen = true
+			case <-ctx.Done():
+			}
+			unblock()
+		}
+		unblock()
+		if err = cmd.Wait(); err != nil {
+			t.Fatalf("C asynchronous progress: %v: %s", err, stderr.String())
+		}
+		if err = scan.Err(); err != nil {
+			t.Fatal(err)
+		}
+		if !seen {
+			t.Fatal("no read completion while physical fence blocked on original socket")
+		}
 	})
 	t.Run("reuse", func(t *testing.T) {
 		s := testServer(t)

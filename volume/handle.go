@@ -140,7 +140,14 @@ func withHandleMode[T any](h *Handle, write, buffered bool, f func(*Volume) (T, 
 		return zero, err
 	}
 	if write && !buffered {
-		if err := l.v.flushDeferred(); err != nil {
+		// Generic metadata builders start from a stable allocator image.
+		// Briefly apply backpressure while draining the preceding overlay;
+		// subsequent ordinary published writes may pipeline at their fence.
+		prior := l.v.maintenance
+		l.v.maintenance = true
+		err := l.v.flushDeferred()
+		l.v.maintenance = prior
+		if err != nil {
 			return zero, err
 		}
 	}

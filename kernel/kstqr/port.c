@@ -51,7 +51,40 @@ void ks_queue_fence_work(struct work_struct *work)
 }
 struct stqr_socket {
 	struct socket *sock;
+	void (*ready)(void *);
+	void *ready_arg;
+	void (*previous_ready)(struct sock *);
 };
+static void sq_data_ready(struct sock *sk)
+{
+	struct stqr_socket *s;
+	read_lock_bh(&sk->sk_callback_lock);
+	s = sk->sk_user_data;
+	if (s && s->ready)
+		s->ready(s->ready_arg);
+	read_unlock_bh(&sk->sk_callback_lock);
+}
+void sq_set_readable(struct stqr_socket *s, void (*ready)(void *), void *arg)
+{
+	struct sock *sk;
+	if (!s)
+		return;
+	sk = s->sock->sk;
+	write_lock_bh(&sk->sk_callback_lock);
+	if (ready && !s->previous_ready) {
+		s->previous_ready = sk->sk_data_ready;
+		sk->sk_user_data = s;
+		sk->sk_data_ready = sq_data_ready;
+	}
+	s->ready = ready;
+	s->ready_arg = arg;
+	if (!ready && s->previous_ready) {
+		sk->sk_data_ready = s->previous_ready;
+		sk->sk_user_data = NULL;
+		s->previous_ready = NULL;
+	}
+	write_unlock_bh(&sk->sk_callback_lock);
+}
 void *sq_alloc(size_t n) { return kvzalloc(n ? n : 1, GFP_NOFS); }
 void sq_free(void *p) { kvfree(p); }
 void sq_secret_free(void *p, size_t n)
@@ -252,6 +285,7 @@ int sq_recv(struct stqr_socket *s, void *p, size_t n)
 void sq_disconnect(struct stqr_socket *s)
 {
 	if (s) {
+		sq_set_readable(s, NULL, NULL);
 		kernel_sock_shutdown(s->sock, SHUT_RDWR);
 		sock_release(s->sock);
 		kfree(s);

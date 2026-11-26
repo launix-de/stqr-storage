@@ -1208,11 +1208,10 @@ sequence:u64` bezeichnet einen Bucket-Präfix auf genau einer Node-Inkarnation.
 Volumes gemäß Storage-Strategie. RAM bleibt ausdrücklich flüchtig. Neue Writes
 nach dem erfassten Präfix dürfen weiterlaufen; es gibt keine globale Lesesperre.
 
-Receipts werden auch bei Reads und vor Subscription-Updates übertragen. Vor einer
-referenzveröffentlichenden Mutation auf einem anderen Owner synchronisiert das SDK
-die beobachteten Vorgänger. Lokal wird beim Wechsel des Zielvolumes zuerst der
-vorherige Bucket-Präfix gespeichert. So darf ein dauerhafter Inode nicht auf
-verlorene Daten-/Indexobjekte zeigen. Das ist keine Multi-Object-Transaktion.
+Receipts werden auch bei Reads und vor Subscription-Updates übertragen. Für
+ältere Clients ohne ConnectionSync bleibt die implizite Reihenfolge beim Owner-
+und Volume-Wechsel bestehen. Neue Clients benutzen den folgenden expliziten
+Vertrag; der Server kennt weiterhin keinerlei FS-/Blockdevice-/S3-Strukturen.
 
 Die erste Implementierung benutzt einen begrenzten Seiten-Overlay und vorhandene
 Redo-Checkpoints; ausschließlich im dauerhaften Freispeicherbild freie Seiten
@@ -1228,6 +1227,59 @@ FUSE/Kernel verwenden Barrieren für `fsync`, `fdatasync`, `msync(MS_SYNC)`,
 `O_SYNC`/`O_DSYNC` und Dateisystem-Sync. Normales Close ist keine Pflichtbarriere.
 S3 und vorhandene native Clients behalten den Durable-ACK. Die Details und
 Implementierungsgrenzen stehen in [docs/durability.md](docs/durability.md).
+
+### 10.9 Nebenläufige Nachrichten und ConnectionSync (Capability 524288)
+
+Jede Nachricht mit Storage-Zugriff wird in einer eigenen Goroutine ausgeführt;
+kleine unmittelbar verfügbare RAM-Abfragen dürfen direkt beantwortet werden.
+Es gibt keinen Storage-Worker-Pool und keine Verbindungssperre über eine komplette
+RPC. Antworten werden über die Request-ID zugeordnet und dürfen beliebig
+gegeneinander überholen. Ein einzelner WebSocket-Writer rahmt die Nachrichten;
+die begrenzten Empfangs-/Sendepuffer dienen nur der Backpressure. Chunk-Offsets
+und Hash-Zustand innerhalb desselben Uploads behalten ihre notwendige Reihenfolge.
+
+Nach HELLO mit Capability 524288 und 8192 kann `OBJECT_ACCEPTED` als F gesendet
+werden: keine Erfolgsantwort je PUT/PUT_RANGE, aber eine korrelierte Fehlerantwort
+mit ursprünglicher Opcode/Request-ID einschließlich Redirect bei Misserfolg.
+GET und andere Resultatoperationen liefern ihre Daten weiterhin asynchron;
+CAS kann seinen Vergleichserfolg als Q abfragen. Fire-and-forget bedeutet somit
+keine implizite Durability-Zusage und kein synchrones Warten beim Sender.
+
+`CONNECTION_SYNC` (0x0122, Q, leerer Body) erfasst bereits beim Empfang alle zuvor
+angenommenen Operationen dieser Verbindung, auch wenn deren Goroutinen noch nicht
+laufen. Danach eingehende Nachrichten verlängern diesen Schnitt nicht. Pro
+Verbindung hält eine RAM-Map die tatsächlich berührten lokalen Volumes und deren
+Generation; Reads und Subscription-Updates können ebenfalls solche Abhängigkeiten
+liefern. Nach Abschluss der erfassten Operationen werden die betroffenen Volumes
+parallel bis zu deren Zielgeneration gesynct. Ein anderweitig bereits erfolgter
+Checkpoint erfüllt denselben Eintrag ohne erneuten Flush. Nur erledigte Einträge
+werden entfernt; neuere Writes bleiben für den nächsten Sync vorgemerkt.
+
+Erst danach folgt die Antwort `boot:ID,receive_cut:u64` mit Status 200. Der Cut
+ist flüchtige Verbindungsfortschrittsinformation, keine Objektversion. Fehler
+vorangegangener F-Mutationen werden vor der Fence-Antwort gesendet und auch von
+jeder sie einschließenden Fence zurückgegeben. Checkpointfehler liefern keinen
+Erfolgs-ACK. Ein verlorener Kanal ohne Fence-ACK bleibt für den Client unbestätigt;
+Reconnect darf daraus keinen Erfolgsbeweis konstruieren.
+
+Bucket-/Volume-Wechsel löst auf diesem Pfad keinen Flush aus. Verbindungs-Close
+und Disconnect lösen ebenfalls **keinen Sync** aus: die Verbindungs-Map wird
+verworfen. Ein Client darf Sync vollständig weglassen; Hintergrund-Checkpoints,
+Kapazitätsgrenzen oder explizites Volume-/Node-Schließen dürfen unabhängig davon
+Daten sichern, ohne eine nicht abgegebene Zusage nachträglich zu ersetzen.
+
+Clients senden über die Placement-Map direkt zum jeweiligen Owner und sammeln
+Sync-Antworten selbst von ihren benutzten Owner-Verbindungen ein. ConnectionSync
+broadcastet und proxyt nichts. Die bestehende Authentifizierungsbindung einer
+Bucket-Verbindung bleibt erhalten; mehrere Buckets teilen keinen veränderlichen
+serverseitigen „aktuellen Bucket“. Clientformate müssen echte Abhängigkeiten
+selbst ordnen: unabhängige Payload-/Indexwrites parallel, dann explizite Fence vor
+dauerhafter Veröffentlichung abhängiger Referenzen. Überlappende BD-Schreibbereiche
+benötigen ihre eigene Reihenfolge; unabhängige Stripes nicht. Der Kernel verwendet
+Request-ID-Demultiplexing, ereignisgesteuerten Empfang und Completion-Callbacks
+für Folio-/Writeback-/asynchrone kiocb-Pfade, statt den gesamten Kanal bis zur
+Antwort zu sperren. Storage bleibt in-place auf stabilen Objekt-IDs; dies ist
+weder eine Transaktion noch eine historische Versionierungs-API.
 
 ## 11. Replikation, Erasure Coding und Read-Replicas
 
@@ -1379,7 +1431,7 @@ TLV := tag:V value:Blob
 Eine **binäre WebSocket-Message ist exakt eine STQR-Message**; kein zusätzlicher TCP-Length-Prefix und kein Vertrauen in WebSocket-Frame-Grenzen. Die WebSocket-Library setzt fragmentierte Frames zur Message zusammen. v1 maximal 16 MiB pro Message, Bulk-Daten in <=1-MiB-Chunks. Kompression im WebSocket-Transport ist standardmäßig aus, um unnötige CPU-/Memory-Kosten und doppelte Kompression zu vermeiden.
 
 - `id` ist bei REQUEST/FF/PUSH eine eindeutige Event-/Operations-ID, bei RESPONSE die ID des beantworteten Requests. Bei mutierenden Objektrequests ist sie zugleich die persistente Dedupe-ID und bleibt bei Redirect/Retry unverändert. Reuse mit anderer OpCode/Objektadresse/Parametern/Payload-Digest ist 400. Eine neue Session darf dieselbe Operation-ID zur Recovery wiederholen.
-- **Q** in den Tabellen = Request mit genau einer terminalen Antwort. **F** = Fire-and-forget ohne RESPONSE. **P** = unaufgeforderter Push. `Q/F` darf der Sender wählen; F liefert keine Erfolgs-/Durability-Zusage an den Sender. Insbesondere Objektmutationen benötigen Q, wenn ein ACK verlangt wird. Fehler bei F können optional über EVENT gemeldet werden, sind aber keine verpflichtende Antwort.
+- **Q** in den Tabellen = Request mit genau einer terminalen Antwort. **F** = Fire-and-forget ohne Erfolgs-RESPONSE (ausgehandelter Fehlerpfad siehe §10.9). **P** = unaufgeforderter Push. `Q/F` darf der Sender wählen; F liefert keine Erfolgs-/Durability-Zusage an den Sender. Insbesondere Objektmutationen benötigen Q, wenn ein ACK verlangt wird. Fehler bei F können optional über EVENT gemeldet werden, sind aber keine verpflichtende Antwort.
 - Requests blockieren nicht die Empfangsschleife: SDKs/Dashboard geben Future/Promise zurück und multiplexen anhand ID. Ein lebender Request bekommt eine terminale Antwort; bei Transportabbruch oder Client-Cancellation kann das Outcome unbekannt sein und muss mit derselben ID geklärt werden. Das ist keine automatische fehlgeschlagene Mutation und kein Membership-Timeout.
 - Ein bekannter SHORT-/Offline-/Restore-Zustand eines weiterhin erforderlichen Peers erzeugt keinen impliziten Failure-Timeout: abhängige Requests bleiben ausstehend, solange Transport und aufrufender Context das erlauben. Ein freiwilliges Client-Deadline/Disconnect beendet nur diesen Aufruf. 503 darf fehlende sichere Routing-/Autoritätsinformation melden, ersetzt aber weder die Mitgliedschaftsentscheidung noch das vereinbarte Warten bei bekanntem Peer.
 - F bedeutet „kein Warten auf Remote-Antwort“, nicht unbeschränkte Speicherbelegung. Senden erfolgt über eine begrenzte Queue; volle Queue gibt lokal `WOULD_BLOCK` zurück. Kritische Kontrollpushes werden journalisiert und nach Reconnect wiederholt. Telemetrie darf zusammengefasst werden.
@@ -1517,7 +1569,8 @@ Normale Clients bekommen ausschließlich Objektzugriff und die dafür nötigen R
 | 0x0115 | BUCKET_MAINTENANCE / Q, Single-Node | `object:ObjectRef` (OID=0, nur Bucket relevant) => leer; exklusive Wartung an die Bucket-WebSocket-Sitzung binden |
 | 0x0116 | BUCKET_SCAN / Q, Single-Node | `object:ObjectRef` (OID=0), `after:Opt(OID),limit:u32` (1..1000) => `count:u32,(id:OID,info:ObjectInfo)*,next:Opt(OID)`; nur in eigener Wartungssitzung |
 | 0x0117 | BUCKET_OBJECT_LIST / Q | `object:ObjectRef` (OID=0), `after:Opt(OID),limit:u32` (1..1000) => `count:u32,(id:OID,info:ObjectInfo)*,next:Opt(OID)`; normale READ-Inventur ohne Wartungssperre, aktuelle Sicht in OID-Reihenfolge, keine Namen-/Prefix-Sortierung |
-| 0x0118 | OBJECT_ACCEPTED / Q, Capability 8192 | `object:ObjectRef,opcode:u16,remaining_native_body` => ursprüngliches Mutationsresultat; Tag 48 trägt den CommitMark; nur vollständige INLINE-Mutationen |
+| 0x0118 | OBJECT_ACCEPTED / Q; zusätzlich F mit Capability 524288, Capability 8192 | `object:ObjectRef,opcode:u16,remaining_native_body` => ursprüngliches Mutationsresultat; Tag 48 trägt den CommitMark; nur vollständige INLINE-Mutationen |
+| 0x0122 | CONNECTION_SYNC / Q, Capability 524288 | leer => `boot:ID,receive_cut:u64`; siehe §10.9 |
 | 0x0119 | BUCKET_SYNC / Q, Capability 8192 | `bucket:ID,mark:CommitMark` => bestätigter `CommitMark`; alter Boot => 410 |
 | 0x011a | DURABILITY_NOTICE / P, Capability 8192 | `mark:CommitMark`; vor einem Subscription-Update mit akzeptiertem Zustand |
 | 0x011b | BUCKET_STATFS / Q | `bucket:ID` => `used:u64,total:u64,free:u64,available:u64,quota:u64,quota_limited:Bool`; authentifizierter Bucket-Grant genügt; ohne Quota verfügbarer nutzbarer Cluster-Platz, mit Quota zusätzlich begrenzt; siehe `docs/space.md` |
@@ -2451,7 +2504,7 @@ Mit künstlich kleinen Volumes (z. B. **4, 8, 16, 32 und 64 MiB**) und determini
 - Online-Rebuild bei über mehrere Tage fehlenden Nodes: unabhängige Online-Ranges umverteilen und Generation abschließen; Offline-Range-Groups einschließlich Grenzen, Locations, Rollen und Epochs unverändert lassen. Offline-Volumes ebenfalls einfrieren. Aufgeschobene Gründe über Neustarts erhalten, ohne wirkungslose Folgeläufe; nach Reconnect/Abgleich in einer neuen Generation umsetzen. Während eines gebundenen Laufs ausfallende Teilnehmer müssen dessen Abschluss blockieren; wiederkehrende Nichtteilnehmer dürfen erst eine Folgerunde erweitern.
 - Gemeinsame Stats-Codec-Golden-Vectors Go/JS, 3-Sekunden-Push ohne Polling, mehrteilige Snapshots, BootID-Wechsel und Replika-Accounting ohne logische Doppelzählung.
 - Leere/UNKNOWN-Client-Map, zufälliger Erstkontakt, 301 mit Patch/Push, Grenzbereiche/Split/Merge/alte Patches und segmentierte Aktualisierung ohne falsche Range-Erweiterung.
-- Basic-Auth-/Cookie-/Origin-Prüfung, HTTP und WebSocket mit identischen Adminhandlern, Q exakt eine terminale Antwort, F keine RESPONSE, begrenzte Queues und Stream-Abbruch ohne partiellen Commit.
+- Basic-Auth-/Cookie-/Origin-Prüfung, HTTP und WebSocket mit identischen Adminhandlern, Q exakt eine terminale Antwort, F ohne Erfolgs-RESPONSE und mit dem ausgehandelten Fehlerpfad, begrenzte Queues und Stream-Abbruch ohne partiellen Commit.
 - HDD-Fallback nur auf freien SSD-Platz ohne fremde Garantiereserven; SSD auf HDD => 507; Index-/Arena-/COW-Overhead kann trotz logischer Quota 507 auslösen.
 - Automatischer leere-Config-/Standalone-Start, --connect wartet bei Unerreichbarkeit, ein Add-Aufruf formatiert nur das angegebene neue Ziel; beschädigtes vorhandenes Volume wird beim Neustart nicht gelöscht.
 - DRAIN/SHORT/CLUSTER-Shutdown, laufende Flushes und verlorene STOP-Pushes; Forceful Disconnect nur nach bestätigtem externem Fencing, LOST statt fälschlichem NOT_FOUND.

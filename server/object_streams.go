@@ -114,21 +114,24 @@ func (ws *wsSession) sendMessageContext(ctx context.Context, m client.Message) e
 }
 func (ws *wsSession) finishUpload(u *serverObjectUpload, result []byte, status int, err error) error {
 	var redirect *objectRedirect
-	if errors.As(err, &redirect) && u.op.message.Kind == client.Request {
-		return ws.sendMessage(client.Message{Kind: client.Response, Opcode: u.op.message.Opcode, ID: u.op.message.ID, Body: redirectResponse(redirect.patch)})
+	var body []byte
+	if errors.As(err, &redirect) {
+		status = 301
+		body = redirectResponse(redirect.patch)
+	} else {
+		detail := ""
+		if err != nil {
+			status = objectStatus(err)
+			result = nil
+			detail = err.Error()
+		}
+		body = client.ResponseBody(status, result, detail)
 	}
-	if err != nil {
-		status = objectStatus(err)
-		result = nil
-	}
-	detail := ""
-	if err != nil {
-		detail = err.Error()
-	}
-	if u.op.message.Kind != client.Request {
+	defer ws.completeConnectionMessage(u.op.message, status, body)
+	if u.op.message.Kind != client.Request && status < 300 {
 		return nil
 	}
-	return ws.sendMessage(client.Message{Kind: client.Response, Opcode: u.op.message.Opcode, ID: u.op.message.ID, Body: client.ResponseBody(status, result, detail)})
+	return ws.sendMessage(client.Message{Kind: client.Response, Opcode: u.op.message.Opcode, ID: u.op.message.ID, Body: body})
 }
 func (ws *wsSession) objectTransfer(m client.Message, p principal, startCall func(func()) bool) error {
 	d := client.Decoder{B: m.Body}
@@ -142,6 +145,9 @@ func (ws *wsSession) objectTransfer(m client.Message, p principal, startCall fun
 			return fail(400, "invalid CANCEL")
 		}
 		ws.discardUpload(id)
+		if u != nil {
+			ws.completeConnectionMessage(u.op.message, 499, client.ResponseBody(499, nil, "upload cancelled"))
+		}
 		return nil
 	}
 	if u == nil || finishing {

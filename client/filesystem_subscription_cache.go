@@ -489,3 +489,8 @@ func (c *SubscriptionStore) Delete(ctx context.Context, id ObjectID, opt DeleteO
 	c.remove(id, nil)
 	return err
 }
+
+// ConcurrentObjectRequests inherits the underlying negotiated transport support.
+func (c *SubscriptionStore) ConcurrentObjectRequests() bool {
+	return c.client.ConcurrentObjectRequests()
+}

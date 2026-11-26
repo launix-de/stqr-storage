@@ -14,7 +14,20 @@ struct sq_channel {
     int lost;
 };
 struct sq_binding { struct sq_binding *next; stqr_id id; struct sq_channel *channel; };
+struct sq_route {
+    struct sq_route *child[2];
+    char endpoint[512];
+    stqr_u64 revision, epoch;
+    stqr_id runtime;
+};
+struct sq_async;
 struct stqr_client {
+    struct sq_async *async[64];
+    struct sq_route *routes;
+    unsigned async_count;
+    stqr_u64 async_sequence;
+    void (*readable)(void *);
+    void *readable_arg;
     struct stqr_socket *socket;
     char host[256], authority[272];
     char *authorization;
@@ -41,6 +54,12 @@ struct stqr_client {
     stqr_u64 channel_clock;
 };
 struct buf { stqr_u8 *p; size_t n, cap, pos; int err; };
+static void async_fail(stqr_client *, struct sq_channel *, int);
+static int async_channel_pending(stqr_client *, struct sq_channel *);
+static void route_free(struct sq_route *r) {
+    if (!r) return;
+    route_free(r->child[0]); route_free(r->child[1]); sq_free(r);
+}
 static int zero(const void *v, size_t n) {
     const stqr_u8 *p = v;
     while (n--) if (*p++) return 0;
@@ -269,7 +288,7 @@ static int select_endpoint(stqr_client *c,const char *endpoint) {
         if (c->channel_count>=SQ_CHANNEL_LIMIT) {
             struct sq_channel *candidate;
             for (candidate=c->channels;candidate;candidate=candidate->next)
-                if (candidate!=original && candidate!=c->lease_owner && (!s || candidate->used<s->used)) s=candidate;
+                if (candidate!=original && candidate!=c->lease_owner && !async_channel_pending(c,candidate) && (!s || candidate->used<s->used)) s=candidate;
             if (!s) { err=-ENOSPC; goto out; }
             load_channel(c,s); err=sync_active(c);
             if (err) { save_channel(c); load_channel(c,original); goto out; }
@@ -293,7 +312,7 @@ static void disconnect_channels(stqr_client *c) {
     if (!c->channels) { broken(c); return; }
     save_channel(c);
     for (s=c->channels;s;s=s->next) {
-        notify|=s->socket!=NULL; sq_disconnect(s->socket); s->socket=NULL;
+        notify|=s->socket!=NULL; async_fail(c,s,-ECONNRESET); sq_disconnect(s->socket); s->socket=NULL;
     }
     c->socket=NULL; forget_bindings(c,NULL);
     if (notify && c->update) c->update(c->update_arg,NULL);
@@ -558,8 +577,22 @@ static int redirect_patch(stqr_client *c, const stqr_u8 *raw, size_t size) {
     if (readvar(&d)!=0 || done(&d) || !endpoint[0]) return -EPROTO;
     /* parse_url validates schemes/authority when the redirect is followed. */
     memcpy(c->redirect,endpoint,sizeof(endpoint));
+    {
+        struct sq_route **at=&c->routes;
+        unsigned bit;
+        for(bit=0;bit<=bits;bit++) {
+            if(!*at) {*at=sq_alloc(sizeof(**at));if(!*at)return -ENOMEM;}
+            if(bit==bits)break;
+            at=&(*at)->child[(start[bit/8]>>(7-bit%8))&1];
+        }
+        memcpy((*at)->endpoint,endpoint,sizeof(endpoint));
+        (*at)->revision=c->redirect_revision;(*at)->epoch=c->redirect_epoch;
+        (*at)->runtime=c->redirect_runtime;
+    }
     return 0;
 }
+static int async_dispatch(stqr_client *, unsigned, unsigned, const stqr_u8 *, struct buf *);
+static void async_fail(stqr_client *, struct sq_channel *, int);
 static int reply(stqr_client *c, unsigned op, stqr_id id, struct buf *result, struct download *stream) {
     unsigned skipped = 0;
     for (;;) {
@@ -578,7 +611,14 @@ static int reply(stqr_client *c, unsigned op, stqr_id id, struct buf *result, st
             }
             if (opcode == 5 || opcode == 6 || opcode == 13) {
                 p = take(&m, 16);
-                if (!p || memcmp(p, id.bytes, 16) || !stream) { drop(&m); return -EPROTO; }
+                if (!p) { drop(&m); return -EPROTO; }
+                if (memcmp(p, id.bytes, 16) || !stream) {
+                    m.pos -= 16;
+                    err = async_dispatch(c, kind, opcode, NULL, &m);
+                    drop(&m); if (err < 0) return err;
+                    if (!err) return -EPROTO;
+                    continue;
+                }
                 err = stream_push(stream, opcode, &m);
                 drop(&m); if (err) return err;
                 continue;
@@ -586,7 +626,13 @@ static int reply(stqr_client *c, unsigned op, stqr_id id, struct buf *result, st
             drop(&m); if (++skipped > 32) return -EPROTO;
             continue;
         }
-        if (kind != 2 || opcode != op || memcmp(p, id.bytes, 16)) { drop(&m); return -EPROTO; }
+        if (kind != 2) { drop(&m); return -EPROTO; }
+        if (opcode != op || memcmp(p, id.bytes, 16)) {
+            err = async_dispatch(c, kind, opcode, p, &m);
+            drop(&m); if (err < 0) return err;
+            if (!err) return -EPROTO;
+            continue;
+        }
         c->status = (int)readvar(&m);
         p = readblob(&m, &n); headers.p = (stqr_u8 *)p; headers.n = n;
         { stqr_u64 count = readvar(&headers), tags[64]; unsigned i, j;
@@ -614,6 +660,7 @@ static int reply(stqr_client *c, unsigned op, stqr_id id, struct buf *result, st
 }
 static void broken(stqr_client *c) {
     int notify=c->socket!=NULL;
+    async_fail(c,c->active,-ECONNRESET);
     sq_disconnect(c->socket); c->socket = NULL;
     forget_bindings(c,c->active);
     if (notify && c->update) c->update(c->update_arg, NULL);
@@ -681,7 +728,7 @@ static int request_payload(stqr_client *c, unsigned op, struct buf *body, stqr_i
             memcpy(endpoint,c->redirect,sizeof(endpoint));
             /* Accepted writes are node-local. Flush the old node before moving
              * this serial connection, so a later sync cannot lose its prefix. */
-            err=stqr_sync(c); if (err) return err;
+            if (!(c->capabilities & STQR_CAP_CONNECTION_SYNC)) { err=stqr_sync(c); if (err) return err; }
             err=select_endpoint(c,endpoint); if (err) return err;
             for (unsigned k=0;k<8;k++) { body->p[48+k]=(stqr_u8)(revision>>(k*8)); body->p[56+k]=(stqr_u8)(epoch>>(k*8)); }
             memcpy(body->p+64,runtime.bytes,16);
@@ -707,7 +754,7 @@ static int reconnect_active(stqr_client *c) {
     if (!err) err = handshake(c);
     if (err) { broken(c); return err; }
     c->status = 0;
-    number(&body, 2, 2); number(&body, 2, 2); number(&body, STQR_CAP_DURABILITY|STQR_CAP_OBJECT_REFERENCES, 8); blob(&body, "stqr-c", 6);
+    number(&body, 2, 2); number(&body, 2, 2); number(&body, STQR_CAP_DURABILITY|STQR_CAP_OBJECT_REFERENCES|STQR_CAP_CONNECTION_SYNC, 8); blob(&body, "stqr-c", 6);
     err = request(c, 1, &body, id, 0, &result, NULL);
     if (!err) {
         if (readnum(&result, 2) != 2) result.err = -EPROTO;
@@ -715,6 +762,7 @@ static int reconnect_active(stqr_client *c) {
     }
     drop(&body); drop(&result);
     if (err) broken(c);
+    else if (c->readable) sq_set_readable(c->socket,c->readable,c->readable_arg);
     return err;
 }
 int stqr_reconnect(stqr_client *c) {
@@ -749,10 +797,20 @@ void stqr_close(stqr_client *c) {
     if (!c) return;
     disconnect_channels(c);
     while (c->channels) { struct sq_channel *next=c->channels->next; sq_free(c->channels); c->channels=next; }
+    route_free(c->routes);
     sq_secret_free(c->authorization, c->authorization_len); sq_secret_free(c, sizeof(*c));
 }
 static void reference(stqr_client *c, struct buf *b, stqr_object_id id) {
-    put(b, c->bucket.bytes, 16); put(b, id.bytes, 32); number(b, 0, 8); number(b, 0, 8); put(b, c->runtime.bytes, 16);
+    struct sq_route *r=c->routes,*best=NULL;unsigned bit;
+    for(bit=0;r&&bit<=256;bit++) {
+        if(r->endpoint[0]&&(!best||r->revision>=best->revision))best=r;
+        if(bit==256)break;
+        r=r->child[(id.bytes[bit/8]>>(7-bit%8))&1];
+    }
+    if(best) {int err=select_endpoint(c,best->endpoint);if(err){b->err=err;return;}}
+    put(b,c->bucket.bytes,16);put(b,id.bytes,32);
+    number(b,best?best->revision:0,8);number(b,best?best->epoch:0,8);
+    put(b,best?best->runtime.bytes:c->runtime.bytes,16);
 }
 static int object_reference(stqr_client *c, stqr_object_id target, stqr_id token, unsigned action) {
     static const char domain[]="STQR object references v1";
@@ -928,9 +986,10 @@ static int poll_active(stqr_client *c, unsigned ms) {
     if (!err) {
         if (readnum(&m, 1) != 1) m.err = -EPROTO;
         kind = (unsigned)readnum(&m, 1); opcode = (unsigned)readnum(&m, 2);
-        take(&m, 16);
-        if (m.err || kind != 3 || (opcode != 0x112 && opcode != 0x113 && opcode != 0x11a)) err = -EPROTO;
-        else err = dispatch_update(c, opcode, &m);
+        const stqr_u8 *id = take(&m, 16);
+        if (m.err) err = -EPROTO;
+        else if (kind == 3 && (opcode == 0x112 || opcode == 0x113 || opcode == 0x11a)) err = dispatch_update(c, opcode, &m);
+        else { err = async_dispatch(c,kind,opcode,id,&m); if (!err) err=-EPROTO; else if (err>0) err=0; }
     }
     drop(&m);
     if (err) { broken(c); return err; }
@@ -1074,8 +1133,27 @@ static int sync_active(stqr_client *c) {
     return sync_through_active(c,&mark,&durable);
 }
 
+struct async_sync_wait { int done,error; };
+static void sync_async_complete(void *arg,int error,int status,void *data,size_t n,const stqr_info *info) {
+    struct async_sync_wait *w=arg;(void)status;(void)n;(void)info;sq_free(data);w->error=error;w->done=1;
+}
 int stqr_sync(stqr_client *c) {
     struct sq_channel *s,*original;
+    if(c) {
+        int modern=!!(c->capabilities&STQR_CAP_CONNECTION_SYNC);
+        for(s=c->channels;s;s=s->next)modern|=!!(s->capabilities&STQR_CAP_CONNECTION_SYNC);
+        if(modern) {
+            struct async_sync_wait wait={0};int result=stqr_connection_sync_async(c,sync_async_complete,&wait);
+            if(result)return result;
+            while(!wait.done) {
+                result=stqr_poll(c,c->timeout);
+                /* Broken channels complete their pending callbacks. Continue
+                 * draining other owners before this stack context expires. */
+                if(result<0 && !wait.done) broken(c);
+            }
+            return wait.error;
+        }
+    }
     int err=0;
     if (!c) return -EINVAL;
     if (!c->channels) return sync_active(c);
@@ -1244,3 +1322,5 @@ void stqr_fence_close(stqr_fence *f) {
     for (i=0;i<f->count;i++) stqr_close(f->entries[i].client);
     sq_secret_free(f,sizeof(*f));
 }
+
+#include "async.c"

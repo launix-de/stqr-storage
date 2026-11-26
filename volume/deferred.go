@@ -117,10 +117,7 @@ func (v *Volume) acceptedMutation(op uint8, k Key, off, length uint64, src io.Re
 	// Oversized calls use the stronger durable path. Buffering the bounded source
 	// permits an identical-ID durable retry if metadata growth exceeds the budget.
 	if length > 1<<20 && op != opTrunc && op != opDelete {
-		if err := v.flushDeferred(); err != nil {
-			return Result{}, err
-		}
-		return v.mutateCore(op, k, off, length, src, expected, opt)
+		return v.durableMutation(op, k, off, length, src, expected, opt)
 	}
 	var payload []byte
 	if op != opTrunc && op != opDelete {
@@ -142,10 +139,7 @@ func (v *Volume) acceptedMutation(op uint8, k Key, off, length uint64, src io.Re
 		if errors.Is(err, ErrFull) {
 			// Exhausted buffering is backpressure, never permission to overwrite
 			// another checkpoint's WAL or to replace its fence.
-			if err = v.flushDeferred(); err != nil {
-				return Result{}, err
-			}
-			return v.mutateCore(op, k, off, length, src, expected, opt)
+			return v.durableMutation(op, k, off, length, src, expected, opt)
 		}
 		return Result{}, err
 	}
@@ -153,15 +147,26 @@ func (v *Volume) acceptedMutation(op uint8, k Key, off, length uint64, src io.Re
 	result, err := v.mutateCore(op, k, off, length, src, expected, opt)
 	v.staging = nil
 	if errors.Is(err, errDeferredBudget) || errors.Is(err, ErrFull) {
-		if err = v.flushDeferred(); err != nil {
-			return Result{}, err
-		}
 		if src != nil {
 			src = bytes.NewReader(payload)
 		}
-		return v.mutateCore(op, k, off, length, src, expected, opt)
+		return v.durableMutation(op, k, off, length, src, expected, opt)
 	}
 	return result, err
+}
+
+// A buffer-exhausted/oversized operation uses the existing durable path. Its
+// allocator image must stay stable while preceding overlays are drained. Reads
+// remain available at fences; new buffered writers receive bounded backpressure.
+func (v *Volume) durableMutation(op uint8, k Key, off, length uint64, src io.Reader, expected []byte, opt Options) (Result, error) {
+	prior := v.maintenance
+	v.maintenance = true
+	defer func() { v.maintenance = prior }()
+	if err := v.flushDeferred(); err != nil {
+		return Result{}, err
+	}
+	opt.Accepted = false
+	return v.mutateCore(op, k, off, length, src, expected, opt)
 }
 
 // CheckpointThrough may also confirm a generation after clean close. A later

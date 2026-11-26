@@ -455,6 +455,9 @@ func (t *transaction) commit(useGuaranteed bool) error {
 }
 func (t *transaction) commitReserved(useGuaranteed bool, allowance, guaranteedAllowance uint64) error {
 	defer t.close()
+	if t.v.staging == nil && (t.v.deferred != nil || t.v.checkpointing) {
+		return ErrBusy
+	}
 	if e := t.finalize(); e != nil {
 		return e
 	}

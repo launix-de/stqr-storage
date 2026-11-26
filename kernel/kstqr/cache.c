@@ -2,6 +2,7 @@
 #include "kstqr.h"
 #include "port.h"
 #include <linux/delay.h>
+#include <linux/completion.h>
 #include <linux/hashtable.h>
 #include <linux/kthread.h>
 #include <linux/slab.h>
@@ -10,7 +11,7 @@
 // merely because they exceed the old unrelated 512-entry cap.
 #define KS_CACHE_ENTRIES 2048
 struct cached_inode {
-	struct hlist_node hash;
+	struct hlist_node hash, subscription_hash;
 	struct list_head lru;
 	stqr_object_id id;
 	stqr_id subscription;
@@ -18,19 +19,36 @@ struct cached_inode {
 	u64 cursor;
 	void *raw;
 	size_t size;
-	bool valid, ready, early;
+	bool valid, ready, early, loading;
 };
 struct ks_cache {
 	struct ks_fs *fs;
 	struct mutex lock, wire;
 	DECLARE_HASHTABLE(objects, 8);
+    DECLARE_HASHTABLE(subscriptions, 8);
 	struct list_head lru;
 	stqr_client *client;
 	struct task_struct *reader;
 	size_t bytes;
 	unsigned count;
-	bool available;
+	bool available, shared;
 };
+static struct mutex *cache_wire(struct ks_cache *c)
+{
+ return c->shared ? &c->fs->rpc[0].lock : &c->wire;
+}
+struct ks_subscribe_result {
+ struct completion done;
+ int error;
+ void *data;
+ size_t size;
+ stqr_info info;
+};
+static void subscribe_completed(void *arg,int error,int status,void *data,size_t size,const stqr_info *info)
+{
+ struct ks_subscribe_result *r=arg;(void)status;
+ r->error=error;r->data=data;r->size=size;if(info)r->info=*info;complete(&r->done);
+}
 static u32 object_hash(stqr_object_id id)
 {
 	return (u32)id.bytes[0] | (u32)id.bytes[9] << 8 | (u32)id.bytes[18] << 16 |
@@ -64,8 +82,9 @@ static void update(void *arg, const stqr_update *u)
 		ks_queue_invalidation(c->fs, NULL);
 		goto out;
 	}
-	list_for_each_entry(e, &c->lru,
-			    lru) if (!memcmp(e->subscription.bytes, u->subscription.bytes, 16))
+	hash_for_each_possible(c->subscriptions,e,subscription_hash,
+                              (u32)u->subscription.bytes[0])
+        if (!memcmp(e->subscription.bytes,u->subscription.bytes,16))
 	{
 		void *raw = NULL;
 		if (!e->ready) {
@@ -102,13 +121,20 @@ static void remove_entry(struct ks_cache *c, struct cached_inode *e)
 	mutex_lock(&c->lock);
 	discard_data(c, e);
 	hash_del(&e->hash);
+    hash_del(&e->subscription_hash);
 	list_del(&e->lru);
 	c->count--;
 	c->bytes -= sizeof(*e);
 	mutex_unlock(&c->lock);
 	kfree(e);
 	ks_queue_invalidation(c->fs, &id);
-	stqr_unsubscribe(c->client, sid);
+	if(c->shared) {
+        struct ks_subscribe_result r={0};int err;init_completion(&r.done);
+        err=stqr_unsubscribe_async(c->client,sid,subscribe_completed,&r);
+        mutex_unlock(cache_wire(c));
+        if(!err)wait_for_completion(&r.done);
+        sq_free(r.data);mutex_lock(cache_wire(c));
+    }else stqr_unsubscribe(c->client, sid);
 }
 void ks_cache_forget(struct ks_fs *f, stqr_object_id id)
 {
@@ -116,13 +142,21 @@ void ks_cache_forget(struct ks_fs *f, stqr_object_id id)
 	struct cached_inode *e;
 	if (!c)
 		return;
-	mutex_lock(&c->wire);
+    /* Mutations may already hold the shared framing lock. Invalidating the
+     * RAM snapshot needs only the cache data lock, never an unsubscribe RPC.
+     * The next miss refreshes the subscription through the normal path. */
+    if(c->shared) {
+        mutex_lock(&c->lock);e=find(c,id);
+        if(e)discard_data(c,e);
+        mutex_unlock(&c->lock);ks_queue_invalidation(f,&id);return;
+    }
+	mutex_lock(cache_wire(c));
 	mutex_lock(&c->lock);
 	e = find(c, id);
 	mutex_unlock(&c->lock);
 	if (e)
 		remove_entry(c, e);
-	mutex_unlock(&c->wire);
+	mutex_unlock(cache_wire(c));
 }
 static int copy_entry(struct ks_cache *c, struct cached_inode *e, void **p, size_t *n,
 		      stqr_info *info)
@@ -226,7 +260,7 @@ int ks_cache_get(struct ks_fs *f, stqr_object_id id, void **p, size_t *n, stqr_i
 		return err;
 	}
 	atomic64_inc(&f->cache_misses);
-	mutex_lock(&c->wire);
+	mutex_lock(cache_wire(c));
 	mutex_lock(&c->lock);
 	e = find(c, id);
 	err = copy_entry(c, e, p, n, info);
@@ -237,7 +271,8 @@ int ks_cache_get(struct ks_fs *f, stqr_object_id id, void **p, size_t *n, stqr_i
 		err = -ENODATA;
 		goto out;
 	}
-	if (e)
+	if(e && e->loading) {err=-ENODATA;goto out;}
+    if (e)
 		remove_entry(c, e);
 	if (c->fs->cache_budget < sizeof(*e)) {
 		err = -ENODATA;
@@ -251,6 +286,7 @@ int ks_cache_get(struct ks_fs *f, stqr_object_id id, void **p, size_t *n, stqr_i
 		mutex_unlock(&c->lock);
 		if (!e)
 			break;
+        if(e->loading){err=-ENODATA;goto out;}
 		remove_entry(c, e);
 	}
 	e = kzalloc(sizeof(*e), GFP_NOFS);
@@ -259,6 +295,7 @@ int ks_cache_get(struct ks_fs *f, stqr_object_id id, void **p, size_t *n, stqr_i
 		goto out;
 	}
 	e->id = id;
+    e->loading=true;
 	err = stqr_request_id(&e->subscription);
 	if (err) {
 		kfree(e);
@@ -267,11 +304,20 @@ int ks_cache_get(struct ks_fs *f, stqr_object_id id, void **p, size_t *n, stqr_i
 	mutex_lock(&c->lock);
 	list_add_tail(&e->lru, &c->lru);
 	hash_add(c->objects, &e->hash, object_hash(id));
+    hash_add(c->subscriptions,&e->subscription_hash,(u32)e->subscription.bytes[0]);
 	c->count++;
 	c->bytes += sizeof(*e);
 	mutex_unlock(&c->lock);
-	err = stqr_subscribe(c->client, id, e->subscription, 0, 0, 0, NULL, &raw, &size, &meta,
+	if(c->shared) {
+        struct ks_subscribe_result result={0};init_completion(&result.done);
+        err=stqr_subscribe_async(c->client,id,e->subscription,&cursor,subscribe_completed,&result);
+        mutex_unlock(cache_wire(c));
+        if(!err){wait_for_completion(&result.done);err=result.error;}
+        raw=result.data;size=result.size;meta=result.info;
+        mutex_lock(cache_wire(c));
+    }else err = stqr_subscribe(c->client, id, e->subscription, 0, 0, 0, NULL, &raw, &size, &meta,
 			     &cursor);
+    e->loading=false;
 	if (!err && size <= (1U << 20)) {
 		mutex_lock(&c->lock);
 		if (!e->early && c->available && size <= c->fs->cache_budget - c->bytes) {
@@ -296,7 +342,7 @@ int ks_cache_get(struct ks_fs *f, stqr_object_id id, void **p, size_t *n, stqr_i
 			err = -ENODATA;
 	}
 out:
-	mutex_unlock(&c->wire);
+	mutex_unlock(cache_wire(c));
 	return err;
 }
 static int reader(void *arg)
@@ -305,7 +351,7 @@ static int reader(void *arg)
 	while (!kthread_should_stop()) {
 		int n = 0;
 		unsigned budget = 128;
-		if (mutex_trylock(&c->wire)) {
+		if (mutex_trylock(cache_wire(c))) {
 			if (!c->available) {
 				/* Reauthentication restores capabilities after disconnect;
 				 * all old snapshots remain invalid and resubscribe on demand. */
@@ -323,7 +369,7 @@ static int reader(void *arg)
 			while (c->available && budget-- && !kthread_should_stop() &&
 			       (n = stqr_poll(c->client, 0)) > 0)
 				cond_resched();
-			mutex_unlock(&c->wire);
+			mutex_unlock(cache_wire(c));
 		}
 		if (n <= 0)
 			msleep_interruptible(READ_ONCE(c->available) ? 1 : 250);
@@ -343,15 +389,22 @@ int ks_cache_start(struct ks_fs *f, const char *user, const char *password, unsi
 	mutex_init(&c->lock);
 	mutex_init(&c->wire);
 	hash_init(c->objects);
+    hash_init(c->subscriptions);
 	INIT_LIST_HEAD(&c->lru);
-	err = stqr_dial(&c->client, f->url, user, password, f->bucket, "fs", timeout);
+	c->shared = f->rpc[0].receive_started &&
+        (stqr_capabilities(f->rpc[0].client) & STQR_CAP_CONNECTION_SYNC);
+    if (c->shared) { c->client = f->rpc[0].client; err = 0; }
+    else err = stqr_dial(&c->client, f->url, user, password, f->bucket, "fs", timeout);
 	if (err) {
 		kfree(c);
 		return err;
 	}
 	c->available = true;
-	stqr_set_update_handler(c->client, update, c);
+	mutex_lock(cache_wire(c));
+    stqr_set_update_handler(c->client, update, c);
+    mutex_unlock(cache_wire(c));
 	f->cache = c;
+    if (c->shared) return 0;
 	c->reader = kthread_run(reader, c, "kstqr-watch");
 	if (IS_ERR(c->reader)) {
 		err = PTR_ERR(c->reader);
@@ -371,8 +424,10 @@ void ks_cache_stop(struct ks_fs *f)
 		kthread_stop(c->reader);
 	WRITE_ONCE(f->stopping, true);
 	cancel_work_sync(&f->invalidation_work);
-	stqr_set_update_handler(c->client, NULL, NULL);
-	stqr_close(c->client);
+	mutex_lock(cache_wire(c));
+    stqr_set_update_handler(c->client, NULL, NULL);
+    mutex_unlock(cache_wire(c));
+    if (!c->shared) stqr_close(c->client);
 	list_for_each_entry_safe(e, next, &c->lru, lru)
 	{
 		sq_free(e->raw);
@@ -389,9 +444,9 @@ int ks_cache_mark(struct ks_fs *f, stqr_commit_mark *m)
 	memset(m, 0, sizeof(*m));
 	if (!c)
 		return 0;
-	mutex_lock(&c->wire);
+	mutex_lock(cache_wire(c));
 	err = stqr_pending_mark(c->client, m);
-	mutex_unlock(&c->wire);
+	mutex_unlock(cache_wire(c));
 	return err;
 }
 void ks_cache_note_durable(struct ks_fs *f, const stqr_commit_mark *m)
@@ -399,9 +454,9 @@ void ks_cache_note_durable(struct ks_fs *f, const stqr_commit_mark *m)
 	struct ks_cache *c = f->cache;
 	if (!c)
 		return;
-	mutex_lock(&c->wire);
+	mutex_lock(cache_wire(c));
 	stqr_note_durable(c->client, m);
-	mutex_unlock(&c->wire);
+	mutex_unlock(cache_wire(c));
 }
 
 int ks_cache_fence_add(struct ks_fs *f, stqr_fence *fence)
@@ -409,16 +464,16 @@ int ks_cache_fence_add(struct ks_fs *f, stqr_fence *fence)
  struct ks_cache *c = f->cache;
  int err;
  if (!c) return 0;
- mutex_lock(&c->wire);
+ mutex_lock(cache_wire(c));
  err = stqr_fence_add(c->client, fence);
- mutex_unlock(&c->wire);
+ mutex_unlock(cache_wire(c));
  return err;
 }
 void ks_cache_fence_apply(struct ks_fs *f, const stqr_fence *fence)
 {
  struct ks_cache *c = f->cache;
  if (!c) return;
- mutex_lock(&c->wire);
+ mutex_lock(cache_wire(c));
  stqr_fence_apply(c->client, fence);
- mutex_unlock(&c->wire);
+ mutex_unlock(cache_wire(c));
 }
