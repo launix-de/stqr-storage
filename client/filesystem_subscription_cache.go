@@ -17,6 +17,7 @@ import (
 // second whole-file cache beside the kernel page cache.
 type SubscriptionStore struct {
 	accepted bool
+	deferred bool
 
 	client          *Client
 	life            context.Context
@@ -54,6 +55,7 @@ func (c *SubscriptionStore) backend(ctx context.Context) (context.Context, func(
 	if c.life.Err() != nil {
 		return nil, nil, ErrClosed
 	}
+	ctx = c.filesystemContext(ctx)
 	merged, cancel := context.WithCancel(context.WithValue(ctx, filesystemWaitKey{}, true))
 	stop := context.AfterFunc(c.life, cancel)
 	return merged, func() { stop(); cancel() }, nil
@@ -81,8 +83,8 @@ func (c *SubscriptionStore) Get(ctx context.Context, id ObjectID) ([]byte, Objec
 	}
 	// Intent decisions and marker ownership must be observed from the owner,
 	// even if the subscription push on another socket has not arrived yet.
-	durable, _ := ctx.Value(fsDurableKey{}).(bool)
-	if disabled || durable {
+	fresh, _ := ctx.Value(fsFreshReadKey{}).(bool)
+	if disabled || fresh {
 		return c.readUncached(ctx, id)
 	}
 	attempts := 0
@@ -320,11 +322,7 @@ func (c *SubscriptionStore) CAS(ctx context.Context, id ObjectID, off uint64, ex
 		return ObjectInfo{}, err
 	}
 	defer release()
-	if durable, _ := ctx.Value(fsDurableKey{}).(bool); durable {
-		opt.Accepted = false
-	} else {
-		opt.Accepted = opt.Accepted || c.accepted
-	}
+	opt.Accepted = opt.Accepted || c.acceptedWrites()
 	info, err := c.client.CAS(ctx, id, off, expected, replacement, opt)
 	// A failed precondition may race an update on another socket. Drop that
 	// snapshot now, rather than spinning CAS retries against a stale local copy.
@@ -415,58 +413,54 @@ func (o *OverlayFilesystem) subscribed(id ObjectID, proof SnapshotProof) bool {
 
 // EnableAcceptedWrites opts this filesystem wrapper into weaker write ACKs.
 // Unsupported nodes retain the durable path. Call Sync at filesystem barriers.
-func (c *SubscriptionStore) EnableAcceptedWrites()          { c.accepted = true }
+func (c *SubscriptionStore) EnableAcceptedWrites()          { c.mu.Lock(); c.accepted = true; c.mu.Unlock() }
 func (c *SubscriptionStore) Sync(ctx context.Context) error { return c.client.Sync(ctx) }
 
 func (c *SubscriptionStore) PinObject(ctx context.Context, id ObjectID, token ID) error {
-	return c.client.PinObject(ctx, id, token)
+	return c.client.PinObject(c.filesystemContext(ctx), id, token)
 }
 func (c *SubscriptionStore) ObjectReferencesSupported() bool {
 	return c.client.ObjectReferencesSupported()
 }
 func (c *SubscriptionStore) PinObjectDependency(ctx context.Context, id ObjectID, token ID) error {
-	return c.client.PinObjectDependency(ctx, id, token)
+	return c.client.PinObjectDependency(c.filesystemContext(ctx), id, token)
 }
 func (c *SubscriptionStore) UnpinObjectDependency(ctx context.Context, id ObjectID, token ID) error {
-	return c.client.UnpinObjectDependency(ctx, id, token)
+	return c.client.UnpinObjectDependency(c.filesystemContext(ctx), id, token)
 }
 func (c *SubscriptionStore) ReadObjectDependencies(ctx context.Context) ([]ObjectID, error) {
 	return c.client.ReadObjectDependencies(ctx)
 }
 func (c *SubscriptionStore) ResetAbandonedObjectReferences(ctx context.Context) error {
-	return c.client.ResetAbandonedObjectReferences(ctx)
+	return c.client.ResetAbandonedObjectReferences(c.filesystemContext(ctx))
 }
 func (c *SubscriptionStore) CanReclaimDependencies(ctx context.Context) (bool, error) {
 	if proof, ok := any(c.client).(interface {
 		CanReclaimDependencies(context.Context) (bool, error)
 	}); ok {
-		return proof.CanReclaimDependencies(ctx)
+		return proof.CanReclaimDependencies(c.filesystemContext(ctx))
 	}
 	return false, nil
 }
 func (c *SubscriptionStore) UnpinObject(ctx context.Context, id ObjectID, token ID) error {
-	return c.client.UnpinObject(ctx, id, token)
+	return c.client.UnpinObject(c.filesystemContext(ctx), id, token)
 }
 func (c *SubscriptionStore) ClaimObjectRetirement(ctx context.Context, id ObjectID, token ID) error {
-	return c.client.ClaimObjectRetirement(ctx, id, token)
+	return c.client.ClaimObjectRetirement(c.filesystemContext(ctx), id, token)
 }
 func (c *SubscriptionStore) ReleaseObjectRetirement(ctx context.Context, id ObjectID, token ID) error {
-	return c.client.ReleaseObjectRetirement(ctx, id, token)
+	return c.client.ReleaseObjectRetirement(c.filesystemContext(ctx), id, token)
 }
 
 // Payload mutations retain their stable OID. Only inode/index snapshots belong
-// in this cache; ranged writes use the native path and durable REDO ordering.
+// in this cache; ranged writes use native accepted visibility and explicit Sync.
 func (c *SubscriptionStore) PutRange(ctx context.Context, id ObjectID, off uint64, data []byte, opt PutOptions) (ObjectInfo, error) {
 	ctx, release, err := c.backend(ctx)
 	if err != nil {
 		return ObjectInfo{}, err
 	}
 	defer release()
-	if durable, _ := ctx.Value(fsDurableKey{}).(bool); durable {
-		opt.Accepted = false
-	} else {
-		opt.Accepted = opt.Accepted || c.accepted
-	}
+	opt.Accepted = opt.Accepted || c.acceptedWrites()
 	info, err := c.client.PutRange(ctx, id, off, data, opt)
 	c.remove(id, nil)
 	return info, err
@@ -485,7 +479,13 @@ func (c *SubscriptionStore) Delete(ctx context.Context, id ObjectID, opt DeleteO
 		return err
 	}
 	defer release()
+	opt.Accepted = opt.Accepted || c.acceptedWrites()
 	err = c.client.Delete(ctx, id, opt)
 	c.remove(id, nil)
 	return err
+}
+
+// ConcurrentObjectRequests inherits the underlying negotiated transport support.
+func (c *SubscriptionStore) ConcurrentObjectRequests() bool {
+	return c.client.ConcurrentObjectRequests()
 }

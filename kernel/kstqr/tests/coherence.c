@@ -51,7 +51,8 @@ int main(int argc, char **argv)
     control(argv[1], "online-reclaimed");
     memset(content, 0, sizeof(content)); strcpy(content, "before");
     puts("kstqr: last readonly close reclaims inode/data/index without fsck");
-    /* Exercise the 1 MiB durable write path and an unaligned replacement. */
+    /* Exercise the 1 MiB visible write path and an unaligned replacement;
+     * persistence is requested by the explicit fsync below. */
     char *large = malloc(2U << 20); REQUIRE(large); memset(large,'L',2U << 20);
     fd = open("/mnt/subscription-large",O_CREAT|O_TRUNC|O_RDWR,0600); REQUIRE(fd >= 0);
     REQUIRE(write(fd,large,2U<<20) == (2U<<20));

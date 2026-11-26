@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
-/* Durable canonical lower anchors; shared STLA ledger with the Go client. */
+/* Canonical lower anchors; shared STLA ledger with the Go client. Accepted
+ * completion publishes them; only an explicit filesystem sync persists them. */
 static int anchor_reserve(struct ks_fs *f, stqr_object_id owner, stqr_object_id target,
 			  stqr_id *token)
 {

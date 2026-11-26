@@ -82,6 +82,7 @@ func OpenOverlayFilesystem(ctx context.Context, lowerStore, upperStore Filesyste
 		return nil, err
 	}
 	o := &OverlayFilesystem{lower: lower, lowerID: opt.LowerBucketID, paths: map[ObjectID]string{}}
+	upperStore = filesystemDeferredStore(upperStore)
 	o.upper = &Filesystem{directoryCache: newFilesystemDirectoryCache(), store: upperStore, lower: lower, directoryMemoryLimit: 64 << 20}
 	o.upper.orphanCollector = o.CollectOrphans
 	_, _, _, err = o.state(ctx)
@@ -672,11 +673,7 @@ func (o *OverlayFilesystem) copyUp(ctx context.Context, id ObjectID) error {
 		if n.kind != fsFile {
 			return syscall.EISDIR
 		}
-		if syncer, ok := o.lower.store.(interface{ Sync(context.Context) error }); ok {
-			if err := syncer.Sync(ctx); err != nil {
-				return err
-			}
-		}
+
 		n.blob.lower = n.blob.root != (ObjectID{})
 		if n.blob.lower {
 			n.blob.lowerOwner = id
@@ -841,6 +838,8 @@ func cloneOverlayState(s *overlayState) *overlayState {
 }
 func filesystemStoreBucket(store FilesystemStore) (BucketID, bool) {
 	switch c := store.(type) {
+	case *filesystemNativeStore:
+		return filesystemStoreBucket(c.Client)
 	case *Client:
 		if c == nil {
 			return BucketID{}, true

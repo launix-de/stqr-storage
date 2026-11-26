@@ -568,7 +568,7 @@ func (s *Server) replicaPeerMessage(m client.Message, actor client.ID) ([]byte, 
 		result, err := h.PublishReplica(header.Request.ID, header.Binding)
 		if err == nil && s.objectSubscriptions.watched(header.Request.Key) {
 			if !record.IsSnapshot() {
-				s.objectSubscriptions.publish(header.Request.Key, result.Info, h)
+				s.objectSubscriptions.publish(header.Request.Key, result.Info, h, v)
 			}
 		}
 		return nil, err
@@ -772,7 +772,7 @@ func (r *replicaManager) start() {
 								if e == nil {
 									published = true
 									if !current.IsSnapshot() {
-										s.objectSubscriptions.publish(record.Request.Key, result.Info, h)
+										s.objectSubscriptions.publish(record.Request.Key, result.Info, h, v)
 									}
 								}
 							}

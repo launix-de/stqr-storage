@@ -30,7 +30,12 @@ type S3Store interface {
 }
 type S3 struct{ store S3Store }
 
-func NewS3(store S3Store) *S3 { return &S3{store: store} }
+func NewS3(store S3Store) *S3 {
+	if fs, ok := store.(*filesystemNativeStore); ok {
+		store = fs.Client
+	}
+	return &S3{store: store}
+}
 
 type S3Object struct {
 	PublicRead    bool
@@ -188,7 +193,7 @@ func (s *S3) Put(ctx context.Context, key string, src io.Reader, size uint64, op
 		if _, err = staged.Seek(0, io.SeekStart); err != nil {
 			return o, err
 		}
-		_, e := s.store.PutFrom(ctx, o.Payload, io.MultiReader(strings.NewReader(string(raw)), staged), uint64(len(raw))+size, *opt.Publication)
+		_, e := s.store.PutFrom(ctx, o.Payload, io.MultiReader(strings.NewReader(string(raw)), staged), uint64(len(raw))+size, durableS3Publication(*opt.Publication))
 		o.header = append([]byte(nil), raw...)
 		o.PayloadOffset = uint64(len(raw))
 		return o, e
@@ -308,3 +313,5 @@ func (s *S3) List(ctx context.Context, prefix string) ([]S3Object, error) {
 }
 
 func uint64Pointer(n uint64) *uint64 { return &n }
+
+func durableS3Publication(opt PutOptions) PutOptions { opt.Accepted = false; return opt }

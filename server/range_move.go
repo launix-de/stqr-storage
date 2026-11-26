@@ -3,6 +3,7 @@ package server
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -270,6 +271,8 @@ func (r *rangeManager) announce(p rangePlan, c rangeCommit) {
 	}
 }
 
+// Reclamation is background work. Scan bounded index pages and publish one
+// batch per lock hold; wait for its durability outside node and volume locks.
 func (r *rangeManager) cleanup(ctx context.Context, p rangePlan) error {
 	if p.ReplicaAdd || p.ReplicaRemove || p.ReplicaPromote || p.ReplicaRelocate {
 		return nil
@@ -278,60 +281,74 @@ func (r *rangeManager) cleanup(ctx context.Context, p rangePlan) error {
 	for _, v := range r.sourceVolumes(p) {
 		var after *volume.ObjectID
 		for {
-			var records []volume.ObjectRecord
-			err := r.cleanupPage(ctx, p, v, func(h *volume.Handle) (err error) {
-				records, err = p.scanObjects(h, after, pageSize)
-				if err != nil || len(records) == 0 {
-					return err
-				}
-				return h.PurgeBatch(records)
-			})
+			if err := r.server.waitForUserIO(ctx); err != nil {
+				return err
+			}
+			h, err := v.Open(false)
+			if err != nil {
+				return err
+			}
+			records, err := p.scanObjects(h, after, pageSize)
+			h.Close()
 			if err != nil {
 				return err
 			}
 			if len(records) == 0 {
 				break
 			}
-			next := records[len(records)-1].Key.Object
-			after = &next
+			var obsolete []volume.ObjectRecord
+			for _, record := range records {
+				if p.contains(record.Key.Object) {
+					obsolete = append(obsolete, record)
+				}
+			}
+			if len(obsolete) > 0 {
+				if err := r.cleanupBatch(ctx, p, v, obsolete, nil); err != nil {
+					return err
+				}
+			}
+			last := records[len(records)-1].Key.Object
+			after = &last
 		}
-		var requestAfter *volume.ID
+		var cursor *volume.ID
 		for {
-			var records []volume.RequestRecord
-			err := r.cleanupPage(ctx, p, v, func(h *volume.Handle) (err error) {
-				records, err = h.ScanRequestRecords(requestAfter, 128)
-				if err != nil || len(records) == 0 {
-					return err
-				}
-				var remove []volume.ID
-				for _, record := range records {
-					if record.Key.Bucket == volume.ID(p.Before.Bucket) && p.contains(record.Key.Object) {
-						remove = append(remove, record.ID)
-					}
-				}
-				if len(remove) == 0 {
-					return nil
-				}
-				return h.ForgetRequests(remove)
-			})
+			if err := r.server.waitForUserIO(ctx); err != nil {
+				return err
+			}
+			h, err := v.Open(false)
+			if err != nil {
+				return err
+			}
+			records, err := h.ScanRequestRecords(cursor, 128)
+			h.Close()
 			if err != nil {
 				return err
 			}
 			if len(records) == 0 {
 				break
 			}
-			next := records[len(records)-1].ID
-			requestAfter = &next
+			var ids []volume.ID
+			for _, record := range records {
+				if record.Key.Bucket == volume.ID(p.Before.Bucket) && p.contains(record.Key.Object) {
+					ids = append(ids, record.ID)
+				}
+			}
+			if len(ids) > 0 {
+				if err := r.cleanupBatch(ctx, p, v, nil, ids); err != nil {
+					return err
+				}
+			}
+			last := records[len(records)-1].ID
+			cursor = &last
 		}
 	}
 	return nil
 }
 
-// Scope priority and locks to one local page, never to the complete sweep.
-// Revalidate the ownership fence before every atomic physical deletion batch.
-func (r *rangeManager) cleanupPage(ctx context.Context, p rangePlan, v *volume.Volume, work func(*volume.Handle) error) error {
-	// Give an unfinished bucket purge a bounded turn after releasing this page's
-	// locks and priority. Polling alone can miss every inter-page idle window.
+// Scope rebuild priority to one bounded page and revalidate authority under
+// opMu before every deletion, but checkpoint only after releasing both locks.
+func (r *rangeManager) cleanupBatch(ctx context.Context, p rangePlan, v *volume.Volume, objects []volume.ObjectRecord, ids []volume.ID) error {
+	// Give unfinished bucket deletions a bounded turn between cleanup pages.
 	defer r.server.reclaimBucketStep()
 	if err := ctx.Err(); err != nil {
 		return err
@@ -341,20 +358,74 @@ func (r *rangeManager) cleanupPage(ctx context.Context, p rangePlan, v *volume.V
 		return err
 	}
 	defer end()
-	r.server.opMu.Lock()
-	defer r.server.opMu.Unlock()
-	if err := ctx.Err(); err != nil {
-		return err
+	for {
+		if err := r.server.waitForUserIO(ctx); err != nil {
+			return err
+		}
+		r.server.opMu.Lock()
+		if err := r.cleanupAllowed(p); err != nil {
+			r.server.opMu.Unlock()
+			return err
+		}
+		if generation, pending := v.PendingCheckpoint(true, 0); pending {
+			r.server.opMu.Unlock()
+			if err := v.CheckpointThrough(generation); err != nil {
+				return err
+			}
+			continue
+		}
+		h, acquired, err := v.TryOpenBuffered()
+		if err != nil {
+			r.server.opMu.Unlock()
+			return err
+		}
+		if !acquired {
+			r.server.opMu.Unlock()
+			if err := v.CheckpointThrough(0); err != nil {
+				return err
+			}
+			continue
+		}
+		var generation uint64
+		if len(objects) > 0 {
+			generation, err = h.PurgeBatchAccepted(objects)
+		} else {
+			generation, err = h.ForgetRequestsAccepted(ids)
+		}
+		h.Close()
+		r.server.opMu.Unlock()
+		if errors.Is(err, volume.ErrBusy) || errors.Is(err, volume.ErrFull) {
+			// Flush an earlier buffer outside node admission. If no buffer can
+			// fit (tiny/full volume), bounded cleanup uses the existing WAL.
+			generation, _ := v.PendingCheckpoint(false, 0)
+			if !v.IsDurableThrough(generation) {
+				if err := v.CheckpointThrough(generation); err != nil {
+					return err
+				}
+				continue
+			}
+			r.server.opMu.Lock()
+			if err := r.cleanupAllowed(p); err != nil {
+				r.server.opMu.Unlock()
+				return err
+			}
+			h, err := v.Open(true)
+			if err == nil {
+				if len(objects) > 0 {
+					err = h.PurgeBatch(objects)
+				} else {
+					err = h.ForgetRequests(ids)
+				}
+				h.Close()
+			}
+			r.server.opMu.Unlock()
+			return err
+		}
+		if err != nil {
+			return err
+		}
+		return v.CheckpointThrough(generation)
 	}
-	if err := r.cleanupAllowed(p); err != nil {
-		return err
-	}
-	h, err := v.Open(true)
-	if err != nil {
-		return err
-	}
-	defer h.Close()
-	return work(h)
 }
 
 // The scan is advisory. Recheck authority under opMu immediately before each

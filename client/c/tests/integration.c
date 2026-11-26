@@ -24,6 +24,25 @@ struct fence_waiter { stqr_fence *fence; int error; };
 static void *wait_fence(void *arg) {
  struct fence_waiter *w=arg; w->error=stqr_fence_wait(w->fence); return NULL;
 }
+struct async_result {
+    unsigned done;
+    int error,status;
+    void *data;
+    size_t size;
+};
+static void async_completed(void *arg,int error,int status,void *data,size_t size,const stqr_info *info) {
+    struct async_result *result=arg;(void)info;
+    result->done++;result->error=error;result->status=status;
+    result->data=data;result->size=size;
+}
+static void async_wait(stqr_client *c,struct async_result *results,unsigned count) {
+    for(unsigned tries=0;tries<300;tries++) {
+        unsigned done=0;for(unsigned i=0;i<count;i++)done+=results[i].done;
+        if(done==count)return;
+        CHECK(stqr_poll(c,100)>=0);
+    }
+    CHECK(!"asynchronous completion timeout");
+}
 int main(void) {
     stqr_client *c = NULL;
     stqr_id bucket = {{0}};
@@ -43,6 +62,126 @@ int main(void) {
     CHECK(!stqr_parse_id(getenv("STQR_TEST_BUCKET"), &bucket));
     CHECK(!stqr_parse_object_id("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", &id));
     CHECK(!stqr_dial(&c, url, getenv("STQR_TEST_USER"), getenv("STQR_TEST_PASSWORD"), bucket,"fs", 3000));
+    if (mode && !strcmp(mode,"legacy-reconnect")) {
+        stqr_commit_mark mark;
+        CHECK(!(stqr_capabilities(c)&STQR_CAP_CONNECTION_SYNC));
+        o=fresh();o.accepted=1;CHECK(!stqr_put(c,id,"hello",5,&o,&info));
+        CHECK(!stqr_pending_mark(c,&mark)&&mark.sequence==7);
+        CHECK(!stqr_reconnect(c));
+        CHECK(!stqr_pending_mark(c,&mark)&&mark.sequence==7);
+        CHECK(!stqr_sync(c));CHECK(!stqr_pending_mark(c,&mark)&&!mark.sequence);
+        stqr_close(c);puts("legacy reconnect confirms retained mark through SyncThrough");return 0;
+    }
+    if (mode && !strcmp(mode,"accepted-cas-reconnect")) {
+        struct async_result result={0},fence={0};stqr_commit_mark mark;
+        o=fresh();CHECK(!stqr_put(c,id,"before",6,&o,&info));
+        o=fresh();o.accepted=1;
+        CHECK(!stqr_cas_async(c,id,1,0,"before",6,"after",5,&o,async_completed,&result));
+        async_wait(c,&result,1);CHECK(!result.error);CHECK(!stqr_async_pending(c));
+        CHECK(!stqr_pending_mark(c,&mark)&&mark.sequence);
+        CHECK(!stqr_reconnect(c));
+        CHECK(stqr_connection_sync_async(c,async_completed,&fence)==-ESTALE);
+        CHECK(stqr_sync(c)==-ESTALE);CHECK(!fence.done);
+        /* Filesystem opt-in keeps live accepted visibility after uncertainty,
+         * while explicit persistence confirmation must remain ESTALE. */
+        stqr_set_accepted_references(c,1);memset(&result,0,sizeof(result));
+        o=fresh();o.accepted=1;
+        CHECK(!stqr_cas_async(c,id,1,0,"after",5,"visible",7,&o,async_completed,&result));
+        async_wait(c,&result,1);CHECK(!result.error);
+        CHECK(!stqr_get(c,id,&data,&n,&info));CHECK(n==7&&!memcmp(data,"visible",7));stqr_free(data);
+        CHECK(stqr_sync(c)==-ESTALE);
+        stqr_close(c);puts("accepted CAS reconnect preserves uncertain prefix");return 0;
+    }
+    if (mode && !strcmp(mode,"async-close")) {
+        struct async_result pending={0};
+        o=fresh();CHECK(!stqr_put_async(c,id,"unfenced",8,&o));
+        CHECK(!stqr_get_async(c,id,async_completed,&pending));
+        stqr_close(c);CHECK(pending.done&&pending.error);stqr_free(pending.data);
+        puts("C close cancelled pending work without a connection fence");return 0;
+    }
+    if (mode && !strcmp(mode,"async-progress")) {
+        struct async_result fence={0},read={0};
+        o=fresh();CHECK(!stqr_put_async(c,id,"hello",5,&o));
+        CHECK(!stqr_connection_sync_async(c,async_completed,&fence));
+        CHECK(!stqr_stat_async(c,id,async_completed,&read));
+        async_wait(c,&read,1);CHECK(!read.error);CHECK(!fence.done);
+        puts("READ_BEFORE_FENCE");fflush(stdout);
+        async_wait(c,&fence,1);CHECK(!fence.error);
+        stqr_close(c);puts("C same-socket read progressed during checkpoint");return 0;
+    }
+    if (mode && !strcmp(mode,"async")) {
+        enum { N=32 };
+        stqr_object_id ids[N];struct async_result result[N],fence={0};
+        CHECK(stqr_capabilities(c)&STQR_CAP_CONNECTION_SYNC);
+        for(unsigned i=0;i<N;i++) {
+            unsigned char payload[128];memset(payload,(int)i,sizeof(payload));
+            ids[i]=id;ids[i].bytes[0]=(unsigned char)i;
+            o=fresh();CHECK(!stqr_put_async(c,ids[i],payload,sizeof(payload),&o));
+        }
+        CHECK(stqr_async_pending(c)==N);
+        CHECK(!stqr_connection_sync_async(c,async_completed,&fence));
+        async_wait(c,&fence,1);CHECK(!fence.error&&fence.status==200);
+        CHECK(!stqr_async_pending(c));
+        memset(result,0,sizeof(result));
+        for(unsigned i=0;i<N;i++)CHECK(!stqr_get_async(c,ids[i],async_completed,&result[i]));
+        CHECK(stqr_async_pending(c)==N);
+        /* A legacy blocking wrapper must dispatch unrelated completed IDs. */
+        CHECK(!stqr_stat(c,ids[0],&info));
+        async_wait(c,result,N);
+        for(unsigned i=0;i<N;i++) {
+            unsigned char payload[128];memset(payload,(int)i,sizeof(payload));
+            CHECK(!result[i].error&&result[i].size==sizeof(payload));
+            CHECK(!memcmp(result[i].data,payload,sizeof(payload)));stqr_free(result[i].data);
+        }
+        memset(result,0,sizeof(result));
+        for(unsigned i=0;i<N;i++) {
+            unsigned char before[128],after[128];memset(before,(int)i,sizeof(before));memset(after,(int)(i+1),sizeof(after));
+            o=fresh();o.accepted=1;
+            CHECK(!stqr_cas_async(c,ids[i],1,0,before,sizeof(before),after,sizeof(after),&o,async_completed,&result[i]));
+        }
+        async_wait(c,result,N);
+        for(unsigned i=0;i<N;i++)CHECK(!result[i].error);
+        CHECK(!stqr_sync(c));
+        {
+            stqr_id sid[8];stqr_u64 cursor[8];
+            memset(result,0,sizeof(result));
+            for(unsigned i=0;i<8;i++) {
+                CHECK(!stqr_request_id(&sid[i]));cursor[i]=0;
+                CHECK(!stqr_subscribe_async(c,ids[i],sid[i],&cursor[i],async_completed,&result[i]));
+            }
+            async_wait(c,result,8);
+            for(unsigned i=0;i<8;i++) {
+                CHECK(!result[i].error&&cursor[i]&&result[i].size==128);
+                CHECK(((unsigned char *)result[i].data)[0]==i+1);stqr_free(result[i].data);
+            }
+            memset(result,0,sizeof(result));
+            for(unsigned i=0;i<8;i++)CHECK(!stqr_unsubscribe_async(c,sid[i],async_completed,&result[i]));
+            async_wait(c,result,8);for(unsigned i=0;i<8;i++)CHECK(!result[i].error);
+        }
+        /* A rejected no-ACK write must remain visible at its connection fence. */
+        o=fresh();o.absent=1;CHECK(!stqr_put_async(c,ids[0],"wrong",5,&o));
+        memset(&fence,0,sizeof(fence));CHECK(!stqr_connection_sync_async(c,async_completed,&fence));
+        async_wait(c,&fence,1);CHECK(fence.error&&fence.status>=400);
+        CHECK(!stqr_async_pending(c));stqr_close(c);
+        puts("C asynchronous multiplexing, no-ACK writes and connection fences passed");return 0;
+    }
+    if (mode && !strcmp(mode,"accepted-references")) {
+        stqr_id pin,claim;stqr_commit_mark mark;struct async_result result={0};
+        CHECK(stqr_capabilities(c)&STQR_CAP_ACCEPTED_REFERENCES);
+        stqr_set_accepted_references(c,1);
+        CHECK(!stqr_request_id(&pin)&&!stqr_request_id(&claim));
+        CHECK(!stqr_object_reference_async(c,id,pin,0,async_completed,&result));
+        async_wait(c,&result,1);CHECK(!result.error);
+        CHECK(!stqr_pending_mark(c,&mark)&&mark.sequence);
+        CHECK(!stqr_sync(c));CHECK(!stqr_reconnect(c));
+        /* Mode survives reconnect; every endpoint checks its own capability. */
+        CHECK(!stqr_object_unpin(c,id,pin));
+        CHECK(!stqr_pending_mark(c,&mark)&&mark.sequence);
+        CHECK(!stqr_object_claim(c,id,claim));
+        CHECK(!stqr_object_release_claim(c,id,claim));
+        CHECK(!stqr_sync(c));CHECK(!stqr_pending_mark(c,&mark)&&!mark.sequence);
+        stqr_close(c);puts("C accepted reference receipts and explicit fences passed");return 0;
+    }
     if (mode && !strcmp(mode,"references")) {
         stqr_client *other=NULL;
         stqr_id pin, claim, second;
@@ -187,8 +326,8 @@ int main(void) {
             CHECK(!stqr_sync(c));
         }
         {
-            /* Routing a subscription must retain, not checkpoint, an accepted
-             * dependency. The subsequent cross-owner publication fences it. */
+            /* Routing a subscription retains an accepted dependency. The format
+             * client explicitly fences before publishing on another owner. */
             stqr_object_id left={{1}},right={{0x81}};
             stqr_id sid; stqr_u64 cursor; stqr_commit_mark before,after; stqr_fence *retained=NULL;
             o=fresh();o.accepted=1;CHECK(!stqr_put(c,left,"volatile",8,&o,&info));
@@ -198,7 +337,9 @@ int main(void) {
             CHECK(!stqr_fence_capture(c,&retained) && stqr_fence_count(retained)==1);
             stqr_fence_close(retained);
             CHECK(!stqr_unsubscribe(c,sid));
+            CHECK(!stqr_sync(c));
             o=fresh();CHECK(!stqr_put(c,right,"dependent",9,&o,&info));
+            CHECK(!stqr_sync(c));
             CHECK(!stqr_pending_mark(c,&after) && !after.sequence);
         }
         {

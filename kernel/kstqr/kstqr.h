@@ -10,17 +10,22 @@
 int ks_transport_start(void);
 void ks_transport_stop(void);
 void ks_queue_fence_work(struct work_struct *);
-#define KS_RPC_SLOTS 4
+#define KS_RPC_SLOTS 1
 struct ks_fs;
 bool ks_transport_retryable(stqr_client *, int);
 int ks_reconnect_wait(struct ks_fs *, stqr_client *);
 struct ks_cache;
 struct ks_overlay_state;
 struct ks_rpc {
+    struct ks_fs *fs;
 	struct mutex lock;
 	stqr_client *client;
-
+	struct work_struct receive;
+	bool receive_started;
 };
+void ks_rpc_start(struct ks_rpc *, struct ks_fs *);
+void ks_rpc_stop(struct ks_rpc *);
+
 #define KS_DIR_LIMIT (16U << 20)
 struct ks_edit;
 /* Runtime-only cache identities. These fields are never encoded in STFS/STOR. */
@@ -109,6 +114,7 @@ struct ks_inode {
 	struct ks_cache_stamp data_stamp;
 	struct ks_directory_proof directory_proof;
 	struct mutex metadata_lock;
+    struct mutex writeback_publish_lock;
 	struct list_head mount_list;
 	u64 invalidated_generation;
 	stqr_proof proof;
@@ -147,6 +153,7 @@ void ks_cache_note_durable(struct ks_fs *, const stqr_commit_mark *);
 struct ks_rpc *ks_rpc_lock(struct ks_fs *, stqr_object_id);
 int ks_cache_start(struct ks_fs *, const char *, const char *, unsigned);
 void ks_cache_stop(struct ks_fs *);
+void ks_cache_reconnected(struct ks_fs *);
 int ks_cache_peek(struct ks_fs *, stqr_object_id, void **, size_t *, stqr_info *);
 int ks_snapshot_cached(struct ks_fs *, stqr_object_id, struct ks_snapshot *);
 int ks_cache_get(struct ks_fs *, stqr_object_id, void **, size_t *, stqr_info *);
