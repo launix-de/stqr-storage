@@ -216,7 +216,10 @@ class NativeSessions:
                 self.release(item, only_unclaimed=True)
 
     def close(self):
-        self.closed.set()
+        # Publish stop under the same lock as the final allocation handoff.
+        # A provisioner returning later rolls back instead of issuing a token.
+        with self.lock:
+            self.closed.set()
         self.reaper.join()
         with self.lock:
             items = list(self.items.values())
