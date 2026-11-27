@@ -111,6 +111,7 @@ type rangeManager struct {
 	journal          *controlJournal
 	node             client.ID
 	txns             map[[32]byte]*rangeTxn
+	activeTxns       map[volume.ID]map[[32]byte]*rangeTxn
 	order            [][32]byte
 	initialized      bool
 	memoCursor       *volume.Key
@@ -120,7 +121,7 @@ type rangeManager struct {
 func (s *Server) initRanges(dataDir string) error {
 	node, _ := parseID(s.cfg.Node.ID)
 	cluster, _ := parseID(s.cfg.ClusterID)
-	r := &rangeManager{server: s, node: client.ID(node), txns: make(map[[32]byte]*rangeTxn), capacityWake: make(chan struct{}, 1)}
+	r := &rangeManager{server: s, node: client.ID(node), txns: make(map[[32]byte]*rangeTxn), activeTxns: make(map[volume.ID]map[[32]byte]*rangeTxn), capacityWake: make(chan struct{}, 1)}
 	if s.cfg.RangeVersion > 1 {
 		return volume.ErrUnsupported
 	}
@@ -351,6 +352,7 @@ func (r *rangeManager) replay(record controlRecord) error {
 	default:
 		return volume.ErrCorrupt
 	}
+	r.updateActiveTxnLocked(event.ID)
 	return nil
 }
 func (r *rangeManager) validCommit(t *rangeTxn, c rangeCommit, observed bool) bool {
@@ -834,10 +836,47 @@ func (r *rangeManager) done(id [32]byte, targetProof *client.Proof) (client.Proo
 	return r.persist(rangeSourceDone, rangeEvent{ID: id, TargetDone: *targetProof})
 }
 
+// activeBucketLocked is a routing index, not a second authority record.
+// Historical transactions stay in txns for proof replay and peer catch-up.
+// All activity-changing fields are written by replay, which updates this index
+// before releasing r.mu. The one-time build also supports recovered managers.
+func (r *rangeManager) activeBucketLocked(bucket volume.ID) map[[32]byte]*rangeTxn {
+	if r.activeTxns == nil {
+		r.activeTxns = make(map[volume.ID]map[[32]byte]*rangeTxn)
+		for id := range r.txns {
+			r.updateActiveTxnLocked(id)
+		}
+	}
+	return r.activeTxns[bucket]
+}
+
+func (r *rangeManager) updateActiveTxnLocked(id [32]byte) {
+	if r.activeTxns == nil {
+		// No readers have built the derived index yet. Replay need not scan history.
+		return
+	}
+	txn := r.txns[id]
+	if txn == nil {
+		return
+	}
+	bucket := volume.ID(txn.plan.Before.Bucket)
+	if !r.active(txn) {
+		delete(r.activeTxns[bucket], id)
+		if len(r.activeTxns[bucket]) == 0 {
+			delete(r.activeTxns, bucket)
+		}
+		return
+	}
+	if r.activeTxns[bucket] == nil {
+		r.activeTxns[bucket] = make(map[[32]byte]*rangeTxn)
+	}
+	r.activeTxns[bucket][id] = txn
+}
+
 func (r *rangeManager) guard(bucket volume.ID, object volume.ObjectID) (func(), error) {
 	r.mu.Lock()
 	var active []*rangeTxn
-	for _, t := range r.txns {
+	for _, t := range r.activeBucketLocked(bucket) {
 		if r.active(t) && volume.ID(t.plan.Before.Bucket) == bucket && t.plan.contains(object) {
 			active = append(active, t)
 		}
@@ -864,7 +903,7 @@ func (r *rangeManager) guard(bucket volume.ID, object volume.ObjectID) (func(), 
 func (r *rangeManager) incoming(bucket volume.ID, object volume.ObjectID) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	for _, t := range r.txns {
+	for _, t := range r.activeBucketLocked(bucket) {
 		if !t.plan.ReplicaRemove && !t.plan.ReplicaPromote && !t.plan.ReplicaRelocate && r.active(t) && t.plan.Target == r.node && t.plan.Source != r.node && t.decision == nil && volume.ID(t.plan.Before.Bucket) == bucket && t.plan.contains(object) {
 			return true
 		}
