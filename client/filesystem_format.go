@@ -385,7 +385,7 @@ func decodeFSIndex(data []byte, length uint64, depth uint8) ([]fsSegment, error)
 		} else {
 			s.offset = uint64(d.U32())
 		}
-		if s.length == 0 || s.length > length-total || s.offset > math.MaxInt64 || s.length > math.MaxInt64-s.offset || (depth > 1 && (s.offset != 0 || s.lower)) || (s.id == (ObjectID{}) && (s.offset != 0 || s.lower)) || (depth == 1 && s.id != (ObjectID{}) && (s.length > FSObjectSize || s.offset+s.length > FSObjectSize)) {
+		if s.length == 0 || s.length > length-total || s.offset > math.MaxInt64 || s.length > math.MaxInt64-s.offset || (depth > 1 && (s.offset != 0 || s.lower || s.legacyVersion != 0)) || (s.id == (ObjectID{}) && (s.offset != 0 || s.lower || s.legacyVersion != 0)) || (depth == 1 && s.id != (ObjectID{}) && (s.length > FSObjectSize || s.offset+s.length > FSObjectSize)) {
 			return nil, ErrFSFormat
 		}
 		total += s.length
