@@ -168,7 +168,7 @@ func (s *Server) validateReferenceMutation(ctx context.Context, p principal, id 
 	if bucketLocalReferenceRoot(id) && !referencePrincipalSupported(p) {
 		return ErrBucketForbidden
 	}
-	if p.internalCoordination && bucketLocalReferenceRoot(id) && !p.cowInternal {
+	if bucketLocalReferenceRoot(id) && !p.cowInternal {
 		if p.referenceAuth == nil {
 			return ErrBucketForbidden
 		}

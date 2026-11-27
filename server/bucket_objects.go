@@ -488,7 +488,7 @@ func (b *Bucket) mutateAttempt(ctx context.Context, p principal, id volume.Objec
 	if bucketLocalReferenceRoot(id) && !referencePrincipalSupported(p) {
 		return volume.Result{}, ErrBucketForbidden
 	}
-	if p.internalCoordination && bucketLocalReferenceRoot(id) && !p.cowInternal && p.referenceAuth == nil {
+	if bucketLocalReferenceRoot(id) && !p.cowInternal && p.referenceAuth == nil {
 		_, stamp, err := s.referenceAccountSnapshot(p)
 		if err != nil {
 			return volume.Result{}, err
