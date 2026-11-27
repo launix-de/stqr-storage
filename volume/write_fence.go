@@ -14,8 +14,7 @@ type writeFence struct {
 
 func (f *writeFence) page(off uint64) ([]byte, bool, error) {
 	if f.group != nil {
-		b, ok := f.group.pages[off]
-		return b, ok, nil
+		return f.group.store.get(off)
 	}
 	if f.image == nil {
 		return nil, false, nil
@@ -91,6 +90,9 @@ func (v *Volume) runFence(f *writeFence, ioView *Volume, run func() error) (err 
 	v.mu.Unlock()
 	defer func() {
 		v.mu.Lock()
+		if f.group != nil {
+			f.group.store.close()
+		}
 		v.fence, v.checkpointing = nil, false
 		if !completed {
 			v.failed = ErrRecovery

@@ -1527,11 +1527,8 @@ static void ks_put_super(struct super_block *sb)
   destroy_workqueue(f->read_queue);
   f->read_queue = NULL;
  }
-	if (!f->readonly) {
-		int err = ks_checkpoint(f);
-		if (err)
-			pr_err("kstqr: final durability checkpoint failed: %d\n", err);
-	}
+	/* Teardown cancels connection-local touches. Persistence is requested only
+	 * through the VFS sync callbacks; closing a connection adds no fence. */
 	WRITE_ONCE(f->stopping, true);
 	ks_cache_stop(f);
 	stqr_fence_close(f->fence);
@@ -1623,8 +1620,8 @@ static int ks_sync_fs(struct super_block *sb, int wait)
 {
 	return wait ? ks_checkpoint(sb->s_fs_info) : 0;
 }
-/* A forced local unmount is an explicit cancellation of hard reconnects.
- * Ordinary unmounts keep their durability/wait-on-node contract. */
+/* A forced local unmount explicitly cancels hard reconnects. Ordinary unmount
+ * persistence follows the VFS sync_fs request; put_super adds no extra fence. */
 static void ks_umount_begin(struct super_block *sb)
 {
 	struct ks_fs *f = sb->s_fs_info;
