@@ -214,6 +214,16 @@ Wait for `PXE ready`. In another terminal:
 ./networkboot/test-boot
 ```
 
+To compare with a directly writable root filesystem without a client overlay:
+
+```sh
+./networkboot/test-boot ubuntu --no-overlay
+```
+
+This starts a private gateway and boots a separate server-side COW copy, leaving
+`ubuntu` unchanged. The `test-plain-…` bucket is retained after shutdown for
+inspection and can then be deleted in the dashboard.
+
 The launcher waits for a valid boot script before opening a diskless QEMU VM.
 Its private DHCP/NAT network obtains the boot script from the host gateway;
 there is no guest hard disk. This test does not change LAN DHCP or exercise
