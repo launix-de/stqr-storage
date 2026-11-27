@@ -737,6 +737,8 @@ func TestKSTQRVirtualMachine(t *testing.T) {
 			binary.LittleEndian.PutUint32(entries[i].object[:4], uint32(i+1))
 			binary.LittleEndian.PutUint32(entries[i].proof[:4], uint32(i+1))
 			entries[i].account = volume.ID{0xfe, 0x52}
+			// Dependency anchors remain protected from lazy orphan-PIN cleanup.
+			entries[i].dependency = true
 		}
 		if len(entries) != 8192 {
 			t.Fatal("reference capacity contract changed", len(entries))
