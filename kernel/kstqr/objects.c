@@ -1078,7 +1078,7 @@ struct ks_range_read {
 	void *destination;
 	size_t length;
 	struct ks_async_result result;
-	bool pending, finished;
+	bool pending, finished, sparse;
 };
 static int range_read_submit(struct ks_range_read *job)
 {
@@ -1128,6 +1128,12 @@ static bool range_read_retryable(const struct ks_async_result *result)
 	return result->error == -EAGAIN ? result->status == 0 || result->status == 503 :
 		ks_transport_retryable(NULL, result->error);
 }
+static bool range_read_sparse_error(const struct ks_range_read *job)
+{
+	/* Qualify by errno as well as status: a stale 416 after socket loss must
+	 * not turn a transport failure into a successful zero-filled read. */
+	return job->sparse && job->result.error == -EREMOTEIO && job->result.status == 416;
+}
 static int range_read_finish(struct ks_range_read *jobs, unsigned count)
 {
 	int err = 0;
@@ -1141,11 +1147,40 @@ static int range_read_finish(struct ks_range_read *jobs, unsigned count)
 			struct ks_range_read *job = &jobs[i];
 			if (job->finished)
 				continue;
+			if (range_read_sparse_error(job)) {
+				void *raw = NULL;
+				size_t size = 0;
+				stqr_info info;
+				/* Mutable FS pages may end before their logical extent: the Go
+				 * format defines the remainder as zeros. A full GET proves the
+				 * object exists; a missing/corrupt payload is never a hole. */
+				err = get_object(job->store, job->id, &raw, &size, &info);
+				if (err) {
+					sq_free(raw);
+					goto out;
+				}
+				if (size != info.length) {
+					sq_free(raw);
+					err = -EUCLEAN;
+					goto out;
+				}
+				memset(job->destination, 0, job->length);
+				if (job->offset < size)
+					memcpy(job->destination, (u8 *)raw + job->offset,
+					       min_t(u64, job->length, size - job->offset));
+				sq_free(raw);
+				sq_free(job->result.data);
+				job->result.data = NULL;
+				job->finished = true;
+				continue;
+			}
 			if (job->result.error && !range_read_retryable(&job->result)) {
 				err = job->result.error;
 				goto out;
 			}
-			if (!job->result.error && job->result.length != job->length) {
+			if (!job->result.error && (job->result.length > job->length ||
+			    (job->result.length != job->length && (!job->sparse ||
+			     job->result.info.length != job->offset + job->result.length)))) {
 				err = -EUCLEAN;
 				goto out;
 			}
@@ -1155,7 +1190,10 @@ static int range_read_finish(struct ks_range_read *jobs, unsigned count)
 			if (job->finished)
 				continue;
 			if (!job->result.error) {
-				memcpy(job->destination, job->result.data, job->length);
+				if (job->result.length < job->length)
+					memset(job->destination, 0, job->length);
+				if (job->result.length)
+					memcpy(job->destination, job->result.data, job->result.length);
 				sq_free(job->result.data);
 				job->result.data = NULL;
 				job->finished = true;
@@ -1188,7 +1226,7 @@ static int range_read_finish(struct ks_range_read *jobs, unsigned count)
 			/* Retry submissions still form a wave; a delayed first reply never
 			 * prevents the other rejected ranges from being resubmitted. */
 			err = range_read_submit(job);
-			if (err && !range_read_retryable(&job->result))
+			if (err && !range_read_retryable(&job->result) && !range_read_sparse_error(job))
 				goto out;
 		}
 	}
@@ -1259,10 +1297,11 @@ static int index_read(struct ks_fs *f, const struct ks_node *view, stqr_object_i
 			job->offset = p->offset + offset;
 			job->destination = dst;
 			job->length = n;
+			job->sparse = view && view->mutable;
 			pending_bytes += n;
 			atomic64_inc(&f->rpc_ranges);
 			err = range_read_submit(job);
-			if (err && !range_read_retryable(&job->result))
+			if (err && !range_read_retryable(&job->result) && !range_read_sparse_error(job))
 				goto out;
 			err = 0;
 		}
