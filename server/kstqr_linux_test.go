@@ -1133,6 +1133,9 @@ rmmod kstqr
 	var nativeUpperID client.ID
 	var watcher *client.Client
 	if os.Getenv("STQR_KERNEL_CACHE_NEGATIVE") == "1" || os.Getenv("STQR_KERNEL_OVERLAY") == "1" || os.Getenv("STQR_KERNEL_OVERLAY_PROOF") == "1" {
+		if os.Getenv("STQR_KERNEL_OVERLAY") == "1" {
+			kernelLegacyIndexFixture(t, ctx, conn, fs)
+		}
 		// External-data files have compact inode heads that can become ready
 		// before the small cache evicts them. Oversized inline heads merely
 		// refuse initial coverage and are not a valid eviction positive control.
@@ -1733,6 +1736,10 @@ poweroff -f
 		return
 	}
 	if os.Getenv("STQR_KERNEL_OVERLAY") == "1" {
+		if !strings.Contains(string(output), "KSTQR_LEGACY_LOCAL_INDEX_PASS") {
+			t.Fatal("legacy local-index read/mmap oracle missing")
+		}
+		t.Log("KSTQR_LEGACY_LOCAL_INDEX_PASS")
 		uc, e := client.Dial(ctx, host.URL, admin.Username, admin.Password, nativeUpperID, "fs")
 		if e != nil {
 			t.Fatal(e)
