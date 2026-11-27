@@ -277,7 +277,9 @@ func (h *Handle) Check(k Key, opts Options) error {
 	})
 }
 
-// CAS compares bytes under the volume write lock. WholeObject also compares
+// CAS compares bytes under the volume write lock. Range comparisons treat bytes
+// beyond EOF (including a missing object) as zero; success grows like PutRange.
+// WholeObject also compares
 // the complete old length before replacing the object; CreateOnly requires absence.
 func (h *Handle) CAS(k Key, offset uint64, expected, replacement []byte, opts Options) (Info, error) {
 	if err := validateCAS(offset, expected, replacement, opts); err != nil {

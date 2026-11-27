@@ -293,6 +293,9 @@ func (c *Client) Delete(ctx context.Context, id ObjectID, opt DeleteOptions) err
 	}
 	return err
 }
+
+// CAS in range scope compares missing bytes beyond EOF as zero and grows the object on
+// success. A mismatch leaves the object unchanged; CASObject compares exact length.
 func (c *Client) CAS(ctx context.Context, id ObjectID, off uint64, expected, replacement []byte, opt CASOptions) (ObjectInfo, error) {
 	if e := c.ready(ctx); e != nil {
 		return ObjectInfo{}, e
