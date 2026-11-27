@@ -231,12 +231,14 @@ func (q *parallelQuotaState) releasePhysicalLocked(t *mutationQuotaTicket) {
 // callbacks have already converted physical reservations into committed usage.
 // Ambiguous unpublished physical charges are quarantined until exact accounting
 // is republished; an unavailable volume cannot silently donate uncertain space.
-func (s *Server) finishMutationQuota(t *mutationQuotaTicket, old, next uint64, repeated bool, err error) {
+// Logical publication is independent of a later failed physical reclamation:
+// preserve the known logical delta while quarantining uncertain physical growth.
+func (s *Server) finishMutationQuota(t *mutationQuotaTicket, old, next uint64, repeated bool, logicalErr, physicalErr error) {
 	q := &s.parallelQuota
 	q.mu.Lock()
 	if q.slots[t.volume] == t {
 		delete(q.slots, t.volume)
-		if mutationQuotaAmbiguous(err) && len(t.physical) > 0 {
+		if mutationQuotaAmbiguous(physicalErr) && len(t.physical) > 0 {
 			if q.quarantine == nil {
 				q.quarantine = make(map[volume.ID]map[volume.ID]uint64)
 			}
@@ -252,7 +254,7 @@ func (s *Server) finishMutationQuota(t *mutationQuotaTicket, old, next uint64, r
 	defer u.mu.Unlock()
 	u.reservedGrowth -= t.growth
 	u.activeTickets--
-	t.bucket.updateUsage(old, next, repeated, err)
+	t.bucket.updateUsage(old, next, repeated, logicalErr)
 }
 
 // Shared callers must never run the all-volume refresh or authority planner.
@@ -263,5 +265,11 @@ func parallelForcedExclusive(ctx context.Context) bool {
 }
 
 func mutationQuotaAmbiguous(err error) bool {
+	// Backend ENOSPC can wrap both ErrFull and ErrRecovery. Recovery dominates
+	// the capacity/precondition classification: uncertain publication must not
+	// donate reserved bytes to another volume.
+	if errors.Is(err, volume.ErrRecovery) {
+		return true
+	}
 	return err != nil && !errors.Is(err, volume.ErrPrecondition) && !errors.Is(err, volume.ErrFull) && !errors.Is(err, volume.ErrRange) && !errors.Is(err, volume.ErrNotFound)
 }

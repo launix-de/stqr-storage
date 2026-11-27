@@ -601,7 +601,7 @@ func TestParallelAmbiguousPhysicalPlanRemainsConservativeUntilExactObserver(t *t
 	if err := va.SetAdmission(func(change volume.StorageChange) (uint64, error) {
 		protected, err := actual(change)
 		if err == nil {
-			return 0, errors.New("injected ambiguous publication failure")
+			return 0, errors.Join(volume.ErrRecovery, volume.ErrFull)
 		}
 		return protected, err
 	}); err != nil {
@@ -683,4 +683,40 @@ func TestParallelAdmissionUnpinnedMultipleVolumeCohortUsesExclusiveFallback(t *t
 	release()
 	awaitParallel(t, done)
 	assertParallelReservationsEmpty(t, s, b)
+}
+
+func TestParallelQuotaRecoveryDominatesExpectedFailureCodes(t *testing.T) {
+	for _, err := range []error{volume.ErrPrecondition, volume.ErrFull, volume.ErrRange, volume.ErrNotFound, nil} {
+		if mutationQuotaAmbiguous(err) {
+			t.Fatalf("ordinary abort classified ambiguous: %v", err)
+		}
+	}
+	for _, err := range []error{volume.ErrRecovery, errors.Join(volume.ErrRecovery, volume.ErrFull), errors.Join(volume.ErrRecovery, volume.ErrPrecondition), io.ErrUnexpectedEOF} {
+		if !mutationQuotaAmbiguous(err) {
+			t.Fatalf("uncertain publication donated quota: %v", err)
+		}
+	}
+}
+
+func TestParallelQuotaLogicalPublicationSurvivesLaterPhysicalCleanupFailure(t *testing.T) {
+	// A successful DELETE can be followed by a failed tombstone-reclamation
+	// transaction. Its logical result is known, even if the later physical plan
+	// is ambiguous. Exercise the independent settlement outcomes directly.
+	s := &Server{}
+	b := &Bucket{server: s}
+	b.usage.valid = true
+	b.usage.bytes = 20
+	b.usage.activeTickets = 1
+	device := volume.ID{1}
+	bucket := volume.ID{2}
+	ticket := &mutationQuotaTicket{bucket: b, volume: device, physical: map[volume.ID]uint64{bucket: 100}}
+	s.parallelQuota.slots = map[volume.ID]*mutationQuotaTicket{device: ticket}
+	s.parallelQuota.physical = map[volume.ID]uint64{bucket: 100}
+	s.finishMutationQuota(ticket, 10, 0, false, nil, errors.Join(volume.ErrRecovery, volume.ErrFull))
+	if b.usage.bytes != 10 || b.usage.activeTickets != 0 {
+		t.Fatal("later cleanup lost known logical publication", b.usage.bytes, b.usage.activeTickets)
+	}
+	if len(s.parallelQuota.slots) != 0 || s.parallelQuota.physical[bucket] != 100 || len(s.parallelQuota.quarantine) != 1 {
+		t.Fatal("uncertain cleanup donated physical quota")
+	}
 }

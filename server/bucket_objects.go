@@ -1044,7 +1044,7 @@ func (b *Bucket) mutateAttempt(ctx context.Context, p principal, id volume.Objec
 			if opcode == 0x0106 || result.Info.Deleted {
 				next = 0
 			}
-			s.finishMutationQuota(ticket, quotaOld, next, repeated, quotaOutcome)
+			s.finishMutationQuota(ticket, quotaOld, next, repeated, quotaOutcome, err)
 			ticket = nil
 		}
 		h.Close()
