@@ -889,9 +889,6 @@ func TestKSTQRVirtualMachine(t *testing.T) {
 		// Exercise the real server admission limit, not a synthesized429 reply.
 		// These fixture-only holders belong to another synthetic account so the
 		// guest hits the global 8192 limit rather than its per-account 1024 limit.
-		if _, err = fs.Create(ctx, client.FilesystemRootID(), "async-unpin", 0644, 0, 0, false); err != nil {
-			t.Fatal(err)
-		}
 		entries := make([]objectReferenceEntry, maxObjectReferences)
 		for i := range entries {
 			binary.LittleEndian.PutUint32(entries[i].object[:4], uint32(i+1))
