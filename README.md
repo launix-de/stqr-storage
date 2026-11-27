@@ -564,3 +564,5 @@ and the [architecture specification](STQR_Architekturspezifikation.md).
 
 STQR is licensed under the [GNU General Public License v3.0](LICENSE.md)
 (`GPL-3.0-only`).
+
+Dashboard format extensions and their installation/API contract: [dashboard plugins](docs/dashboard-plugins.md).

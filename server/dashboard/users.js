@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: GPL-3.0-only
 import {formatNumber,formatBytes,formatRate} from './numbers.js';
 import {entityRate,throughputHTML,userTrafficSummary,recordRateSnapshot} from './throughput.js';
-import {EndlessList} from './endless.js';
+import {EndlessList,bindSearch} from './endless.js';
 import {newID} from './protocol.js';
 import {setupS3Keys} from './s3-keys.js';
 const $=id=>document.getElementById(id);
 export function setupUserViews({connection,currentUsername,escape,toast,showView,requireLogin,openBucketCreate,onUserDeleted=()=>{},statsEntries=()=>[]}){
- let users=[],createRetry,passwordRetry,selected,deleteRetry,loading=0,pageMeta={},searchTimer;
+ let users=[],createRetry,passwordRetry,selected,deleteRetry,loading=0,pageMeta={};
  const keys=setupS3Keys({connection});
  const traffic=new Map();let trafficPoll;
  const roleRetries=new Map(),deleteJobs=new Map();
@@ -27,7 +27,7 @@ export function setupUserViews({connection,currentUsername,escape,toast,showView
  }
  $('user-rows').closest('.storage-panel').querySelector('.panel-heading').insertAdjacentHTML('beforeend','<label class="search"><span>⌕</span><input id="user-search" placeholder="Name oder ID suchen …" aria-label="Benutzer durchsuchen"></label>');
  const pager=new EndlessList({container:$('user-rows').closest('.storage-panel'),visible:()=>!$('users-view').hidden,fetchPage:(after,limit,query)=>connection().listUsersPage(after,limit,query),entries:page=>page.users,onUpdate:(items,state)=>{if(!state.loading){users=items;pageMeta=state.meta;observeTraffic(state.meta);scheduleTraffic()}render(state)},onError:e=>{$('users-error').textContent=e.message},onLoading:busy=>{$('refresh-users').disabled=busy}});
- async function load(force=false){if(pager.busy&&force!==true)return;loading++;$('users-error').textContent='';return pager.reset($('user-search').value.trim())}
+ async function load(){loading++;$('users-error').textContent='';return pager.reset($('user-search').value.trim())}
 
  function observeTraffic(page){
   if(!page.node||!page.boot||!page.captured_ns)return;
@@ -66,7 +66,7 @@ export function setupUserViews({connection,currentUsername,escape,toast,showView
    if(seq===loading)refreshThroughput();
   }catch(e){if(seq===loading)$('users-error').textContent=e.message}finally{if(seq===loading)scheduleTraffic()}
  }
- $('user-search').oninput=()=>{clearTimeout(searchTimer);searchTimer=setTimeout(load,250)};
+ const search=bindSearch($('user-search'),()=>load(),{onChange:()=>{loading++;pager.cancel()}});
  $('refresh-users').onclick=load;
  $('add-user').onclick=()=>{createRetry=null;$('user-add-form').reset();$('user-password').setCustomValidity('');$('user-add-error').textContent='';$('user-add-dialog').showModal();$('user-name').focus()};
  $('user-create-bucket').onchange=()=>{$('user-add-submit').textContent=$('user-create-bucket').checked?'User anlegen & weiter':'User anlegen'};
@@ -112,5 +112,5 @@ export function setupUserViews({connection,currentUsername,escape,toast,showView
   if(connection()!==owner)return;deleteJobs.delete(user.id);toast(`User „${user.name}“ wurde gelöscht.`);
   await Promise.allSettled([load(true),onUserDeleted()]);
  });
- return {load,clear(){keys.clear();loading++;clearTimeout(trafficPoll);traffic.clear();clearTimeout(searchTimer);pager.clear();pageMeta={};roleRetries.clear();deleteJobs.clear();users=[];render()}};
+ return {load,clear(){keys.clear();loading++;clearTimeout(trafficPoll);traffic.clear();search.clear();pager.clear();pageMeta={};roleRetries.clear();deleteJobs.clear();users=[];render()}};
 }

@@ -161,7 +161,7 @@ func (s *Server) serveWebSocket(w http.ResponseWriter, r *http.Request, p princi
 		httpError(w, statusOf(authErr), authErr)
 		return
 	}
-	up := websocket.Upgrader{Subprotocols: []string{"stqr.v2", "stqr.v1"}, CheckOrigin: sameOrigin, EnableCompression: false, ReadBufferSize: 4096, WriteBufferSize: 4096}
+	up := websocket.Upgrader{Subprotocols: []string{"stqr.v2", "stqr.v1"}, CheckOrigin: s.browserOriginAllowed, EnableCompression: false, ReadBufferSize: 4096, WriteBufferSize: 4096}
 	responseHeaders := http.Header{}
 	if authorization.bucket != nil {
 		responseHeaders.Set(client.BucketHeader, authorization.bucketID.String())

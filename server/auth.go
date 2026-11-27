@@ -223,6 +223,9 @@ type principal struct {
 
 func (s *Server) authenticate(r *http.Request) (principal, error) {
 	if name, password, ok := r.BasicAuth(); ok {
+		if strings.HasPrefix(name, browserCredentialPrefix) {
+			return s.authenticateBrowserTunnel(r, name, password)
+		}
 		if strings.HasPrefix(name, frontendCredentialPrefix) {
 			return s.authenticateFrontend(r, name, password)
 		}
