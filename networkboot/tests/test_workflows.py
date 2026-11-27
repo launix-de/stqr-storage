@@ -249,7 +249,8 @@ class Workflows(unittest.TestCase):
             (directory/'stqr-boot-root').write_bytes(b'current-helper')
             original=gzip.compress(b'original-archive')
             initrd=directory/'initrd.img';initrd.write_bytes(original)
-            with patch.object(script,'BIN',directory):
+            probe = subprocess.CompletedProcess([], 0, b'mount-overlay\nmount-edit\nlogin-uri\n', b'')
+            with patch.object(script,'BIN',directory), patch.object(script.subprocess, 'run', return_value=probe):
                 digest=script.editor_initrd(initrd)
             self.assertTrue(initrd.read_bytes().startswith(original))
             self.assertEqual(digest,hashlib.sha256(b'current-helper').digest())
@@ -447,6 +448,18 @@ class Workflows(unittest.TestCase):
         self.assertIn('n', args)
         self.assertNotIn('-drive', args)
         self.assertNotIn('-blockdev', args)
+
+    def test_plain_boot_uses_separate_copy_and_private_gateway(self):
+        script = load('test-boot')
+        for extra, source in (([], 'ubuntu'), (['custom-image'], 'custom-image')):
+            with self.subTest(source=source), patch.object(sys, 'argv', ['test-boot', '--no-overlay', *extra]), patch.object(script, 'boot_network') as network, patch.object(script, 'wait_for_gateway') as ready, patch.object(script, 'run') as launch, contextlib.redirect_stdout(io.StringIO()):
+                script.main()
+            command = launch.call_args.args
+            self.assertEqual(command[0], str(ROOT / 'edit-image'))
+            self.assertRegex(command[1], r'^test-plain-[0-9a-f]{16}$')
+            self.assertIn('--copy-from=' + source, command)
+            network.assert_not_called()
+            ready.assert_not_called()
 
     def test_parallel_pxe_launches_have_distinct_mac_and_explicit_mac_validates(self):
         script=load('test-boot')

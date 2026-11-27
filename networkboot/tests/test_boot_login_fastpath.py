@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -99,6 +100,30 @@ stqr_prepare_login "$@"
     def checked_prepare(self, **kw):
         result = self.prepare(**kw)
         self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_editor_requires_helper_with_login_uri_and_preserves_initrd_on_failure(self):
+        loader = importlib.machinery.SourceFileLoader('login_editor_serve', str(ROOT/'serve'))
+        spec = importlib.util.spec_from_loader(loader.name, loader)
+        serve = importlib.util.module_from_spec(spec)
+        with patch.object(sys, 'path', [str(ROOT), *sys.path]):
+            loader.exec_module(serve)
+        binary_dir = self.work/'helpers'
+        binary_dir.mkdir()
+        helper = binary_dir/'stqr-boot-root'
+        # Reproduce the old ignored binary: supports mounting but not login-uri.
+        helper.write_text('#!/bin/sh\necho "Usage: stqr-boot-root SERVER PORT TOKEN ROOTMOUNT" >&2\nexit 2\n')
+        helper.chmod(0o755)
+        artifact = self.work/'editor-initrd'
+        artifact.write_bytes(b'published-initrd')
+        with patch.object(serve, 'BIN', binary_dir):
+            with self.assertRaisesRegex(RuntimeError, 'make -C networkboot'):
+                serve.editor_initrd(artifact)
+            self.assertEqual(artifact.read_bytes(), b'published-initrd')
+            shutil.copy2(self.binary, helper)
+            serve.editor_initrd(artifact)
+        self.assertGreater(artifact.stat().st_size, len(b'published-initrd'))
+        self.assertEqual(subprocess.check_output([helper, '--capabilities']).decode().splitlines(),
+                         ['mount-overlay', 'mount-edit', 'login-uri'])
 
     def test_matching_marker_skips_all_payload_copies_and_python(self):
         heavy = self.root/'usr/libexec/stqr-bootctl'
