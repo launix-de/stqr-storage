@@ -27,11 +27,16 @@ func TestAcceptedCleanupReleasesClosedVolumesWhilePeerPending(t *testing.T) {
 		}
 		g := connectionTestPut(t, v, volume.Key{Bucket: bucket, Object: volume.ObjectID{n}}, "closed")
 		s.recordAccepted(bucket, v, g)
+		// Closing is not a durability request. Establish the confirmed fixture
+		// through an explicit fence before testing nonblocking prefix pruning.
+		if err := v.CheckpointThrough(g); err != nil {
+			t.Fatal(err)
+		}
 		if err := v.Close(); err != nil {
 			t.Fatal(err)
 		}
 		if !v.TryIsDurableThrough(g) {
-			t.Fatal("closed volume did not checkpoint accepted data")
+			t.Fatal("explicitly fenced closed volume lost confirmation")
 		}
 		stats[v] = v.IOStats()
 	}
@@ -80,5 +85,38 @@ func TestAcceptedCleanupReleasesClosedVolumesWhilePeerPending(t *testing.T) {
 	s.durability.mu.Unlock()
 	if retained != 0 {
 		t.Fatalf("retained %d checkpointed devices", retained)
+	}
+}
+
+// A disconnected/unmounted device must never turn a dropped accepted tail into
+// a false persistence confirmation just because its handle has been closed.
+func TestAcceptedClosedUnconfirmedVolumeNeverConfirms(t *testing.T) {
+	s := testServer(t)
+	bucket := volume.ID(client.NewRequestID())
+	v, err := volume.NewRAM(16 << 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	generation := connectionTestPut(t, v, volume.Key{Bucket: bucket, Object: volume.ObjectID{1}}, "unconfirmed")
+	s.recordAccepted(bucket, v, generation)
+	before := v.IOStats()
+	if err = v.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if v.IOStats().SyncOps != before.SyncOps {
+		t.Fatal("Close issued an unsolicited Sync")
+	}
+	s.pruneDurability()
+	if v.TryIsDurableThrough(generation) {
+		t.Fatal("Close invented persistence")
+	}
+	if _, ok := s.acceptedMark(bucket); !ok {
+		t.Fatal("dropped accepted generation falsely confirmed")
+	}
+	s.durability.mu.Lock()
+	retained := s.durability.buckets[bucket].volumes[v]
+	s.durability.mu.Unlock()
+	if retained != generation || v.IOStats() != before {
+		t.Fatal("pruning lost an uncertain dependency or performed storage I/O")
 	}
 }

@@ -181,6 +181,12 @@ func newImageSession(ctx context.Context, c config, lowerName, imageName string,
 	err = grant(ctx, c, s.Upper, s.User, 15)
 	return
 }
+
+// errSessionActive is an expected collection deferral. The command exits 75
+// silently so gateways can back off without repeating an error every poll.
+// It never means that revocation or deletion has occurred.
+var errSessionActive = errors.New("temporary upper still active; retained")
+
 func removeBootSession(ctx context.Context, c config, user, upper, lower client.ID) error {
 	return removeImageSession(ctx, c, user, upper, lower, false)
 }
@@ -198,7 +204,11 @@ func removeImageSession(ctx context.Context, c config, user, upper, lower client
 	if err == nil {
 		if err = idle.BeginMaintenance(ctx); err != nil {
 			idle.Close()
-			return fmt.Errorf("temporary upper still active; retained: %w", err)
+			var status *client.StatusError
+			if errors.As(err, &status) && status.Status == 409 {
+				return fmt.Errorf("%w: %v", errSessionActive, err)
+			}
+			return fmt.Errorf("temporary upper maintenance failed; retained: %w", err)
 		}
 		defer idle.Close()
 	} else if !errors.Is(err, client.ErrNotFound) {

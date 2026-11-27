@@ -248,6 +248,7 @@ def install_native_kernel(socket, work, version):
         (HERE / 'initramfs/scripts/stqr', '/etc/initramfs-tools/scripts/stqr', '0755'),
         (HERE / 'initramfs/hooks/stqr', '/etc/initramfs-tools/hooks/stqr', '0755'),
         (HERE / 'initramfs/modules.conf', '/etc/initramfs-tools/conf.d/stqr', '0644'),
+        (HERE / 'initramfs/prepare-login', '/usr/lib/stqr-networkboot/prepare-login', '0644'),
     ):
         commands.append(('upload', origin, target))
         commands.append(('chmod', mode, target))
@@ -271,7 +272,7 @@ def install_logins(socket, work, config):
         (HERE / 'pam/install-login', '/usr/lib/stqr-networkboot/install-login', '0755'),
     ):
         commands.extend([('upload', source, target), ('chmod', mode, target)])
-    commands.append(('command', '/usr/bin/python3 /usr/lib/stqr-networkboot/install-login /usr/lib/stqr-networkboot/login.json'))
+    commands.append(('command', '/usr/bin/python3 /usr/lib/stqr-networkboot/install-login /usr/lib/stqr-networkboot/login.json --persist'))
     guest_many(socket, commands)
 
 

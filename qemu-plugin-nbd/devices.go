@@ -156,7 +156,7 @@ func (c *Catalog) Create(ctx context.Context, m Metadata) (Metadata, error) {
 	if e := c.CheckFormat(ctx); e != nil {
 		return m, e
 	}
-	_, e := c.store.CAS(ctx, MetadataID(m.Name), 0, nil, encodeMetadata(m), client.CASOptions{Scope: client.CASObject, MutationOptions: client.MutationOptions{Absent: true, RequestID: client.NewRequestID()}})
+	_, e := c.store.CAS(ctx, MetadataID(m.Name), 0, nil, encodeMetadata(m), client.CASOptions{Scope: client.CASObject, MutationOptions: client.MutationOptions{Accepted: true, Absent: true, RequestID: client.NewRequestID()}})
 	return m, e
 }
 func (c *Catalog) Lookup(ctx context.Context, name string) (Metadata, error) {
@@ -201,14 +201,11 @@ func (c *Catalog) Resize(ctx context.Context, device Metadata, size uint64) (Met
 	if size != oldSize {
 		_, err = c.store.CAS(ctx, MetadataID(m.Name), 0, raw, encodeMetadata(m), client.CASOptions{
 			Scope:           client.CASObject,
-			MutationOptions: client.MutationOptions{RequestID: client.NewRequestID()},
+			MutationOptions: client.MutationOptions{Accepted: true, RequestID: client.NewRequestID()},
 		})
 		if err != nil {
 			return Metadata{}, err
 		}
-	}
-	if err = c.store.Sync(ctx); err != nil {
-		return Metadata{}, err
 	}
 	return m, nil
 }
@@ -277,49 +274,75 @@ func (c *Catalog) ReadAt(ctx context.Context, m Metadata, dst []byte, off uint64
 	}
 	defer complete()
 	clear(dst)
-	for len(dst) > 0 {
-		index, at := off/StripeSize, off%StripeSize
+	parallel, ok := c.store.(interface{ ConcurrentObjectRequests() bool })
+	if !ok || !parallel.ConcurrentObjectRequests() {
+		for len(dst) > 0 {
+			at := off % StripeSize
+			n := min(uint64(len(dst)), StripeSize-at)
+			if err := c.readStripe(ctx, StripeID(m.ID, off/StripeSize), at, dst[:n]); err != nil {
+				return err
+			}
+			dst = dst[n:]
+			off += n
+		}
+		return nil
+	}
+	batch := newStripeReadScatter(ctx)
+	defer batch.cancel()
+	for len(dst) > 0 && batch.ctx.Err() == nil {
+		at := off % StripeSize
 		n := min(uint64(len(dst)), StripeSize-at)
-		id := StripeID(m.ID, index)
-		var data []byte
-		var info client.ObjectInfo
-		var e error
-		if at == 0 && n == StripeSize {
-			data, info, e = c.store.Get(ctx, id)
-		} else {
-			data, info, e = c.store.GetRange(ctx, id, at, n)
-			var status *client.StatusError
-			if errors.Is(e, client.ErrRange) || (errors.As(e, &status) && status.Status == 400) {
-				// Object ranges are bounded by payload length. Disk holes/tails are
-				// interpreted here, never by the storage server. No extra Stat is needed
-				// for ordinary reads within a populated stripe.
-				info, e = c.store.Stat(ctx, id)
-				if e == nil {
-					if info.Length > StripeSize {
-						return client.ErrProtocol
-					}
-					if at >= info.Length {
-						data = nil
-					} else {
-						data, info, e = c.store.GetRange(ctx, id, at, min(n, info.Length-at))
-					}
-				}
-			}
-		}
-		if e != nil && !errors.Is(e, client.ErrNotFound) {
-			return e
-		}
-		if e == nil {
-			if info.Length > StripeSize || uint64(len(data)) > n {
-				return client.ErrProtocol
-			}
-			copy(dst[:n], data)
-		}
+		id, part := StripeID(m.ID, off/StripeSize), dst[:n]
+		batch.run(func() error { return c.readStripe(batch.ctx, id, at, part) })
 		dst = dst[n:]
 		off += n
 	}
+	batch.work.Wait()
+	if batch.err != nil {
+		return batch.err
+	}
+	return batch.ctx.Err()
+}
+func (c *Catalog) readStripe(ctx context.Context, id client.ObjectID, at uint64, dst []byte) error {
+	n := uint64(len(dst))
+
+	var data []byte
+	var info client.ObjectInfo
+	var e error
+	if at == 0 && n == StripeSize {
+		data, info, e = c.store.Get(ctx, id)
+	} else {
+		data, info, e = c.store.GetRange(ctx, id, at, n)
+		var status *client.StatusError
+		if errors.Is(e, client.ErrRange) || (errors.As(e, &status) && status.Status == 400) {
+			// Object ranges are bounded by payload length. Disk holes/tails are
+			// interpreted here, never by the storage server. No extra Stat is needed
+			// for ordinary reads within a populated stripe.
+			info, e = c.store.Stat(ctx, id)
+			if e == nil {
+				if info.Length > StripeSize {
+					return client.ErrProtocol
+				}
+				if at >= info.Length {
+					data = nil
+				} else {
+					data, info, e = c.store.GetRange(ctx, id, at, min(n, info.Length-at))
+				}
+			}
+		}
+	}
+	if e != nil && !errors.Is(e, client.ErrNotFound) {
+		return e
+	}
+	if e == nil {
+		if info.Length > StripeSize || uint64(len(data)) > n {
+			return client.ErrProtocol
+		}
+		copy(dst[:n], data)
+	}
 	return nil
 }
+
 func (c *Catalog) WriteAt(ctx context.Context, m Metadata, data []byte, off uint64) error {
 	if off > m.Size || uint64(len(data)) > m.Size-off {
 		return client.ErrRange
@@ -528,7 +551,7 @@ func (c *Catalog) Collect(ctx context.Context, opaque []client.ObjectID) (uint64
 				}
 			}
 			if !live {
-				if e := c.store.Delete(ctx, entry.ID, client.DeleteOptions{RequestID: client.NewRequestID()}); e != nil {
+				if e := c.store.Delete(ctx, entry.ID, client.DeleteOptions{Accepted: true, RequestID: client.NewRequestID()}); e != nil {
 					return deleted, e
 				}
 				deleted++

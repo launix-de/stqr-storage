@@ -220,17 +220,12 @@ func (h *Handle) ReadAt(k Key, dst []byte, offset uint64) (int, error) {
 }
 
 func (h *Handle) mutate(op uint8, k Key, offset, length uint64, src io.Reader, expected []byte, opts Options) (Result, error) {
-	buffered := opts.prepare == nil && (length <= 1<<20 || op == opTrunc || op == opDelete)
+	// Accepted is a mode, not a size-dependent optimization. Durable callers
+	// explicitly requested a durable response and retain the existing direct WAL
+	// path, including near-full/tiny volumes; accepted callers never fall into it.
+	buffered := opts.prepare == nil && opts.Accepted
 	return withHandleMode(h, true, buffered, func(v *Volume) (Result, error) {
-		durable := !opts.Accepted
-		if buffered {
-			opts.Accepted = true
-		}
-		result, err := v.mutateWithRetryLocked(op, k, offset, length, src, expected, opts)
-		if err == nil && durable && buffered {
-			err = v.checkpointLockedThrough(v.sb.Generation)
-		}
-		return result, err
+		return v.mutateWithRetryLocked(op, k, offset, length, src, expected, opts)
 	})
 }
 
@@ -374,12 +369,22 @@ func (h *Handle) RecompressWithOptions(k Key, codec Compression, opts Options) e
 	})
 }
 
+func (h *Handle) doAcceptedOptions(opts Options, run func(*Volume) error) error {
+	_, err := withHandleMode(h, true, opts.Accepted, func(v *Volume) (struct{}, error) {
+		if opts.Accepted {
+			return struct{}{}, v.acceptedBuild(func() error { return run(v) })
+		}
+		return struct{}{}, run(v)
+	})
+	return err
+}
+
 // Restore installs trusted bytes and tombstones under the volume write lock.
 // The server must fence source/destination ownership before calling. Byte/length
 // predicates can guard installation; a retry ID makes repeats idempotent.
 // Neither source nor its callbacks may reenter the handle or destination volume.
 func (h *Handle) Restore(k Key, info Info, source ExtentSource, opts Options) error {
-	return h.do(true, func(v *Volume) error { return v.restoreLocked(k, info, source, opts, false) })
+	return h.doAcceptedOptions(opts, func(v *Volume) error { return v.restoreLocked(k, info, source, opts, false) })
 }
 
 // RestoreSeekable imports an immutable, replayable snapshot without another
@@ -387,7 +392,7 @@ func (h *Handle) Restore(k Key, info Info, source ExtentSource, opts Options) er
 // and remain open and unchanged until this call returns. Readers must be distinct
 // for extents with independent cursors. Untrusted streams should use Restore.
 func (h *Handle) RestoreSeekable(k Key, info Info, source ExtentSource, opts Options) error {
-	return h.do(true, func(v *Volume) error { return v.restoreLocked(k, info, source, opts, true) })
+	return h.doAcceptedOptions(opts, func(v *Volume) error { return v.restoreLocked(k, info, source, opts, true) })
 }
 
 // Repair replaces damaged physical data using a trusted replica of the current
@@ -410,7 +415,7 @@ func (h *Handle) RestoreRequest(x RequestRecord) error {
 // RestoreRequestWithOptions lets a trusted migration consume space reserved
 // for its own import. It does not change the original retry fingerprint/result.
 func (h *Handle) RestoreRequestWithOptions(x RequestRecord, opts Options) error {
-	return h.do(true, func(v *Volume) error { return v.restoreRequestLocked(x, opts) })
+	return h.doAcceptedOptions(opts, func(v *Volume) error { return v.restoreRequestLocked(x, opts) })
 }
 
 // SyncThrough flushes the current object locally. It requires a write

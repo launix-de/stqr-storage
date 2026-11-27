@@ -2,11 +2,9 @@
 package volume
 
 import (
-	"bytes"
 	"crypto/sha256"
 	"errors"
 	"io"
-	"sort"
 	"sync"
 )
 
@@ -15,16 +13,16 @@ import (
 // image. The temporary WAL region is free in both the old and new checkpoints and
 // is excluded from every allocation while the group is open.
 const deferredPageLimit = (4 << 20) / PageSize
-const deferredJournalBytes = 8 << 20
-
-var errDeferredBudget = errors.New("accepted page budget exhausted")
+const deferredJournalBytes = 8 * PageSize // start small; grow for protected redo only
 
 type deferredGroup struct {
-	journal      allocation
-	pages        map[uint64][]byte
-	pageLimit    int
-	baseFreeRoot uint64
-	baseNodes    *nodeCache
+	journal        allocation
+	pages          map[uint64][]byte
+	pageLimit      int
+	store          *dirtyStore
+	protectedPages uint64
+	baseFreeRoot   uint64
+	baseNodes      *nodeCache
 }
 
 func (v *Volume) beginDeferred() error {
@@ -36,6 +34,20 @@ func (v *Volume) beginDeferred() error {
 	size := uint64(deferredJournalBytes)
 	var off uint64
 	for {
+		// Fixed scratch is excluded from client capacity. Prefer it so a small
+		// journal cannot split the only free extent that fits a new payload.
+		// An older checkpoint retains exclusive ownership until its I/O ends.
+		scratch := allocation{4 * PageSize, scratchPages * PageSize, false}
+		blocked := false
+		if v.fence != nil {
+			for _, r := range v.fence.reserved {
+				blocked = blocked || overlap(scratch, r)
+			}
+		}
+		if !blocked {
+			off, size = scratch.off, scratch.n
+			break
+		}
 		start, length, chosen, err := t.findSpace(size, PageSize, false)
 		if err == nil {
 			// Keep the WAL at the free extent's aligned end to preserve a
@@ -54,118 +66,76 @@ func (v *Volume) beginDeferred() error {
 		}
 		size = size / 2 / PageSize * PageSize
 	}
-	limit := min(deferredPageLimit, int((size/PageSize*(PageSize-16)-PageSize-8)/(PageSize+8)))
-	v.deferred = &deferredGroup{journal: allocation{off, size, false}, pageLimit: limit, pages: map[uint64][]byte{}, baseFreeRoot: v.sb.FreeRoot, baseNodes: newNodeCache(128, 1<<20)}
+	limit := deferredPageLimit
+	store := newDirtyStore(deferredPageLimit, v.sb.Identity.Class == RAM || v.sb.Identity.Class == RAMCache)
+	v.deferred = &deferredGroup{journal: allocation{off, size, false}, pageLimit: limit, pages: store.pages, store: store, baseFreeRoot: v.sb.FreeRoot, baseNodes: newNodeCache(128, 1<<20)}
 	return nil
+}
+func (v *Volume) beginStaging() {
+	v.stageStore = newDirtyStore(deferredPageLimit, v.sb.Identity.Class == RAM || v.sb.Identity.Class == RAMCache)
+	v.staging = v.stageStore.pages
+}
+func (v *Volume) endStaging() {
+	v.staging = nil
+	if v.stageStore != nil {
+		v.stageStore.close()
+		v.stageStore = nil
+	}
 }
 func (v *Volume) stageWrite(b []byte, off uint64) error {
 	for len(b) > 0 {
 		page, at := off/PageSize*PageSize, off%PageSize
-		p := v.staging[page]
-		if p == nil {
-			if len(v.staging) >= v.deferred.pageLimit {
-				return errDeferredBudget
-			}
-			var err error
+		p, ok, err := v.stageStore.get(page)
+		if err != nil {
+			return err
+		}
+		if !ok {
 			p, err = v.readPage(page)
 			if err != nil {
 				return err
 			}
-			v.staging[page] = p
 		}
 		n := min(len(b), PageSize-int(at))
 		copy(p[at:], b[:n])
+		if err = v.stageStore.put(page, p, 1); err != nil {
+			if err == ErrBusy {
+				return ErrWritebackPressure
+			}
+			return err
+		}
+		off += uint64(n)
 		b = b[n:]
-		off += uint64(n)
 	}
 	return nil
 }
-func (v *Volume) readLayer(dst []byte, off uint64) error {
-	if off > v.limit || uint64(len(dst)) > v.limit-off {
-		return ErrCorrupt
+func (v *Volume) readLayer(dst []byte, off uint64) error { return v.readVisibleBytes(dst, off) }
+
+// acceptedBuild gives trusted metadata/import builders the same no-sync staging
+// contract as PUT/CAS. No fallback may silently strengthen acceptance to Sync.
+func (v *Volume) acceptedBuild(run func() error) error {
+	if err := v.beginDeferred(); err != nil {
+		if errors.Is(err, ErrFull) {
+			return ErrWritebackPressure
+		}
+		return err
 	}
-	for len(dst) > 0 {
-		page, at := off/PageSize*PageSize, off%PageSize
-		n := min(len(dst), PageSize-int(at))
-		p := v.staging[page]
-		if p == nil && v.deferred != nil {
-			p = v.deferred.pages[page]
-		}
-		if p == nil && v.fence != nil {
-			var err error
-			p, _, err = v.fence.page(page)
-			if err != nil {
-				return err
-			}
-		}
-		if p != nil {
-			copy(dst[:n], p[at:at+uint64(n)])
-		} else {
-			// Raw devices may reject sub-page reads. The overlay changes read
-			// visibility, never the backend alignment contract.
-			b := make([]byte, PageSize)
-			if err := readFullAt(v.dev, b, page); err != nil {
-				return err
-			}
-			copy(dst[:n], b[at:at+uint64(n)])
-		}
-		off += uint64(n)
-		dst = dst[n:]
-	}
-	return nil
+	v.beginStaging()
+	defer v.endStaging()
+	return run()
 }
+
 func (v *Volume) acceptedMutation(op uint8, k Key, off, length uint64, src io.Reader, expected []byte, opt Options) (Result, error) {
-	// Oversized calls use the stronger durable path. Buffering the bounded source
-	// permits an identical-ID durable retry if metadata growth exceeds the budget.
-	if length > 1<<20 && op != opTrunc && op != opDelete {
-		return v.durableMutation(op, k, off, length, src, expected, opt)
-	}
-	var payload []byte
-	if op != opTrunc && op != opDelete {
-		if length > 0 && src == nil {
-			return Result{}, ErrRange
-		}
-		payload = make([]byte, int(length))
-		if _, err := io.ReadFull(src, payload); err != nil {
-			return Result{}, err
-		}
-		src = bytes.NewReader(payload)
-	}
-	if v.deferred != nil && len(v.deferred.pages) > v.deferred.pageLimit/2 {
-		if err := v.flushDeferred(); err != nil {
-			return Result{}, err
-		}
+	if length > 0 && op != opTrunc && op != opDelete && src == nil {
+		return Result{}, ErrRange
 	}
 	if err := v.beginDeferred(); err != nil {
 		if errors.Is(err, ErrFull) {
-			// Exhausted buffering is backpressure, never permission to overwrite
-			// another checkpoint's WAL or to replace its fence.
-			return v.durableMutation(op, k, off, length, src, expected, opt)
+			return Result{}, ErrWritebackPressure
 		}
 		return Result{}, err
 	}
-	v.staging = map[uint64][]byte{}
-	result, err := v.mutateCore(op, k, off, length, src, expected, opt)
-	v.staging = nil
-	if errors.Is(err, errDeferredBudget) || errors.Is(err, ErrFull) {
-		if src != nil {
-			src = bytes.NewReader(payload)
-		}
-		return v.durableMutation(op, k, off, length, src, expected, opt)
-	}
-	return result, err
-}
-
-// A buffer-exhausted/oversized operation uses the existing durable path. Its
-// allocator image must stay stable while preceding overlays are drained. Reads
-// remain available at fences; new buffered writers receive bounded backpressure.
-func (v *Volume) durableMutation(op uint8, k Key, off, length uint64, src io.Reader, expected []byte, opt Options) (Result, error) {
-	v.beginMaintenance()
-	defer v.endMaintenance()
-	if err := v.flushDeferred(); err != nil {
-		return Result{}, err
-	}
-	opt.Accepted = false
+	v.beginStaging()
+	defer v.endStaging()
 	return v.mutateCore(op, k, off, length, src, expected, opt)
 }
 
@@ -200,20 +170,18 @@ func (v *Volume) FlushAccepted() error {
 }
 
 // PendingCheckpoint lets a caller leave its own admission lock before a slow
-// flush or a full accepted-write buffer. It is a hint, not mutation authority;
+// explicit fence. Accepted pressure never requests a checkpoint. It is a hint, not mutation authority;
 // the actual operation must recheck placement/permissions after waiting.
 func (v *Volume) PendingCheckpoint(accepted bool, length uint64) (uint64, bool) {
 	v.mu.RLock()
 	defer v.mu.RUnlock()
+	if accepted {
+		return 0, v.checkpointing && v.fence == nil
+	}
 	if v.checkpointing {
-		if accepted && length <= 1<<20 && v.fence != nil &&
-			(v.deferred == nil || len(v.deferred.pages) <= v.deferred.pageLimit/2) {
-			return 0, false
-		}
 		return 0, true
 	}
-	return v.sb.Generation, v.deferred != nil &&
-		(!accepted || length > 1<<20 || len(v.deferred.pages) > v.deferred.pageLimit/2)
+	return v.sb.Generation, v.deferred != nil
 }
 
 // IsDurableThrough only inspects local flush progress. The counter belongs to
@@ -313,70 +281,57 @@ func (v *Volume) flushDeferredIO() error {
 	if err != nil {
 		return err
 	}
-	offsets := make([]uint64, 0, len(g.pages))
-	for off := range g.pages {
-		offsets = append(offsets, off)
+	// The private redo spool is bounded in RAM and never synced itself. Only
+	// explicit Sync reaches this function; all recovery authority stays on-volume.
+	payload := &encodedSpool{noSpill: v.sb.Identity.Class == RAM || v.sb.Identity.Class == RAMCache}
+	defer payload.Close()
+	digest := sha256.New()
+	writer := io.MultiWriter(payload, digest)
+	if _, err = writer.Write(header); err != nil {
+		return err
 	}
-	sort.Slice(offsets, func(i, j int) bool { return offsets[i] < offsets[j] })
-	// Full pages free in the durable checkpoint can be staged directly. Only
-	// pages sharing confirmed data need redo images. Consult the raw old tree,
-	// never the overlay's newer allocator view, especially after delete/reuse.
-	baseNode := func(off uint64) (treeNode, error) {
-		if node, ok := g.baseNodes.get(off); ok {
-			return node, nil
-		}
-		page := make([]byte, PageSize)
-		if err := readFullAt(v.dev, page, off); err != nil {
-			return treeNode{}, err
-		}
-		node, err := decodeNode(page, v.sb.Identity.VolumeID)
-		if err == nil {
-			g.baseNodes.put(off, node)
-		}
-		return node, err
+	var raw [8]byte
+	diskOrder.PutUint64(raw[:], g.protectedPages)
+	if _, err = writer.Write(raw[:]); err != nil {
+		return err
 	}
-	redo := make([]uint64, 0, len(offsets))
-	for _, off := range offsets {
-		span, found, err := treeNeighbor(baseNode, g.baseFreeRoot, spaceKey(off), false)
-		if err != nil {
-			return err
+	var protected uint64
+	err = g.store.eachSorted(func(off uint64, flag byte, page []byte) error {
+		if flag == 1 {
+			return v.rawWrite(page[:min(uint64(PageSize), v.limit-off)], off)
 		}
-		start := keyOffset(span.key)
-		if found && start <= off && off-start <= span.value && PageSize <= span.value-(off-start) {
-			if err = v.rawWrite(g.pages[off][:min(uint64(PageSize), v.limit-off)], off); err != nil {
-				return err
-			}
-		} else {
-			redo = append(redo, off)
-		}
-	}
-	payload := bytes.NewBuffer(make([]byte, 0, PageSize+8+len(redo)*(PageSize+8)))
-	payload.Write(header)
-	var n [8]byte
-	diskOrder.PutUint64(n[:], uint64(len(redo)))
-	payload.Write(n[:])
-	for _, off := range redo {
-		if off < treeStart {
+		if flag != 2 || off < treeStart {
 			return ErrCorrupt
 		}
-		diskOrder.PutUint64(n[:], off)
-		payload.Write(n[:])
-		payload.Write(g.pages[off])
+		protected++
+		diskOrder.PutUint64(raw[:], off)
+		if _, err := writer.Write(raw[:]); err != nil {
+			return err
+		}
+		_, err := writer.Write(page)
+		return err
+	})
+	if err != nil {
+		return err
 	}
-	raw := payload.Bytes()
-	count := (len(raw) + PageSize - 17) / (PageSize - 16)
+	if protected != g.protectedPages {
+		return ErrCorrupt
+	}
+	count := (payload.size + PageSize - 17) / (PageSize - 16)
 	if uint64(count)*PageSize > g.journal.n {
 		return ErrCorrupt
 	}
-	for i := 0; i < count; i++ {
+	for i := int64(0); i < count; i++ {
 		page := make([]byte, PageSize)
 		if i+1 < count {
 			diskOrder.PutUint64(page, g.journal.off+uint64(i+1)*PageSize)
 		}
 		from := i * (PageSize - 16)
-		size := min(PageSize-16, len(raw)-from)
+		size := min(int64(PageSize-16), payload.size-from)
+		if _, err = payload.ReadAt(page[16:16+size], from); err != nil {
+			return err
+		}
 		diskOrder.PutUint32(page[8:], uint32(size))
-		copy(page[16:], raw[from:from+size])
 		diskOrder.PutUint32(page[12:], checksum(page[16:]))
 		if err = v.rawWrite(page, g.journal.off+uint64(i)*PageSize); err != nil {
 			return err
@@ -389,9 +344,8 @@ func (v *Volume) flushDeferredIO() error {
 	copy(anchor, "STQRCMT2")
 	diskOrder.PutUint64(anchor[8:], v.sb.Generation)
 	diskOrder.PutUint64(anchor[16:], g.journal.off)
-	diskOrder.PutUint64(anchor[24:], uint64(len(raw)))
-	hash := sha256.Sum256(raw)
-	copy(anchor[32:64], hash[:])
+	diskOrder.PutUint64(anchor[24:], uint64(payload.size))
+	copy(anchor[32:64], digest.Sum(nil))
 	copy(anchor[64:80], v.sb.Identity.VolumeID[:])
 	diskOrder.PutUint32(anchor[PageSize-4:], checksum(anchor[:PageSize-4]))
 	if err = v.rawWrite(anchor, uint64(2+int(v.sb.Generation%2))*PageSize); err != nil {
@@ -400,10 +354,13 @@ func (v *Volume) flushDeferredIO() error {
 	if err = v.rawSync(); err != nil {
 		return err
 	}
-	for _, off := range redo {
-		if err = v.rawWrite(g.pages[off][:min(uint64(PageSize), v.limit-off)], off); err != nil {
-			return err
+	if err = g.store.eachSorted(func(off uint64, flag byte, page []byte) error {
+		if flag != 2 {
+			return nil
 		}
+		return v.rawWrite(page[:min(uint64(PageSize), v.limit-off)], off)
+	}); err != nil {
+		return err
 	}
 	if err = v.rawSync(); err != nil {
 		return err
