@@ -37,7 +37,7 @@ func TestKSTQRVirtualMachine(t *testing.T) {
 	// Focused scripts replace the same init section; combining them cannot
 	// represent a valid test and must fail before starting a guest.
 	selectedMode := ""
-	for _, mode := range []string{"CACHE_REOPEN", "BENCHMARK", "WRITE_BENCHMARK", "READ_WINDOW", "LOOP", "RESTART_ONLY", "OVERLAY", "OUTAGE", "CACHE_RETENTION"} {
+	for _, mode := range []string{"CACHE_REOPEN", "BENCHMARK", "WRITE_BENCHMARK", "READ_WINDOW", "LOOP", "RESTART_ONLY", "OVERLAY", "OUTAGE", "CACHE_RETENTION", "REFERENCE_LIMIT"} {
 		if os.Getenv("STQR_KERNEL_"+mode) == "1" {
 			if selectedMode != "" {
 				t.Fatalf("incompatible kernel fixture modes %s and %s; run them separately", selectedMode, mode)
@@ -100,6 +100,7 @@ func TestKSTQRVirtualMachine(t *testing.T) {
 	copyFile(module, "kstqr.ko", 0600)
 	run("cc", "-static", "-std=c11", "-Wall", "-Wextra", "-Werror", "-O2", "-o", filepath.Join(initrdRoot, "mount.kstqr"), filepath.Join(root, "mount.c"))
 	run("cc", "-static", "-std=c11", "-Wall", "-Wextra", "-Werror", "-O2", "-o", filepath.Join(initrdRoot, "smoke"), filepath.Join(root, "tests/smoke.c"))
+	run("cc", "-static", "-std=c11", "-Wall", "-Wextra", "-Werror", "-O2", "-o", filepath.Join(initrdRoot, "reference-limit"), filepath.Join(root, "tests/reference_limit.c"))
 	run("cc", "-static", "-std=c11", "-Wall", "-Wextra", "-Werror", "-O2", "-o", filepath.Join(initrdRoot, "sandbox"), filepath.Join(root, "tests/sandbox.c"))
 	run("cc", "-static", "-std=c11", "-Wall", "-Wextra", "-Werror", "-O2", "-o", filepath.Join(initrdRoot, "signal-rpc"), filepath.Join(root, "tests/signals.c"))
 	run("cc", "-static", "-std=c11", "-Wall", "-Wextra", "-Werror", "-O2", "-o", filepath.Join(initrdRoot, "coherence"), filepath.Join(root, "tests/coherence.c"))
@@ -724,6 +725,28 @@ func TestKSTQRVirtualMachine(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	if os.Getenv("STQR_KERNEL_REFERENCE_LIMIT") == "1" {
+		// Exercise the real server admission limit, not a synthesized429 reply.
+		// These fixture-only holders belong to another synthetic account so the
+		// guest hits the global 8192 limit rather than its per-account 1024 limit.
+		if _, err = fs.Create(ctx, client.FilesystemRootID(), "async-unpin", 0644, 0, 0, false); err != nil {
+			t.Fatal(err)
+		}
+		entries := make([]objectReferenceEntry, maxObjectReferences)
+		for i := range entries {
+			binary.LittleEndian.PutUint32(entries[i].object[:4], uint32(i+1))
+			binary.LittleEndian.PutUint32(entries[i].proof[:4], uint32(i+1))
+			entries[i].account = volume.ID{0xfe, 0x52}
+		}
+		if len(entries) != 8192 {
+			t.Fatal("reference capacity contract changed", len(entries))
+		}
+		if _, err = conn.Put(ctx, client.ObjectReferenceRootID(), encodeObjectReferences(entries, b.ID()), client.MutationOptions{RequestID: client.NewRequestID()}); err != nil {
+			t.Fatal(err)
+		}
+		t.Logf("seeded exact %d-entry global reference limit", len(entries))
+	}
+
 	if err = os.WriteFile(filepath.Join(initrdRoot, "readonly-credentials"), []byte("username="+user.Name+"\npassword=bucket-test-password\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -878,6 +901,17 @@ for pass in 1 2; do
 done
 echo KSTQR_SQUASHFS_PASS
 cat /proc/self/mountstats
+umount /readonly
+rmmod kstqr
+`
+		init = init[:begin] + script + init[end:]
+	}
+
+	if os.Getenv("STQR_KERNEL_REFERENCE_LIMIT") == "1" {
+		begin := strings.Index(init, "for attempt in 1 2 3 4; do")
+		end := strings.Index(init, "if dmesg |")
+		script := `/mount.kstqr --uri ` + endpoint + ` --bucket ` + client.ID(b.ID()).String() + ` --credentials /readonly-credentials --readonly /readonly
+/reference-limit
 umount /readonly
 rmmod kstqr
 `
@@ -1294,7 +1328,12 @@ poweroff -f
 	if err != nil {
 		t.Fatalf("cpio: %v %s", err, packErr.String())
 	}
-	args := []string{"-machine", "q35", "-m", "512M", "-smp", "2", "-display", "none", "-serial", "stdio", "-monitor", "none", "-no-reboot", "-kernel", image, "-initrd", archive, "-append", "console=ttyS0 panic=1 oops=panic panic_on_warn=1 rdinit=/init loglevel=6", "-nic", "user,model=virtio-net-pci"}
+	guestMemory := "512M"
+	if os.Getenv("STQR_KERNEL_REFERENCE_LIMIT") == "1" {
+		// Ubuntu 7.0 plus the static fixture initrd needs 1 GiB to unpack.
+		guestMemory = "1024M"
+	}
+	args := []string{"-machine", "q35", "-m", guestMemory, "-smp", "2", "-display", "none", "-serial", "stdio", "-monitor", "none", "-no-reboot", "-kernel", image, "-initrd", archive, "-append", "console=ttyS0 panic=1 oops=panic panic_on_warn=1 rdinit=/init loglevel=6", "-nic", "user,model=virtio-net-pci"}
 	if os.Getenv("STQR_KERNEL_TCG") != "1" {
 		args = append(args, "-enable-kvm", "-cpu", "host")
 	}
@@ -1321,6 +1360,18 @@ poweroff -f
 	if err != nil || !strings.Contains(string(output), "KSTQR_VM_PASS") || strings.Contains(string(output), "KSTQR_VM_FAIL") {
 		t.Fatalf("kernel VM: %v\n%s", err, output)
 	}
+	if os.Getenv("STQR_KERNEL_REFERENCE_LIMIT") == "1" {
+		if !strings.Contains(string(output), "KSTQR_REFERENCE_LIMIT_PASS") {
+			t.Fatal("terminal reference limit probe did not complete")
+		}
+		for _, line := range strings.Split(string(output), "\n") {
+			if strings.Contains(line, "reference-limit:") || strings.Contains(line, "KSTQR_REFERENCE_LIMIT_PASS") {
+				t.Log(strings.TrimSpace(line))
+			}
+		}
+		return
+	}
+
 	if os.Getenv("STQR_KERNEL_CACHE_REOPEN") == "1" {
 		if !strings.Contains(string(output), "KSTQR_CACHE_REOPEN_PASS") {
 			t.Fatal("cache reopen probe did not complete")

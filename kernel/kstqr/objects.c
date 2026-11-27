@@ -206,6 +206,13 @@ int ks_object_reference(struct ks_fs *f, stqr_object_id id, stqr_id token, unsig
             if(!err){wait_for_completion(&result.done);err=result.error;status=result.status;}
             sq_free(result.data);mutex_lock(&rpc->lock);
         }else { err = operation(rpc->client, id, token); status = stqr_status(rpc->client); }
+        /* Reference status 429 reports global/account table capacity. Expose ENFILE
+         * to VFS for this operation only. Remap only the SDK's server-status
+         * errno: a stale status after transport loss must not suppress hard
+         * reconnection. Status 503 outage waits and 412 preconditions retain their
+         * existing retry handling. */
+        if (err == -EREMOTEIO && status == 429)
+            err = -ENFILE;
 		if (err == -EACCES && !auth_retry)
 			auth_retry = true;
 		else if (!(err == -EAGAIN ? (status == 0 || status == 503) : ks_transport_retryable(NULL, err)))
