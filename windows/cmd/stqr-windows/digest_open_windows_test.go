@@ -13,18 +13,24 @@ import (
 )
 
 func TestDigestReaderAllowsConcurrentAtomicReplacement(t *testing.T) {
-	for _, kind := range []string{"short", "long"} {
-		t.Run(kind, func(t *testing.T) { testDigestReaderReplacement(t, kind == "long") })
+	for _, kind := range []string{"short", "long", "unicode", "long-unicode"} {
+		t.Run(kind, func(t *testing.T) { testDigestReaderReplacement(t, kind) })
 	}
 }
 
-func testDigestReaderReplacement(t *testing.T, long bool) {
+func testDigestReaderReplacement(t *testing.T, kind string) {
 	t.Helper()
 	directory := t.TempDir()
-	if long {
+	if strings.HasPrefix(kind, "long") {
 		for i := 0; i < 10; i++ {
 			directory = filepath.Join(directory, strings.Repeat("segment", 4))
 		}
+		if err := os.MkdirAll(directory, 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if strings.Contains(kind, "unicode") {
+		directory = filepath.Join(directory, "Übergrößenträger-東京-📦")
 		if err := os.MkdirAll(directory, 0700); err != nil {
 			t.Fatal(err)
 		}
@@ -42,7 +48,7 @@ func testDigestReaderReplacement(t *testing.T, long bool) {
 		t.Fatal(err)
 	}
 	defer reader.Close()
-	if err := os.Rename(replacement, target); err != nil {
+	if err := replaceExecutable(replacement, target); err != nil {
 		t.Fatal("integrity reader blocked atomic cache replacement", err)
 	}
 	got, err := io.ReadAll(reader)
