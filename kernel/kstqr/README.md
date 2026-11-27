@@ -78,3 +78,9 @@ identical-content root replacement and a guest subscription reconnect. Optional
 The immutable decoded overlay state is reusable only for the same root bytes,
 runtime, subscription ID and cursor. It never promotes old bytes using a newer
 unobserved proof or mutates an existing shared state's observation in place.
+
+The plain filesystem binding regression uses `STQR_KERNEL_PLAIN_BIND=1` with
+the same command. It mounts an additional disposable filesystem twice, checks
+that local and independent-mount sibling edits preserve a file bind mount, and
+checks that replacement, removal and recreation still invalidate cached names.
+The existing complete-suite transaction recovery fixture remains unchanged.
