@@ -56,7 +56,13 @@ func decodeObjectReferences(raw []byte, bucket volume.ID) ([]objectReferenceEntr
 	if n > maxObjectReferences || uint64(n)*81 != uint64(len(raw)-24) {
 		return nil, volume.ErrCorrupt
 	}
-	entries := make([]objectReferenceEntry, 0, n)
+	// PIN commonly appends one entry immediately after decoding. Reserve that
+	// slot without relaxing the encoded length or global reference limit.
+	capacity := n
+	if capacity < maxObjectReferences {
+		capacity++
+	}
+	entries := make([]objectReferenceEntry, 0, capacity)
 	for i := uint32(0); i < n; i++ {
 		var e objectReferenceEntry
 		copy(e.object[:], d.Take(32))
