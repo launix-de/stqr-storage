@@ -695,7 +695,10 @@ and local recompression stage changes without per-object Sync. The destination
 captures the highest imported volume generation, then checkpoints that cut before
 publishing its durable final READY. This physical wait holds neither the node's
 admission lock nor a volume handle. A failed fence cannot publish READY or permit
-source retirement. The source remains authoritative until the existing complete
+source retirement. A codec-only PG participant likewise fences its complete
+per-volume conversion cut before returning the ACK that contributes to READY;
+it does not persist each recompressed object separately. The source remains
+authoritative until the existing complete
 READY/COMMIT protocol succeeds. This preserves the existing wire ownership
 contract with older peers, which may persist accepted progress earlier.
 
