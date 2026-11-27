@@ -55,8 +55,9 @@ var SoftwareRevision = "unknown"
 
 // ProtocolVersion is assigned by hand when peer protocol semantics change.
 // Never derive it from build time, commit count, package version or Git hash.
-// v3 includes the current unversioned control and bucket-lease semantics.
-const ProtocolVersion uint64 = 3
+// v4 introduces directed COW catalog edges (bucket schema 3). Old nodes must
+// reject affected control/COW exchanges before interpreting that catalog.
+const ProtocolVersion uint64 = 4
 
 type operationSemantics struct {
 	Emit uint16 `json:"emit"`
@@ -359,6 +360,19 @@ func currentOperationSemantics() map[string]operationSemantics {
 	result[fmt.Sprintf("%04x", peerCowCapture)] = operationSemantics{Emit: 2, Min: 2, Max: 2}
 	for _, op := range []uint16{peerForceReplicaState, clusterJoinStatus, clusterJoinInfo, clusterJoinPrepare} {
 		result[fmt.Sprintf("%04x", op)] = operationSemantics{Emit: 1, Min: 1, Max: 1}
+	}
+	// Directed inheritance changes which namespaces may supply a read and
+	// which dependants need a preimage. Never let an undirected peer consume
+	// the new catalog or serve a read through a descendant.
+	result[fmt.Sprintf("%04x", client.BucketClone)] = operationSemantics{Emit: 4, Min: 4, Max: 4}
+	for _, op := range []uint16{client.PeerControlReserve, client.PeerControlPrepare, client.PeerControlCommit, client.PeerControlApply, client.PeerControlRelease, client.PeerControlAbort} {
+		result[fmt.Sprintf("%04x", op)] = operationSemantics{Emit: 4, Min: 4, Max: 4}
+	}
+	for _, op := range []uint16{peerControlInfo, peerSystemChunk} {
+		result[fmt.Sprintf("%04x", op)] = operationSemantics{Emit: 3, Min: 3, Max: 3}
+	}
+	for op := peerCowCapture; op <= peerCowSync; op++ {
+		result[fmt.Sprintf("%04x", op)] = operationSemantics{Emit: 3, Min: 3, Max: 3}
 	}
 	return result
 }
