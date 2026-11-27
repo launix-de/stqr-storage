@@ -692,6 +692,7 @@ func (s *Server) execute(m client.Message, ws *wsSession) ([]byte, int, error) {
 			ws.durabilityCap.Store(requestedCapabilities&client.CapabilityDurability != 0)
 			ws.connectionFenceCap.Store(requestedCapabilities&client.CapabilityConnectionSync != 0)
 			ws.acceptedReferencesCap.Store(requestedCapabilities&client.CapabilityAcceptedReferences != 0)
+			ws.acceptedStreamsCap.Store(requestedCapabilities&capabilityAcceptedStreams != 0)
 		}
 		d.Text()
 		if e := guard(); e != nil {
@@ -709,7 +710,7 @@ func (s *Server) execute(m client.Message, ws *wsSession) ([]byte, int, error) {
 		} else {
 			e.U16(1)
 		}
-		caps, membership, revision := client.CapabilityAcceptedReferences|client.CapabilityConnectionSync|client.CapabilityBucketFormat|client.CapabilityObjectReferences|client.CapabilityPeerTransport|client.CapabilityNodeAdmin|client.CapabilityObjectSubscriptions|client.CapabilityDurability, uint64(1), c.Generation
+		caps, membership, revision := capabilityAcceptedStreams|client.CapabilityAcceptedReferences|client.CapabilityConnectionSync|client.CapabilityBucketFormat|client.CapabilityObjectReferences|client.CapabilityPeerTransport|client.CapabilityNodeAdmin|client.CapabilityObjectSubscriptions|client.CapabilityDurability, uint64(1), c.Generation
 		if s.control != nil {
 			caps |= client.CapabilityClusterControl
 			s.control.ledger.mu.Lock()

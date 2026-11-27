@@ -15,7 +15,18 @@ import (
 const maxObjectStagingBytes = 1 << 30
 const maxObjectStagingTransfers = 4
 
+// Negotiated separately because older durability peers accept only inline data.
+const capabilityAcceptedStreams uint64 = 1 << 21
+
 func objectUploadHeader(m client.Message) bool {
+	if m.Opcode == client.ObjectAccepted {
+		if len(m.Body) < 82 {
+			return false
+		}
+		inner := client.Decoder{B: m.Body[80:82]}
+		m.Opcode = inner.U16()
+		m.Body = append(append([]byte(nil), m.Body[:80]...), m.Body[82:]...)
+	}
 	if m.Opcode < 0x0102 || m.Opcode > 0x0104 {
 		return false
 	}
@@ -127,13 +138,21 @@ func (ws *wsSession) finishUpload(u *serverObjectUpload, result []byte, status i
 			result = nil
 			detail = err.Error()
 		}
-		body = client.ResponseBody(status, result, detail)
+		if err == nil && u.op.accepted {
+			body = ws.server.durabilityResponse(status, result, u.op.bucket.ID())
+		} else {
+			body = client.ResponseBody(status, result, detail)
+		}
 	}
 	defer ws.completeConnectionMessage(u.op.message, status, body)
 	if u.op.message.Kind != client.Request && (!ws.connectionFenceCap.Load() || status < 300) {
 		return nil
 	}
-	return ws.sendMessage(client.Message{Kind: client.Response, Opcode: u.op.message.Opcode, ID: u.op.message.ID, Body: body})
+	opcode := u.op.message.Opcode
+	if u.op.accepted {
+		opcode = client.ObjectAccepted
+	}
+	return ws.sendMessage(client.Message{Kind: client.Response, Opcode: opcode, ID: u.op.message.ID, Body: body})
 }
 func (ws *wsSession) objectTransfer(m client.Message, p principal, startCall func(func()) bool) error {
 	d := client.Decoder{B: m.Body}

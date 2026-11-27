@@ -72,9 +72,9 @@ never produces a success ACK. Disconnect before an ACK leaves an unknown outcome
 Each connection keeps a RAM-only map from actual local volumes to their touched
 generations, including observed read/subscription dependencies. Volumes are
 checkpointed concurrently; an already durable generation requires no further
-flush. Bucket/volume switches do not flush on this negotiated path. Closing a
+flush. Bucket/volume switches never flush merely because the destination changed. Closing a
 client/socket does not request Sync: its tracking is discarded. Applications may
-omit Sync entirely. Independent background/pressure checkpoints or clean volume
+omit Sync entirely. Necessary bounded-buffer checkpoints or clean volume
 shutdown can still persist data without promising a client acknowledgement.
 
 The client connects directly to placement owners and fences used owner sockets
@@ -110,8 +110,10 @@ freed/reused only in the volatile view must still use redo. The final group is
 therefore recovered as the old checkpoint or the complete new group. Backend
 write/flush ambiguity fences the volume rather than acknowledging it.
 
-A background worker attempts checkpoints once per second; capacity pressure can
-checkpoint earlier. This is not a hard durability deadline. Clean volume close
+The server never periodically flushes accepted mutations. Its background cleanup
+only checks RAM durability generations and forgets references already confirmed
+by an explicit fence, a durable mutation, or a necessary bounded-buffer checkpoint.
+Busy volumes are skipped without waiting for their locks. Clean volume close
 flushes accepted state. Confirmed generation references are pruned, allowing
 closed/replaced volumes to be collected. A Go client retains at most 1,024 pending
 issuer receipts; exceeding that budget fails subsequent barriers rather than
@@ -163,7 +165,7 @@ keep their causal order. There are no automatic publication-phase fences.
 
 Only explicit fsync/fdatasync/msync(MS_SYNC), O_SYNC/O_DSYNC, filesystem sync and
 block FLUSH/FUA request persistence. Close discards connection tracking without a
-fence. Background checkpoints and bounded-buffer pressure may still cause backend
+fence. Necessary bounded-buffer checkpoints may still cause backend
 Sync calls; those are distinct from a filesystem requesting durability.
 
 CapabilityAcceptedReferences (1<<20) permits an optional trailing accepted Bool
