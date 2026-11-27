@@ -241,7 +241,7 @@ func (s *Server) executeObjects(m client.Message, ws *wsSession, p principal) ([
 		}
 		defer func() { file.Close(); os.Remove(file.Name()) }()
 		hash := sha256.New()
-		info, n, err := op.bucket.copyToChecked(ctx, p, op.object, op.offset, length, &objectBudgetWriter{dst: io.MultiWriter(file, hash), remaining: maxObjectStagingBytes}, condition)
+		info, n, err := op.bucket.copyToChecked(withMembershipRead(ctx), p, op.object, op.offset, length, &objectBudgetWriter{dst: io.MultiWriter(file, hash), remaining: maxObjectStagingBytes}, condition)
 		if err != nil {
 			return nil, 0, err
 		}
@@ -281,7 +281,7 @@ func (s *Server) executeObjects(m client.Message, ws *wsSession, p principal) ([
 		if d.Done() != nil {
 			return nil, 0, fail(400, "invalid STAT body")
 		}
-		info, err := op.bucket.Stat(ctx, p, op.object)
+		info, err := op.bucket.Stat(withMembershipRead(ctx), p, op.object)
 		if err != nil {
 			return nil, 0, err
 		}

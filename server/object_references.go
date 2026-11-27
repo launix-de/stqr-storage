@@ -202,7 +202,7 @@ func (s *Server) executeObjectReference(ctx context.Context, m client.Message, w
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		raw, _, err := op.bucket.Get(ctx, internal, op.object)
+		raw, _, err := op.bucket.Get(withMembershipRead(ctx), internal, op.object)
 		absent := errors.Is(err, volume.ErrNotFound)
 		if absent {
 			raw = nil

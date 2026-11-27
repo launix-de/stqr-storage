@@ -160,37 +160,27 @@ func bucketLocalPolicy(p BucketPolicy) error {
 	return nil
 }
 func (b *Bucket) selectVolume(d BucketDescription, key volume.Key, request volume.ID, create bool) (*volume.Volume, volume.Info, bool, error) {
-	if b.server.controller != nil && d.DesiredPolicy != nil {
-		if entry, known := b.server.placement.Load().lookup(client.ID(key.Bucket), client.ObjectID(key.Object)); known && entry.PolicyVersion == d.DesiredPolicy.Version {
-			d.Policy = *d.DesiredPolicy
-		}
+	return b.selectVolumeProof(d, key, request, create, nil)
+}
+func (b *Bucket) selectVolumeProof(d BucketDescription, key volume.Key, request volume.ID, create bool, proof *cohortMembershipProof) (*volume.Volume, volume.Info, bool, error) {
+	var class volume.Class
+	var volumes []*volume.Volume
+	if proof == nil {
+		d, class, volumes = b.probeCohort(d, key)
+	} else {
+		d, class, volumes = proof.description, proof.class, proof.volumes
 	}
 	var selected *volume.Volume
 	var latest volume.Info
 	found := false
-	class := bucketClass(d.Policy)
-	if b.server.controller != nil {
-		if entry, known := b.server.placement.Load().lookup(client.ID(key.Bucket), client.ObjectID(key.Object)); known {
-			class = b.server.rangeClass(d.Policy, entry)
-		}
-	}
-	// volumesFor returns a request-owned slice. Retain exactly the same
-	// class/authority-eligible cohort while probing EVERY possible physical copy.
-	// Capacity ranking is unrelated to reads or an already located object.
-	volumes := b.volumesFor(d)
+	// Keep ALL eligible stores for new-create capacity ranking. A negative key
+	// proof suppresses only the existing-object/receipt probe, never capacity.
 	candidates := volumes[:0]
 	for _, v := range volumes {
-		if !class.Allows(v.Identity().Class) {
+		candidates = append(candidates, v)
+		if proof != nil && proof.absent[v] {
 			continue
 		}
-		if b.server.controller != nil {
-			if patch, ok := b.server.routingPatch(key.Bucket, key.Object); ok {
-				if !b.server.volumeAllowedForEntry(client.ID(b.ID()), patch.Entries[0], v.Identity().VolumeID, b.server.currentSystem.Load()) {
-					continue
-				}
-			}
-		}
-		candidates = append(candidates, v)
 		h, err := v.Open(false)
 		if err != nil {
 			return nil, latest, false, err
@@ -319,21 +309,11 @@ func (b *Bucket) getRange(ctx context.Context, p principal, id volume.ObjectID, 
 	if err := ctx.Err(); err != nil {
 		return nil, volume.Info{}, err
 	}
-	d, err := b.authorize(p, BucketRead)
+	v, h, d, prior, err := b.openSelectedRead(ctx, p, id)
 	if err != nil {
-		return nil, volume.Info{}, err
-	}
-	if err := b.server.checkObjectOwner(b.ID(), id, true); err != nil {
-		return nil, volume.Info{}, err
-	}
-	v, prior, _, err := b.selectVolume(d, volume.Key{Bucket: b.ID(), Object: id}, volume.ID{}, false)
-	if err != nil {
-		if bindingErr := b.server.checkObjectBinding(ctx, b.ID(), id, true); bindingErr != nil {
-			return nil, volume.Info{}, bindingErr
-		}
 		if errors.Is(err, volume.ErrNotFound) && len(d.ClonePeers) > 0 {
 			var data bytes.Buffer
-			info, _, e := b.cowCopyTo(ctx, id, offset, min(length, uint64(volume.MaxBufferedRead)+1), &data, nil)
+			info, _, e := b.cowCopyTo(withoutMembershipRead(ctx), id, offset, min(length, uint64(volume.MaxBufferedRead)+1), &data, nil)
 			if data.Len() > volume.MaxBufferedRead {
 				return nil, info, volume.ErrRange
 			}
@@ -343,10 +323,6 @@ func (b *Bucket) getRange(ctx context.Context, p principal, id volume.ObjectID, 
 	}
 	b.server.ioPriority.users.Add(1)
 	defer b.server.ioPriority.users.Add(-1)
-	h, err := v.Open(false)
-	if err != nil {
-		return nil, volume.Info{}, err
-	}
 	defer h.Close()
 	if err := b.server.checkObjectBinding(ctx, b.ID(), id, true); err != nil {
 		return nil, volume.Info{}, err
@@ -385,30 +361,16 @@ func (b *Bucket) copyToCheckedUnmetered(ctx context.Context, p principal, id vol
 	if err := ctx.Err(); err != nil {
 		return volume.Info{}, 0, err
 	}
-	d, err := b.authorize(p, BucketRead)
-	if err != nil {
-		return volume.Info{}, 0, err
-	}
-	if err := b.server.checkObjectOwner(b.ID(), id, true); err != nil {
-		return volume.Info{}, 0, err
-	}
 	key := volume.Key{Bucket: b.ID(), Object: id}
-	v, prior, _, err := b.selectVolume(d, key, volume.ID{}, false)
+	v, h, d, prior, err := b.openSelectedRead(ctx, p, id)
 	if err != nil {
-		if bindingErr := b.server.checkObjectBinding(ctx, b.ID(), id, true); bindingErr != nil {
-			return volume.Info{}, 0, bindingErr
-		}
 		if errors.Is(err, volume.ErrNotFound) && len(d.ClonePeers) > 0 {
-			return b.cowCopyTo(ctx, id, offset, length, dst, condition)
+			return b.cowCopyTo(withoutMembershipRead(ctx), id, offset, length, dst, condition)
 		}
 		return volume.Info{}, 0, b.absenceError(id, prior, err)
 	}
 	b.server.ioPriority.users.Add(1)
 	defer b.server.ioPriority.users.Add(-1)
-	h, err := v.Open(false)
-	if err != nil {
-		return volume.Info{}, 0, err
-	}
 	defer h.Close()
 	if err := b.server.checkObjectBinding(ctx, b.ID(), id, true); err != nil {
 		return volume.Info{}, 0, err
@@ -456,19 +418,8 @@ func (b *Bucket) Stat(ctx context.Context, p principal, id volume.ObjectID) (vol
 	if err := ctx.Err(); err != nil {
 		return volume.Info{}, err
 	}
-	d, err := b.authorize(p, BucketRead)
-	if err != nil {
-		return volume.Info{}, err
-	}
-	if err := b.server.checkObjectOwner(b.ID(), id, true); err != nil {
-		return volume.Info{}, err
-	}
-	v, info, _, err := b.selectVolume(d, volume.Key{Bucket: b.ID(), Object: id}, volume.ID{}, false)
+	v, h, d, info, err := b.openSelectedRead(ctx, p, id)
 	if err == nil && v != nil {
-		h, openErr := v.Open(false)
-		if openErr != nil {
-			return volume.Info{}, openErr
-		}
 		info, err = h.Stat(volume.Key{Bucket: b.ID(), Object: id})
 		if err == nil {
 			generation, _ := h.Generation()
@@ -476,11 +427,8 @@ func (b *Bucket) Stat(ctx context.Context, p principal, id volume.ObjectID) (vol
 		}
 		h.Close()
 	}
-	if bindingErr := b.server.checkObjectBinding(ctx, b.ID(), id, true); bindingErr != nil {
-		err = bindingErr
-	}
 	if errors.Is(err, volume.ErrNotFound) && len(d.ClonePeers) > 0 {
-		snapshot, e := b.server.cowLogicalSnapshot(ctx, b.ID(), id, true)
+		snapshot, e := b.server.cowLogicalSnapshot(withoutMembershipRead(ctx), b.ID(), id, true)
 		if e != nil {
 			return volume.Info{}, e
 		}
@@ -574,6 +522,15 @@ func (b *Bucket) mutateAttempt(ctx context.Context, p principal, id volume.Objec
 	// Only buffered publication keeps the quota slot under one uninterrupted
 	// Volume write handle. Large legacy durable mutations can release that
 	// lock inside their WAL fence and retain the exclusive fallback instead.
+	requestRelease, requestErr := s.lockRequestID(ctx, opt.RequestID)
+	if requestErr != nil {
+		return volume.Result{}, requestErr
+	}
+	defer func() {
+		if requestRelease != nil {
+			requestRelease()
+		}
+	}()
 	parallel := !parallelForcedExclusive(ctx) && (opt.Accepted || length <= 1<<20 && opcode != cowRestoreOpcode) && s.parallelMutationCandidate(b, p, id)
 	lockObjectIO, unlockObjectIO := s.lockUserObjectIO, s.unlockUserObjectIO
 	if parallel {
@@ -586,8 +543,12 @@ func (b *Bucket) mutateAttempt(ctx context.Context, p principal, id volume.Objec
 			unlockObjectIO()
 		}
 	}()
+	var membership *cohortMembershipProof
 	if parallel {
-		if !s.parallelMutationReady(b, p, id) || !b.beginParallelUsage() {
+		membership = b.membershipProof(b.storageDescription(), volume.Key{Bucket: b.ID(), Object: id}, opt.RequestID)
+	}
+	if parallel {
+		if !s.parallelMutationReadyProof(b, p, id, membership) || !b.beginParallelUsage() {
 			return volume.Result{}, &exclusiveMutationRetry{}
 		}
 		defer b.endParallelUsage()
@@ -695,6 +656,10 @@ func (b *Bucket) mutateAttempt(ctx context.Context, p principal, id volume.Objec
 			unlockObjectIO()
 			opLocked = false
 		}
+		if requestRelease != nil {
+			requestRelease()
+			requestRelease = nil
+		}
 		if replicaRelease != nil {
 			replicaRelease()
 			replicaRelease = nil
@@ -720,7 +685,14 @@ func (b *Bucket) mutateAttempt(ctx context.Context, p principal, id volume.Objec
 		return volume.Result{}, fail(400, "mutation request ID is required")
 	}
 	key := volume.Key{Bucket: b.ID(), Object: id}
-	v, old, exists, err := b.selectVolume(d, key, opt.RequestID, true)
+	create := true
+	if parallel && len(membership.volumes) > 1 {
+		create = false
+	}
+	v, old, exists, err := b.selectVolumeProof(d, key, opt.RequestID, create, membership)
+	if parallel && len(membership.volumes) > 1 && (errors.Is(err, volume.ErrNotFound) || err == nil && (!exists || len(membership.possible) != 1 || v != membership.possible[0])) {
+		return volume.Result{}, &exclusiveMutationRetry{}
+	}
 	if err != nil {
 		if errors.Is(err, volume.ErrFull) && s.scopes != nil {
 			failed := volume.ID{}

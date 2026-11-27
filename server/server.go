@@ -38,6 +38,8 @@ type Server struct {
 	activeLeases    map[volume.ID]*Bucket
 	durability      durabilityState
 
+	requestCoordination    requestIDCoordination
+	membershipJobs         map[*volume.Volume]*membershipJob
 	objectSubscriptions    objectSubscriptionRegistry
 	recoveryVolumes        map[volume.ID]*stagedRecoveryVolume
 	authority              *volumeAuthorityState
@@ -358,6 +360,7 @@ func Open(opts Options) (s *Server, err error) {
 	if e = s.loadBucketLeases(); e != nil {
 		return s, e
 	}
+	s.startVolumeMemberships()
 	s.startLeaseRecovery()
 	s.startDurabilityCleanup()
 	s.startBucketReclaimer()

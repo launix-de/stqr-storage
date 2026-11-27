@@ -32,12 +32,15 @@ func (s *Server) parallelMutationCandidate(b *Bucket, p principal, id volume.Obj
 		return false
 	}
 	entry, ok := s.placement.Load().lookup(client.ID(b.ID()), client.ObjectID(id))
-	return ok && entry.State == 0 && len(entry.Locations) == 1 && entry.Locations[0].Role == 0 && entry.Locations[0].Node == s.control.ledger.node && (entry.Locations[0].Volume != (client.ID{}) || len(b.volumesFor(d)) == 1)
+	return ok && entry.State == 0 && len(entry.Locations) == 1 && entry.Locations[0].Role == 0 && entry.Locations[0].Node == s.control.ledger.node
 }
 
 // Caller holds shared admission: publication of a changed map, authority plan,
 // hooks or policy requires exclusive admission. This check does no Volume I/O.
 func (s *Server) parallelMutationReady(b *Bucket, p principal, id volume.ObjectID) bool {
+	return s.parallelMutationReadyProof(b, p, id, b.membershipProof(b.storageDescription(), volume.Key{Bucket: b.ID(), Object: id}, volume.ID{}))
+}
+func (s *Server) parallelMutationReadyProof(b *Bucket, p principal, id volume.ObjectID, proof *cohortMembershipProof) bool {
 	if !s.parallelMutationCandidate(b, p, id) {
 		return false
 	}
@@ -49,7 +52,13 @@ func (s *Server) parallelMutationReady(b *Bucket, p principal, id volume.ObjectI
 	entry, _ := s.placement.Load().lookup(client.ID(b.ID()), client.ObjectID(id))
 	device := volume.ID(entry.Locations[0].Volume)
 	if device == (volume.ID{}) {
-		device = b.volumesFor(d)[0].Identity().VolumeID
+		if len(proof.volumes) == 1 {
+			device = proof.volumes[0].Identity().VolumeID
+		} else if len(proof.possible) == 1 {
+			device = proof.possible[0].Identity().VolumeID
+		} else {
+			return false
+		}
 	}
 	s.mu.RLock()
 	m := s.volumes[device.String()]

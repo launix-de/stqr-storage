@@ -357,5 +357,8 @@ func (s *Server) activateRecoveredVolumesLocked(view *systemView) error {
 	}
 	s.mu.Unlock()
 	s.dirtyVolumeAuthority()
+	for _, staged := range activated {
+		s.startVolumeMembership(staged.store)
+	}
 	return nil
 }

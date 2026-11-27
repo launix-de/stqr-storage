@@ -659,8 +659,11 @@ func TestParallelAdmissionUnpinnedMultipleVolumeCohortUsesExclusiveFallback(t *t
 	if err = s.ensureVolumeAuthority(); err != nil {
 		t.Fatal(err)
 	}
-	if s.parallelMutationCandidate(b, p, volume.ObjectID{2}) {
-		t.Fatal("ambiguous physical lookup admitted parallel fast path")
+	s.opMu.RLock()
+	ready := s.parallelMutationReady(b, p, volume.ObjectID{2})
+	s.opMu.RUnlock()
+	if ready {
+		t.Fatal("absent/unknown physical lookup admitted parallel fast path")
 	}
 	gate := &parallelPayloadGate{Reader: bytes.NewReader([]byte("first")), entered: make(chan struct{}), release: make(chan struct{})}
 	var once sync.Once
