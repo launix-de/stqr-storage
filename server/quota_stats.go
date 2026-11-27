@@ -7,8 +7,9 @@ import (
 )
 
 // Existing heartbeat BucketStats carry maintained counters, not an additional
-// dashboard poll or a scan of every object's index. CollectStats holds cfg.mu;
-// this path only reads immutable images and cannot invert the volume lock order.
+// dashboard poll or a scan of every object's index. No node/config lock is
+// required: images are atomically published and immutable; traffic reads use
+// bucketMu plus atomic counters. Never acquire a Volume lock on this path.
 func (s *Server) collectQuotaStats(snap *client.StatsSnapshot, filter client.StatsFilter) {
 	// Cold usage is unknown, never an empty bucket or spendable allowance.
 	if s.storageWarming.Load() {

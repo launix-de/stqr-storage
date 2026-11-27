@@ -10,41 +10,61 @@ import (
 	"time"
 
 	"github.com/launix-de/stqr-storage/client"
+	"github.com/launix-de/stqr-storage/volume"
 )
 
 // CollectStats is shared by dashboard and placement planning. The peer transport
 // pushes these same source-bound snapshots; liveness never changes membership.
 func (s *Server) CollectStats(filter client.StatsFilter) client.StatsSnapshot {
+	// Pin the configuration/cohort and retired counters together, then release
+	// the node lock before native Volume accessors can wait for storage locks.
+	// Otherwise a writer holding a Volume handle and needing node admission can
+	// deadlock with telemetry. The copied fields contain no mutable slice/map
+	// aliases. A detached/closed store remains a valid Go instance with readable
+	// final counters; counting this cohort with its matching retired snapshot
+	// avoids double-counting a concurrent detach's transferred I/O history.
+	type volumeInput struct {
+		store             *volume.Volume
+		path              string
+		draining, pending bool
+	}
 	s.mu.RLock()
-	defer s.mu.RUnlock()
-	node, _ := parseID(s.cfg.Node.ID)
-	snap := client.StatsSnapshot{Schema: 1, Node: client.ID(node), BootID: s.boot, Sequence: s.sequence.Add(1), CapturedUnixNS: uint64(time.Now().UnixNano()), WindowNS: uint64(3 * time.Second), MembershipEpoch: 1, Generation: s.cfg.Generation, MapRevision: s.cfg.Generation, Volumes: []client.VolumeStats{}, Buckets: []client.BucketStats{}, Ranges: []client.RangeStats{}}
-	snap.IO = s.retiredIO
-	if s.scopes != nil {
-		if activity := s.scopes.activity.Load(); activity != nil && activity.Active > 0 {
+	cfgNode, generation, joinPending := s.cfg.Node, s.cfg.Generation, s.cfg.JoinPending
+	retired := s.retiredIO
+	control, scopes, hasController := s.control, s.scopes, s.controller != nil
+	volumes := make([]volumeInput, 0, len(s.volumes))
+	for _, m := range s.volumes {
+		volumes = append(volumes, volumeInput{store: m.store, path: m.config.Path, draining: m.config.State == "draining", pending: len(m.config.PlacementGroupsPending) > 0})
+	}
+	s.mu.RUnlock()
+	node, _ := parseID(cfgNode.ID)
+	snap := client.StatsSnapshot{Schema: 1, Node: client.ID(node), BootID: s.boot, Sequence: s.sequence.Add(1), CapturedUnixNS: uint64(time.Now().UnixNano()), WindowNS: uint64(3 * time.Second), MembershipEpoch: 1, Generation: generation, MapRevision: generation, Volumes: []client.VolumeStats{}, Buckets: []client.BucketStats{}, Ranges: []client.RangeStats{}}
+	snap.IO = retired
+	if scopes != nil {
+		if activity := scopes.activity.Load(); activity != nil && activity.Active > 0 {
 			snap.NeedRebuild = true
 			snap.ReasonBits |= 1 << 4
 			snap.Coordinator = activity.Coordinator
 			snap.Round = activity.Round
 		}
 	}
-	if s.control != nil {
-		if activity := s.control.ledger.activity.Load(); activity != nil && activity.Busy {
+	if control != nil {
+		if activity := control.ledger.activity.Load(); activity != nil && activity.Busy {
 			snap.NeedRebuild = true
 			snap.ReasonBits |= 1 << 9 // a durable global control decision is pending
 			snap.Coordinator, snap.Round = activity.Coordinator, activity.Round
 		}
 	}
-	if s.cfg.Node.Paused {
+	if cfgNode.Paused {
 		snap.NodeState = 2
 	}
-	if s.cfg.Node.Draining && !s.cfg.Node.Paused {
+	if cfgNode.Draining && !cfgNode.Paused {
 		snap.NodeState = 1
 		snap.NeedRebuild = true
 		snap.ReasonBits |= 1 << 1
 	}
 	if view := s.currentSystem.Load(); view != nil {
-		if stop := view.manifest.Shutdown; stop != nil && stop.Membership == view.manifest.Membership.Epoch && s.cfg.Node.ClusterResumedID != stop.ID.String() {
+		if stop := view.manifest.Shutdown; stop != nil && stop.Membership == view.manifest.Membership.Epoch && cfgNode.ClusterResumedID != stop.ID.String() {
 			snap.NodeState = 2
 		}
 		snap.MembershipEpoch = view.manifest.Membership.Epoch
@@ -61,7 +81,7 @@ func (s *Server) CollectStats(filter client.StatsFilter) client.StatsSnapshot {
 			}
 		}
 	}
-	if s.cfg.JoinPending {
+	if joinPending {
 		snap.NodeState = 4
 		snap.MembershipEpoch, snap.Generation, snap.MapRevision = 0, 0, 0
 		snap.NeedRebuild = true
@@ -93,15 +113,15 @@ func (s *Server) CollectStats(filter client.StatsFilter) client.StatsSnapshot {
 	if !matches(filter.Nodes, snap.Node) {
 		return snap
 	}
-	for _, m := range s.volumes {
+	for _, m := range volumes {
 		v := m.store.Stats()
 		id := client.ID(v.Identity.VolumeID)
 		io := volumeAccessIO(v.IO)
 		state := uint8(m.store.State())
-		if s.storageWarming.Load() || len(m.config.PlacementGroupsPending) > 0 {
+		if s.storageWarming.Load() || m.pending {
 			state = 0
 		}
-		if s.controller != nil && m.config.State == "draining" {
+		if hasController && m.draining {
 			state = 2
 		}
 		health := uint8(0)
@@ -109,7 +129,7 @@ func (s *Server) CollectStats(filter client.StatsFilter) client.StatsSnapshot {
 			health = 2
 		}
 		if matches(filter.Volumes, id) {
-			snap.Volumes = append(snap.Volumes, client.VolumeStats{ID: id, Path: m.config.Path, Class: uint8(v.Identity.Class), State: state, CapacityPhysical: v.CapacityPhysical, AllocatedPhysical: v.AllocatedPhysical, ReclaimablePhysical: v.ReclaimablePhysical, PayloadPhysical: v.DataPhysical, MetadataPhysical: v.MetadataPhysical, ArenaUnusedPhysical: v.ArenaUnusedPhysical, GuaranteedRemainingPhysical: v.GuaranteedRemainingPhysical, InFlightReservedPhysical: v.InFlightReservedPhysical, OperatingReservePhysical: v.OperatingReservePhysical, AdmissionFreePhysical: v.AdmissionFreePhysical, Health: health, IO: io})
+			snap.Volumes = append(snap.Volumes, client.VolumeStats{ID: id, Path: m.path, Class: uint8(v.Identity.Class), State: state, CapacityPhysical: v.CapacityPhysical, AllocatedPhysical: v.AllocatedPhysical, ReclaimablePhysical: v.ReclaimablePhysical, PayloadPhysical: v.DataPhysical, MetadataPhysical: v.MetadataPhysical, ArenaUnusedPhysical: v.ArenaUnusedPhysical, GuaranteedRemainingPhysical: v.GuaranteedRemainingPhysical, InFlightReservedPhysical: v.InFlightReservedPhysical, OperatingReservePhysical: v.OperatingReservePhysical, AdmissionFreePhysical: v.AdmissionFreePhysical, Health: health, IO: io})
 		}
 		snap.IO.PhysicalReadBytes += io.PhysicalReadBytes
 		snap.IO.PhysicalWriteBytes += io.PhysicalWriteBytes
@@ -122,8 +142,8 @@ func (s *Server) CollectStats(filter client.StatsFilter) client.StatsSnapshot {
 		}
 	}
 	s.collectQuotaStats(&snap, filter)
-	if filter.IncludeRanges && s.scopes != nil {
-		s.scopes.collectRangeTelemetry(&snap)
+	if filter.IncludeRanges && scopes != nil {
+		scopes.collectRangeTelemetry(&snap)
 	}
 	sort.Slice(snap.Volumes, func(i, j int) bool { return snap.Volumes[i].ID.String() < snap.Volumes[j].ID.String() })
 	return snap
