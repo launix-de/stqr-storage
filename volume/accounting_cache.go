@@ -181,6 +181,22 @@ func (d *accountingContextIO) ReadAt(p []byte, off int64) (int, error) {
 	return d.VolumeIO.ReadAt(p, off)
 }
 
+// The census holds the source volume's shared lock for the entire scan. Forward
+// its read-only view capability without extending that lifetime or bypassing
+// cancellation. Hiding this optional capability would allocate and copy a whole
+// page for every small object header, even on a mapped backend.
+func (d *accountingContextIO) borrowAt(off uint64, n int) ([]byte, int, error) {
+	if err := d.ctx.Err(); err != nil {
+		return nil, 0, err
+	}
+	if reader, ok := d.VolumeIO.(interface {
+		borrowAt(uint64, int) ([]byte, int, error)
+	}); ok {
+		return reader.borrowAt(off, n)
+	}
+	return nil, 0, ErrUnsupported
+}
+
 func ownershipKey(stamp any, include func(Key, bool) bool) ([32]byte, bool) {
 	if key, ok := stamp.(OwnershipCheckpointKey); ok {
 		return key.OwnershipCheckpointKey(), true
