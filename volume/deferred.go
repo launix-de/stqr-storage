@@ -34,6 +34,20 @@ func (v *Volume) beginDeferred() error {
 	size := uint64(deferredJournalBytes)
 	var off uint64
 	for {
+		// Fixed scratch is excluded from client capacity. Prefer it so a small
+		// journal cannot split the only free extent that fits a new payload.
+		// An older checkpoint retains exclusive ownership until its I/O ends.
+		scratch := allocation{4 * PageSize, scratchPages * PageSize, false}
+		blocked := false
+		if v.fence != nil {
+			for _, r := range v.fence.reserved {
+				blocked = blocked || overlap(scratch, r)
+			}
+		}
+		if !blocked {
+			off, size = scratch.off, scratch.n
+			break
+		}
 		start, length, chosen, err := t.findSpace(size, PageSize, false)
 		if err == nil {
 			// Keep the WAL at the free extent's aligned end to preserve a
@@ -46,21 +60,6 @@ func (v *Volume) beginDeferred() error {
 		if err == nil {
 			off = chosen
 			break
-		}
-		if errors.Is(err, ErrFull) && size <= 8*PageSize {
-			// Fixed operational scratch is never client capacity. It can buffer
-			// small accepted deletes/metadata even when no free extent remains.
-			scratch := allocation{4 * PageSize, scratchPages * PageSize, false}
-			blocked := false
-			if v.fence != nil {
-				for _, r := range v.fence.reserved {
-					blocked = blocked || overlap(scratch, r)
-				}
-			}
-			if !blocked {
-				off, size = scratch.off, scratch.n
-				break
-			}
 		}
 		if !errors.Is(err, ErrFull) || size <= 8*PageSize {
 			return err
