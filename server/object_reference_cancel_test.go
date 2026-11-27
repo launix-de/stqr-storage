@@ -194,8 +194,17 @@ func TestObjectRequestContextStreamHeaderLifetime(t *testing.T) {
 	ws.authorization = &connectionAuthorization{bucket: b, bucketID: b.ID()}
 	ws.durabilityCap.Store(true)
 	ws.connectionFenceCap.Store(true)
-	ws.acceptedStreamsCap.Store(true)
-	m := acceptedStreamHeader(b, client.ObjectID{7}, bytes.Repeat([]byte("x"), 4096))
+	payload := bytes.Repeat([]byte("x"), 4096)
+	e := connectionTestRef(b, client.ObjectID{7})
+	e.Bool(false)
+	e.Bool(false)
+	e.Bool(false)
+	e.U8(1)
+	e.U64(uint64(len(payload)))
+	digest := sha256.Sum256(payload)
+	e.B = append(e.B, digest[:]...)
+	e.Blob(nil)
+	m := client.Message{Kind: client.Request, Opcode: 0x0102, ID: client.NewRequestID(), Body: e.B}
 	if !usesObjectRequestContext(m.Opcode) || !ws.admitConnectionMessage(m) || !ws.registerObjectContext(m.ID) {
 		t.Fatal("stream context admission")
 	}
