@@ -13,18 +13,25 @@ import (
 type ioPriorities struct{ users, rebuilds atomic.Int64 }
 
 func (s *Server) waitForUserIO(ctx context.Context) error {
-	// Yield at each bounded action, without starving a generation under a
-	// continuous stream of requests. A blocked client lending its priority to
-	// this exact handoff bypasses the extra delay.
+	// Wait for a quiet foreground interval at each bounded action, but cap
+	// the grace period so a continuous workload cannot starve handoff forever.
+	// Urgent range dependencies bypass grace; no lock is held while waiting.
 	runtime.Gosched()
 	e, _ := ctx.Value(rangeExecutionKey{}).(*rangeExecution)
-	if s.ioPriority.users.Load() > 0 && (e == nil || e.urgent.Load() == 0) {
-		timer := time.NewTimer(time.Millisecond)
-		defer timer.Stop()
+	if s.ioPriority.users.Load() == 0 || e != nil && e.urgent.Load() != 0 {
+		return ctx.Err()
+	}
+	deadline := time.NewTimer(25 * time.Millisecond)
+	defer deadline.Stop()
+	tick := time.NewTicker(time.Millisecond)
+	defer tick.Stop()
+	for s.ioPriority.users.Load() > 0 && (e == nil || e.urgent.Load() == 0) {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-timer.C:
+		case <-deadline.C:
+			return ctx.Err()
+		case <-tick.C:
 		}
 	}
 	return ctx.Err()

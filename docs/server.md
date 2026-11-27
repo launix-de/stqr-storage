@@ -686,6 +686,26 @@ counter sums, failed writes and request replay. Full bucket guarantee allocation
 is still unsupported; this engine primitive alone does not promise capacity.
 
 
+
+### Range import persistence boundary
+
+Object-end and receipt acknowledgements accept a non-authoritative shadow; they
+are not durability or placement promises. Bulk restoration, replacement cleanup
+and local recompression stage changes without per-object Sync. The destination
+captures the highest imported volume generation, then checkpoints that cut before
+publishing its durable final READY. This physical wait holds neither the node's
+admission lock nor a volume handle. A failed fence cannot publish READY or permit
+source retirement. The source remains authoritative until the existing complete
+READY/COMMIT protocol succeeds. This preserves the existing wire ownership
+contract with older peers, which may persist accepted progress earlier.
+
+A persisted transfer memo is never sufficient evidence for HAVE: its private
+journal can survive while accepted shadow bytes do not. Probes compare the actual
+shadow content; delta patches also bind the actual base hash. Imports no longer
+write a durable private memo for each object. No per-object progress map is kept
+in RAM. Foreground activity gets a bounded quiet interval before each background
+storage action, with urgent capacity dependencies bypassing that grace period.
+
 ## Explicit exclusion recovery
 
 Native FORCE_DISCONNECT (0x2013) binds a canonical victim list, the expected
