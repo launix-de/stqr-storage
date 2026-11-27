@@ -247,6 +247,7 @@ func (t *transaction) insertAt(off uint64, key indexKey, value uint64) (treeEntr
 }
 func (t *transaction) set(root *uint64, key indexKey, value uint64) error {
 	if root == &t.sb.ObjectRoot {
+		t.v.addMembershipKey(key)
 		if t.changed == nil {
 			t.changed = make(map[indexKey]bool)
 		}

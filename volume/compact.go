@@ -436,6 +436,9 @@ func (v *Volume) Import(src io.Reader, codec *Compression) error {
 			return e
 		}
 	}
+	// Import swaps a separately built key index; invalidate any prior empty
+	// membership proof before copying/publishing that new index.
+	v.invalidateKeyMembership()
 	// The destination is empty: its data area is entirely unreferenced.
 	// Stream the validated allocated pages there without retaining an entire
 	// snapshot/directory in RAM. Only its two existing root pages need redo.

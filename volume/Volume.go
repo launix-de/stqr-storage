@@ -44,12 +44,15 @@ import (
 // Cluster placement, authentication, quotas across volumes, and UI are outside
 // this package. They may reserve physical capacity and manage the lifecycle.
 type Volume struct {
-	identity          atomic.Pointer[Identity]
-	deferred          *deferredGroup
-	fence             *writeFence
-	staging           map[uint64][]byte
-	stageStore        *dirtyStore
-	durableGeneration uint64
+	identity           atomic.Pointer[Identity]
+	keyMembership      atomic.Pointer[keyMembership]
+	keyMembershipEpoch atomic.Uint64
+	keyMembershipBuild sync.Mutex
+	deferred           *deferredGroup
+	fence              *writeFence
+	staging            map[uint64][]byte
+	stageStore         *dirtyStore
+	durableGeneration  uint64
 
 	mu                sync.RWMutex
 	preparing         bool
@@ -336,6 +339,7 @@ func (v *Volume) write(b []byte, off uint64) error {
 }
 func (v *Volume) rawWrite(b []byte, off uint64) error {
 	if e := writeFullAt(v.dev, b, off); e != nil {
+		v.invalidateKeyMembership()
 		v.failed = e
 		if errors.Is(e, syscall.ENOSPC) || errors.Is(e, syscall.EDQUOT) || errors.Is(e, ErrFull) {
 			return fmt.Errorf("%w: %w: %v", ErrRecovery, ErrFull, e)
@@ -354,6 +358,7 @@ func (v *Volume) sync() error {
 }
 func (v *Volume) rawSync() error {
 	if e := v.dev.Sync(); e != nil {
+		v.invalidateKeyMembership()
 		v.failed = e
 		if errors.Is(e, syscall.ENOSPC) || errors.Is(e, syscall.EDQUOT) || errors.Is(e, ErrFull) {
 			return fmt.Errorf("%w: %w: %v", ErrRecovery, ErrFull, e)
@@ -394,6 +399,7 @@ func (v *Volume) Close() error {
 	if v.closed {
 		return nil
 	}
+	v.invalidateKeyMembership()
 	v.closing = true
 	for v.preparing || v.checkpointing {
 		v.prepareCond.Wait()

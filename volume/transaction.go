@@ -680,6 +680,7 @@ func (t *transaction) commitReserved(useGuaranteed bool, allowance, guaranteedAl
 	for off := range all {
 		b, err := t.page(off)
 		if err != nil {
+			live.invalidateKeyMembership()
 			live.failed = err
 			return err
 		}
