@@ -165,6 +165,9 @@ type combinedReference struct {
 
 func (s *Server) validateCombinedReference(q *combinedReferenceRequest) (combinedReference, error) {
 	c := combinedReference{q: q}
+	if !referencePrincipalSupported(q.principal) {
+		return c, ErrBucketForbidden
+	}
 	if err := q.ctx.Err(); err != nil {
 		return c, err
 	}

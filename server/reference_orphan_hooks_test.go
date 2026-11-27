@@ -6,8 +6,11 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/binary"
+	"errors"
 	"fmt"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/launix-de/stqr-storage/client"
 	"github.com/launix-de/stqr-storage/volume"
@@ -184,5 +187,101 @@ func TestReferenceOrphanHookOwnAccountCapIsNotEvaded(t *testing.T) {
 	}
 	if f.mark() != before {
 		t.Fatal("failed own-quota request published unrelated cleanup")
+	}
+}
+
+// A test-local context places a real administrative account publication AFTER
+// filtering but BEFORE the real mutation's node admission. No production hook
+// or publisher bypass is used. Omitting the derived CAS context makes this test
+// evict a now-present holder and incorrectly acknowledge the new PIN.
+type referencePruneRecreateContext struct {
+	context.Context
+	armed, changed  atomic.Bool
+	beforeAdmission func()
+}
+
+func (c *referencePruneRecreateContext) Value(key any) any {
+	if _, ok := key.(referencePruneKey); ok {
+		c.armed.Store(true)
+	}
+	return c.Context.Value(key)
+}
+func (c *referencePruneRecreateContext) Deadline() (time.Time, bool) {
+	// mutateUnmetered derives its local timeout BEFORE entering mutateAttempt
+	// or taking node admission. valueCtx preserves this parent method.
+	if c.armed.Load() && c.changed.CompareAndSwap(false, true) {
+		c.beforeAdmission()
+	}
+	return c.Context.Deadline()
+}
+
+func TestReferenceOrphanHookDerivedContextRechecksRecreatedHolder(t *testing.T) {
+	for _, accepted := range []bool{true, false} {
+		t.Run(fmt.Sprint("accepted=", accepted), func(t *testing.T) {
+			f := newCombiningFixture(t)
+			fullReferenceRoot(t, f, 1)
+			raw := f.root(t)
+			before := f.mark()
+			ctx := &referencePruneRecreateContext{Context: context.Background(), beforeAdmission: func() {
+				f.s.opMu.Lock()
+				defer f.s.opMu.Unlock()
+				index, err := f.s.accountIndex()
+				if err != nil {
+					t.Fatal(err)
+				}
+				image := cloneAccountsImage(index.image)
+				image.Users = append(image.Users, account{ID: (volume.ID{0x23}).String(), Name: "recreated-reference-holder", Role: "USER", PasswordHash: "unused"})
+				if err = f.s.writeBlob("accounts", image); err != nil {
+					t.Fatal(err)
+				}
+			}}
+			message := f.message(0, client.NewRequestID(), 1)
+			message.Body[len(message.Body)-1] = 0
+			if accepted {
+				message.Body[len(message.Body)-1] = 1
+			}
+			_, err := f.s.executeObjectReference(ctx, message, f.ws, f.p)
+			if !ctx.changed.Load() {
+				t.Fatal("test did not race after filtering")
+			}
+			if objectStatus(err) != 429 {
+				t.Fatal("recreated holder was discarded instead of refiltering", err)
+			}
+			if !bytes.Equal(raw, f.root(t)) || f.mark() != before {
+				t.Fatal("stale absence proof changed reference root")
+			}
+		})
+	}
+}
+
+func TestReferenceOrphanHookFrontendScopeRejectedNativeInternalAllowed(t *testing.T) {
+	f := newCombiningFixture(t)
+	message := f.message(0, client.NewRequestID(), 1)
+	before := f.mark()
+	for _, kind := range []string{"issuer", "connection"} {
+		t.Run(kind, func(t *testing.T) {
+			p := f.p
+			if kind == "issuer" {
+				p.frontendIssuer = client.ID{1}
+			} else {
+				p.connection = &connectionAuthorization{bucket: f.b, bucketID: f.b.ID(), permissions: BucketAllPermissions, frontendPermission: BucketRead}
+			}
+			if _, err := f.s.executeObjectReference(context.Background(), message, f.ws, p); !errors.Is(err, ErrBucketForbidden) {
+				t.Fatal("frontend lifetime operation admitted", err)
+			}
+			if _, err := f.s.validateCombinedReference(&combinedReferenceRequest{ctx: context.Background(), message: message, ws: f.ws, principal: p}); !errors.Is(err, ErrBucketForbidden) {
+				t.Fatal("independent combined preparation admitted frontend", err)
+			}
+		})
+	}
+	if f.mark() != before {
+		t.Fatal("rejected frontend changed root")
+	}
+	// Internal native coordination deliberately uses this READ override. It is
+	// not a frontend-issued credential and must not be denied by the new guard.
+	p := f.p
+	p.frontendPermission = BucketRead
+	if _, err := f.s.executeObjectReference(context.Background(), message, f.ws, p); err != nil {
+		t.Fatal("native internal READ override rejected", err)
 	}
 }

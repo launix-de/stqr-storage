@@ -137,6 +137,9 @@ func (s *Server) executeObjectReference(ctx context.Context, m client.Message, w
 }
 
 func (s *Server) executeObjectReferenceHeld(ctx context.Context, m client.Message, ws *wsSession, p principal, held bool) ([]byte, error) {
+	if !referencePrincipalSupported(p) {
+		return nil, ErrBucketForbidden
+	}
 	if m.Kind != client.Request {
 		return nil, fail(400, "object references require requests")
 	}
