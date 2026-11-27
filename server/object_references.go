@@ -80,7 +80,10 @@ func decodeObjectReferences(raw []byte, bucket volume.ID) ([]objectReferenceEntr
 	return entries, nil
 }
 func encodeObjectReferences(entries []objectReferenceEntry, bucket volume.ID) []byte {
-	e := client.Encoder{B: []byte("ORF1")}
+	// Entries are bounded by maxObjectReferences. Reserve the exact encoded
+	// size so whole-root updates do not repeatedly grow and copy the buffer.
+	e := client.Encoder{B: make([]byte, 4, 24+81*len(entries))}
+	copy(e.B, "ORF1")
 	e.ID(client.ID(bucket))
 	e.U32(uint32(len(entries)))
 	for _, r := range entries {
