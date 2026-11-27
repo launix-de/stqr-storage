@@ -1820,14 +1820,7 @@ out:
 	drop(&b);
 	return err;
 }
-static long find_entry(struct ks_entry *e, size_t n, const char *name)
-{
-	size_t i;
-	for (i = 0; i < n; i++)
-		if (!strcmp(e[i].name, name))
-			return i;
-	return -1;
-}
+#include "directory_lookup.h"
 static int entry_cmp(const void *a, const void *b)
 {
 	return strcmp(((const struct ks_entry *)a)->name, ((const struct ks_entry *)b)->name);
@@ -1925,7 +1918,7 @@ int ks_newnode(struct ks_fs *f, stqr_object_id parent, const char *name, unsigne
 			return err;
 		err = ks_directory(f, &old.node, &entries, &n);
 		next = old.node;
-		if (!err && find_entry(entries, n, name) >= 0)
+		if (!err && find_sorted_entry(entries, n, name) >= 0)
 			err = -EEXIST;
 		if (!err && !made) {
 			struct ks_node child = {.kind = kind,
@@ -2060,7 +2053,7 @@ int ks_remove(struct ks_fs *f, stqr_object_id parent, const char *name, bool dir
 			return err;
 		next = old.node;
 		err = ks_directory(f, &old.node, &entries, &n);
-		at = err ? -1 : find_entry(entries, n, name);
+		at = err ? -1 : find_sorted_entry(entries, n, name);
 		if (!err && at < 0)
 			err = -ENOENT;
 		if (!err)
@@ -2225,8 +2218,8 @@ int ks_rename(struct ks_fs *f, stqr_object_id from, const char *name, stqr_objec
 			nb = na;
 		}
 		if (!err) {
-			ai = find_entry(ae, na, name);
-			bi = find_entry(be, nb, newname);
+			ai = find_sorted_entry(ae, na, name);
+			bi = find_sorted_entry(be, nb, newname);
 			if (ai < 0)
 				err = -ENOENT;
 			else if ((flags & RENAME_EXCHANGE) && bi < 0)
@@ -2354,7 +2347,7 @@ int ks_link(struct ks_fs *f, stqr_object_id parent, const char *name, stqr_objec
 		err = ks_snapshot(f, parent, &p);
 		if (!err)
 			err = ks_directory(f, &p.node, &entries, &n);
-		if (!err && find_entry(entries, n, name) >= 0)
+		if (!err && find_sorted_entry(entries, n, name) >= 0)
 			err = -EEXIST;
 		if (!err)
 			err = ks_snapshot(f, target, &child);

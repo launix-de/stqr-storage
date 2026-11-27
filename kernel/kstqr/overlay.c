@@ -671,7 +671,7 @@ static int ov_child_proven(struct ks_fs *f, struct ks_overlay_state *s, stqr_obj
 	ks_snapshot_free(&lower);
 	if (err)
 		goto done;
-	at = find_entry(entries, count, name);
+	at = find_sorted_entry(entries, count, name);
 	if (at < 0)
 		err = -ENOENT;
 	else if (ov_upper_ref(s, entries[at].id))
@@ -1910,7 +1910,7 @@ static int ov_lower_kind(struct ks_fs *f, const char *path, unsigned *kind)
 		ks_snapshot_free(&dir);
 		if (err)
 			return err;
-		long found = find_entry(entries, count, name);
+		long found = find_sorted_entry(entries, count, name);
 		if (found < 0) {
 			sq_free(entries);
 			return -ENOENT;
