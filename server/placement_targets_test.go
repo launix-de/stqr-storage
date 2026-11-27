@@ -178,8 +178,13 @@ func TestPlacementTargetMapExecutesStorageClassDiff(t *testing.T) {
 	if p, ok := source.node.scopes.nextPlacementTarget(m); ok {
 		t.Fatal("extra payload move after satisfying target", p)
 	}
-	if result, err := bucket.Append(ctx, actor, object, []byte("once"), opt); err != nil || result != original {
-		t.Fatal("append receipt changed", result, err)
+	// Placement is complete, but its quota/policy checkpoint may still reject
+	// writes transiently. Reuse the original request ID while that barrier drains.
+	result := retryReplicaMutation(t, ctx, func() (volume.Result, error) {
+		return bucket.Append(ctx, actor, object, []byte("once"), opt)
+	})
+	if result != original {
+		t.Fatal("append receipt changed", result)
 	}
 	for _, node := range []*Server{source.node, target.node} {
 		copy, err := node.Bucket(bucket.ID())
