@@ -44,6 +44,8 @@ type Server struct {
 	activeLeases    map[volume.ID]*Bucket
 	durability      durabilityState
 
+	referenceCoordination referenceCoordination
+
 	objectSubscriptions    objectSubscriptionRegistry
 	recoveryVolumes        map[volume.ID]*stagedRecoveryVolume
 	authority              *volumeAuthorityState
