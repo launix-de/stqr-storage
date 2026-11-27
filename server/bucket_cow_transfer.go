@@ -72,6 +72,7 @@ func (s *Server) cowGraph() (cowGraph, error) { return cowGraphDescriptions(s.bu
 func cowGraphDescriptions(descriptions []BucketDescription) (cowGraph, error) {
 	g := cowGraph{}
 	links := map[volume.ID]map[volume.ID]string{}
+	directions := map[volume.ID]map[volume.ID]string{}
 	for _, d := range descriptions {
 		if d.DeletionComplete {
 			continue
@@ -88,20 +89,25 @@ func cowGraphDescriptions(descriptions []BucketDescription) (cowGraph, error) {
 			g[id] = append(g[id], peer)
 			if links[id] == nil {
 				links[id] = map[volume.ID]string{}
+				directions[id] = map[volume.ID]string{}
 			}
 			links[id][peer] = p.Link
+			directions[id][peer] = p.Direction
 		}
 	}
 	for id, peers := range g {
 		for _, peer := range peers {
 			found := false
 			for _, back := range g[peer] {
-				found = found || back == id && links[id][peer] == links[peer][id]
+				found = found || back == id && links[id][peer] == links[peer][id] && cowDirectionsMatch(directions[id][peer], directions[peer][id])
 			}
 			if !found {
 				return nil, fail(503, "clone graph publication is incomplete")
 			}
 		}
+	}
+	if err := cowValidateDirectedGraph(directions); err != nil {
+		return nil, err
 	}
 	return g, nil
 }
@@ -519,7 +525,7 @@ func (s *Server) cowGraphDigest(g cowGraph, bucket volume.ID) ([32]byte, error) 
 			}
 			symmetric := false
 			for _, back := range other.storageDescription().ClonePeers {
-				if back.Bucket == id.String() && back.Link == edge.Link {
+				if back.Bucket == id.String() && back.Link == edge.Link && cowDirectionsMatch(edge.Direction, back.Direction) {
 					symmetric = true
 					break
 				}
@@ -529,6 +535,7 @@ func (s *Server) cowGraphDigest(g cowGraph, bucket volume.ID) ([32]byte, error) 
 			}
 			e.ID(client.ID(peer))
 			e.ID(client.ID(link))
+			e.Text(edge.Direction)
 		}
 		e.ID(client.ID{})
 	}
@@ -565,4 +572,101 @@ func cowReadExtents(extents, ranges []volume.Extent) []volume.Extent {
 		merged = append(merged, e)
 	}
 	return merged
+}
+
+func cowDirectionsMatch(a, b string) bool {
+	return a == "" && b == "" || a == "parent" && b == "child" || a == "child" && b == "parent"
+}
+
+// Legacy symmetric components are valid, including their historical cycles.
+// Directed parent links between those components must form a DAG: otherwise a
+// missing record could be incorrectly resolved as absence after a read cycle.
+func cowValidateDirectedGraph(edges map[volume.ID]map[volume.ID]string) error {
+	directed := false
+	for _, peers := range edges {
+		for _, direction := range peers {
+			if direction != "" {
+				directed = true
+				break
+			}
+		}
+		if directed {
+			break
+		}
+	}
+	if !directed {
+		return nil
+	}
+	parent := map[volume.ID]volume.ID{}
+	find := func(id volume.ID) volume.ID {
+		root := id
+		for parent[root] != root {
+			root = parent[root]
+		}
+		for parent[id] != id {
+			next := parent[id]
+			parent[id] = root
+			id = next
+		}
+		return root
+	}
+	for id, peers := range edges {
+		parent[id] = id
+		for peer := range peers {
+			parent[peer] = peer
+		}
+	}
+	for id, peers := range edges {
+		for peer, direction := range peers {
+			if direction == "" {
+				a, b := find(id), find(peer)
+				parent[a] = b
+			}
+		}
+	}
+	indegree := map[volume.ID]int{}
+	forward := map[volume.ID][]volume.ID{}
+	for id, peers := range edges {
+		parents := 0
+		for peer, direction := range peers {
+			if direction != "parent" {
+				continue
+			}
+			parents++
+			if parents > 1 {
+				return fail(503, "clone namespace has multiple parents")
+			}
+			a, b := find(id), find(peer)
+			if a == b {
+				return fail(503, "clone inheritance cycle")
+			}
+			if _, ok := indegree[a]; !ok {
+				indegree[a] = 0
+			}
+			indegree[b]++
+			forward[a] = append(forward[a], b)
+		}
+	}
+	var ready []volume.ID
+	for id, n := range indegree {
+		if n == 0 {
+			ready = append(ready, id)
+		}
+	}
+	visited := 0
+	for len(ready) > 0 {
+		id := ready[len(ready)-1]
+		ready = ready[:len(ready)-1]
+		visited++
+		for _, peer := range forward[id] {
+			indegree[peer]--
+			if indegree[peer] == 0 {
+				ready = append(ready, peer)
+			}
+		}
+	}
+	if visited != len(indegree) {
+		return fail(503, "clone inheritance cycle")
+	}
+	return nil
 }

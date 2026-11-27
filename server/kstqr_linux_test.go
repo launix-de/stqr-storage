@@ -37,7 +37,7 @@ func TestKSTQRVirtualMachine(t *testing.T) {
 	// Focused scripts replace the same init section; combining them cannot
 	// represent a valid test and must fail before starting a guest.
 	selectedMode := ""
-	for _, mode := range []string{"PLAIN_BIND", "CACHE_NEGATIVE", "POSTRESTART_PIN", "ASYNC_UNPIN", "SHARED_PINS", "CACHE_REOPEN", "BENCHMARK", "WRITE_BENCHMARK", "READ_WINDOW", "LOOP", "RESTART_ONLY", "OVERLAY", "OVERLAY_PROOF", "OUTAGE", "CACHE_RETENTION", "REFERENCE_LIMIT"} {
+	for _, mode := range []string{"EDIT_RETRY", "PLAIN_BIND", "CACHE_NEGATIVE", "POSTRESTART_PIN", "ASYNC_UNPIN", "SHARED_PINS", "CACHE_REOPEN", "BENCHMARK", "WRITE_BENCHMARK", "READ_WINDOW", "LOOP", "RESTART_ONLY", "OVERLAY", "OVERLAY_PROOF", "OUTAGE", "CACHE_RETENTION", "REFERENCE_LIMIT"} {
 		if os.Getenv("STQR_KERNEL_"+mode) == "1" {
 			if selectedMode != "" {
 				t.Fatalf("incompatible kernel fixture modes %s and %s; run them separately", selectedMode, mode)
@@ -116,6 +116,7 @@ func TestKSTQRVirtualMachine(t *testing.T) {
 	run("cc", "-static", "-std=c11", "-Wall", "-Wextra", "-Werror", "-O2", "-o", filepath.Join(initrdRoot, "shared-pins"), filepath.Join(root, "tests/shared_pins.c"))
 	run("cc", "-static", "-std=c11", "-Wall", "-Wextra", "-Werror", "-O2", "-o", filepath.Join(initrdRoot, "postrestart-pin"), filepath.Join(root, "tests/postrestart_pin.c"))
 	run("cc", "-static", "-std=c11", "-Wall", "-Wextra", "-Werror", "-O2", "-o", filepath.Join(initrdRoot, "writeback"), filepath.Join(root, "tests/writeback.c"))
+	run("cc", "-static", "-std=c11", "-Wall", "-Wextra", "-Werror", "-O2", "-o", filepath.Join(initrdRoot, "edit-retry"), filepath.Join(root, "tests/edit_retry.c"))
 	run("cc", "-static", "-std=c11", "-Wall", "-Wextra", "-Werror", "-O2", "-o", filepath.Join(initrdRoot, "crash-reconnect"), filepath.Join(root, "tests/crash_reconnect.c"))
 	run("cc", "-static", "-std=c11", "-Wall", "-Wextra", "-Werror", "-O2", "-o", filepath.Join(initrdRoot, "mmap-test"), filepath.Join(root, "tests/mmap.c"), "-lsqlite3", "-lm", "-ldl", "-lpthread")
 	s := testServer(t)
@@ -151,6 +152,19 @@ func TestKSTQRVirtualMachine(t *testing.T) {
 	}))
 	defer upstream.Close()
 	host := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/__kstqr_test/edit-retry/") {
+			parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/__kstqr_test/edit-retry/"), "/")
+			if len(parts) != 2 {
+				http.NotFound(w, r)
+				return
+			}
+			if parts[1] == "begin" {
+				writebackFault.editRetry.begin(parts[0])
+			} else if err := writebackFault.editRetry.verify(parts[0]); err != nil {
+				http.Error(w, err.Error(), 500)
+			}
+			return
+		}
 		if r.URL.Path == "/__kstqr_test/read-failure/start" {
 			writebackFault.ranges.beginFailure()
 			return
@@ -937,6 +951,23 @@ func TestKSTQRVirtualMachine(t *testing.T) {
 		plainConn.Close()
 	}
 
+	var editRetryID client.ID
+	if os.Getenv("STQR_KERNEL_EDIT_RETRY") == "1" {
+		// The outage deliberately loses a connection's unconfirmed durability
+		// prefix. Isolate it from the original suite's clean-fsync assertions.
+		retryBucket, _ := createProtocolBucket(t, s, "kernel-edit-outage")
+		editRetryID = client.ID(retryBucket.ID())
+		retryConn, e := client.Dial(ctx, host.URL, admin.Username, admin.Password, editRetryID, "fs")
+		if e != nil {
+			t.Fatal(e)
+		}
+		if _, e = client.OpenFilesystem(ctx, retryConn, client.FSOptions{Create: true}); e != nil {
+			retryConn.Close()
+			t.Fatal(e)
+		}
+		retryConn.Close()
+	}
+
 	if err = os.WriteFile(filepath.Join(initrdRoot, "readonly-credentials"), []byte("username="+user.Name+"\npassword=bucket-test-password\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -1408,6 +1439,11 @@ umount /mnt
 		init = strings.Replace(init, "insmod /kstqr.ko\n", "insmod /kstqr.ko\n"+plainScript, 1)
 	}
 
+	if os.Getenv("STQR_KERNEL_EDIT_RETRY") == "1" {
+		probe := fmt.Sprintf("echo KSTQR_EDIT_RETRY_MOUNT_BEGIN\n/mount.kstqr --uri %s --bucket %s --credentials /credentials /mnt\necho KSTQR_EDIT_RETRY_WRITE_BEGIN\n/edit-retry %s\necho KSTQR_EDIT_RETRY_UNMOUNT_BEGIN\numount /mnt\n", endpoint, editRetryID.String(), endpoint)
+		init = strings.Replace(init, "insmod /kstqr.ko\n", "insmod /kstqr.ko\n"+probe, 1)
+	}
+
 	if os.Getenv("STQR_KERNEL_OVERLAY_PROOF") == "1" {
 		run("cc", "-static", "-O2", "-Wall", "-Wextra", "-Werror", "-o", filepath.Join(initrdRoot, "overlay-proof"), filepath.Join(root, "tests/overlay_proof.c"))
 		init = fmt.Sprintf(`#!/bin/sh
@@ -1653,7 +1689,7 @@ poweroff -f
 		t.Fatalf("cpio: %v %s", err, packErr.String())
 	}
 	guestMemory := "512M"
-	if os.Getenv("STQR_KERNEL_PLAIN_BIND") == "1" || os.Getenv("STQR_KERNEL_CACHE_NEGATIVE") == "1" || os.Getenv("STQR_KERNEL_OVERLAY") == "1" || os.Getenv("STQR_KERNEL_OVERLAY_PROOF") == "1" || os.Getenv("STQR_KERNEL_REFERENCE_LIMIT") == "1" {
+	if os.Getenv("STQR_KERNEL_EDIT_RETRY") == "1" || os.Getenv("STQR_KERNEL_PLAIN_BIND") == "1" || os.Getenv("STQR_KERNEL_CACHE_NEGATIVE") == "1" || os.Getenv("STQR_KERNEL_OVERLAY") == "1" || os.Getenv("STQR_KERNEL_OVERLAY_PROOF") == "1" || os.Getenv("STQR_KERNEL_REFERENCE_LIMIT") == "1" {
 		// These fixtures need 1 GiB to unpack their static test binaries and
 		// debug module, including the longer-path original-source control.
 		guestMemory = "1024M"
@@ -1689,6 +1725,12 @@ poweroff -f
 
 	if os.Getenv("STQR_KERNEL_CACHE_RETENTION") == "1" && !strings.Contains(string(output), "KSTQR_CACHE_RETENTION_PASS") {
 		t.Fatalf("cache retention test did not pass: %v\n%s", err, output)
+	}
+	if os.Getenv("STQR_KERNEL_EDIT_RETRY") == "1" {
+		if !strings.Contains(string(output), "KSTQR_EDIT_RETRY_PASS") {
+			t.Fatalf("edit retry test did not pass: %v\n%s", err, output)
+		}
+		t.Log("KSTQR_EDIT_RETRY_PASS")
 	}
 	if os.Getenv("STQR_KERNEL_OUTAGE") == "1" && !strings.Contains(string(output), "KSTQR_OUTAGE_PASS") {
 		t.Fatalf("outage test did not pass: %v\n%s", err, output)

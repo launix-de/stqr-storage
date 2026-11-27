@@ -31,6 +31,8 @@ type cowServerObjects struct {
 	server      *Server
 	metadata    bool
 	readReplica bool
+	// Prospective quota evaluation must use its fenced future catalog snapshot.
+	graphDescriptions map[volume.ID]BucketDescription
 }
 
 func (store cowServerObjects) capture(ctx context.Context, bucket volume.ID, object volume.ObjectID) (*cowSnapshot, error) {
@@ -399,7 +401,7 @@ func (s *Server) cowPrepareWrite(ctx context.Context, b *Bucket, id volume.Objec
 		}
 	}
 	err = g.prepareWrite(ctx, cowServerObjects{server: s}, b.ID(), id)
-	return proof, true, err
+	return proof, true, cowStorageError(err)
 }
 func (s *Server) cowValidateRestore(bucket volume.ID, restore cowRestore) error {
 	g, err := s.cowGraph()
@@ -482,4 +484,43 @@ func (b *Bucket) cowMaterializationRequest(object volume.ObjectID, proof [32]byt
 		id = volume.ID(next[:16])
 	}
 	return volume.ID{}, fail(503, "clone materialization has too many retained aborts")
+}
+
+func (store cowServerObjects) cloneNeighbors(bucket volume.ID, preserve bool) ([]volume.ID, error) {
+	var d BucketDescription
+	if store.graphDescriptions != nil {
+		var ok bool
+		d, ok = store.graphDescriptions[bucket]
+		if !ok {
+			return nil, fail(503, "prospective clone namespace metadata is unavailable")
+		}
+	} else {
+		b, err := store.server.Bucket(bucket)
+		if err != nil {
+			return nil, fail(503, "clone namespace metadata is unavailable")
+		}
+		d = b.storageDescription()
+	}
+	var ids []volume.ID
+	for _, edge := range d.ClonePeers {
+		if preserve && edge.Direction == "parent" || !preserve && edge.Direction == "child" {
+			continue
+		}
+		id, err := bucketID(edge.Bucket)
+		if err != nil {
+			return nil, fail(503, "clone neighbor metadata is invalid")
+		}
+		ids = append(ids, id)
+	}
+	return ids, nil
+}
+
+// An owner whose inheritance semantics cannot be used is unavailable, not
+// empty or unsupported client storage. Keep peer/admin 426 diagnostics intact;
+// storage-facing callers return retryable 503 without changing placement.
+func cowStorageError(err error) error {
+	if err != nil && statusOf(err) == 426 {
+		return fail(503, "clone owner is temporarily unavailable due to incompatible semantics")
+	}
+	return err
 }
