@@ -342,24 +342,20 @@ func TestFilesystemNativeMutationsDeferUntilExplicitSync(t *testing.T) {
 		})
 	}
 }
-func TestAcceptedReferencesLegacyFallback(t *testing.T) {
+func TestAcceptedReferencesRejectDurableLegacyFallback(t *testing.T) {
 	const caps = CapabilityDurability | CapabilityConnectionSync | CapabilityObjectReferences
 	p, host := newDeferredFSPeer(t, caps)
 	c := dialConnectionTest(t, host)
 	ctx := context.Background()
 	fs := filesystemDeferredStore(c).(*filesystemNativeStore)
-	if err := fs.PinObject(ctx, ObjectID{3}, NewRequestID()); err != nil {
-		t.Fatal(err)
+	var unsupported *StatusError
+	if err := fs.PinObject(ctx, ObjectID{3}, NewRequestID()); !errors.As(err, &unsupported) || unsupported.Status != 426 {
+		t.Fatal("legacy accepted reference did not fail explicitly", err)
 	}
-	if p.refsDurable.Load() != 1 || p.refsAccepted.Load() != 0 {
-		t.Fatal("legacy reference contract changed")
+	if p.refsDurable.Load() != 0 || p.refsAccepted.Load() != 0 || p.fences.Load() != 0 {
+		t.Fatal("unsupported reference performed storage/fence")
 	}
-	if err := c.Sync(ctx); err != nil {
-		t.Fatal(err)
-	}
-	if p.fences.Load() != 0 {
-		t.Fatal("durable legacy reference unnecessarily fenced")
-	}
+
 }
 
 func TestS3PublicationNeverInheritsAcceptedFilesystemMode(t *testing.T) {
@@ -372,7 +368,7 @@ func TestS3PublicationNeverInheritsAcceptedFilesystemMode(t *testing.T) {
 		t.Fatal(err)
 	}
 	s := NewS3(fs.store.(S3Store))
-	before := p.durable.Load()
+	before := p.accepted.Load()
 	if _, err = s.Put(ctx, "default", bytes.NewReader([]byte("data")), 4, S3PutOptions{}); err != nil {
 		t.Fatal(err)
 	}
@@ -380,8 +376,8 @@ func TestS3PublicationNeverInheritsAcceptedFilesystemMode(t *testing.T) {
 	if _, err = s.Put(ctx, "publication", bytes.NewReader([]byte("data")), 4, S3PutOptions{Publication: &publication, Modified: time.Now()}); err != nil {
 		t.Fatal(err)
 	}
-	if p.durable.Load() != before+2 || !publication.Accepted {
-		t.Fatal("S3 publication used accepted ACK or mutated caller options", p.durable.Load()-before, publication.Accepted)
+	if p.accepted.Load() != before+2 || p.durable.Load() != 0 || p.fences.Load() != 2 || !publication.Accepted {
+		t.Fatal("S3 publication lacked explicit fence", p.accepted.Load()-before, p.durable.Load(), p.fences.Load(), publication.Accepted)
 	}
 }
 

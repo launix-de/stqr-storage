@@ -62,11 +62,11 @@ func (s s3Store) GetRange(ctx context.Context, id client.ObjectID, off, n uint64
 	return b, s3Info(i), s3NativeError(e)
 }
 func (s s3Store) CAS(ctx context.Context, id client.ObjectID, off uint64, expected, replacement []byte, opt client.CASOptions) (client.ObjectInfo, error) {
-	i, e := s.b.CAS(ctx, s.p, volume.ObjectID(id), off, expected, replacement, volume.Options{RequestID: volume.ID(opt.RequestID), ExpectedLength: opt.ExpectedLength, CompareOffset: opt.CompareOffset, Compare: opt.Compare, CreateOnly: opt.Absent, WholeObject: opt.Scope == client.CASObject})
+	i, e := s.b.CAS(ctx, s.p, volume.ObjectID(id), off, expected, replacement, volume.Options{RequestID: volume.ID(opt.RequestID), Accepted: opt.Accepted, ExpectedLength: opt.ExpectedLength, CompareOffset: opt.CompareOffset, Compare: opt.Compare, CreateOnly: opt.Absent, WholeObject: opt.Scope == client.CASObject})
 	return s3Info(i), s3NativeError(e)
 }
 func (s s3Store) PutFrom(ctx context.Context, id client.ObjectID, src io.Reader, n uint64, opt client.PutOptions) (client.ObjectInfo, error) {
-	i, e := s.b.PutReader(ctx, s.p, volume.ObjectID(id), src, n, volume.Options{RequestID: volume.ID(opt.RequestID), CreateOnly: opt.Absent, ExpectedLength: opt.ExpectedLength, CompareOffset: opt.CompareOffset, Compare: opt.Compare})
+	i, e := s.b.PutReader(ctx, s.p, volume.ObjectID(id), src, n, volume.Options{RequestID: volume.ID(opt.RequestID), Accepted: opt.Accepted, CreateOnly: opt.Absent, ExpectedLength: opt.ExpectedLength, CompareOffset: opt.CompareOffset, Compare: opt.Compare})
 	return s3Info(i), s3NativeError(e)
 }
 func (s s3Store) GetRangeTo(ctx context.Context, id client.ObjectID, off, n uint64, dst io.Writer) (client.ObjectInfo, error) {
@@ -95,7 +95,7 @@ func (s s3Store) GetRangeToMatching(ctx context.Context, id client.ObjectID, off
 	return s3Info(i), e
 }
 func (s s3Store) Delete(ctx context.Context, id client.ObjectID, opt client.DeleteOptions) error {
-	return s3NativeError(s.b.Delete(ctx, s.p, volume.ObjectID(id), volume.Options{RequestID: volume.ID(opt.RequestID), ExpectedLength: opt.ExpectedLength, CompareOffset: opt.CompareOffset, Compare: opt.Compare}))
+	return s3NativeError(s.b.Delete(ctx, s.p, volume.ObjectID(id), volume.Options{RequestID: volume.ID(opt.RequestID), Accepted: opt.Accepted, ExpectedLength: opt.ExpectedLength, CompareOffset: opt.CompareOffset, Compare: opt.Compare}))
 }
 func (s s3Store) ScanObjects(ctx context.Context, after *client.ObjectID, limit uint32) ([]client.ObjectEntry, *client.ObjectID, error) {
 	d, e := s.b.authorize(s.p, BucketRead)
@@ -120,4 +120,23 @@ func (s s3Store) ScanObjects(ctx context.Context, after *client.ObjectID, limit 
 	}
 	id := client.ObjectID(next)
 	return out, &id, nil
+}
+
+// Sync is requested explicitly by the S3 adapter before publishing its durable
+// HTTP acknowledgement. Ordinary storage operations do not issue this fence.
+func (s s3Store) Sync(ctx context.Context) error {
+	if _, err := s.b.authorize(s.p, BucketRead); err != nil {
+		return s3NativeError(err)
+	}
+	server := s.b.server
+	mark, pending := server.acceptedMark(s.b.ID())
+	if !pending {
+		return nil
+	}
+	e := client.Encoder{}
+	e.ID(client.BucketID(s.b.ID()))
+	e.ID(mark.Boot)
+	e.U64(mark.Sequence)
+	_, _, err := server.executeSync(ctx, client.Message{Opcode: client.BucketSync, Body: e.B}, nil, s.p)
+	return s3NativeError(err)
 }

@@ -134,14 +134,16 @@ func TestAcceptedAbortAndCleanClose(t *testing.T) {
 	if err = v.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if err = v.CheckpointThrough(generation); err != nil {
-		t.Fatal(err)
+	if err = v.CheckpointThrough(generation); !errors.Is(err, ErrClosed) {
+		t.Fatal("discarded tail became confirmed after Close", err)
 	}
 	recovered, err := Open(d.crash(), OpenOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	mustGet(t, recovered, testKey(1), []byte("keep"))
+	if _, _, err = testGet(recovered, testKey(1)); !errors.Is(err, ErrNotFound) {
+		t.Fatal("Close persisted an unrequested tail", err)
+	}
 }
 
 // Dirty allocator state can reuse pages which are still live in the durable

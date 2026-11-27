@@ -31,7 +31,7 @@ typedef struct {
  stqr_u64 compare_offset;
  const void *compare; size_t compare_size;
  int has_compare;
-    int accepted; /* opt-in visible ACK; stqr_sync confirms persistence */
+    int accepted; /* visible ACK; explicit sync persists; unsupported peers reject */
 } stqr_options;
 typedef struct {
     stqr_u64 length;
@@ -45,8 +45,9 @@ typedef struct {
  * Submission and poll framing must be serialized; pending operations overlap.
  * Close must not race framing; it cancels callbacks without a durability fence.
  * Owner redirects reuse bounded per-endpoint sessions, retaining subscriptions.
- * sync covers all sessions; pending_mark confirms other sessions before returning
- * one remaining node-local mark. Explicit reconnect invalidates all subscriptions.
+ * sync covers all sessions; pending_mark only observes RAM and cannot summarize
+ * independent server incarnations. A full owner pool retains dirty sessions and
+ * returns -ENOSPC until callers explicitly sync. Reconnect invalidates subscriptions.
  * Dial always takes URL, username, password and bucket. No global credentials.
  * URLs are http:// or ws://; encrypted transport is not currently supported.
  */
@@ -78,9 +79,10 @@ void stqr_free(void *data);
  * to the callback (stqr_free); info is borrowed only during callback execution.
  * Transport failure of a possibly sent write reports -EINPROGRESS. */
 #define STQR_CAP_CONNECTION_SYNC 524288U
+#define STQR_CAP_ACCEPTED_STREAMS (1U << 21)
 #define STQR_CAP_ACCEPTED_REFERENCES 1048576U
 /* Filesystem-only opt-in; defaults to durable references. Persists across
- * owner routing/reconnect, and falls back to durable on unsupported peers. */
+ * owner routing/reconnect; unsupported accepted-reference peers reject it. */
 void stqr_set_accepted_references(stqr_client *, int enabled);
 typedef void (*stqr_completion)(void *arg, int error, int status,
                                 void *data, size_t length, const stqr_info *info);
@@ -105,6 +107,8 @@ int stqr_delete_async(stqr_client *, stqr_object_id, const stqr_options *, stqr_
 int stqr_unsubscribe_async(stqr_client *, stqr_id subscription, stqr_completion, void *);
 int stqr_subscribe_async(stqr_client *, stqr_object_id, stqr_id subscription,
                          stqr_u64 *cursor, stqr_completion, void *);
+/* Captures preceding logical result completions, including redirects, before
+ * explicitly fencing their owners. Later submissions do not extend that join. */
 int stqr_connection_sync_async(stqr_client *, stqr_completion, void *);
 unsigned stqr_async_pending(const stqr_client *);
 /* A readiness notification never processes replies and must not sleep. Kernel
@@ -140,7 +144,8 @@ int stqr_cas(stqr_client *, stqr_object_id, unsigned scope, stqr_u64 offset,
              const stqr_options *, stqr_info *);
 /* Bucket-local references are durable by default. With the explicit filesystem
  * accepted-reference mode, completion confirms visibility; stqr_sync is the
- * persistence boundary, including intents and dependency pins.
+ * persistence boundary, including intents and dependency pins. Unsupported
+ * accepted-reference peers reject instead of silently making ordinary ops durable.
  * Generate a nonzero token with
  * stqr_request_id and preserve it through retries, reconnect and restart.
  * All four coordination actions need READ. Claims do not grant WRITE/DELETE;
@@ -161,7 +166,9 @@ int stqr_object_unpin_dependency(stqr_client *, stqr_object_id, stqr_id token);
 typedef struct { stqr_id boot; stqr_u64 sequence; } stqr_commit_mark;
 /* Mark observation includes reads and subscription updates, preserving causal
  * dependencies. Close is not a durability barrier. Marks survive reconnect;
- * loss of an unconfirmed server incarnation makes sync return -ESTALE. */
+ * loss of an unconfirmed server incarnation makes sync return -ESTALE.
+ * pending_mark never sends requests; it returns -EOPNOTSUPP when multiple server
+ * incarnations have pending marks. Use fence_capture or sync for that case. */
 int stqr_pending_mark(stqr_client *, stqr_commit_mark *);
 int stqr_sync_through(stqr_client *, const stqr_commit_mark *, stqr_commit_mark *);
 int stqr_sync(stqr_client *);

@@ -22,6 +22,9 @@ import (
 // It validates the exact bucket/reference/precondition/transfer field ordering.
 type wireObjectPeer struct {
 	helloCaps        atomic.Uint64
+	acceptedHeaders  atomic.Int64
+	nativeHeaders    atomic.Int64
+	fences           atomic.Int64
 	stallHandshake   atomic.Bool
 	handshakeStarted chan struct{}
 	handshakeGate    chan struct{}
@@ -97,8 +100,23 @@ func (p *wireObjectPeer) serve(w http.ResponseWriter, r *http.Request) {
 	}
 	defer c.Close()
 	uploads := map[ID]*fixtureUpload{}
+	acceptedIDs := map[ID]bool{}
 	send := func(m Message, status int, result []byte) error {
-		return c.WriteMessage(websocket.BinaryMessage, EncodeMessage(Message{Kind: Response, Opcode: m.Opcode, ID: m.ID, Body: ResponseBody(status, result, "")}))
+		body := ResponseBody(status, result, "")
+		if acceptedIDs[m.ID] {
+			m.Opcode = ObjectAccepted
+			mark := CommitMark{Boot: ID{99}, Sequence: uint64(p.commits.Load())}
+			h := Encoder{}
+			h.V(1)
+			h.V(DurabilityHeader)
+			h.Blob(mark.MarshalBinary())
+			e := Encoder{}
+			e.V(uint64(status))
+			e.Blob(h.B)
+			e.B = append(e.B, result...)
+			body = e.B
+		}
+		return c.WriteMessage(websocket.BinaryMessage, EncodeMessage(Message{Kind: Response, Opcode: m.Opcode, ID: m.ID, Body: body}))
 	}
 	commit := func(m Message, id ObjectID, off uint64, data []byte) error {
 		p.mu.Lock()
@@ -159,7 +177,30 @@ func (p *wireObjectPeer) serve(w http.ResponseWriter, r *http.Request) {
 			p.t.Error(e)
 			return
 		}
+		if m.Opcode == ObjectAccepted {
+			if len(m.Body) < 82 {
+				p.t.Error("short accepted header")
+				return
+			}
+			acceptedIDs[m.ID] = true
+			p.acceptedHeaders.Add(1)
+			m.Opcode = uint16(m.Body[80]) | uint16(m.Body[81])<<8
+			m.Body = append(append([]byte(nil), m.Body[:80]...), m.Body[82:]...)
+		} else if m.Opcode >= objectPut && m.Opcode <= objectAppend {
+			p.nativeHeaders.Add(1)
+		}
 		d := Decoder{B: m.Body}
+		if m.Opcode == BucketSync {
+			d.ID()
+			mark, err := DecodeCommitMark(d.Take(24))
+			if err != nil || d.Done() != nil {
+				p.t.Error("bad bucket fence")
+				return
+			}
+			p.fences.Add(1)
+			send(m, 200, mark.MarshalBinary())
+			continue
+		}
 		if m.Opcode == Hello {
 			d.U16()
 			d.U16()

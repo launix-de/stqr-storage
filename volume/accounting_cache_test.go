@@ -290,7 +290,7 @@ func TestAccountingWarmupAllowsReadsAndStatsAndCancel(t *testing.T) {
 }
 func TestAccountingCacheAcceptedWritesAndCrashOrdering(t *testing.T) {
 	for _, crash := range []bool{true, false} {
-		t.Run(map[bool]string{true: "crash", false: "clean-close"}[crash], func(t *testing.T) {
+		t.Run(map[bool]string{true: "crash", false: "explicit-sync-close"}[crash], func(t *testing.T) {
 			v, name, cache, _ := accountingCacheFixture(t)
 			old, err := os.ReadFile(cache)
 			if err != nil {
@@ -316,6 +316,9 @@ func TestAccountingCacheAcceptedWritesAndCrashOrdering(t *testing.T) {
 					t.Fatal(err)
 				}
 			} else {
+				if err = v.Sync(); err != nil {
+					t.Fatal(err)
+				}
 				if err = v.Close(); err != nil {
 					t.Fatal(err)
 				}

@@ -5,7 +5,7 @@ import "context"
 
 // Native filesystems wait for visibility/CAS results, not physical persistence.
 // The wrapper is owned by the filesystem; the original Client retains its
-// default durable API (including S3 calls using that same native connection).
+// legacy native API. S3 asks for its own explicit publication fence.
 // Custom stores keep their own acknowledgement contract.
 type filesystemNativeStore struct{ *Client }
 

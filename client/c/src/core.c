@@ -22,8 +22,11 @@ struct sq_route {
     stqr_id runtime;
 };
 struct sq_async;
+struct async_sync_group;
 struct stqr_client {
     struct sq_async *async[64];
+    struct async_sync_group *sync_waiting;
+    unsigned sync_progressing;
     struct sq_route *routes;
     unsigned async_count;
     stqr_u64 async_sequence;
@@ -318,10 +321,11 @@ static int select_endpoint(stqr_client *c,const char *endpoint) {
         if (c->channel_count>=SQ_CHANNEL_LIMIT) {
             struct sq_channel *candidate;
             for (candidate=c->channels;candidate;candidate=candidate->next)
-                if (candidate!=original && candidate!=c->lease_owner && !async_channel_pending(c,candidate) && (!s || candidate->used<s->used)) s=candidate;
+                if (candidate!=original && candidate!=c->lease_owner && !candidate->pending.sequence && !candidate->lost && !async_channel_pending(c,candidate) && (!s || candidate->used<s->used)) s=candidate;
             if (!s) { err=-ENOSPC; goto out; }
-            load_channel(c,s); err=sync_active(c);
-            if (err) { save_channel(c); load_channel(c,original); goto out; }
+            /* A channel limit is backpressure, never permission to request
+             * persistence. Retain dirty owners until an explicit caller fence. */
+            load_channel(c,s);
             broken(c); save_channel(c); load_channel(c,original);
             struct sq_channel *next=s->next; memset(s,0,sizeof(*s)); s->next=next;
         } else {
@@ -735,22 +739,15 @@ static int request_payload(stqr_client *c, unsigned op, struct buf *body, stqr_i
     stqr_u64 started = sq_now_ms();
     if (!c || !c->socket) return -ENOTCONN;
     if (mutation && any_lost(c) && !accepted_visibility_after_loss(c,op,mutation)) return -ESTALE;
-    /* Reads/subscriptions may change channels without a durability fence.
-     * Fence their retained causal dependencies only when publishing a write
-     * on a different owner, or when the caller explicitly requests SYNC. */
-    if (mutation && !(c->capabilities&STQR_CAP_CONNECTION_SYNC)) {
-        for (struct sq_channel *channel=c->channels;channel;channel=channel->next)
-            if (channel!=c->active && channel->pending.sequence) {
-                err=stqr_sync(c); if (err) return err;
-                break;
-            }
-    }
     if (body->err) return body->err;
     if (zero(id.bytes,16)) { if (mutation) return -EINVAL; if ((err=stqr_request_id(&id))) return err; }
     for (unsigned redirects=0;redirects<16;) {
         struct buf wrapped={0}; unsigned wire_op=op; struct buf *wire_body=body;
         /* Redirect/reconnect can change the peer's accepted capabilities. */
         if(mutation && any_lost(c) && !accepted_visibility_after_loss(c,op,mutation))return -ESTALE;
+        if (mutation>1 && !(c->capabilities&STQR_CAP_DURABILITY)) return -EOPNOTSUPP;
+        if (payload && mutation>1 && !(c->capabilities&STQR_CAP_ACCEPTED_STREAMS)) return -EOPNOTSUPP;
+        if (op==0x121 && c->accepted_references && !references_accepted(c)) return -EOPNOTSUPP;
         c->status=0; c->redirect[0]=0;
         c->query_valid=((op>=0x100 && op<=0x110) || op==0x121) && body->n>=80;
         if (c->query_valid) memcpy(c->query.bytes,body->p+16,32);
@@ -786,11 +783,8 @@ static int request_payload(stqr_client *c, unsigned op, struct buf *body, stqr_i
             char endpoint[512]; stqr_u64 revision=c->redirect_revision, epoch=c->redirect_epoch;
             stqr_id runtime=c->redirect_runtime;
             memcpy(endpoint,c->redirect,sizeof(endpoint));
-            /* Modern sessions retain owner-local touches. Legacy publications
-             * fence before moving; reads never force a checkpoint. */
-            if (mutation && !(c->capabilities & STQR_CAP_CONNECTION_SYNC)) {
-                err=stqr_sync(c);if(err)return err;
-            }
+            /* Retain every owner's touches for the caller's explicit fence.
+             * Following a placement redirect must never initiate a sync. */
             err=select_endpoint(c,endpoint); if (err) return err;
             for (unsigned k=0;k<8;k++) { body->p[48+k]=(stqr_u8)(revision>>(k*8)); body->p[56+k]=(stqr_u8)(epoch>>(k*8)); }
             memcpy(body->p+64,runtime.bytes,16);
@@ -816,7 +810,7 @@ static int reconnect_active(stqr_client *c) {
     if (!err) err = handshake(c);
     if (err) { broken(c); return err; }
     c->status = 0;
-    number(&body, 2, 2); number(&body, 2, 2); number(&body, STQR_CAP_DURABILITY|STQR_CAP_OBJECT_REFERENCES|STQR_CAP_CONNECTION_SYNC|STQR_CAP_ACCEPTED_REFERENCES, 8); blob(&body, "stqr-c", 6);
+    number(&body, 2, 2); number(&body, 2, 2); number(&body, STQR_CAP_DURABILITY|STQR_CAP_OBJECT_REFERENCES|STQR_CAP_CONNECTION_SYNC|STQR_CAP_ACCEPTED_REFERENCES|STQR_CAP_ACCEPTED_STREAMS, 8); blob(&body, "stqr-c", 6);
     err = request(c, 1, &body, id, 0, &result, NULL);
     if (!err) {
         if (readnum(&result, 2) != 2) result.err = -EPROTO;
@@ -907,6 +901,7 @@ static int object_reference(stqr_client *c, stqr_object_id target, stqr_id token
     int err;
     if (!c || !c->socket) return -ENOTCONN;
     if (!(c->capabilities & STQR_CAP_OBJECT_REFERENCES)) return -EOPNOTSUPP;
+    if (c->accepted_references && !references_accepted(c)) return -EOPNOTSUPP;
     if (zero(token.bytes,sizeof(token.bytes))) return -EINVAL;
     err=sq_hash(256,domain,sizeof(domain)-1,root.bytes);
     if (err) return err;
@@ -1015,7 +1010,7 @@ static int write_payload(stqr_client *c, unsigned op, stqr_object_id id, stqr_u6
     else {
         /* Replay a fully rejected upload with the same logical request ID.
          * Unknown transport outcomes retain the common EINPROGRESS contract. */
-        err=request_payload(c,op,&b,opt->request_id,1,&r,NULL,data,n,hash);
+        err=request_payload(c,op,&b,opt->request_id,1+!!opt->accepted,&r,NULL,data,n,hash);
     }
     if (!err) {
         info_decode(&r, info);
@@ -1172,19 +1167,25 @@ static int pending_active(stqr_client *c, stqr_commit_mark *out) {
     *out = c->pending_mark; return 0;
 }
 int stqr_pending_mark(stqr_client *c,stqr_commit_mark *out) {
-    struct sq_channel *s,*original;
-    int err=0;
+    struct sq_channel *s;
     if (!c || !out) return -EINVAL;
     if (!c->channels) return pending_active(c,out);
-    save_channel(c); original=c->active;
-    /* A public mark represents the whole logical connection: confirm other
-     * server incarnations before returning the remaining active-node mark. */
-    for (s=c->channels;s;s=s->next) if (s!=original) {
-        load_channel(c,s); err=sync_active(c); save_channel(c); if (err) break;
+    save_channel(c);
+    memset(out,0,sizeof(*out));
+    for (s=c->channels;s;s=s->next) {
+        if (s->lost) return -ESTALE;
+        if (!s->pending.sequence) continue;
+        /* A scalar mark cannot represent independent server incarnations.
+         * Observing marks never performs I/O; capture a multi-owner fence. */
+        if (out->sequence && memcmp(out->boot.bytes,s->pending.boot.bytes,16)) {
+            memset(out,0,sizeof(*out));
+            return -EOPNOTSUPP;
+        }
+        if (s->pending.sequence>out->sequence) *out=s->pending;
     }
-    load_channel(c,original);
-    return err?err:pending_active(c,out);
+    return 0;
 }
+
 static int sync_through_active(stqr_client *c, const stqr_commit_mark *mark, stqr_commit_mark *durable) {
     struct buf b = {0}, r = {0}; stqr_id rid = {{0}}; int err;
     if (!c || !mark || !durable || !mark->sequence || zero(mark->boot.bytes,16)) return -EINVAL;
@@ -1222,31 +1223,21 @@ static void sync_async_complete(void *arg,int error,int status,void *data,size_t
     struct async_sync_wait *w=arg;(void)status;(void)n;(void)info;sq_free(data);w->error=error;w->done=1;
 }
 int stqr_sync(stqr_client *c) {
-    struct sq_channel *s,*original;
-    if(c) {
-        int modern=!!(c->capabilities&STQR_CAP_CONNECTION_SYNC);
-        for(s=c->channels;s;s=s->next)modern|=!!(s->capabilities&STQR_CAP_CONNECTION_SYNC);
-        if(modern) {
-            struct async_sync_wait wait={0};int result=stqr_connection_sync_async(c,sync_async_complete,&wait);
-            if(result)return result;
-            while(!wait.done) {
-                result=stqr_poll(c,c->timeout);
-                /* Broken channels complete their pending callbacks. Continue
-                 * draining other owners before this stack context expires. */
-                if(result<0 && !wait.done) broken(c);
-            }
-            return wait.error;
-        }
+    struct async_sync_wait wait={0};int result;
+    if(!c)return -EINVAL;
+    /* The asynchronous barrier joins prior logical completions on modern and
+     * legacy owners alike before taking their explicit persistence cut. */
+    result=stqr_connection_sync_async(c,sync_async_complete,&wait);
+    if(result)return result;
+    while(!wait.done) {
+        result=stqr_poll(c,c->timeout);
+        /* Broken channels cancel deferred joins and their pending callbacks.
+         * Drain other owners before this stack completion context expires. */
+        if(result<0 && !wait.done)broken(c);
     }
-    int err=0;
-    if (!c) return -EINVAL;
-    if (!c->channels) return sync_active(c);
-    save_channel(c); original=c->active;
-    for (s=c->channels;s;s=s->next) {
-        load_channel(c,s); err=sync_active(c); save_channel(c); if (err) break;
-    }
-    load_channel(c,original); return err;
+    return wait.error;
 }
+
 int stqr_bucket_space(stqr_client *c, stqr_space *space) {
     struct buf b = {0}, r = {0}; stqr_id rid; stqr_space out = {0}; int err;
     if (!c || !space) return -EINVAL;

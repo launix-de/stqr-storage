@@ -35,6 +35,7 @@ type terminalFrame struct {
 
 type wsSession struct {
 	acceptedReferencesCap   atomic.Bool
+	acceptedStreamsCap      atomic.Bool
 	connectionFenceCap      atomic.Bool
 	fenceMu                 sync.Mutex
 	connectionSequence      uint64
