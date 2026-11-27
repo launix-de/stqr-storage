@@ -285,3 +285,87 @@ func TestReferenceOrphanHookFrontendScopeRejectedNativeInternalAllowed(t *testin
 		t.Fatal("native internal READ override rejected", err)
 	}
 }
+
+// A currently one-location map does not override the declared replication or
+// administrative transition policy. Ineligible scopes retain the existing full
+// root response and every holder, including otherwise reclaimable plain PINs.
+func TestReferenceOrphanHookUnsupportedScopeKeepsRoot(t *testing.T) {
+	policies := map[string]func(*BucketDescription){
+		"replicas-two":   func(d *BucketDescription) { d.Policy.Redundancy.Mode = "replication"; d.Policy.Redundancy.Replicas = 2 },
+		"desired-policy": func(d *BucketDescription) { p := d.Policy; d.DesiredPolicy = &p },
+		"locked":         func(d *BucketDescription) { d.State = BucketLocked },
+		"everywhere": func(d *BucketDescription) {
+			d.Policy.PlacementMode = "everywhere"
+			d.Policy.Redundancy.Mode = "replication"
+			d.Policy.Redundancy.Replicas = 0
+		},
+	}
+	for name, edit := range policies {
+		for _, combined := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/combined=%t", name, combined), func(t *testing.T) {
+				f := newCombiningFixture(t)
+				fullReferenceRoot(t, f, 1)
+				raw, mark := f.root(t), f.mark()
+				f.s.opMu.Lock()
+				f.b.mu.Lock()
+				d := cloneBucketDescription(f.b.description)
+				edit(&d)
+				f.b.setDescription(d)
+				f.b.mu.Unlock()
+				f.s.opMu.Unlock()
+				messages := []client.Message{f.message(0, client.NewRequestID(), 1)}
+				var results []error
+				if combined {
+					messages = append(messages, f.message(0, client.NewRequestID(), 2))
+					results = f.burst(t, messages, false, nil)
+				} else {
+					_, err := f.s.executeObjectReference(context.Background(), messages[0], f.ws, f.p)
+					results = []error{err}
+				}
+				for _, err := range results {
+					if objectStatus(err) != 429 {
+						t.Fatal("unsupported scope reclaimed or changed full-root response", err)
+					}
+				}
+				if !bytes.Equal(raw, f.root(t)) || mark != f.mark() {
+					t.Fatal("unsupported scope changed reference root")
+				}
+			})
+		}
+	}
+}
+
+func TestReferenceOrphanHookPolicyChangesAfterFiltering(t *testing.T) {
+	for _, accepted := range []bool{true, false} {
+		t.Run(fmt.Sprint("accepted=", accepted), func(t *testing.T) {
+			f := newCombiningFixture(t)
+			fullReferenceRoot(t, f, 1)
+			raw, mark := f.root(t), f.mark()
+			ctx := &referencePruneRecreateContext{Context: context.Background(), beforeAdmission: func() {
+				f.s.opMu.Lock()
+				defer f.s.opMu.Unlock()
+				f.b.mu.Lock()
+				defer f.b.mu.Unlock()
+				d := cloneBucketDescription(f.b.description)
+				d.Policy.Redundancy.Mode = "replication"
+				d.Policy.Redundancy.Replicas = 2
+				f.b.setDescription(d)
+			}}
+			message := f.message(0, client.NewRequestID(), 1)
+			message.Body[len(message.Body)-1] = 0
+			if accepted {
+				message.Body[len(message.Body)-1] = 1
+			}
+			_, err := f.s.executeObjectReference(ctx, message, f.ws, f.p)
+			if !ctx.changed.Load() {
+				t.Fatal("test did not change scope after filtering")
+			}
+			if objectStatus(err) != 429 {
+				t.Fatal("stale single-copy scope was not refiltered", err)
+			}
+			if !bytes.Equal(raw, f.root(t)) || mark != f.mark() {
+				t.Fatal("policy transition published unsafe pruning")
+			}
+		})
+	}
+}
