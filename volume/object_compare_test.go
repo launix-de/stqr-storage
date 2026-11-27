@@ -59,9 +59,10 @@ func TestCASCheckedComparisonLayouts(t *testing.T) {
 			if _, err := testCAS(v, key, uint64(len(next)), nil, nil, Options{Accepted: true}); err != nil {
 				t.Fatal("empty EOF range", err)
 			}
-			if _, err := testCAS(v, key, uint64(len(next)+1), nil, nil, Options{Accepted: true}); !errors.Is(err, ErrPrecondition) {
-				t.Fatal("out of range", err)
+			if info, err := testCAS(v, key, uint64(len(next)+1), nil, nil, Options{Accepted: true}); err != nil || info.Length != uint64(len(next)+1) {
+				t.Fatal("zero-length sparse extension", info, err)
 			}
+			next = append(next, 0)
 			if v.IOStats().SyncOps != before {
 				t.Fatal("comparison changed accepted Sync semantics")
 			}

@@ -509,10 +509,7 @@ func (v *Volume) mutateCore(op uint8, k Key, offset, length uint64, src io.Reade
 		}
 	}
 	if op == opCAS && !opts.WholeObject {
-		if !alive || end > o.Info.Length {
-			return Result{}, ErrPrecondition
-		}
-		equal, err := v.compareObject(o, offset, expected)
+		equal, err := v.compareObjectZeroExtended(o, offset, expected)
 		if err != nil {
 			return Result{}, err
 		}
