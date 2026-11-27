@@ -34,6 +34,13 @@ func TestKSTQRVirtualMachine(t *testing.T) {
 	if os.Getenv("STQR_TEST_KERNEL") != "1" {
 		t.Skip("set STQR_TEST_KERNEL=1 and STQR_KERNEL_IMAGE to run isolated kernel tests")
 	}
+	if os.Getenv("STQR_KERNEL_CACHE_REOPEN") == "1" {
+		for _, mode := range []string{"BENCHMARK", "WRITE_BENCHMARK", "READ_WINDOW", "LOOP", "RESTART_ONLY", "OVERLAY", "OUTAGE", "CACHE_RETENTION"} {
+			if os.Getenv("STQR_KERNEL_"+mode) == "1" {
+				t.Fatalf("incompatible kernel fixture modes CACHE_REOPEN and %s; run them separately", mode)
+			}
+		}
+	}
 	image := os.Getenv("STQR_KERNEL_IMAGE")
 	if image == "" {
 		t.Fatal("STQR_KERNEL_IMAGE is required")
@@ -94,6 +101,7 @@ func TestKSTQRVirtualMachine(t *testing.T) {
 	run("cc", "-static", "-std=c11", "-Wall", "-Wextra", "-Werror", "-O2", "-o", filepath.Join(initrdRoot, "coherence"), filepath.Join(root, "tests/coherence.c"))
 	run("cc", "-static", "-std=c11", "-Wall", "-Wextra", "-Werror", "-O2", "-o", filepath.Join(initrdRoot, "cache-capacity"), filepath.Join(root, "tests/cache_capacity.c"))
 	run("cc", "-static", "-std=c11", "-Wall", "-Wextra", "-Werror", "-O2", "-o", filepath.Join(initrdRoot, "throughput"), filepath.Join(root, "tests/throughput.c"))
+	run("cc", "-static", "-std=c11", "-Wall", "-Wextra", "-Werror", "-O2", "-o", filepath.Join(initrdRoot, "cache-reopen"), filepath.Join(root, "tests/cache_reopen.c"))
 	run("cc", "-static", "-std=c11", "-Wall", "-Wextra", "-Werror", "-O2", "-o", filepath.Join(initrdRoot, "writeback"), filepath.Join(root, "tests/writeback.c"))
 	run("cc", "-static", "-std=c11", "-Wall", "-Wextra", "-Werror", "-O2", "-o", filepath.Join(initrdRoot, "crash-reconnect"), filepath.Join(root, "tests/crash_reconnect.c"))
 	run("cc", "-static", "-std=c11", "-Wall", "-Wextra", "-Werror", "-O2", "-o", filepath.Join(initrdRoot, "mmap-test"), filepath.Join(root, "tests/mmap.c"), "-lsqlite3", "-lm", "-ldl", "-lpthread")
@@ -414,6 +422,13 @@ func TestKSTQRVirtualMachine(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	reopenFile, e := fs.Create(ctx, client.FilesystemRootID(), "cache-reopen", 0644, 0, 0, false)
+	if e != nil {
+		t.Fatal(e)
+	}
+	if _, e = fs.WriteAt(ctx, reopenFile.ID, bytes.Repeat([]byte("R"), 1<<20), 0); e != nil {
+		t.Fatal(e)
+	}
 	subscriptionFS = fs
 	readBenchmark := os.Getenv("STQR_KERNEL_BENCHMARK") == "1"
 	writeBenchmark := os.Getenv("STQR_KERNEL_WRITE_BENCHMARK") == "1"
@@ -602,6 +617,7 @@ insmod /kstqr.ko
 /mount.kstqr --uri @@URL@@ --bucket @@BUCKET@@ --credentials /readonly-credentials --readonly /readonly
 test "$(cat /readonly/kernel.txt)" = 'written by kstqr'
 /mmap-test verify
+/cache-reopen
 umount /readonly
 rmmod kstqr
 if dmesg | grep -E 'BUG:|WARNING:|Oops:|KASAN:'; then exit 1; fi
@@ -627,6 +643,18 @@ umount /mnt
 rmmod kstqr
 `
 		}
+		init = init[:begin] + script + init[end:]
+	}
+
+	if os.Getenv("STQR_KERNEL_CACHE_REOPEN") == "1" {
+		begin := strings.Index(init, "for attempt in 1 2 3 4; do")
+		end := strings.Index(init, "if dmesg |")
+		script := `/mount.kstqr --uri ` + endpoint + ` --bucket ` + client.ID(b.ID()).String() + ` --credentials /readonly-credentials --readonly /readonly
+/cache-reopen
+cat /proc/self/mountstats
+umount /readonly
+rmmod kstqr
+`
 		init = init[:begin] + script + init[end:]
 	}
 
@@ -1067,6 +1095,18 @@ poweroff -f
 	if err != nil || !strings.Contains(string(output), "KSTQR_VM_PASS") || strings.Contains(string(output), "KSTQR_VM_FAIL") {
 		t.Fatalf("kernel VM: %v\n%s", err, output)
 	}
+	if os.Getenv("STQR_KERNEL_CACHE_REOPEN") == "1" {
+		if !strings.Contains(string(output), "KSTQR_CACHE_REOPEN_PASS") {
+			t.Fatal("cache reopen probe did not complete")
+		}
+		for _, line := range strings.Split(string(output), "\n") {
+			if strings.Contains(line, "KSTQR_CACHE_REOPEN") {
+				t.Log(strings.TrimSpace(line))
+			}
+		}
+		return
+	}
+
 	if os.Getenv("STQR_KERNEL_RESTART_ONLY") == "1" {
 		if !strings.Contains(string(output), "KSTQR_CRASH_RECONNECT_PASS") {
 			t.Fatal("targeted restart regression did not complete")

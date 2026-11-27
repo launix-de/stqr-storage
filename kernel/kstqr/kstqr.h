@@ -165,6 +165,7 @@ void ks_queue_invalidation(struct ks_fs *, const stqr_object_id *);
 extern const stqr_object_id ks_root_id;
 void ks_snapshot_free(struct ks_snapshot *s);
 int ks_snapshot(struct ks_fs *, stqr_object_id, struct ks_snapshot *);
+int ks_validate_open_cache(struct ks_fs *, stqr_object_id);
 int ks_initialize(struct ks_fs *, u32 uid, u32 gid);
 int ks_read(struct ks_fs *, const struct ks_node *, void *, size_t, u64);
 int ks_directory(struct ks_fs *, const struct ks_node *, struct ks_entry **, size_t *);

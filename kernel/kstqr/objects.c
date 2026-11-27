@@ -838,6 +838,33 @@ int ks_snapshot_cached(struct ks_fs *f, stqr_object_id id, struct ks_snapshot *s
 	return f->lower ? ks_overlay_snapshot_cached(f, id, s)
 			: ks_plain_snapshot_cached(f, id, s);
 }
+/* Open must validate the post-PIN inode at its owner, but a fresh read of
+ * identical metadata does not invalidate uninterrupted subscription coverage.
+ * In particular, throwing that coverage away on every exec reloads otherwise
+ * unchanged shared-library pages. Compare exact bytes; a changed/missing head
+ * takes the ordinary cache-miss path and retains existing snapshot/guard checks.
+ */
+int ks_validate_open_cache(struct ks_fs *f, stqr_object_id id)
+{
+	void *cached = NULL, *fresh = NULL;
+	size_t cached_size = 0, fresh_size = 0;
+	stqr_info info;
+	int err = ks_cache_peek(f, id, &cached, &cached_size, &info);
+	if (err == -ENODATA || err == -ENOENT)
+		return 0;
+	if (err)
+		return err;
+	err = get_object(f, id, &fresh, &fresh_size, &info);
+	if (err == -ENOENT) {
+		ks_cache_forget(f, id);
+		err = 0;
+	} else if (!err && (fresh_size != cached_size || memcmp(cached, fresh, fresh_size))) {
+		ks_cache_forget(f, id);
+	}
+	sq_free(cached);
+	sq_free(fresh);
+	return err;
+}
 int ks_snapshot(struct ks_fs *f, stqr_object_id id, struct ks_snapshot *s)
 {
 	return f->lower ? ks_overlay_snapshot(f, id, s) : ks_plain_snapshot(f, id, s);

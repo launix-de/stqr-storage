@@ -1153,12 +1153,12 @@ static int ks_open_file(struct inode *inode, struct file *file)
 			err = ks_object_reference(f->lower, id, ref->lower, 0);
 		ref->lower_pinned = !err;
 	}
-	if (!err) {
-		ks_cache_forget(f, id);
-		if (f->lower)
-			ks_cache_forget(f->lower, id);
+	if (!err)
+		err = ks_validate_open_cache(f, id);
+	if (!err && f->lower)
+		err = ks_validate_open_cache(f->lower, id);
+	if (!err)
 		err = ks_snapshot(f, id, &snapshot);
-	}
 	if (!err && (snapshot.node.removed || !snapshot.node.links))
 		err = -ENOENT;
 	ks_snapshot_free(&snapshot);
