@@ -7,28 +7,11 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"runtime"
-	"strings"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
 )
-
-func windowsExecutablePath(path string) (string, error) {
-	absolute, err := filepath.Abs(path)
-	if err != nil {
-		return "", err
-	}
-	if !strings.HasPrefix(absolute, `\\?\`) && !strings.HasPrefix(absolute, `\\.\`) {
-		if strings.HasPrefix(absolute, `\\`) {
-			absolute = `\\?\UNC\` + absolute[2:]
-		} else {
-			absolute = `\\?\` + absolute
-		}
-	}
-	return absolute, nil
-}
 
 // Native FILE_RENAME_INFO layout: the DWORD Flags union precedes a naturally
 // aligned HANDLE. FileNameLength counts UTF-16 bytes, excluding the terminator.
@@ -59,7 +42,7 @@ func replaceExecutable(source, target string) error {
 
 func replaceExecutableWith(source, target string, setInfo executableRenameCall) error {
 	linkError := func(err error) error { return &os.LinkError{Op: "replace", Old: source, New: target, Err: err} }
-	sourcePath, err := windowsExecutablePath(source)
+	sourcePath, err := executableWindowsPath(source)
 	if err != nil {
 		return linkError(err)
 	}
@@ -67,7 +50,7 @@ func replaceExecutableWith(source, target string, setInfo executableRenameCall) 
 	if err != nil {
 		return linkError(err)
 	}
-	targetPath, err := windowsExecutablePath(target)
+	targetPath, err := executableWindowsPath(target)
 	if err != nil {
 		return linkError(err)
 	}
@@ -75,9 +58,12 @@ func replaceExecutableWith(source, target string, setInfo executableRenameCall) 
 	if err != nil {
 		return linkError(err)
 	}
-	handle, err := windows.CreateFile(sourceName, windows.DELETE|windows.SYNCHRONIZE,
+	if len(targetName) > windows.MAX_LONG_PATH {
+		return linkError(windows.ERROR_FILENAME_EXCED_RANGE)
+	}
+	handle, err := windows.CreateFile(sourceName, windows.DELETE,
 		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
-		nil, windows.OPEN_EXISTING, windows.FILE_ATTRIBUTE_NORMAL, 0)
+		nil, windows.OPEN_EXISTING, windows.FILE_ATTRIBUTE_NORMAL|windows.FILE_FLAG_OPEN_REPARSE_POINT, 0)
 	if err != nil {
 		return linkError(err)
 	}

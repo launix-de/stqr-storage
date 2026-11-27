@@ -1153,12 +1153,12 @@ static int ks_open_file(struct inode *inode, struct file *file)
 			err = ks_object_reference(f->lower, id, ref->lower, 0);
 		ref->lower_pinned = !err;
 	}
-	if (!err) {
-		ks_cache_forget(f, id);
-		if (f->lower)
-			ks_cache_forget(f->lower, id);
+	if (!err)
+		err = ks_validate_open_cache(f, id);
+	if (!err && f->lower)
+		err = ks_validate_open_cache(f->lower, id);
+	if (!err)
 		err = ks_snapshot(f, id, &snapshot);
-	}
 	if (!err && (snapshot.node.removed || !snapshot.node.links))
 		err = -ENOENT;
 	ks_snapshot_free(&snapshot);
@@ -1527,11 +1527,8 @@ static void ks_put_super(struct super_block *sb)
   destroy_workqueue(f->read_queue);
   f->read_queue = NULL;
  }
-	if (!f->readonly) {
-		int err = ks_checkpoint(f);
-		if (err)
-			pr_err("kstqr: final durability checkpoint failed: %d\n", err);
-	}
+	/* Teardown cancels connection-local touches. Persistence is requested only
+	 * through the VFS sync callbacks; closing a connection adds no fence. */
 	WRITE_ONCE(f->stopping, true);
 	ks_cache_stop(f);
 	stqr_fence_close(f->fence);
@@ -1623,8 +1620,8 @@ static int ks_sync_fs(struct super_block *sb, int wait)
 {
 	return wait ? ks_checkpoint(sb->s_fs_info) : 0;
 }
-/* A forced local unmount is an explicit cancellation of hard reconnects.
- * Ordinary unmounts keep their durability/wait-on-node contract. */
+/* A forced local unmount explicitly cancels hard reconnects. Ordinary unmount
+ * persistence follows the VFS sync_fs request; put_super adds no extra fence. */
 static void ks_umount_begin(struct super_block *sb)
 {
 	struct ks_fs *f = sb->s_fs_info;

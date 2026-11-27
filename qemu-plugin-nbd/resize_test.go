@@ -38,8 +38,8 @@ func TestResizePreservesDataAndSparseExtension(t *testing.T) {
 	}
 	want := m
 	want.Size = 3 * StripeSize
-	if grown != want || len(s.objects) != objects || s.syncs != 1 {
-		t.Fatal("growth changed identity, allocated stripes or omitted flush", grown, len(s.objects), s.syncs)
+	if grown != want || len(s.objects) != objects || s.syncs != 0 {
+		t.Fatal("growth changed identity, allocated stripes or implicitly flushed", grown, len(s.objects), s.syncs)
 	}
 	got := make([]byte, 2048)
 	if err = c.ReadAt(ctx, grown, got, StripeSize-512); err != nil {
@@ -125,12 +125,18 @@ func TestResizeConflictAndUnknownFlushOutcome(t *testing.T) {
 	}
 	s.conflict = false
 	s.syncErr = errors.New("lost flush response")
-	if _, err = c.Resize(ctx, m, 8192); !errors.Is(err, s.syncErr) {
-		t.Fatal(err)
+	if _, err = c.Resize(ctx, m, 8192); err != nil {
+		t.Fatal("resize implicitly fenced", err)
+	}
+	if err = c.Sync(ctx); !errors.Is(err, s.syncErr) {
+		t.Fatal("explicit fence lost error", err)
 	}
 	s.syncErr = nil
-	if actual, err = c.Resize(ctx, m, 8192); err != nil || actual.Size != 8192 || s.syncs != 1 {
-		t.Fatal("same-size retry did not flush", actual, err, s.syncs)
+	if actual, err = c.Resize(ctx, m, 8192); err != nil || actual.Size != 8192 || s.syncs != 0 {
+		t.Fatal("same-size retry implicitly flushed", actual, err, s.syncs)
+	}
+	if err = c.Sync(ctx); err != nil || s.syncs != 1 {
+		t.Fatal("explicit retry did not flush", err, s.syncs)
 	}
 }
 

@@ -284,7 +284,9 @@ func (s *S3) saveUpload(ctx context.Context, u S3Upload, body io.Reader, absent 
 	u.PayloadOffset = uint64(len(raw))
 	return u, e
 }
-func (s *S3) CreateMultipart(ctx context.Context, key, owner, algorithm, checksumType string, opt S3PutOptions) (S3Upload, error) {
+func (s *S3) CreateMultipart(ctx context.Context, key, owner, algorithm, checksumType string, opt S3PutOptions) (_ S3Upload, resultErr error) {
+	ctx, finish := s.beginWrite(ctx)
+	defer finish(&resultErr)
 	if !validS3Key(key) {
 		return S3Upload{}, ErrRange
 	}
@@ -339,7 +341,9 @@ func copyS3Map(m map[string]string) map[string]string {
 	}
 	return n
 }
-func (s *S3) UploadPart(ctx context.Context, id string, number uint32, src io.Reader, size uint64, opt S3PutOptions) (S3Part, error) {
+func (s *S3) UploadPart(ctx context.Context, id string, number uint32, src io.Reader, size uint64, opt S3PutOptions) (_ S3Part, resultErr error) {
+	ctx, finish := s.beginWrite(ctx)
+	defer finish(&resultErr)
 	if number == 0 || number > 10000 || size > 5<<30 {
 		return S3Part{}, ErrRange
 	}
@@ -453,7 +457,9 @@ func completeRecipe(parts []S3CompletedPart, opt S3PutOptions) [32]byte {
 	s3WriteMap(&e, opt.Checksums)
 	return sha256.Sum256(e.B)
 }
-func (s *S3) CompleteMultipart(ctx context.Context, id string, parts []S3CompletedPart, opt S3PutOptions) (S3Object, error) {
+func (s *S3) CompleteMultipart(ctx context.Context, id string, parts []S3CompletedPart, opt S3PutOptions) (_ S3Object, resultErr error) {
+	ctx, finish := s.beginWrite(ctx)
+	defer finish(&resultErr)
 	recipe := completeRecipe(parts, opt)
 	for attempt := 0; attempt < 128; attempt++ {
 		u, e := s.Multipart(ctx, id)
@@ -530,7 +536,9 @@ func (s *S3) CompleteMultipart(ctx context.Context, id string, parts []S3Complet
 	}
 	return S3Object{}, ErrPrecondition
 }
-func (s *S3) FinishMultipart(ctx context.Context, u S3Upload) (S3Object, error) {
+func (s *S3) FinishMultipart(ctx context.Context, u S3Upload) (_ S3Object, resultErr error) {
+	ctx, finish := s.beginWrite(ctx)
+	defer finish(&resultErr)
 	result := S3Object{Key: u.Key, ETag: u.ResultETag, Size: u.ResultSize, Modified: u.PublishTime, Headers: u.ResultHeaders}
 	if u.State == S3UploadDone {
 		return result, nil
@@ -631,7 +639,9 @@ func (s *S3) FinishMultipart(ctx context.Context, u S3Upload) (S3Object, error) 
 	}
 	return result, nil
 }
-func (s *S3) AbortMultipart(ctx context.Context, id string) error {
+func (s *S3) AbortMultipart(ctx context.Context, id string) (resultErr error) {
+	ctx, finish := s.beginWrite(ctx)
+	defer finish(&resultErr)
 	for i := 0; i < 128; i++ {
 		u, e := s.Multipart(ctx, id)
 		if errors.Is(e, ErrS3Upload) {

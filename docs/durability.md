@@ -16,11 +16,13 @@ if err != nil { return err }
 return conn.Sync(ctx)
 ```
 
-The SDK uses the durable path on servers without the capability, and for streamed
-uploads above 1 MiB. The server may also give a stronger ACK when staging space
-is unavailable or an individual mutation exceeds its staging budget. Durability
-mode is excluded from the retry fingerprint: an identical-ID durable retry can
-checkpoint an earlier accepted result without applying the mutation twice.
+Accepted writes never request a fence because an upload is large, another owner
+was contacted, or the connection is being closed. Streamed accepted uploads use
+HELLO capability `CapabilityAcceptedStreams` (`1 << 21`) and preserve the normal
+chunk framing. A peer without the requested accepted capability returns an
+explicit compatibility error; the SDK never silently sends a durable native
+write instead. Legacy callers that select the native durable API retain that
+separately documented wire contract.
 
 ## Protocol
 
@@ -30,13 +32,13 @@ and endpoint are learned from that connection, not embedded credentials.
 
 | Code | Message | Body/result |
 | --- | --- | --- |
-| `0x0118` | OBJECT_ACCEPTED / request | `ObjectRef, opcode:u16, remaining_native_body`; inline PUT/PUT_RANGE/APPEND/TRUNC/DELETE/CAS only. Result is the original mutation result. |
+| `0x0118` | OBJECT_ACCEPTED / request | `ObjectRef, opcode:u16, remaining_native_body`; PUT/PUT_RANGE/APPEND/TRUNC/DELETE/CAS; streamed payloads require capability `1 << 21`. Result is the original mutation result. |
 | `0x0119` | BUCKET_SYNC / request | `bucket:ID,mark:CommitMark` → confirmed `CommitMark` |
 | `0x011a` | DURABILITY_NOTICE / server push | `CommitMark`, sent before a subscription update which can expose accepted state |
 
 ObjectRef is unchanged (80 bytes). The wrapper preserves the original request ID,
-preconditions, CAS scope and payload checksums. Streams retain the durable native
-commands. New requests require a bucket-bound WebSocket which negotiated the
+preconditions, CAS scope and payload checksums. Accepted streams use the same
+wrapper around their mode-1 header and unchanged chunk/end messages. New requests require a bucket-bound WebSocket which negotiated the
 capability. Response header TLV `48` carries an unconfirmed CommitMark on relevant
 successful reads, snapshots and mutations; old decoders can skip this optional TLV.
 
@@ -121,8 +123,7 @@ silently forgetting an unconfirmed dependency. C clients retain fixed-size marks
 
 - The FUSE CLI opts filesystem writes into accepted ACKs after negotiation.
   `fsync`/`fdatasync` and synchronous-open writes call a real barrier. Ordinary
-  close/FUSE FLUSH does not imply durability. CLI unmount attempts a final sync
-  and returns an error if it fails. `--fsck` continues to use durable mutations.
+  close/FUSE FLUSH and connection close do not request a final sync. `--fsck` continues to use durable mutations.
 - The kernel client uses accepted mutations, batches mmap writeback and confirms
   its pooled-connection marks for `fsync`, `msync(MS_SYNC)`, O_SYNC/O_DSYNC and the
   waiting phase of `syncfs`/`sync`. Clean unmount also attempts a checkpoint.
@@ -130,8 +131,13 @@ silently forgetting an unconfirmed dependency. C clients retain fixed-size marks
 - Loss invalidates cached snapshots/pages. An accepted version may roll back to
   a lower durable version after restart, so authoritative inode refreshes must
   permit that decrease instead of retaining a vanished volatile size forever.
-- S3 operations retain the durable default. Successful PUT/multipart publication
-  does not inherit the filesystem's weaker write ACK setting.
+- Native S3 uses accepted object mutations, then the S3 adapter explicitly calls
+  `Client.Sync` before a successful PUT, DELETE, ACL or multipart publication ACK.
+  Nested multipart writes share one outer fence. A successful retry fences even
+  an already-visible completion receipt, since the earlier fence may have failed.
+  Sync failure prevents the S3 success ACK. Custom non-native stores without Sync
+  retain their historical durable-operation contract; they are not asked for
+  accepted acknowledgements.
 
 See the tests in `volume/deferred_test.go` (power cuts including reused live
 pages), `server/durability_test.go` (barriers, subscriptions and cross-owner
@@ -167,6 +173,8 @@ on ObjectReference. Legacy/default reference requests remain durable; offline
 maintenance does not accept the weaker mode. Accepted replies retain receipt
 header48 and the exact local volume dependency until an explicit owner fence.
 
-S3 PUT and multipart acknowledgements stay durable, including caller-supplied
-publication options. Filesystem adapters scope their mode to their own calls;
-they do not weaken the same raw Client used by a native or S3 caller.
+S3 PUT and multipart acknowledgements stay durable through an explicit adapter
+fence, including caller-supplied publication options. Filesystem adapters scope
+acceptance to their own calls; they do not change the same raw Client's legacy
+native API. Ordinary filesystem references require negotiated accepted-reference
+support; unsupported peers are rejected rather than silently forcing persistence.

@@ -409,10 +409,19 @@ PXE -> iPXE -> HTTP kernel + initramfs (includes matching kstqr.ko)
 login -> PAM -> persistent username_home bucket at /home/username
 ```
 
-The initramfs copies its matching module into the private upper for later module
-reloads. The shared lower stays unchanged. Since this PXE session supplies its
-own network configuration and identity, cloud metadata initialization and local
-GRUB boot-success bookkeeping are disabled in that private upper.
+Image preparation installs helpers, the matching module, account tables and PAM
+configuration once. A small hash manifest binds that completed preparation to
+the initramfs payload. Matching boots read only the manifest from the lower and
+skip helper copying and Python account installation. A hotpatched payload copies
+only changed files; a changed login plan or installer reapplies identities before
+PID1. Missing markers conservatively prepare the private upper. Payload hashes
+are calculated from initramfs RAM, not by reading all helpers back from STQR.
+
+A static helper substitutes the numeric per-boot server address into the small
+credential-free home configuration; no Python interpreter or persistence fence
+is needed for this runtime update. The shared lower stays unchanged. Since this
+PXE session supplies its own network configuration and identity, cloud metadata
+initialization and local GRUB bookkeeping are disabled in the private upper.
 
 The kernel uses our native Go/FUSE-compatible STOR/STOM overlay format:
 deletion markers live in directory records, metadata overrides preserve the

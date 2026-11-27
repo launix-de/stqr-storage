@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -29,6 +30,165 @@ type kernelWritebackFault struct {
 	rejected    atomic.Uint64
 	connections atomic.Uint64
 	before      atomic.Uint64
+	ranges      kernelRangeGate
+}
+
+// kernelRangeGate holds the first selected leaf reply until another distinct
+// leaf request arrives. Serial readers fail this oracle even if their eventual
+// bytes are correct. A bounded delay on independent replies models storage RTT.
+type kernelRangeGate struct {
+	mu                 sync.Mutex
+	leaves             map[client.ObjectID]bool
+	requests           map[client.ID]bool
+	first              client.ID
+	firstLeaf          client.ObjectID
+	release            chan struct{}
+	released, timedOut bool
+	seen               uint64
+	indexes            map[client.ObjectID]bool
+	visited            map[client.ObjectID]bool
+	failureLeaves      map[client.ObjectID]bool
+	failure            bool
+	failureFirst       client.ID
+	failurePending     map[client.ID]bool
+	failureRelease     chan struct{}
+	failureDelivered   int
+	failureOverlap     int
+}
+
+func (g *kernelRangeGate) configureFailure(ids []client.ObjectID) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.failureLeaves = make(map[client.ObjectID]bool)
+	for _, id := range ids {
+		g.failureLeaves[id] = true
+		g.leaves[id] = true
+	}
+}
+
+func (g *kernelRangeGate) beginFailure() {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.failure = true
+	g.failurePending = make(map[client.ID]bool)
+	g.failureRelease = make(chan struct{})
+}
+
+func (g *kernelRangeGate) failureReply(raw []byte) (bool, bool, <-chan struct{}) {
+	m, err := client.DecodeMessage(raw)
+	if err != nil {
+		return false, false, nil
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.failure && g.failurePending[m.ID], m.ID == g.failureFirst, g.failureRelease
+}
+
+func (g *kernelRangeGate) deliveredFailure(raw []byte, first bool) {
+	m, _ := client.DecodeMessage(raw)
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	delete(g.failurePending, m.ID)
+	g.failureDelivered++
+	if first {
+		g.failureOverlap = len(g.failurePending)
+		close(g.failureRelease)
+	}
+}
+
+func (g *kernelRangeGate) verifyFailure() (int, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if !g.failure || g.failureDelivered < 2 || g.failureOverlap == 0 || len(g.failurePending) != 0 {
+		return g.failureDelivered, fmt.Errorf("failed read returned without draining its overlapping ranges: delivered=%d overlapping=%d pending=%d", g.failureDelivered, g.failureOverlap, len(g.failurePending))
+	}
+	g.failure = false
+	return g.failureDelivered, nil
+}
+
+func (g *kernelRangeGate) configure(ids []client.ObjectID) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.leaves = make(map[client.ObjectID]bool)
+	for _, id := range ids {
+		g.leaves[id] = true
+	}
+	g.requests = make(map[client.ID]bool)
+	g.release = make(chan struct{})
+}
+func (g *kernelRangeGate) configureIndexes(ids []client.ObjectID) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.indexes = make(map[client.ObjectID]bool)
+	g.visited = make(map[client.ObjectID]bool)
+	for _, id := range ids {
+		g.indexes[id] = true
+	}
+}
+func (g *kernelRangeGate) verifyIndexes() (int, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	n := len(g.visited)
+	if n == 0 || n > 4 {
+		return n, errors.New("small read traversed unrelated index subtrees")
+	}
+	return n, nil
+}
+func (g *kernelRangeGate) request(raw []byte) {
+	m, err := client.DecodeMessage(raw)
+	if err != nil || (m.Opcode != 0x0101 && m.Opcode != 0x0100) || len(m.Body) < 48 {
+		return
+	}
+	var leaf client.ObjectID
+	copy(leaf[:], m.Body[16:48])
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if m.Opcode == 0x0100 {
+		if g.indexes[leaf] {
+			g.visited[leaf] = true
+		}
+		return
+	}
+	if !g.leaves[leaf] {
+		return
+	}
+	if g.failure && g.failureLeaves[leaf] {
+		if g.failureFirst == (client.ID{}) {
+			g.failureFirst = m.ID
+		}
+		g.failurePending[m.ID] = true
+	}
+	g.seen++
+	if g.seen == 1 {
+		g.first = m.ID
+		g.firstLeaf = leaf
+	}
+	g.requests[m.ID] = m.ID == g.first
+	if leaf != g.firstLeaf && !g.released {
+		close(g.release)
+		g.released = true
+	}
+}
+func (g *kernelRangeGate) reply(raw []byte) (bool, bool, <-chan struct{}) {
+	m, err := client.DecodeMessage(raw)
+	if err != nil || m.Kind != client.Response {
+		return false, false, nil
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	first, ok := g.requests[m.ID]
+	if ok {
+		delete(g.requests, m.ID)
+	}
+	return ok, first, g.release
+}
+func (g *kernelRangeGate) verify() error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.timedOut || !g.released || g.seen < 2 {
+		return errors.New("independent leaf was not submitted while the first reply was blocked")
+	}
+	return nil
 }
 
 func (f *kernelWritebackFault) begin() {
@@ -98,21 +258,78 @@ func (f *kernelWritebackFault) proxy(w http.ResponseWriter, r *http.Request, ups
 		defer writer.Unlock()
 		return downstream.WriteMessage(kind, raw)
 	}
+	ctx, cancel := context.WithCancel(r.Context())
+	defer cancel()
+	var replies sync.WaitGroup
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
 		defer downstream.Close()
 		for {
 			kind, raw, err := peer.ReadMessage()
-			if err != nil || write(kind, raw) != nil {
+			if err != nil {
+				return
+			}
+			selected, first, release := f.ranges.reply(raw)
+			if selected {
+				replies.Add(1)
+				go func() {
+					defer replies.Done()
+					if failed, failFirst, failureRelease := f.ranges.failureReply(raw); failed {
+						if failFirst {
+							m, _ := client.DecodeMessage(raw)
+							m.Body = client.ResponseBody(403, nil, "injected selected-range rejection")
+							raw = client.EncodeMessage(m)
+						} else {
+							select {
+							case <-failureRelease:
+							case <-ctx.Done():
+								return
+							}
+							select {
+							case <-time.After(100 * time.Millisecond):
+							case <-ctx.Done():
+								return
+							}
+						}
+						if write(kind, raw) != nil {
+							downstream.Close()
+							return
+						}
+						f.ranges.deliveredFailure(raw, failFirst)
+						return
+					}
+					if first {
+						select {
+						case <-release:
+						case <-time.After(2 * time.Second):
+							f.ranges.mu.Lock()
+							f.ranges.timedOut = true
+							f.ranges.mu.Unlock()
+						case <-ctx.Done():
+							return
+						}
+					}
+					select {
+					case <-time.After(20 * time.Millisecond):
+					case <-ctx.Done():
+						return
+					}
+					if write(kind, raw) != nil {
+						downstream.Close()
+					}
+				}()
+			} else if write(kind, raw) != nil {
 				return
 			}
 		}
 	}()
 	defer func() {
+		cancel()
 		peer.Close()
 		downstream.Close()
 		<-done
+		replies.Wait()
 	}()
 	for {
 		kind, raw, err := downstream.ReadMessage()
@@ -130,6 +347,7 @@ func (f *kernelWritebackFault) proxy(w http.ResponseWriter, r *http.Request, ups
 				continue
 			}
 		}
+		f.ranges.request(raw)
 		if peer.WriteMessage(kind, raw) != nil {
 			return
 		}

@@ -36,7 +36,20 @@ func (f *Filesystem) index(ctx context.Context, s fsSegment, depth uint8) ([]fsS
 	}
 	return decodeFSIndex(data, s.length, depth)
 }
+
+// readSegment joins every selected child before its caller validates the inode
+// or lower anchor. It never flattens the file or fetches unselected subtrees.
 func (f *Filesystem) readSegment(ctx context.Context, s fsSegment, depth uint8, dst []byte, off uint64) error {
+	if depth == 0 || !f.concurrentObjectReads() {
+		return f.readSegmentNode(ctx, s, depth, dst, off, nil)
+	}
+	batch := newFSReadScatter(ctx)
+	defer batch.cancel()
+	batch.fail(f.readSegmentNode(batch.ctx, s, depth, dst, off, batch))
+	batch.work.Wait()
+	return batch.err
+}
+func (f *Filesystem) readSegmentNode(ctx context.Context, s fsSegment, depth uint8, dst []byte, off uint64, batch *fsReadScatter) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -133,8 +146,18 @@ func (f *Filesystem) readSegment(ctx context.Context, s fsSegment, depth uint8, 
 			continue
 		}
 		n := min(uint64(len(dst)), c.length-off)
-		if err = f.readSegment(ctx, c, depth-1, dst[:int(n)], off); err != nil {
-			return err
+		part, at := dst[:int(n)], off
+		if batch == nil {
+			if err = f.readSegmentNode(ctx, c, depth-1, part, at, nil); err != nil {
+				return err
+			}
+		} else if c.id == (ObjectID{}) {
+			clear(part)
+		} else {
+			batch.run(func() error { return f.readSegmentNode(batch.ctx, c, depth-1, part, at, batch) })
+			if err := batch.ctx.Err(); err != nil {
+				return err
+			}
 		}
 		dst = dst[int(n):]
 		off = 0

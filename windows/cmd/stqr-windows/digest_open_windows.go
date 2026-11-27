@@ -5,13 +5,30 @@ package main
 
 import (
 	"os"
+	"path/filepath"
+	"strings"
 
 	"golang.org/x/sys/windows"
 )
 
+func executableWindowsPath(path string) (string, error) {
+	absolute, err := filepath.Abs(path)
+	if err != nil {
+		return "", err
+	}
+	// Preserve os.Open's long-path support when calling CreateFile directly.
+	if !strings.HasPrefix(absolute, `\\?\`) && !strings.HasPrefix(absolute, `\\.\`) {
+		if strings.HasPrefix(absolute, `\\`) {
+			absolute = `\\?\UNC\` + absolute[2:]
+		} else {
+			absolute = `\\?\` + absolute
+		}
+	}
+	return absolute, nil
+}
+
 func openExecutableForDigest(path string) (*os.File, error) {
-	// Preserve os.Open's long-path support for this native read handle too.
-	absolute, err := windowsExecutablePath(path)
+	absolute, err := executableWindowsPath(path)
 	if err != nil {
 		return nil, err
 	}

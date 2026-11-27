@@ -85,7 +85,7 @@ func (h *Handle) ExportEncoded(k Key, yield func(EncodedChunk) error) (Info, err
 // twice, allocates one contiguous payload region and never recompresses data.
 // This trusted migration API requires ImportShadow and no request receipt.
 func (h *Handle) RestoreEncoded(k Key, info Info, source EncodedSource, opts Options) error {
-	return h.do(true, func(v *Volume) error {
+	return h.doAcceptedOptions(opts, func(v *Volume) error {
 		if !opts.ImportShadow || opts.RequestID != (ID{}) || !info.Compression.valid() || info.Deleted && info.Length != 0 || opts.Compression != nil && *opts.Compression != info.Compression || source == nil {
 			return ErrRange
 		}
