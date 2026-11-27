@@ -38,8 +38,10 @@ type Server struct {
 	activeLeases    map[volume.ID]*Bucket
 	durability      durabilityState
 
-	requestCoordination    requestIDCoordination
-	membershipJobs         map[*volume.Volume]*membershipJob
+	requestCoordination   requestIDCoordination
+	membershipJobs        map[*volume.Volume]*membershipJob
+	referenceCoordination referenceCoordination
+
 	objectSubscriptions    objectSubscriptionRegistry
 	recoveryVolumes        map[volume.ID]*stagedRecoveryVolume
 	authority              *volumeAuthorityState

@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"errors"
+	"sync"
 
 	"github.com/launix-de/stqr-storage/client"
 	"github.com/launix-de/stqr-storage/volume"
@@ -13,6 +14,62 @@ import (
 
 const maxObjectReferences = 8192
 const maxAccountReferences = 1024
+
+// referenceCoordination contains only running/waiting requests, never object
+// metadata or cached ownership. The registry mutex covers lifetimes only;
+// storage work holds one bucket token. Ordinary volume/replica locks still apply. A gate
+// disappears when its last holder/waiter leaves; cancellation is not a release
+// of a durable object pin. The volume lock and ordinary CAS remain authoritative.
+type referenceCoordination struct {
+	mu    sync.Mutex
+	gates map[volume.ID]*referenceGate
+}
+type referenceGate struct {
+	token chan struct{}
+	refs  int
+}
+
+func (r *referenceCoordination) acquire(ctx context.Context, bucket volume.ID) (func(), error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	r.mu.Lock()
+	if r.gates == nil {
+		r.gates = make(map[volume.ID]*referenceGate)
+	}
+	gate := r.gates[bucket]
+	if gate == nil {
+		gate = &referenceGate{token: make(chan struct{}, 1)}
+		r.gates[bucket] = gate
+	}
+	gate.refs++
+	r.mu.Unlock()
+	drop := func() {
+		r.mu.Lock()
+		gate.refs--
+		if gate.refs == 0 {
+			delete(r.gates, bucket)
+			if len(r.gates) == 0 {
+				r.gates = nil
+			}
+		}
+		r.mu.Unlock()
+	}
+	select {
+	case gate.token <- struct{}{}:
+		if err := ctx.Err(); err != nil {
+			<-gate.token
+			drop()
+			return nil, err
+		}
+		// Private software contract: the successful caller defers this exactly
+		// once and never reacquires this bucket recursively while holding it.
+		return func() { <-gate.token; drop() }, nil
+	case <-ctx.Done():
+		drop()
+		return nil, ctx.Err()
+	}
+}
 
 type objectReferenceEntry struct {
 	object     volume.ObjectID
@@ -137,6 +194,20 @@ func (s *Server) executeObjectReference(ctx context.Context, m client.Message, w
 	}
 	if d.Done() != nil || action > 8 || token == (client.ID{}) || target == op.object {
 		return nil, fail(400, "invalid object reference")
+	}
+	if action <= 6 {
+		release, err := s.referenceCoordination.acquire(ctx, op.bucket.ID())
+		if err != nil {
+			return nil, err
+		}
+		defer release()
+		// Placement epochs, maintenance and permissions may change while a
+		// request waits. Reparse before touching the root, then retain the
+		// ordinary read/CAS loop so external object writers cannot be lost.
+		op, _, err = s.parseObject(m, ws, p)
+		if err != nil {
+			return nil, err
+		}
 	}
 	if _, err = op.bucket.authorize(p, BucketRead); err != nil {
 		return nil, err
