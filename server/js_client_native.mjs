@@ -18,8 +18,9 @@ try{
  let read=0;await client.getTo(oid('stream'),chunk=>{assert.deepEqual(chunk,large.subarray(read,read+chunk.length));read+=chunk.length});assert.equal(read,large.length);
  await client.putFrom(oid('source'),[large.subarray(0,100),large.subarray(100)],BigInt(large.length));assert.deepEqual((await client.get(oid('source'))).data,large);
  console.log('STEP streams');await client.put(oid('accepted'),data('accepted'),{accepted:true});await client.sync();assert.equal(text((await client.get(oid('accepted'))).data),'accepted');
+ await client.putAsync(oid('async'),data('async'));await client.sync();assert.equal(text((await client.get(oid('async'))).data),'async');await client.putRangeAsync(oid('async'),1n,data('Z'));await client.sync();assert.equal(text((await client.get(oid('async'))).data),'aZync');await client.putAsync(oid('async'),data('bad'),{absent:true});await assert.rejects(client.sync(),{status:412});
  const concurrent=Array.from({length:6},(_,i)=>({id:oid('concurrent-'+i),value:data('value-'+i)}));await Promise.all(concurrent.map(e=>client.put(e.id,e.value)));await Promise.all(concurrent.map(async e=>assert.deepEqual((await client.get(e.id)).data,e.value)));
  let after='',all=[];do{const page=await client.scanObjects(after,2);all.push(...page.objects);after=page.next}while(after);assert(all.length>=10);assert(all.some(e=>e.id===id));const space=await client.space();assert.equal(space.used+space.free,space.total);
- await client.delete(id);await assert.rejects(client.get(id),{status:404});
+ await client.delete(id);await assert.rejects(client.get(id),{status:404});await client.beginObjectLease(false);await client.put(oid('lease'),data('leased'));await client.endMaintenance();await client.beginObjectLease(false);assert.equal(text((await client.get(oid('lease'))).data),'leased');await client.endMaintenance();
  console.log('JS_NATIVE_OK '+cfg.routing);
-}finally{client.close()}
+}finally{await client.close()}
