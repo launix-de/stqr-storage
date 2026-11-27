@@ -468,3 +468,44 @@ func TestMembershipDuplicateAndShadowCopiesKeepOriginalRules(t *testing.T) {
 	release()
 	_ = a
 }
+
+// The same unpinned2-store cohort used by a real upper bucket must preserve
+// legacy read progress while an unrelated exclusive operation owns admission.
+// The negative hint is a positive control: this read would otherwise choose
+// guarded acceleration and queue behind W even though both volumes can read.
+func TestMembershipHintedReadFallsBackInsteadOfWaitingForAdmission(t *testing.T) {
+	s, b, a, _ := membershipFixture(t)
+	p := quotaPrincipal(t, s)
+	key := volume.Key{Bucket: b.ID(), Object: volume.ObjectID{2}}
+	if a.MayContainObject(key) || !b.membershipReadCouldSkip(key) {
+		t.Fatal("fixture lacks a real negative candidate")
+	}
+	s.opMu.Lock()
+	locked := true
+	defer func() {
+		if locked {
+			s.opMu.Unlock()
+		}
+	}()
+	done := make(chan error, 1)
+	go func() {
+		ctx, cancel := context.WithTimeout(withMembershipRead(context.Background()), time.Second)
+		defer cancel()
+		got, _, err := b.Get(ctx, p, key.Object)
+		if err == nil && string(got) != "seed" {
+			err = errors.New("legacy fallback returned wrong payload")
+		}
+		done <- err
+	}()
+	awaitParallel(t, done)
+	// Fallback must also release its transient key coordination, not retain it
+	// while an exclusive caller may need that key for internal publication.
+	s.replicas.mu.Lock()
+	retained := s.replicas.locks[key] != nil
+	s.replicas.mu.Unlock()
+	if retained {
+		t.Fatal("full-probe fallback retained an object guard")
+	}
+	s.opMu.Unlock()
+	locked = false
+}
