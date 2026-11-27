@@ -175,17 +175,22 @@ func (b *Bucket) openSelectedRead(ctx context.Context, p principal, id volume.Ob
 	}
 	guarded := membershipReadEnabled(ctx) && b.membershipReadCouldSkip(key)
 	if guarded {
+		release := func() {}
 		if s.replicas != nil {
-			release := s.replicas.lock(key)
+			release = s.replicas.lock(key)
+		}
+		// Hints are an optional acceleration, not permission to make reads
+		// wait for unrelated administrative/legacy writers. Without immediate
+		// shared admission, discard every hint and retain the exact old probe.
+		// Release the temporary key guard too: internal exclusive publishers
+		// may otherwise wait for it while the full probe waits for their I/O.
+		if s.opMu.TryRLock() {
 			defer release()
+			defer s.opMu.RUnlock()
+		} else {
+			release()
+			guarded = false
 		}
-		release, err := s.lockRequestID(ctx, volume.ID{})
-		if err != nil {
-			return nil, nil, BucketDescription{}, volume.Info{}, err
-		}
-		defer release()
-		s.opMu.RLock()
-		defer s.opMu.RUnlock()
 	}
 	d, err := b.authorize(p, BucketRead)
 	if err != nil {

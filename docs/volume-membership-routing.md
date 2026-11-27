@@ -11,6 +11,10 @@ A negative is usable only while the relevant keys cannot change. Native external
 GET/GET_RANGE/STAT and the audited external reference-root read acquire object-key
 coordination followed by shared node admission. They release those guards as soon
 as the selected Volume read handle pins its bytes, before payload/network output.
+Hinted reads use shared admission only when immediately available; a contended
+node-wide lock, a single eligible volume, or no skippable candidate keeps the
+original full-probe read path without node admission. An unlocked preflight is
+only an optimization choice; all used absence proofs are rebuilt under guards.
 Generic/internal, COW fallback, subscription and S3 reads keep the full-probe path;
 recursively taking admission under an administrative lock or range lease is unsafe.
 
