@@ -21,14 +21,45 @@ stqr_login_install() {
     chroot "$1" /usr/bin/python3 /usr/lib/stqr-networkboot/install-login \
         /usr/lib/stqr-networkboot/login.json --server "$2"
 }
+# /run itself is noexec. A dedicated child mount keeps the payload executable,
+# root-only and local, then becomes readonly before any file is bound into root.
+# initramfs-tools moves /run (including child mounts) into the final root after
+# init-bottom, so these sources survive run-init deleting the old initramfs.
+stqr_login_mount() { mount "$@"; }
+stqr_login_bind_changes() {
+    stqr_bind_root=$1 stqr_bind_payload=$2 stqr_bind_list=$3 stqr_bind_run=$4
+    [ -s "$stqr_bind_list" ] || return 0
+    stqr_bind_ram=$(mktemp -d "$stqr_bind_run/stqr-boot-assets.XXXXXX") || return 1
+    stqr_login_mount -t tmpfs -o size=64m,mode=0700,nodev,nosuid,exec stqr-boot-assets "$stqr_bind_ram" || return 1
+    while IFS= read -r stqr_bind_asset; do
+        mkdir -p "$stqr_bind_ram/$(dirname "$stqr_bind_asset")" || return 1
+        cp -p "$stqr_bind_payload/$stqr_bind_asset" "$stqr_bind_ram/$stqr_bind_asset" || return 1
+    done < "$stqr_bind_list"
+    stqr_login_mount -t tmpfs -o remount,ro,nodev,nosuid,exec stqr-boot-assets "$stqr_bind_ram" || return 1
+    while IFS= read -r stqr_bind_asset; do
+        stqr_bind_target="$stqr_bind_root/$stqr_bind_asset"
+        mkdir -p "$(dirname "$stqr_bind_target")" || return 1
+        if [ ! -e "$stqr_bind_target" ]; then
+            (umask 077; : > "$stqr_bind_target") || return 1
+        fi
+        # Helpers have regular file leaves; merged-/usr directory links remain
+        # supported. Refuse an unexpected leaf link or special device target.
+        [ -f "$stqr_bind_target" ] && [ ! -L "$stqr_bind_target" ] || return 1
+        stqr_login_mount --bind "$stqr_bind_ram/$stqr_bind_asset" "$stqr_bind_target" || return 1
+        # Give both paths explicitly: BusyBox otherwise searches /proc/mounts
+        # for the literal target, which fails for /lib -> usr/lib aliases.
+        stqr_login_mount -o remount,bind,ro,nodev,nosuid,exec "$stqr_bind_ram/$stqr_bind_asset" "$stqr_bind_target" || return 1
+    done < "$stqr_bind_list"
+}
 stqr_prepare_login() {
-    stqr_login_root=$1 stqr_login_server=$2 stqr_login_kernel=$3 stqr_login_payload=${4:-/}
+    stqr_login_root=$1 stqr_login_server=$2 stqr_login_kernel=$3 stqr_login_payload=${4:-/} stqr_login_run=${5:-/run}
     stqr_login_marker=usr/lib/stqr-networkboot/prepared.sha256
-    stqr_login_current=$(mktemp /run/stqr-login.XXXXXX) || return 1
-    stqr_login_manifest "$stqr_login_payload" "$stqr_login_kernel" > "$stqr_login_current" || { rm -f "$stqr_login_current"; return 1; }
+    stqr_login_current=$(mktemp "$stqr_login_run/stqr-login.XXXXXX") || return 1
+    stqr_login_changes=$(mktemp "$stqr_login_run/stqr-login-changes.XXXXXX") || { rm -f "$stqr_login_current"; return 1; }
+    stqr_login_manifest "$stqr_login_payload" "$stqr_login_kernel" > "$stqr_login_current" || { rm -f "$stqr_login_current" "$stqr_login_changes"; return 1; }
     if ! cmp -s "$stqr_login_current" "$stqr_login_root/$stqr_login_marker"; then
-        # An old/missing marker is a conservative migration path. A changed
-        # module alone does not require copying bootctl or rewriting identities.
+        # A stale/missing image marker needs runtime overrides, not megabytes
+        # of copy-up into STQR. Only identity/config changes reach the upper.
         stqr_login_reinstall=0
         if ! grep -qx '# STQR prepared boot assets v1' "$stqr_login_root/$stqr_login_marker" 2>/dev/null; then
             stqr_login_reinstall=1
@@ -37,22 +68,26 @@ stqr_prepare_login() {
             case "$stqr_login_line" in '# '*) continue;; esac
             stqr_login_asset=${stqr_login_line#*  }
             if ! grep -Fqx "$stqr_login_line" "$stqr_login_root/$stqr_login_marker" 2>/dev/null; then
-                mkdir -p "$stqr_login_root/$(dirname "$stqr_login_asset")" || { rm -f "$stqr_login_current"; return 1; }
-                cp -p "$stqr_login_payload/$stqr_login_asset" "$stqr_login_root/$stqr_login_asset" || { rm -f "$stqr_login_current"; return 1; }
                 case "$stqr_login_asset" in
-                    */login.json|*/install-login|*/home-template.json) stqr_login_reinstall=1;;
+                    */home-template.json)
+                        # install-login regenerates this OUTPUT atomically.
+                        # A readonly file bind here makes os.replace fail EBUSY
+                        # when the login/home plan changes. Keep its tiny
+                        # generated metadata on the writable guest upper.
+                        stqr_login_reinstall=1
+                        continue;;
+                    */login.json|*/install-login) stqr_login_reinstall=1;;
                 esac
+                printf '%s\n' "$stqr_login_asset" >> "$stqr_login_changes"
             fi
         done < "$stqr_login_current"
+        stqr_login_bind_changes "$stqr_login_root" "$stqr_login_payload" "$stqr_login_changes" "$stqr_login_run" || { rm -f "$stqr_login_current" "$stqr_login_changes"; return 1; }
         if [ "$stqr_login_reinstall" = 1 ]; then
-            stqr_login_install "$stqr_login_root" "$stqr_login_server" || { rm -f "$stqr_login_current"; return 1; }
+            stqr_login_install "$stqr_login_root" "$stqr_login_server" || { rm -f "$stqr_login_current" "$stqr_login_changes"; return 1; }
         fi
-        mkdir -p "$stqr_login_root/$(dirname "$stqr_login_marker")" || { rm -f "$stqr_login_current"; return 1; }
-        cp "$stqr_login_current" "$stqr_login_root/$stqr_login_marker" || { rm -f "$stqr_login_current"; return 1; }
-        chmod 0600 "$stqr_login_root/$stqr_login_marker" || { rm -f "$stqr_login_current"; return 1; }
+        # Never advance the persistent prepared marker for RAM-only overrides.
+        # An edited image/reused upper must bind them again on its next boot.
     fi
-    rm -f "$stqr_login_current"
-    # This static initramfs helper replaces only a numeric runtime endpoint in
-    # a small prepared JSON template; it does not start Python or call fsync.
+    rm -f "$stqr_login_current" "$stqr_login_changes"
     "$stqr_login_payload/bin/stqr-boot-root" --login-uri "$stqr_login_root" "$stqr_login_server"
 }
