@@ -120,6 +120,9 @@ func (b *Bucket) cowLogicalUsage() (uint64, error) {
 	var used uint64
 	var after *volume.ObjectID
 	for {
+		if err := b.server.ctx.Err(); err != nil {
+			return 0, err
+		}
 		page, next, more, err := b.server.cowLogicalPage(b.server.ctx, b.ID(), after, 128, true)
 		if err != nil {
 			return 0, err
@@ -143,6 +146,9 @@ func (s *Server) cowGraphPage(ctx context.Context, bucket volume.ID, after *volu
 	seen := map[volume.ObjectID]bool{}
 	more := false
 	for _, peer := range g.component(bucket) {
+		if err := ctx.Err(); err != nil {
+			return nil, volume.ObjectID{}, false, err
+		}
 		page, extra, err := s.cowPhysicalPage(ctx, peer, after, limit)
 		if err != nil {
 			return nil, volume.ObjectID{}, false, err
@@ -164,6 +170,9 @@ func (s *Server) cowGraphPage(ctx context.Context, bucket volume.ID, after *volu
 	var next volume.ObjectID
 	var out []volume.ObjectRecord
 	for _, id := range ids {
+		if err := ctx.Err(); err != nil {
+			return nil, next, false, err
+		}
 		next = id
 		if local {
 			owner := client.ID{}

@@ -27,7 +27,14 @@ func (s *Server) executeBucketStatFS(ctx context.Context, m client.Message, p pr
 	if s.bucketAwaitingRecovery(client.ID(id)) {
 		return nil, fail(503, "bucket has unavailable recovery ranges")
 	}
-	c, err := s.quotaCapacitySnapshot(ctx, id, uint8(bucketClass(desc.Policy)), principal{}, true)
+	// An unlimited COW view may inherit millions of objects without owning
+	// their records. POSIX filesystem space can report its physical storage
+	// pool directly; counting the merged namespace here would turn a df probe
+	// into an unbounded scan under node admission. Finite quota headroom still
+	// requires a known exact bucket usage measurement and must never use this
+	// physical pool count in logical quota admission.
+	physicalPool := desc.Policy.Limits.Unlimited && len(desc.ClonePeers) > 0
+	c, err := s.quotaCapacitySnapshotMode(ctx, id, uint8(bucketClass(desc.Policy)), principal{}, true, physicalPool)
 	if err != nil {
 		return nil, err
 	}
