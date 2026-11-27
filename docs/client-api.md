@@ -354,7 +354,12 @@ an explicit durability boundary. Receipts include the issuing server incarnation
 unconfirmed receipts cannot silently survive a reboot. The FUSE CLI negotiates
 this mode and uses actual barriers for filesystem sync operations; ordinary close
 is no longer a forced fsync. See [the durability contract](durability.md) for
-causal references, bounds, fallback behavior and recovery semantics.
+causal references, bounds and recovery semantics. Accepted streamed writes require
+`CapabilityAcceptedStreams`; unsupported peers fail explicitly rather than
+falling back to a durable native operation. There is no automatic cross-owner
+Sync. A closed dirty owner connection remains an uncertain dependency until
+explicit Sync reports its error or the caller closes the Client. The S3 adapter
+requests its own explicit Sync before a successful publication acknowledgement.
 
 ### Bucket format
 

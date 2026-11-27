@@ -226,7 +226,7 @@ func nbdSession(ctx context.Context, c net.Conn, catalog *Catalog, opt Options) 
 			}
 		}
 		if cmd == 2 {
-			return catalog.Sync(ctx)
+			return nil
 		}
 		code := uint32(0)
 		var err error
@@ -328,7 +328,7 @@ func Serve(ctx context.Context, path string, catalog *Catalog, opt Options) erro
 			stop()
 			workers.Wait()
 			if canceled {
-				return catalog.Sync(context.Background())
+				return nil
 			}
 			return err
 		}

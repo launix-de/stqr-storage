@@ -5,12 +5,11 @@ import (
 	"crypto/sha256"
 	"fmt"
 	"io"
-	"os"
 )
 
 func executableDigest(source string) ([32]byte, error) {
 	var digest [32]byte
-	f, err := os.Open(source)
+	f, err := openExecutableForDigest(source)
 	if err != nil {
 		return digest, err
 	}
