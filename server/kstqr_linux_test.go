@@ -1674,10 +1674,14 @@ poweroff -f
 	err = vm.Run()
 	output := captured.Bytes()
 	if os.Getenv("STQR_KERNEL_PLAIN_BIND") == "1" {
+		if !strings.Contains(string(output), "KSTQR_PLAIN_DIRECTORY_MOUNTS_PASS") {
+			t.Fatalf("plain directory mount retention test did not pass: %v\n%s", err, output)
+		}
 		if !strings.Contains(string(output), "KSTQR_PLAIN_BIND_PASS") {
 			t.Fatalf("plain bind test did not pass: %v\n%s", err, output)
 		}
 		t.Log("KSTQR_PLAIN_BIND_PASS")
+		t.Log("KSTQR_PLAIN_DIRECTORY_MOUNTS_PASS")
 	}
 
 	if os.Getenv("STQR_KERNEL_CACHE_RETENTION") == "1" && !strings.Contains(string(output), "KSTQR_CACHE_RETENTION_PASS") {
