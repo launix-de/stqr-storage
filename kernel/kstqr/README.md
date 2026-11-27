@@ -83,4 +83,8 @@ The plain filesystem binding regression uses `STQR_KERNEL_PLAIN_BIND=1` with
 the same command. It mounts an additional disposable filesystem twice, checks
 that local and independent-mount sibling edits preserve a file bind mount, and
 checks that replacement, removal and recreation still invalidate cached names.
+It also mounts tmpfs through a merged-/usr alias and stacks nested tmpfs mounts
+on a `/sys/fs/cgroup`-shaped namespace. Local and independent-mount edits at
+each ancestor must preserve the reached mount, its device identity and contents;
+unmounting must reveal the original covered STQR directory contents.
 The existing complete-suite transaction recovery fixture remains unchanged.

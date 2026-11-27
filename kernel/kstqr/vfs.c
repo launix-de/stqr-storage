@@ -241,7 +241,6 @@ static int ks_revalidate(struct inode *parent, const struct qstr *name, struct d
 	struct ks_dentry *proof;
 	struct ks_fs *f = parent->i_sb->s_fs_info;
 	stqr_proof cached_proof;
-	(void)name;
 	if (flags & LOOKUP_RCU)
 		return -ECHILD;
 	if (f->lower) {
@@ -288,7 +287,10 @@ static int ks_revalidate(struct inode *parent, const struct qstr *name, struct d
 			err = ks_directory(f, &s.node, &entries, &count);
 		if (!err)
 			for (k = 0; k < count; k++)
-				if (!strcmp(entries[k].name, name->name)) {
+				/* qstr can point into a longer pathname, e.g. usr/lib.
+				 * Compare this component, not the nonterminated suffix. */
+				if (strlen(entries[k].name) == name->len &&
+				    !memcmp(entries[k].name, name->name, name->len)) {
 					found = true;
 					same = d_inode(d) && !memcmp(entries[k].id.bytes,
 						KS_I(d_inode(d))->id.bytes, 32);
