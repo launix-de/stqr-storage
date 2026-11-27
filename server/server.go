@@ -41,7 +41,7 @@ type Server struct {
 	recoveryVolumes        map[volume.ID]*stagedRecoveryVolume
 	authority              *volumeAuthorityState
 	mu                     sync.RWMutex
-	opMu                   sync.Mutex
+	opMu                   sync.RWMutex
 	cfg, running           Config
 	configPath, volumesDir string
 	volumes                map[string]*managedVolume

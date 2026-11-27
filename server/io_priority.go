@@ -54,3 +54,17 @@ func (s *Server) beginRebuildIO(ctx context.Context) (func(), error) {
 // A dependency on a rebuild must not itself prevent that rebuild from running.
 func (s *Server) lockUserObjectIO()   { s.ioPriority.users.Add(1); s.opMu.Lock() }
 func (s *Server) unlockUserObjectIO() { s.opMu.Unlock(); s.ioPriority.users.Add(-1) }
+
+// Parallel admission pins administrative lifetime/placement without serializing
+// independent volume operations. Callers must first prove stable single-copy
+// authority and install exact quota reservations; ordinary lockUserObjectIO
+// remains the exclusive fallback for all other paths. Never upgrade while a
+// shared admission is held: unwind and revalidate under exclusive admission.
+func (s *Server) lockParallelUserObjectIO() {
+	s.ioPriority.users.Add(1)
+	s.opMu.RLock()
+}
+func (s *Server) unlockParallelUserObjectIO() {
+	s.opMu.RUnlock()
+	s.ioPriority.users.Add(-1)
+}
