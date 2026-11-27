@@ -21,10 +21,25 @@ import (
 )
 
 func TestDashboardPluginsBrowser(t *testing.T) {
+	dashboardPluginsBrowser(t, false)
+}
+
+func TestDashboardPluginsClusterBrowser(t *testing.T) {
+	dashboardPluginsBrowser(t, true)
+}
+
+func dashboardPluginsBrowser(t *testing.T, cluster bool) {
 	if os.Getenv("STQR_TEST_BROWSER_MODULE") == "" {
 		t.Skip("set STQR_TEST_BROWSER_MODULE for Playwright")
 	}
-	s := testServer(t)
+	var s, storage *Server
+	if cluster {
+		source, target := startAutomaticDaemonPair(t)
+		s, storage = source.node, target.node
+	} else {
+		s = testServer(t)
+		storage = s
+	}
 	s.cfg.FormatPluginsDir = t.TempDir()
 	custom := `export const apiVersion=1;
 export const css='[data-stqr-plugin="custom"] .custom-output { color: rgb(12, 34, 56); }';
@@ -41,7 +56,7 @@ export async function open({bucket,windows,ui,signal}) {
 	if err := os.WriteFile(filepath.Join(s.cfg.FormatPluginsDir, "badcss.mjs"), []byte(`export const apiVersion=1;export const css='body{display:none}';export function open(){throw Error('must not run')}`), 0644); err != nil {
 		t.Fatal(err)
 	}
-	addTestVolume(t, s, "plugins", "hdd", 96<<20)
+	addTestVolume(t, storage, "plugins", "hdd", 96<<20)
 	host := httptest.NewServer(s.Handler())
 	defer host.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
