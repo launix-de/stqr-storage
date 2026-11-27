@@ -190,6 +190,10 @@ func nextMutationLength(op uint16, off, n uint64, old volume.Info, opt volume.Op
 		if opt.WholeObject {
 			return n, nil
 		}
+		if n > math.MaxUint64-off {
+			return 0, volume.ErrRange
+		}
+		return max(prior, off+n), nil
 	}
 	return prior, nil
 }
