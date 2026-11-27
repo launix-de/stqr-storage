@@ -241,7 +241,6 @@ static int ks_revalidate(struct inode *parent, const struct qstr *name, struct d
 	struct ks_dentry *proof;
 	struct ks_fs *f = parent->i_sb->s_fs_info;
 	stqr_proof cached_proof;
-	(void)name;
 	if (flags & LOOKUP_RCU)
 		return -ECHILD;
 	if (f->lower) {
@@ -271,15 +270,52 @@ static int ks_revalidate(struct inode *parent, const struct qstr *name, struct d
 		return d_inode(d) ? (refresh_inode(d_inode(d)) ? 0 : 1) : 1;
 	}
 
+	stqr_proof parent_proof = {0};
+	spin_lock(&d->d_lock);
 	proof = d->d_fsdata;
+	if (proof)
+		parent_proof = proof->parent_proof;
+	spin_unlock(&d->d_lock);
 	if (!proof || !ks_cache_proof(f, KS_I(parent)->id, &cached_proof) ||
-	    memcmp(&cached_proof, &proof->parent_proof, sizeof(cached_proof)))
-		return 0;
-	/* Namespace proof also covers negative dentries. Refresh a positive inode
-	 * from its live subscription before permission checks use its attributes. */
-	if (d_inode(d) &&
-	    (!ks_cache_proof(f, KS_I(d_inode(d))->id, &cached_proof) || refresh_inode(d_inode(d))))
-		return 0;
+	    memcmp(&cached_proof, &parent_proof, sizeof(cached_proof))) {
+		struct ks_snapshot s = {0};
+		struct ks_entry *entries = NULL;
+		size_t count = 0, k;
+		bool found = false, same = !d_inode(d);
+		int err = ks_snapshot(f, KS_I(parent)->id, &s);
+		if (!err)
+			err = ks_directory(f, &s.node, &entries, &count);
+		if (!err)
+			for (k = 0; k < count; k++)
+				/* qstr can point into a longer pathname, e.g. usr/lib.
+				 * Compare this component, not the nonterminated suffix. */
+				if (strlen(entries[k].name) == name->len &&
+				    !memcmp(entries[k].name, name->name, name->len)) {
+					found = true;
+					same = d_inode(d) && !memcmp(entries[k].id.bytes,
+						KS_I(d_inode(d))->id.bytes, 32);
+					break;
+				}
+		if (!found && d_inode(d))
+			same = false;
+		/* A sibling edit changes the parent proof, not this binding. Dropping
+		 * an unchanged dentry can detach a live file bind mount. */
+		if (!err && same) {
+			spin_lock(&d->d_lock);
+			if (d->d_fsdata)
+				((struct ks_dentry *)d->d_fsdata)->parent_proof = s.info.proof;
+			spin_unlock(&d->d_lock);
+		}
+		sq_free(entries);
+		ks_snapshot_free(&s);
+		if (err || !same)
+			return err ? err : 0;
+	}
+	/* Re-establish child coverage without discarding an unchanged binding. */
+	if (d_inode(d)) {
+		int err = refresh_inode(d_inode(d));
+		return err ? err : 1;
+	}
 	return 1;
 }
 static void ks_dentry_release(struct dentry *d) { kfree(d->d_fsdata); }

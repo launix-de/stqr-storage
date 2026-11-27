@@ -15,12 +15,13 @@
 #undef sq_disconnect
 #include <assert.h>
 #include <stdio.h>
-struct stqr_socket { struct buf replies,held; unsigned calls[512]; stqr_u64 sequence,reply_length; unsigned boot;int closed,hold,redirect; };
+struct stqr_socket { struct buf replies,held; unsigned calls[512],pongs; stqr_u64 sequence,reply_length; unsigned boot;int closed,hold,redirect; };
 int policy_connect(struct stqr_socket **out,const char *host,unsigned port,unsigned ms) {
     (void)out;(void)host;(void)port;(void)ms;return -EOPNOTSUPP;
 }
 int policy_send(struct stqr_socket *socket,const void *data,size_t size) {
     const stqr_u8 *wire=data;size_t at=2,n;struct buf input={0},message={0},headers={0},mark={0};
+    if(size==6 && wire[0]==0x8a && wire[1]==0x80) { socket->pongs++; return 0; }
     assert(size>=6 && (wire[0]&15)==2 && (wire[1]&128));
     n=wire[1]&127;
     if(n==126){assert(size>=8);n=((size_t)wire[2]<<8)|wire[3];at=4;}
@@ -312,7 +313,40 @@ static void overlapping_legacy_fences(void) {
     assert(one.called==1&&!one.error&&two.called==1&&!two.error);
     stqr_close(c);
 }
+/* The kernel schedules one receive worker per socket-readiness notification.
+ * That worker drains while poll reports progress. A control frame and its
+ * following reply can arrive in the SAME readiness event, with no later edge
+ * to wake a caller whose completion has not yet been dispatched. */
+static void control_before_cas_reply(unsigned opcode) {
+    struct stqr_socket socket={0};stqr_client *c=sq_alloc(sizeof(*c));
+    struct result result={0};stqr_options options={.accepted=1};stqr_object_id object={{7}};
+    const stqr_u8 control[2]={(stqr_u8)(0x80|opcode),0};
+    assert(c);c->socket=&socket;c->bucket.bytes[0]=1;
+    c->capabilities=STQR_CAP_DURABILITY|STQR_CAP_CONNECTION_SYNC;
+    options.request_id.bytes[0]=7;
+    put(&socket.replies,control,sizeof(control));
+    assert(!stqr_cas_async(c,object,1,0,"old!",4,"new!",4,&options,completed,&result));
+    unsigned progress=0;int n;
+    while((n=stqr_poll(c,0))>0){assert(++progress<=2);}
+    assert(!n && progress==2);
+    assert(result.called==1 && !result.error && result.status==200);
+    assert(!stqr_async_pending(c) && socket.replies.pos==socket.replies.n);
+    assert(socket.pongs==(opcode==9));
+    stqr_close(c);
+}
+static void control_without_reply(unsigned opcode,int expected) {
+    struct stqr_socket socket={0};stqr_client *c=sq_alloc(sizeof(*c));
+    const stqr_u8 control[2]={(stqr_u8)opcode,0};
+    assert(c);c->socket=&socket;
+    put(&socket.replies,control,sizeof(control));
+    assert(stqr_poll(c,0)==expected);
+    if(expected>0) assert(!stqr_poll(c,0));
+    stqr_close(c);
+}
 int main(void) {
+    control_before_cas_reply(9);control_before_cas_reply(10);
+    control_without_reply(0x89,1);control_without_reply(0x8a,1);
+    control_without_reply(0x88,-ECONNRESET);control_without_reply(0x09,-EPROTO);
     failed_fence(0);failed_fence(1);successful_fence();confirmed_and_legacy_marks();
     observation_and_capacity_never_sync();accepted_mode_never_downgrades();burst_has_only_explicit_fence();dirty_owner_pool_preserves_explicit_cut();
     overlapping_legacy_fences();legacy_sync_joins_result();redirected_result_precedes_fence();close_cancels_deferred_fence(0);close_cancels_deferred_fence(1);clean_eviction_preserves_deferred_fence();

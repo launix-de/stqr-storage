@@ -72,6 +72,7 @@ export function setupUserViews({connection,currentUsername,escape,toast,showView
  $('user-create-bucket').onchange=()=>{$('user-add-submit').textContent=$('user-create-bucket').checked?'User anlegen & weiter':'User anlegen'};
  $('user-password').addEventListener('input',()=>passwordValid($('user-password')));
  $('user-new-password').addEventListener('input',()=>passwordValid($('user-new-password')));
+ for(const id of ['user-add-dialog','user-password-dialog'])$(id).addEventListener('cancel',event=>{if($(id).querySelector('button[type=submit]')?.disabled)event.preventDefault()});
  $('user-add-dialog').addEventListener('close',()=>{$('user-password').value='';createRetry=null;$('user-add-submit').textContent='User anlegen'});
  $('user-password-dialog').addEventListener('close',()=>{$('user-new-password').value='';passwordRetry=null});
  $('user-add-form').addEventListener('submit',async e=>{
