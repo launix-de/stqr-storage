@@ -15,6 +15,7 @@ import (
 	"strings"
 
 	"github.com/launix-de/stqr-storage/client"
+	jssdk "github.com/launix-de/stqr-storage/client/js"
 )
 
 //go:embed dashboard/*
@@ -85,6 +86,27 @@ func (s *Server) Handler() http.Handler {
 			httpError(w, 403, errors.New("source address is outside the allowed subnets"))
 			return
 		}
+		if browserPath(r.URL.Path) {
+			if !s.browserOriginAllowed(r) {
+				httpError(w, 403, errors.New("origin rejected"))
+				return
+			}
+			if origin := r.Header.Get("Origin"); origin != "" {
+				w.Header().Set("Access-Control-Allow-Origin", origin)
+				w.Header().Set("Vary", "Origin")
+				w.Header().Set("Access-Control-Allow-Credentials", "true")
+				w.Header().Set("Access-Control-Allow-Headers", "Authorization, X-STQR-Bucket, X-STQR-Format, X-CSRF-Token")
+				w.Header().Set("Access-Control-Allow-Methods", "POST, GET, OPTIONS")
+			}
+			if r.Method == "OPTIONS" {
+				w.WriteHeader(204)
+				return
+			}
+			if err := browserHeaders(r); err != nil {
+				httpError(w, 400, err)
+				return
+			}
+		}
 		if r.URL.Path == "/s3" || strings.HasPrefix(r.URL.Path, "/s3/") {
 			s.serveS3(w, r)
 			return
@@ -97,6 +119,10 @@ func (s *Server) Handler() http.Handler {
 			}
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
 			w.Write(b)
+			return
+		}
+		if strings.HasPrefix(r.URL.Path, "/assets/sdk/") && r.Method == http.MethodGet {
+			http.StripPrefix("/assets/sdk/", http.FileServer(http.FS(jssdk.Files))).ServeHTTP(w, r)
 			return
 		}
 		if strings.HasPrefix(r.URL.Path, "/assets/") && r.Method == http.MethodGet {
@@ -115,11 +141,11 @@ func (s *Server) Handler() http.Handler {
 			httpError(w, 401, errors.New("authentication required"))
 			return
 		}
-		if p.User.Role != "ADMIN" && r.URL.Path != "/api/ws" && r.URL.Path != "/api/message" {
+		if p.User.Role != "ADMIN" && r.URL.Path != "/api/ws" && r.URL.Path != "/api/message" && r.URL.Path != "/api/bucket-connect" && r.URL.Path != "/api/bucket-tunnel" {
 			httpError(w, 403, errors.New("administrator required"))
 			return
 		}
-		if !sameOrigin(r) {
+		if !sameOrigin(r) && !(browserPath(r.URL.Path) && s.browserOriginAllowed(r)) {
 			httpError(w, 403, errors.New("origin rejected"))
 			return
 		}
@@ -132,6 +158,10 @@ func (s *Server) Handler() http.Handler {
 			return
 		}
 		switch {
+		case r.URL.Path == "/api/bucket-connect":
+			s.serveBrowserConnect(w, r, p)
+		case r.URL.Path == "/api/bucket-tunnel":
+			s.serveBucketTunnel(w, r, p)
 		case r.URL.Path == "/api/session":
 			switch r.Method {
 			case "GET":

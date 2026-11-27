@@ -88,6 +88,7 @@ func copyConfig(c Config) Config {
 	c.Volumes = append([]VolumeConfig(nil), c.Volumes...)
 	c.Peers = append([]PeerConfig(nil), c.Peers...)
 	c.AllowSubnets = append([]string{}, c.AllowSubnets...)
+	c.BrowserOrigins = append([]string(nil), c.BrowserOrigins...)
 	return c
 }
 func (s *Server) beginOperation(id, kind string, input any) (Operation, bool, error) {
