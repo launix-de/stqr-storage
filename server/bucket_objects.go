@@ -557,7 +557,7 @@ func (b *Bucket) mutateAttempt(ctx context.Context, p principal, id volume.Objec
 	// Account deletion/publication takes exclusive node admission. Revalidate
 	// reference actor continuity and any pruning absence proof while this exact
 	// R/W admission remains held through the ordinary Volume CAS publication.
-	if err := s.validateReferenceMutation(ctx, p, id); err != nil {
+	if err := s.validateReferenceMutation(ctx, p, id, b); err != nil {
 		return volume.Result{}, err
 	}
 	var membership *cohortMembershipProof

@@ -83,6 +83,7 @@ func (s *Server) referenceAccountSnapshot(p principal) (account, *referenceAccou
 type referencePruneKey struct{}
 type referencePruneGuard struct {
 	accounts *accountsIndex
+	bucket   volume.ID
 	absent   map[string]struct{}
 }
 
@@ -111,12 +112,15 @@ func (s *Server) referenceAccountsStable() bool {
 // present even when disabled. Claims and dependency anchors are never removed.
 // The returned context derives from ctx, preserving the collector's original
 // connectionWork/fence linkage. CAS must validate this guard under admission.
-func (s *Server) pruneAbsentPlainReferencePins(ctx context.Context, entries []objectReferenceEntry) ([]objectReferenceEntry, context.Context, error) {
+func (s *Server) pruneAbsentPlainReferencePins(ctx context.Context, b *Bucket, entries []objectReferenceEntry) ([]objectReferenceEntry, context.Context, error) {
 	if len(entries) < maxObjectReferences {
 		return entries, ctx, nil
 	}
 	if !s.referenceAccountsStable() {
 		return nil, ctx, fail(503, "reference cleanup awaits stable account authority")
+	}
+	if !s.referencePruneSingleCopy(b) {
+		return entries, ctx, nil
 	}
 	x, err := s.accountIndex()
 	if err != nil {
@@ -149,12 +153,12 @@ func (s *Server) pruneAbsentPlainReferencePins(ctx context.Context, entries []ob
 		return entries, ctx, nil
 	}
 	guard := &referencePruneGuard{accounts: x, absent: absent}
+	if b != nil {
+		guard.bucket = b.ID()
+	}
 	return kept, context.WithValue(ctx, referencePruneKey{}, guard), nil
 }
 
-// Caller holds the SAME shared/exclusive node admission as the real mutation,
-// before any Volume access. UserDelete/system installation use its exclusive
-// side; no queued old actor may publish after that deletion has completed.
 // Scoped frontend credentials intentionally have no lifetime-reference capability.
 // Their cross-node grant currently proves an HTTP operation, not continuity of
 // the ORIGINAL account incarnation. Never upgrade them to a fresh local stamp.
@@ -164,7 +168,12 @@ func referencePrincipalSupported(p principal) bool {
 	return p.frontendIssuer == (client.ID{}) && (p.connection == nil || p.connection.frontendPermission == 0)
 }
 
-func (s *Server) validateReferenceMutation(ctx context.Context, p principal, id volume.ObjectID) error {
+// Caller holds the actual object key and shared/exclusive node admission.
+// Initial actor admission rejects queued old identities after UserDelete. For
+// SINGLE-COPY pruning this same admission remains held through publication.
+// Existing distributed operations already prepared before deletion may finish;
+// pruning is excluded from those network/decision paths entirely.
+func (s *Server) validateReferenceMutation(ctx context.Context, p principal, id volume.ObjectID, b *Bucket) error {
 	if bucketLocalReferenceRoot(id) && !referencePrincipalSupported(p) {
 		return ErrBucketForbidden
 	}
@@ -183,6 +192,33 @@ func (s *Server) validateReferenceMutation(ctx context.Context, p principal, id 
 	if !p.internalCoordination || p.cowInternal || !bucketLocalReferenceRoot(id) || !s.referenceAccountsStable() {
 		return volume.ErrPrecondition
 	}
+	if !s.referencePruneSingleCopy(b) {
+		return volume.ErrPrecondition
+	}
+	if b != nil {
+		if guard.bucket != b.ID() {
+			return volume.ErrPrecondition
+		}
+		key := volume.Key{Bucket: b.ID(), Object: id}
+		cohort := b.localVolumes()
+		if len(cohort) == 0 {
+			return volume.ErrPrecondition
+		}
+		for _, v := range cohort {
+			h, err := v.Open(false)
+			if err != nil {
+				return err
+			}
+			pending, err := h.HasPendingReplica(key)
+			h.Close()
+			if err != nil {
+				return err
+			}
+			if pending {
+				return volume.ErrPrecondition
+			}
+		}
+	}
 	current, err := s.accountIndex()
 	if err != nil || current != guard.accounts {
 		return volume.ErrPrecondition
@@ -193,4 +229,34 @@ func (s *Server) validateReferenceMutation(ctx context.Context, p principal, id 
 		}
 	}
 	return nil
+}
+
+// Reclamation is deliberately narrower than ordinary reference support.
+// Already prepared replicated operations may complete after account deletion;
+// they must never race an absence-based pruning CAS. Map changes fence pending
+// transactions before topology activation, and actual CAS also probes the exact
+// pending key on each local cohort member. Desired policies and uncertain maps
+// are not evidence of a stable single-copy lifetime.
+// Caller repeats this check under the actual object-key/node admission guards.
+func (s *Server) referencePruneSingleCopy(b *Bucket) bool {
+	if b == nil {
+		// Only isolated standalone unit fixtures omit the bucket.
+		return s.controller == nil
+	}
+	d := b.storageDescription()
+	if d.State != BucketActive || d.DesiredPolicy != nil || d.Policy.PlacementMode == "everywhere" || d.Policy.Redundancy.Replicas != 1 {
+		return false
+	}
+	if s.controller == nil {
+		return true
+	}
+	if s.control == nil || s.authorityPending(b.ID(), volume.ObjectID(client.ObjectReferenceRootID())) {
+		return false
+	}
+	image := s.placement.Load()
+	if image == nil {
+		return false
+	}
+	entry, ok := image.lookup(client.ID(b.ID()), client.ObjectID(client.ObjectReferenceRootID()))
+	return ok && entry.State == 0 && len(entry.Locations) == 1 && entry.Locations[0].Role == 0 && entry.Locations[0].Node == s.control.ledger.node
 }

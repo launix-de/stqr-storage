@@ -72,7 +72,7 @@ func TestReferencePruneGuardPreservesProtectedOwnersAndDetectsImageABA(t *testin
 	original := append([]objectReferenceEntry(nil), entries...)
 	marker := new(int)
 	ctx := context.WithValue(context.Background(), "reference-private-work-marker", marker)
-	filtered, guarded, e := s.pruneAbsentPlainReferencePins(ctx, entries)
+	filtered, guarded, e := s.pruneAbsentPlainReferencePins(ctx, nil, entries)
 	if e != nil || len(filtered) != len(entries)-1 {
 		t.Fatal("wrong safe subset", len(filtered), e)
 	}
@@ -94,7 +94,7 @@ func TestReferencePruneGuardPreservesProtectedOwnersAndDetectsImageABA(t *testin
 	actor := principal{User: user, referenceAuth: stamp, internalCoordination: true}
 	root := volume.ObjectID(client.ObjectReferenceRootID())
 	s.opMu.RLock()
-	e = s.validateReferenceMutation(guarded, actor, root)
+	e = s.validateReferenceMutation(guarded, actor, root, nil)
 	s.opMu.RUnlock()
 	if e != nil {
 		t.Fatal(e)
@@ -103,13 +103,13 @@ func TestReferencePruneGuardPreservesProtectedOwnersAndDetectsImageABA(t *testin
 	guardIndex(t, s, []account{user, off, {ID: gone.String(), Name: "recreated", Role: "USER", Disabled: true, PasswordHash: "restored"}})
 	guardIndex(t, s, []account{user, off})
 	s.opMu.RLock()
-	e = s.validateReferenceMutation(guarded, actor, root)
+	e = s.validateReferenceMutation(guarded, actor, root, nil)
 	s.opMu.RUnlock()
 	if !errors.Is(e, volume.ErrPrecondition) {
 		t.Fatal("absent-ID image ABA not rejected", e)
 	}
 	s.accounts.Store(nil)
-	if _, _, e = s.pruneAbsentPlainReferencePins(ctx, entries); statusOf(e) != 503 {
+	if _, _, e = s.pruneAbsentPlainReferencePins(ctx, nil, entries); statusOf(e) != 503 {
 		t.Fatal("unknown account authority became empty", e)
 	}
 }
@@ -121,13 +121,13 @@ func TestReferencePruneGuardBusyControlFailsClosed(t *testing.T) {
 	guardIndex(t, s, []account{u})
 	entries := guardEntries(live)
 	entries[0].account = gone
-	_, ctx, e := s.pruneAbsentPlainReferencePins(context.Background(), entries)
+	_, ctx, e := s.pruneAbsentPlainReferencePins(context.Background(), nil, entries)
 	if e != nil {
 		t.Fatal(e)
 	}
 	s.control = &controlRuntime{ledger: &controlLedger{}}
 	s.control.ledger.activity.Store(&controlActivity{Busy: true})
-	_, _, e = s.pruneAbsentPlainReferencePins(context.Background(), entries)
+	_, _, e = s.pruneAbsentPlainReferencePins(context.Background(), nil, entries)
 	if statusOf(e) != 503 {
 		t.Fatal("busy authority reported permanent capacity", e)
 	}
@@ -136,7 +136,7 @@ func TestReferencePruneGuardBusyControlFailsClosed(t *testing.T) {
 		t.Fatal(e)
 	}
 	s.opMu.RLock()
-	e = s.validateReferenceMutation(ctx, principal{User: u, referenceAuth: stamp, internalCoordination: true}, volume.ObjectID(client.ObjectReferenceRootID()))
+	e = s.validateReferenceMutation(ctx, principal{User: u, referenceAuth: stamp, internalCoordination: true}, volume.ObjectID(client.ObjectReferenceRootID()), nil)
 	s.opMu.RUnlock()
 	if !errors.Is(e, volume.ErrPrecondition) {
 		t.Fatal("CAS accepted unstable absence proof", e)
@@ -336,5 +336,71 @@ func TestReferenceCookieAndSessionIssuanceRejectEqualFieldsABA(t *testing.T) {
 	s.createSession(w, p)
 	if w.Code != 403 {
 		t.Fatal("stale original Basic principal issued new session", w.Code)
+	}
+}
+
+func TestReferencePruneGuardRejectsExactPendingReplicaBeforePublication(t *testing.T) {
+	f := newCombiningFixture(t)
+	fullReferenceRoot(t, f, 1)
+	raw := f.root(t)
+	entries, err := decodeObjectReferences(raw, f.b.ID())
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, ctx, err := f.s.pruneAbsentPlainReferencePins(context.Background(), f.b, entries)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ctx.Value(referencePruneKey{}) == nil {
+		t.Fatal("single copy positive control failed")
+	}
+	root := volume.ObjectID(client.ObjectReferenceRootID())
+	key := volume.Key{Bucket: f.b.ID(), Object: root}
+	actor := f.p
+	_, actor.referenceAuth, err = f.s.referenceAccountSnapshot(actor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	actor.internalCoordination = true
+	id := volume.ID(client.NewRequestID())
+	binding := volume.ReplicaBinding{Epoch: 1, Sequence: 1, SetHash: [32]byte{1}}
+	release := f.s.replicas.lock(key)
+	defer release()
+	f.s.opMu.Lock()
+	h, err := f.v.Open(true)
+	if err != nil {
+		f.s.opMu.Unlock()
+		t.Fatal(err)
+	}
+	_, err = h.PrepareMutation(1, key, 0, uint64(len(raw)), bytes.NewReader(raw), nil, volume.Options{RequestID: id}, binding)
+	h.Close()
+	f.s.opMu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.s.opMu.RLock()
+	err = f.s.validateReferenceMutation(ctx, actor, root, f.b)
+	f.s.opMu.RUnlock()
+	if !errors.Is(err, volume.ErrPrecondition) {
+		t.Fatal("pending distributed operation allowed pruning", err)
+	}
+	if !bytes.Equal(raw, f.root(t)) {
+		t.Fatal("pending replica changed visible root")
+	}
+	f.s.opMu.Lock()
+	h, err = f.v.Open(true)
+	if err == nil {
+		err = h.AbortReplica(id, binding)
+		h.Close()
+	}
+	f.s.opMu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.s.opMu.RLock()
+	err = f.s.validateReferenceMutation(ctx, actor, root, f.b)
+	f.s.opMu.RUnlock()
+	if err != nil {
+		t.Fatal("completed pending marker still blocked exact lookup", err)
 	}
 }
