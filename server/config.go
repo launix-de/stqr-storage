@@ -62,6 +62,7 @@ type VolumeConfig struct {
 	OperationID            string   `yaml:"operation_id,omitempty" json:"operation_id,omitempty"`
 }
 type Config struct {
+	FormatPluginsDir       string         `yaml:"format_plugins_dir,omitempty" json:"format_plugins_dir,omitempty"`
 	RecoveryVolumes        []VolumeConfig `yaml:"recovery_volumes,omitempty" json:"recovery_volumes,omitempty"`
 	Node                   NodeConfig     `yaml:"node" json:"node"`
 	ClusterID              string         `yaml:"cluster_id" json:"cluster_id"`
