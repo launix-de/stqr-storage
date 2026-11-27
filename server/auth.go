@@ -92,7 +92,7 @@ func (s *Server) writeBlob(name string, value any) error {
 		return e
 	}, func() {
 		if index != nil {
-			s.accounts.Store(index)
+			s.publishAccountIndex(index)
 		}
 	})
 }
@@ -184,7 +184,7 @@ func (s *Server) loadAccounts(out *accountsImage) error {
 	if err != nil {
 		return err
 	}
-	s.accounts.Store(x)
+	s.publishAccountIndex(x)
 	return nil
 }
 
@@ -204,6 +204,7 @@ type session struct {
 	Expires                time.Time
 }
 type principal struct {
+	referenceAuth        *referenceAccountStamp // immutable original native-auth continuity token
 	requestContext       context.Context
 	internalCoordination bool // private metrics-only marker; never grants permission or comes from wire
 	cowInternal          bool // admitted node preservation; never decoded from a client
@@ -240,14 +241,14 @@ func (s *Server) authenticate(r *http.Request) (principal, error) {
 		if s.joinPending() {
 			return principal{}, fail(503, "node is waiting for committed cluster admission")
 		}
-		u, e := s.findAccount(name)
+		u, stamp, e := s.findAccountWithReferenceStamp(name)
 		if e != nil || bcrypt.CompareHashAndPassword([]byte(u.PasswordHash), []byte(password)) != nil {
 			return principal{}, errors.New("invalid credentials")
 		}
 		if u.Role != "ADMIN" && u.Role != "USER" {
 			return principal{}, errors.New("invalid account role")
 		}
-		return principal{User: u}, nil
+		return principal{User: u, referenceAuth: stamp}, nil
 	}
 	if s.joinPending() {
 		return principal{}, fail(503, "node is waiting for committed cluster admission")
@@ -266,11 +267,11 @@ func (s *Server) authenticate(r *http.Request) (principal, error) {
 	if !ok {
 		return principal{}, errors.New("session expired")
 	}
-	u, e := s.findAccount(ss.Username)
+	u, stamp, e := s.findAccountWithReferenceStamp(ss.Username)
 	if e != nil || u.ID != ss.UserID || u.Role != "ADMIN" {
 		return principal{}, errors.New("session revoked")
 	}
-	return principal{User: u, SessionToken: c.Value, CSRF: ss.CSRF, Cookie: true}, nil
+	return principal{User: u, referenceAuth: stamp, SessionToken: c.Value, CSRF: ss.CSRF, Cookie: true}, nil
 }
 func constantEqual(a, b string) bool { return subtle.ConstantTimeCompare([]byte(a), []byte(b)) == 1 }
 func (s *Server) createSession(w http.ResponseWriter, p principal) {

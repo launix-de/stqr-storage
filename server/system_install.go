@@ -64,7 +64,7 @@ func (s *Server) installSystemAuthorityAttempt(view *systemView) error {
 			}
 		}
 		return nil
-	}, func() { s.accounts.Store(accounts) }); err != nil {
+	}, func() { s.publishAccountIndex(accounts) }); err != nil {
 		return err
 	}
 	s.placementGroups.Store(view.groupImage)

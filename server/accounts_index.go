@@ -11,12 +11,13 @@ import "errors"
 // Readers must not mutate image or its slices; mutable admin operations receive
 // a deep copy through readBlob. No failed persistence may publish a new index.
 type accountsIndex struct {
-	image       accountsImage
-	byName      map[string]int
-	byID        map[string]int
-	byAccessKey map[string]accountAccessKey
-	byReceipt   map[string]int
-	admin       int
+	image         accountsImage
+	byName        map[string]int
+	byID          map[string]int
+	byAccessKey   map[string]accountAccessKey
+	byReceipt     map[string]int
+	admin         int
+	referenceAuth []*referenceAccountStamp
 }
 
 type accountAccessKey struct {
@@ -42,8 +43,9 @@ func newAccountsIndex(image accountsImage) (*accountsIndex, error) {
 	if image.Schema != 1 {
 		return nil, errors.New("invalid system account image")
 	}
-	x := &accountsIndex{image: cloneAccountsImage(image), byName: make(map[string]int, len(image.Users)), byID: make(map[string]int, len(image.Users)), byAccessKey: make(map[string]accountAccessKey), byReceipt: make(map[string]int, len(image.Receipts)), admin: -1}
+	x := &accountsIndex{referenceAuth: make([]*referenceAccountStamp, len(image.Users)), image: cloneAccountsImage(image), byName: make(map[string]int, len(image.Users)), byID: make(map[string]int, len(image.Users)), byAccessKey: make(map[string]accountAccessKey), byReceipt: make(map[string]int, len(image.Receipts)), admin: -1}
 	for i, u := range x.image.Users {
+		x.referenceAuth[i] = new(referenceAccountStamp)
 		if _, exists := x.byName[u.Name]; exists {
 			return nil, errors.New("duplicate account name")
 		}

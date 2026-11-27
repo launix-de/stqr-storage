@@ -485,6 +485,13 @@ func (b *Bucket) mutateAttempt(ctx context.Context, p principal, id volume.Objec
 		return volume.Result{}, fail(503, "bucket not attached")
 	}
 	s := b.server
+	if p.internalCoordination && bucketLocalReferenceRoot(id) && !p.cowInternal && p.referenceAuth == nil {
+		_, stamp, err := s.referenceAccountSnapshot(p)
+		if err != nil {
+			return volume.Result{}, err
+		}
+		p.referenceAuth = stamp
+	}
 	if s.metadataPreview {
 		return volume.Result{}, fail(503, "metadata preview cannot mutate user objects")
 	}
@@ -544,6 +551,12 @@ func (b *Bucket) mutateAttempt(ctx context.Context, p principal, id volume.Objec
 			unlockObjectIO()
 		}
 	}()
+	// Account deletion/publication takes exclusive node admission. Revalidate
+	// reference actor continuity and any pruning absence proof while this exact
+	// R/W admission remains held through the ordinary Volume CAS publication.
+	if err := s.validateReferenceMutation(ctx, p, id); err != nil {
+		return volume.Result{}, err
+	}
 	var membership *cohortMembershipProof
 	if parallel {
 		// Policy may have changed while acquiring admission. The physical-only
