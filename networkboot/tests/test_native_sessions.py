@@ -185,10 +185,11 @@ class Sessions(unittest.TestCase):
             errors=[]
             provision=self.provision()
             def command(*args,**kwargs):
+                result=provision(*args,**kwargs)
                 if args[-1]=='slow':
                     started.set()
                     if not finish.wait(5):raise RuntimeError('test timeout')
-                return provision(*args,**kwargs)
+                return result
             with patch('native_sessions.ctl',side_effect=command):
                 sessions=NativeSessions('config',directory,16)
                 def slow():
@@ -204,8 +205,12 @@ class Sessions(unittest.TestCase):
                     item,_=sessions.claim(token,'ip',Mock())
                     sessions.release(item)
                     self.assertNotIn('fast',sessions.items)
-                    # Recovery must exclude the in-flight reservation marker.
+                    # The helper has already persisted a valid recovery marker.
+                    # Recovery must not collect it before publication completes.
+                    marker=sessions.provisioning['slow']
+                    self.assertTrue(marker.exists())
                     sessions.recover()
+                    self.assertTrue(marker.exists())
                 finally:
                     finish.set();worker.join(5);sessions.close()
                 self.assertFalse(worker.is_alive())
@@ -236,6 +241,94 @@ class Sessions(unittest.TestCase):
                 self.assertEqual(len(errors),1)
                 self.assertIn('stopping',str(errors[0]))
                 self.assertFalse(list(Path(directory).glob('boot-*.json')))
+
+    def test_stop_rollback_failure_retains_marker_for_next_gateway(self):
+        with tempfile.TemporaryDirectory() as directory:
+            provision=self.provision()
+            def command(*args,**kwargs):
+                if 'boot-session-create' in args:
+                    result=provision(*args,**kwargs)
+                    sessions.close()
+                    return result
+                raise subprocess.CalledProcessError(75,['collect'])
+            with patch('native_sessions.ctl',side_effect=command) as ctl:
+                sessions=NativeSessions('config',directory,16)
+                try:
+                    with contextlib.redirect_stdout(io.StringIO()), self.assertRaisesRegex(RuntimeError,'stopping'):
+                        sessions.allocate('mac','ip','lower')
+                    self.assertEqual(sessions.items,{})
+                    self.assertEqual(sessions.tokens,{})
+                    self.assertEqual(sessions.provisioning,{})
+                    markers=list(Path(directory).glob('boot-*.json'))
+                    self.assertEqual(len(markers),1)
+                    self.assertNotIn('password',markers[0].read_text())
+                finally:sessions.close()
+                ctl.side_effect=None
+                restarted=NativeSessions('config',directory,16)
+                try:
+                    restarted.recover()
+                    self.assertFalse(markers[0].exists())
+                finally:restarted.close()
+
+    def test_provisioning_reservation_counts_toward_session_limit(self):
+        with tempfile.TemporaryDirectory() as directory:
+            started,finish=threading.Event(),threading.Event()
+            errors=[]
+            provision=self.provision()
+            def command(*args,**kwargs):
+                result=provision(*args,**kwargs)
+                if args[-1]=='first-lower':
+                    started.set()
+                    if not finish.wait(5):raise RuntimeError('test timeout')
+                return result
+            with patch('native_sessions.ctl',side_effect=command) as ctl:
+                sessions=NativeSessions('config',directory,16,max_sessions=1)
+                def allocate():
+                    try:sessions.allocate('first','ip','first-lower')
+                    except Exception as error:errors.append(error)
+                worker=threading.Thread(target=allocate);worker.start()
+                try:
+                    self.assertTrue(started.wait(2))
+                    with self.assertRaisesRegex(RuntimeError,'maximum concurrent'):
+                        sessions.allocate('second','ip','lower')
+                    self.assertEqual(ctl.call_count,1)
+                finally:
+                    finish.set();worker.join(5);sessions.close()
+                self.assertFalse(worker.is_alive())
+                self.assertEqual(errors,[])
+
+    def test_recovery_backoff_caps_at_sixty_seconds_and_restart_retries(self):
+        with tempfile.TemporaryDirectory() as directory, patch('native_sessions.ctl',side_effect=self.provision()) as ctl:
+            sessions=NativeSessions('config',directory,16)
+            try:
+                token=sessions.allocate('mac','ip','lower')
+                item,_=sessions.claim(token,'ip',Mock())
+                ctl.side_effect=subprocess.CalledProcessError(75,['collect'])
+                now=100
+                with contextlib.redirect_stdout(io.StringIO()):
+                    with patch('native_sessions.time.monotonic',return_value=now):
+                        sessions.release(item)
+                    for delay in (1,2,4,8,16,32,60,60):
+                        self.assertEqual(sessions.retries[item['marker']][1],delay)
+                        before=ctl.call_count
+                        now+=delay
+                        with patch('native_sessions.time.monotonic',return_value=now-.01):
+                            sessions.recover()
+                        self.assertEqual(ctl.call_count,before)
+                        with patch('native_sessions.time.monotonic',return_value=now):
+                            sessions.recover()
+                        self.assertEqual(ctl.call_count,before+1)
+                self.assertTrue(item['marker'].exists())
+            finally:sessions.close()
+            # Retry bookkeeping is deliberately process-local. A new gateway
+            # attempts retained records immediately, with storage as authority.
+            ctl.side_effect=None
+            restarted=NativeSessions('config',directory,16)
+            try:
+                restarted.recover()
+                self.assertFalse(item['marker'].exists())
+                self.assertEqual(restarted.retries,{})
+            finally:restarted.close()
 
     def test_cleanup_single_inflight_per_marker(self):
         with tempfile.TemporaryDirectory() as directory, patch('native_sessions.ctl',side_effect=self.provision()) as ctl:

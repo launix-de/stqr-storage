@@ -15,7 +15,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -496,6 +498,20 @@ func TestNativeImageEditorAndRecursiveCOW(t *testing.T) {
 	}
 }
 
+// Execute the real CLI entry point in a disposable test child, so os.Exit(75)
+// and silent stderr are verified rather than inferred from the typed error.
+func TestBootctlCleanupProcess(t *testing.T) {
+	if os.Getenv("STQR_BOOTCTL_CLEANUP_TEST_CHILD") != "1" {
+		return
+	}
+	separator := slices.Index(os.Args, "--")
+	if separator < 0 {
+		t.Fatal("missing child arguments")
+	}
+	os.Args = append([]string{"stqr-bootctl"}, os.Args[separator+1:]...)
+	main()
+}
+
 func TestBootCleanupRetainsMountedUpperUntilStorageConnectionCloses(t *testing.T) {
 	cfg, _, _ := imageTestNode(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -530,6 +546,22 @@ func TestBootCleanupRetainsMountedUpperUntilStorageConnectionCloses(t *testing.T
 		if err = removeBootSession(ctx, cfg, session.User, session.Upper, session.Lower); !errors.Is(err, errSessionActive) {
 			t.Fatalf("expected typed active deferral, got %v", err)
 		}
+	}
+	configPath := filepath.Join(t.TempDir(), "cleanup.json")
+	configBytes, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = os.WriteFile(configPath, configBytes, 0600); err != nil {
+		t.Fatal(err)
+	}
+	child := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestBootctlCleanupProcess$", "--",
+		"--config", configPath, "boot-session-delete", session.User.String(), session.Upper.String(), session.Lower.String())
+	child.Env = append(os.Environ(), "STQR_BOOTCTL_CLEANUP_TEST_CHILD=1")
+	output, childErr := child.CombinedOutput()
+	var exit *exec.ExitError
+	if !errors.As(childErr, &exit) || exit.ExitCode() != 75 || len(output) != 0 {
+		t.Fatalf("active cleanup CLI: error=%v output=%q", childErr, output)
 	}
 	// Failed collection must not revoke the currently active VM's identity.
 	if _, _, err = mounted.Get(ctx, client.FilesystemRootID()); err != nil {
