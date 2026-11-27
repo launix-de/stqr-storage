@@ -287,19 +287,29 @@ referenceBatchRetry:
 			}
 			return
 		}
-		entries, err := decodeObjectReferences(raw, first.op.bucket.ID())
+		table, err := borrowReferenceBytes(raw, first.op.bucket.ID(), len(active))
 		if err != nil {
 			for _, c := range active {
 				c.q.result.err = err
 			}
 			return
 		}
-		changed := false
 		casCtx := ctx
 		for _, c := range active {
-			before := len(entries)
-			entries, c.q.result.err = applyCombinedReference(entries, c)
-			if !c.unpin && len(entries) >= maxObjectReferences && c.q.result.err != nil && objectStatus(c.q.result.err) == 429 && referenceAccountHasRoom(entries, c.uid) {
+			action := byte(0)
+			if c.unpin {
+				action = 1
+			}
+			full, e := table.apply(c.target, c.proof, c.uid, c.internal.User.Role == "ADMIN", action, true)
+			c.q.result.err = e
+			if full {
+				entries, e := decodeObjectReferences(table.raw, first.op.bucket.ID())
+				if e != nil {
+					for _, other := range active {
+						other.q.result.err = e
+					}
+					return
+				}
 				filtered, nextCtx, e := s.pruneAbsentPlainReferencePins(casCtx, first.op.bucket, entries)
 				if e != nil {
 					if errors.Is(e, volume.ErrPrecondition) && !errors.Is(e, volume.ErrRecovery) {
@@ -315,15 +325,20 @@ referenceBatchRetry:
 				}
 				casCtx = nextCtx
 				if len(filtered) < len(entries) {
-					entries = filtered
-					changed = true // Removed PINs must publish even if add restores length.
-					entries, c.q.result.err = applyCombinedReference(entries, c)
+					table, e = borrowReferenceBytes(encodeObjectReferences(filtered, first.op.bucket.ID()), first.op.bucket.ID(), len(active))
+					if e != nil {
+						for _, other := range active {
+							other.q.result.err = e
+						}
+						return
+					}
+					table.changed = true // Guarded reclamation must publish even if a later add fails.
 				}
+				_, c.q.result.err = table.apply(c.target, c.proof, c.uid, c.internal.User.Role == "ADMIN", action, false)
 			}
-			changed = changed || len(entries) != before
 		}
-		if changed {
-			next := encodeObjectReferences(entries, first.op.bucket.ID())
+		if table.changed {
+			next := table.raw
 			_, err = first.op.bucket.CAS(casCtx, first.internal, first.op.object, 0, raw, next, volume.Options{RequestID: volume.ID(client.NewRequestID()), CreateOnly: absent, WholeObject: true, Accepted: true})
 			if errors.Is(err, volume.ErrPrecondition) && !errors.Is(err, volume.ErrRecovery) {
 				continue

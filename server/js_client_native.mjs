@@ -9,7 +9,7 @@ const cfg = JSON.parse(input),
   oid = (s) => hex(sha256(data(s)));
 const client = await Client.connect({
   ...cfg,
-  format: "js-native",
+  format: cfg.format ?? "js-native",
   requestTimeout: 10000,
 });
 try {

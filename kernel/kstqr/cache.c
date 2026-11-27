@@ -119,11 +119,17 @@ out:
 }
 /* Caller holds wire; remove the entry before waiting for the unsubscribe
  * barrier, because that wait itself may dispatch a final update. */
-static void remove_entry(struct ks_cache *c, struct cached_inode *e)
+static void remove_entry(struct ks_cache *c, struct cached_inode *e, bool known_absent)
 {
 	stqr_id sid = e->subscription;
 	stqr_object_id id = e->id;
+	bool invalidate;
 	mutex_lock(&c->lock);
+	/* Only a confirmed missing-object probe can be quiet: it never supplied
+	 * coverage for mapped bytes. A successful snapshot rejected for budget,
+	 * a transport failure, or any ready/early-notified entry must still
+	 * invalidate. Otherwise a later mmap fault could reuse an obsolete size. */
+	invalidate = !known_absent || e->ready || e->early;
 	discard_data(c, e);
 	hash_del(&e->hash);
 	hash_del(&e->subscription_hash);
@@ -132,7 +138,8 @@ static void remove_entry(struct ks_cache *c, struct cached_inode *e)
 	c->bytes -= sizeof(*e);
 	mutex_unlock(&c->lock);
 	kfree(e);
-	ks_queue_invalidation(c->fs, &id);
+	if (invalidate)
+		ks_queue_invalidation(c->fs, &id);
 	if(c->shared) {
         struct ks_subscribe_result r={0};int err;init_completion(&r.done);
         err=stqr_unsubscribe_async(c->client,sid,subscribe_completed,&r);
@@ -160,7 +167,7 @@ void ks_cache_forget(struct ks_fs *f, stqr_object_id id)
 	e = find(c, id);
 	mutex_unlock(&c->lock);
 	if (e)
-		remove_entry(c, e);
+		remove_entry(c, e, false);
 	mutex_unlock(cache_wire(c));
 }
 static int copy_entry(struct ks_cache *c, struct cached_inode *e, void **p, size_t *n,
@@ -278,7 +285,7 @@ int ks_cache_get(struct ks_fs *f, stqr_object_id id, void **p, size_t *n, stqr_i
 	}
 	if(e && e->loading) {err=-ENODATA;goto out;}
     if (e)
-		remove_entry(c, e);
+		remove_entry(c, e, false);
 	if (c->fs->cache_budget < sizeof(*e)) {
 		err = -ENODATA;
 		goto out;
@@ -292,7 +299,7 @@ int ks_cache_get(struct ks_fs *f, stqr_object_id id, void **p, size_t *n, stqr_i
 		if (!e)
 			break;
         if(e->loading){err=-ENODATA;goto out;}
-		remove_entry(c, e);
+		remove_entry(c, e, false);
 	}
 	e = kzalloc(sizeof(*e), GFP_NOFS);
 	if (!e) {
@@ -341,7 +348,7 @@ int ks_cache_get(struct ks_fs *f, stqr_object_id id, void **p, size_t *n, stqr_i
 		err = -ENODATA;
 	sq_free(raw);
 	if (err) {
-		remove_entry(c, e);
+		remove_entry(c, e, err == -ENOENT);
 		/* Capability/budget/transport limitations fall back to native reads. */
 		if (err != -ENOMEM && err != -ENOENT)
 			err = -ENODATA;

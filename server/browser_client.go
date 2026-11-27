@@ -311,9 +311,15 @@ func (s *Server) serveBucketTunnel(w http.ResponseWriter, r *http.Request, p pri
 			if err != nil || current.User.ID != p.User.ID {
 				return
 			}
-			s.opMu.Lock()
+			// Session/account expiry and relay cancellation must keep running
+			// while unrelated storage holds administrative admission. ACL
+			// publications take exclusive admission; retry their read-only
+			// validation on the next tick when it is temporarily unavailable.
+			if !s.opMu.TryRLock() {
+				continue
+			}
 			_, _, err = s.authorizeConnection(r, current, false)
-			s.opMu.Unlock()
+			s.opMu.RUnlock()
 			if err != nil {
 				return
 			}

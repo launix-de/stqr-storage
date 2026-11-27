@@ -69,12 +69,13 @@ export class ProtocolError extends Error {
 function invariant(ok, message) {
   if (!ok) throw new ProtocolError(message);
 }
-function b64(s) {
+function utf8Header(s) {
   const b = new TextEncoder().encode(s);
   let raw = "";
   for (const v of b) raw += String.fromCharCode(v);
-  return btoa(raw);
+  return raw;
 }
+const b64 = (s) => btoa(utf8Header(s));
 const token = (s) =>
   b64(s).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 const envelope = (op, body, id = newID(), kind = 1) =>
@@ -256,9 +257,19 @@ class Transport {
         new StatusError(409, "Request ID already in flight", requestId),
       );
     return new Promise((resolve, reject) => {
+      const cancel = () => {
+        if (this.closed) return;
+        try {
+          // CANCEL must remain sendable after the request signal has expired.
+          this.ws.send(envelope(7, new Writer().id(requestId).bytes(), newID(), 0));
+        } catch (error) {
+          this.fail(error);
+        }
+      };
       const abort = () => {
           this.pending.delete(requestId);
           cleanup();
+          cancel();
           reject(signal.reason);
         },
         cleanup = () => signal?.removeEventListener("abort", abort);
@@ -279,6 +290,7 @@ class Transport {
           if (p) {
             this.pending.delete(requestId);
             cleanup();
+            cancel();
             reject(error);
           }
         });
@@ -557,8 +569,8 @@ export class Client {
     if (!this.bucket) {
       const u = new URL("/api/bucket-connect", this.endpoint),
         headers = {
-          "X-STQR-Bucket": this.selector,
-          "X-STQR-Format": this.format,
+          "X-STQR-Bucket": utf8Header(this.selector),
+          "X-STQR-Format": utf8Header(this.format),
         };
       if (authorization) headers.Authorization = authorization;
       if (csrf) headers["X-CSRF-Token"] = csrf;
@@ -1427,9 +1439,11 @@ export class Client {
   }
   async prepareLease(o) {
     if (this.lease || this.acquiringLease) throw Error("Lease already active");
-    await this.sync(o);
+    if (this.leaseTransport?.closed)
+      throw new StatusError(410, "Exclusive lease connection was lost");
     this.acquiringLease = true;
     try {
+      await this.sync(o);
       const seed = await this.establish(this.endpoint, { signal: o.signal });
       for (const t of this.transports.values()) {
         if (t === seed) continue;
@@ -1437,18 +1451,20 @@ export class Client {
       }
       for (const [key, t] of this.transports)
         if (t !== seed) this.transports.delete(key);
+      return seed;
     } catch (error) {
       this.acquiringLease = false;
       throw error;
     }
   }
   async beginObjectLease(readonly = false, o = {}) {
-    await this.prepareLease(o);
+    const owner = await this.prepareLease(o);
+    this.leaseTransport = owner;
     try {
       const reply = await this.call(
           OP.LEASE,
           this.ref(OZERO).bool(readonly).bytes(),
-          { ...o, requestId: o.requestId ?? newID() },
+          { ...o, mutation: true, requestId: o.requestId ?? newID() },
         ),
         r = new Reader(reply.result);
       if (reply.result.length) {
@@ -1457,14 +1473,21 @@ export class Client {
         r.done();
       } else this.lease = "local";
       this.leaseTransport = reply.transport;
+    } catch (error) {
+      this.failedLease(owner, error);
+      throw error;
     } finally {
       this.acquiringLease = false;
     }
   }
   async beginMaintenance(o = {}) {
-    await this.prepareLease(o);
+    const owner = await this.prepareLease(o);
+    this.leaseTransport = owner;
     try {
-      const reply = await this.call(OP.MAINTENANCE, this.ref(OZERO).bytes(), o),
+      const reply = await this.call(OP.MAINTENANCE, this.ref(OZERO).bytes(), {
+          ...o,
+          mutation: true,
+        }),
         r = new Reader(reply.result);
       this.lease = "local";
       if (reply.result.length) {
@@ -1473,9 +1496,22 @@ export class Client {
         r.done();
       }
       this.leaseTransport = reply.transport;
+    } catch (error) {
+      this.failedLease(owner, error);
+      throw error;
     } finally {
       this.acquiringLease = false;
     }
+  }
+  failedLease(owner, error) {
+    if (error instanceof StatusError) {
+      this.leaseTransport = null;
+      return;
+    }
+    // A lost reply can hide a granted lease. Closing its original coordinator
+    // lets the server release it and prevents silent reacquisition on retry.
+    owner.fail(error);
+    this.lease = null;
   }
   async endMaintenance(o = {}) {
     const owner = this.leaseTransport;

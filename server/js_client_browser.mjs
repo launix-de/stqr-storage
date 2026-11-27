@@ -35,7 +35,7 @@ try {
         const c = await Client.connect({
           endpoint: location.origin,
           bucket,
-          format: "js-browser",
+          format: "js-browser-形式-📦",
           routing,
           csrf: session.csrf_token,
           ...(routing === "direct"
