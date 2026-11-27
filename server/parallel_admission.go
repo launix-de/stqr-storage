@@ -20,15 +20,24 @@ type exclusiveMutationRetry struct{}
 
 func (*exclusiveMutationRetry) Error() string { return "mutation needs exclusive admission" }
 
+// Only server-encoded reference coordination may omit the logical-total proof:
+// the root is bucket-local even in a clone graph, and an unlimited logical
+// quota has no inherited-byte ceiling to enforce. Physical admission, guarantees,
+// authority and lifetime barriers are still mandatory. The mutation caller also
+// requires Accepted; a legacy durable operation keeps exclusive admission.
+func parallelReferenceCoordination(b *Bucket, p principal, id volume.ObjectID) bool {
+	d := b.storageDescription()
+	return p.internalCoordination && !p.cowInternal && bucketLocalReferenceRoot(id) && d.Policy.Limits.Unlimited && d.Policy.Limits.Accounting == "logical"
+}
+
 func (s *Server) parallelMutationCandidate(b *Bucket, p principal, id volume.ObjectID) bool {
 	if p.cowInternal || s.controller == nil || s.control == nil || s.replicas == nil || b.underMaintenance() {
 		return false
 	}
 	d := b.storageDescription()
-	// Inherited logical bytes are not necessarily represented by a local
-	// RecordInfo. Until a dedicated COW delta proof exists, all linked buckets
-	// (including their internal coordination roots) retain exclusive admission.
-	if len(d.ClonePeers) != 0 || d.DesiredPolicy != nil || d.State != BucketActive || d.Policy.PlacementMode == "everywhere" {
+	// Ordinary inherited logical bytes require the exclusive COW proof. The
+	// private unlimited reference root has no inherited contents or logical cap.
+	if (len(d.ClonePeers) != 0 && !parallelReferenceCoordination(b, p, id)) || d.DesiredPolicy != nil || d.State != BucketActive || d.Policy.PlacementMode == "everywhere" {
 		return false
 	}
 	entry, ok := s.placement.Load().lookup(client.ID(b.ID()), client.ObjectID(id))
@@ -70,6 +79,9 @@ func (s *Server) parallelMutationReadyProof(b *Bucket, p principal, id volume.Ob
 	if image == nil {
 		return false
 	}
+	if parallelReferenceCoordination(b, p, id) {
+		return true
+	}
 	u := &b.usage
 	u.mu.Lock()
 	defer u.mu.Unlock()
@@ -79,12 +91,12 @@ func (s *Server) parallelMutationReadyProof(b *Bucket, p principal, id volume.Ob
 
 // Register before acquiring any Volume handle so a cold logicalUsage reader
 // cannot hold usage.mu while waiting for this publisher's Volume lock.
-func (b *Bucket) beginParallelUsage() bool {
+func (b *Bucket) beginParallelUsage(physicalOnly bool) bool {
 	u := &b.usage
 	u.mu.Lock()
 	defer u.mu.Unlock()
 	placement, revision := b.usageStamp()
-	if !u.valid || u.placement != placement || u.generation != revision {
+	if !physicalOnly && (!u.valid || u.placement != placement || u.generation != revision) {
 		return false
 	}
 	u.activeAdmissions++
@@ -102,7 +114,7 @@ func (b *Bucket) endParallelUsage() {
 // admission; map changes invalidate the zero-pending proof as well. Followers
 // cannot introduce primary growth without a placement publication.
 func (s *Server) prepareParallelMutation(b *Bucket, p principal, id volume.ObjectID) error {
-	if !s.parallelMutationCandidate(b, p, id) {
+	if !s.parallelMutationCandidate(b, p, id) || parallelReferenceCoordination(b, p, id) {
 		return nil
 	}
 	if _, err := b.logicalUsage(); err != nil {
@@ -134,7 +146,18 @@ type parallelQuotaState struct {
 	physical   map[volume.ID]uint64
 	quarantine map[volume.ID]map[volume.ID]uint64
 }
+
+// The physical-only kind skips no engine admission callback. It omits only a
+// meaningless logical-growth reservation for the private unlimited root.
+type mutationQuotaKind uint8
+
+const (
+	mutationLogicalQuota mutationQuotaKind = iota
+	mutationPhysicalOnlyQuota
+)
+
 type mutationQuotaTicket struct {
+	kind     mutationQuotaKind
 	bucket   *Bucket
 	volume   volume.ID
 	growth   uint64
@@ -171,7 +194,10 @@ func nextMutationLength(op uint16, off, n uint64, old volume.Info, opt volume.Op
 	return prior, nil
 }
 
-func (s *Server) reserveMutationQuota(b *Bucket, d BucketDescription, device volume.ID, key volume.Key, op uint16, off, n uint64, old volume.Info, repeated bool, opt volume.Options) (*mutationQuotaTicket, error) {
+func (s *Server) reserveMutationQuota(b *Bucket, d BucketDescription, device volume.ID, key volume.Key, op uint16, off, n uint64, old volume.Info, repeated bool, opt volume.Options, kind mutationQuotaKind) (*mutationQuotaTicket, error) {
+	if kind == mutationPhysicalOnlyQuota && (!opt.Accepted || !bucketLocalReferenceRoot(key.Object) || !d.Policy.Limits.Unlimited || d.Policy.Limits.Accounting != "logical") {
+		return nil, &exclusiveMutationRetry{}
+	}
 	next, err := nextMutationLength(op, off, n, old, opt)
 	if err != nil {
 		return nil, err
@@ -181,14 +207,14 @@ func (s *Server) reserveMutationQuota(b *Bucket, d BucketDescription, device vol
 		prior = 0
 	}
 	growth := uint64(0)
-	if !repeated && next > prior {
+	if kind != mutationPhysicalOnlyQuota && !repeated && next > prior {
 		growth = next - prior
 	}
 	u := &b.usage
 	u.mu.Lock()
 	defer u.mu.Unlock()
 	placement, revision := b.usageStamp()
-	if !u.valid || u.placement != placement || u.generation != revision {
+	if kind != mutationPhysicalOnlyQuota && (!u.valid || u.placement != placement || u.generation != revision) {
 		return nil, &exclusiveMutationRetry{}
 	}
 	used := addCapacity(u.bytes, u.reservedGrowth)
@@ -213,7 +239,7 @@ func (s *Server) reserveMutationQuota(b *Bucket, d BucketDescription, device vol
 	if growth > math.MaxUint64-u.reservedGrowth {
 		return nil, volume.ErrRange
 	}
-	t := &mutationQuotaTicket{bucket: b, volume: device, growth: growth}
+	t := &mutationQuotaTicket{kind: kind, bucket: b, volume: device, growth: growth}
 	q := &s.parallelQuota
 	q.mu.Lock()
 	defer q.mu.Unlock()

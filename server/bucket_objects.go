@@ -531,7 +531,8 @@ func (b *Bucket) mutateAttempt(ctx context.Context, p principal, id volume.Objec
 			requestRelease()
 		}
 	}()
-	parallel := !parallelForcedExclusive(ctx) && (opt.Accepted || length <= 1<<20 && opcode != cowRestoreOpcode) && s.parallelMutationCandidate(b, p, id)
+	physicalOnly := opt.Accepted && parallelReferenceCoordination(b, p, id)
+	parallel := (!parallelReferenceCoordination(b, p, id) || physicalOnly) && !parallelForcedExclusive(ctx) && (opt.Accepted || length <= 1<<20 && opcode != cowRestoreOpcode) && s.parallelMutationCandidate(b, p, id)
 	lockObjectIO, unlockObjectIO := s.lockUserObjectIO, s.unlockUserObjectIO
 	if parallel {
 		lockObjectIO, unlockObjectIO = s.lockParallelUserObjectIO, s.unlockParallelUserObjectIO
@@ -545,10 +546,13 @@ func (b *Bucket) mutateAttempt(ctx context.Context, p principal, id volume.Objec
 	}()
 	var membership *cohortMembershipProof
 	if parallel {
+		// Policy may have changed while acquiring admission. The physical-only
+		// exception must be classified again under the lifetime barrier.
+		physicalOnly = opt.Accepted && parallelReferenceCoordination(b, p, id)
 		membership = b.membershipProof(b.storageDescription(), volume.Key{Bucket: b.ID(), Object: id}, opt.RequestID)
 	}
 	if parallel {
-		if !s.parallelMutationReadyProof(b, p, id, membership) || !b.beginParallelUsage() {
+		if !s.parallelMutationReadyProof(b, p, id, membership) || !b.beginParallelUsage(physicalOnly) {
 			return volume.Result{}, &exclusiveMutationRetry{}
 		}
 		defer b.endParallelUsage()
@@ -1049,7 +1053,11 @@ func (b *Bucket) mutateAttempt(ctx context.Context, p principal, id volume.Objec
 		if old.Deleted {
 			quotaOld = 0
 		}
-		ticket, err = s.reserveMutationQuota(b, d, v.Identity().VolumeID, key, opcode, offset, length, old, repeated, opt)
+		kind := mutationLogicalQuota
+		if physicalOnly {
+			kind = mutationPhysicalOnlyQuota
+		}
+		ticket, err = s.reserveMutationQuota(b, d, v.Identity().VolumeID, key, opcode, offset, length, old, repeated, opt, kind)
 		if err != nil {
 			return volume.Result{}, err
 		}
