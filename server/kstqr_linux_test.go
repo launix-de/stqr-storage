@@ -53,7 +53,11 @@ func TestKSTQRVirtualMachine(t *testing.T) {
 	// the complete VM suite; keep a bounded budget for loaded CI hosts.
 	ctx, cancel := context.WithTimeout(context.Background(), 480*time.Second)
 	defer cancel()
-	root, err := filepath.Abs("../kernel/kstqr")
+	sourceRoot := os.Getenv("STQR_KERNEL_SOURCE_ROOT")
+	if sourceRoot == "" {
+		sourceRoot = "../kernel/kstqr"
+	}
+	root, err := filepath.Abs(sourceRoot)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1129,6 +1133,9 @@ rmmod kstqr
 	var nativeUpperID client.ID
 	var watcher *client.Client
 	if os.Getenv("STQR_KERNEL_OVERLAY") == "1" || os.Getenv("STQR_KERNEL_OVERLAY_PROOF") == "1" {
+		if os.Getenv("STQR_KERNEL_OVERLAY") == "1" {
+			kernelLegacyIndexFixture(t, ctx, conn, fs)
+		}
 		// Keep mapped lower files larger than the deliberately tiny cache used
 		// by overlay-cache-quiet. Eviction must not refill that same cache from
 		// an all-inode invalidation worker while the guest is otherwise idle.
@@ -1570,7 +1577,7 @@ poweroff -f
 		t.Fatalf("cpio: %v %s", err, packErr.String())
 	}
 	guestMemory := "512M"
-	if os.Getenv("STQR_KERNEL_OVERLAY_PROOF") == "1" || os.Getenv("STQR_KERNEL_REFERENCE_LIMIT") == "1" {
+	if os.Getenv("STQR_KERNEL_OVERLAY") == "1" || os.Getenv("STQR_KERNEL_OVERLAY_PROOF") == "1" || os.Getenv("STQR_KERNEL_REFERENCE_LIMIT") == "1" {
 		// The isolated fixture initrd requires 1 GiB to unpack.
 		guestMemory = "1024M"
 	}
@@ -1681,6 +1688,10 @@ poweroff -f
 		return
 	}
 	if os.Getenv("STQR_KERNEL_OVERLAY") == "1" {
+		if !strings.Contains(string(output), "KSTQR_LEGACY_LOCAL_INDEX_PASS") {
+			t.Fatal("legacy local-index read/mmap oracle missing")
+		}
+		t.Log("KSTQR_LEGACY_LOCAL_INDEX_PASS")
 		uc, e := client.Dial(ctx, host.URL, admin.Username, admin.Password, nativeUpperID, "fs")
 		if e != nil {
 			t.Fatal(e)
