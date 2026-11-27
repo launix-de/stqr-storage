@@ -44,6 +44,8 @@ type kernelRangeGate struct {
 	release            chan struct{}
 	released, timedOut bool
 	seen               uint64
+	indexes            map[client.ObjectID]bool
+	visited            map[client.ObjectID]bool
 }
 
 func (g *kernelRangeGate) configure(ids []client.ObjectID) {
@@ -56,15 +58,39 @@ func (g *kernelRangeGate) configure(ids []client.ObjectID) {
 	g.requests = make(map[client.ID]bool)
 	g.release = make(chan struct{})
 }
+func (g *kernelRangeGate) configureIndexes(ids []client.ObjectID) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.indexes = make(map[client.ObjectID]bool)
+	g.visited = make(map[client.ObjectID]bool)
+	for _, id := range ids {
+		g.indexes[id] = true
+	}
+}
+func (g *kernelRangeGate) verifyIndexes() (int, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	n := len(g.visited)
+	if n == 0 || n > 4 {
+		return n, errors.New("small read traversed unrelated index subtrees")
+	}
+	return n, nil
+}
 func (g *kernelRangeGate) request(raw []byte) {
 	m, err := client.DecodeMessage(raw)
-	if err != nil || m.Opcode != 0x0101 || len(m.Body) < 48 {
+	if err != nil || (m.Opcode != 0x0101 && m.Opcode != 0x0100) || len(m.Body) < 48 {
 		return
 	}
 	var leaf client.ObjectID
 	copy(leaf[:], m.Body[16:48])
 	g.mu.Lock()
 	defer g.mu.Unlock()
+	if m.Opcode == 0x0100 {
+		if g.indexes[leaf] {
+			g.visited[leaf] = true
+		}
+		return
+	}
 	if !g.leaves[leaf] {
 		return
 	}

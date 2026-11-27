@@ -956,14 +956,17 @@ static int segment_add(struct segments *s, struct segment segment)
 	s->p[s->n++] = segment;
 	return 0;
 }
-static int index_segments_view(struct ks_fs *f, const struct ks_node *view, stqr_object_id id,
-			       u64 length, unsigned depth, struct segments *out)
+static int index_segments_range(struct ks_fs *f, const struct ks_node *view, stqr_object_id id,
+			        u64 length, unsigned depth, u64 start, u64 wanted,
+			        struct segments *out)
 {
 	struct buf b = {0};
 	stqr_info info;
 	unsigned version, count, i;
 	u64 total = 0;
 	int err;
+	if (start > length || wanted > length - start)
+		return -EUCLEAN;
 	err = view ? get_view_object(f, view, id, (void **)&b.p, &b.n, &info)
 		   : get_object(f, id, (void **)&b.p, &b.n, &info);
 	if (err)
@@ -999,10 +1002,21 @@ static int index_segments_view(struct ks_fs *f, const struct ks_node *view, stqr
 		}
 		s.lower = lower;
 		total += s.length;
-		if (depth > 1 && !nullid(s.id))
-			err = index_segments_view(f, view, s.id, s.length, depth - 1, out);
-		else
-			err = segment_add(out, s);
+		/* Validate every entry of this visited node, but do not fetch unrelated
+		 * descendants. A small read must not walk the entire file's index. */
+		if (start < total && start + wanted > total - s.length) {
+			u64 skip = start > total - s.length ? start - (total - s.length) : 0;
+			u64 take = min(total, start + wanted) - (total - s.length) - skip;
+			if (depth > 1 && !nullid(s.id)) {
+				err = index_segments_range(f, view, s.id, s.length, depth - 1,
+						   skip, take, out);
+			} else {
+				if (!nullid(s.id))
+					s.offset += skip;
+				s.length = take;
+				err = segment_add(out, s);
+			}
+		}
 		if (err)
 			goto out;
 	}
@@ -1016,7 +1030,7 @@ out:
 static int index_segments(struct ks_fs *f, stqr_object_id id, u64 length, unsigned depth,
 			  struct segments *out)
 {
-	return index_segments_view(f, NULL, id, length, depth, out);
+	return index_segments_range(f, NULL, id, length, depth, 0, length, out);
 }
 /* A page-cache window is at most one MiB. Limit metadata callers too: many
  * tiny extents must not allocate an unbounded set of callbacks/buffers. Each
@@ -1155,7 +1169,8 @@ static int index_read(struct ks_fs *f, const struct ks_node *view, stqr_object_i
 	struct ks_range_read *jobs = NULL;
 	unsigned pending = 0;
 	size_t pending_bytes = 0;
-	int err = index_segments_view(f, view, id, length, depth, &s);
+	int err = index_segments_range(f, view, id, length, depth, offset, count, &s);
+	offset = 0;
 	if (err)
 		goto out;
 	jobs = sq_alloc(KS_RANGE_BATCH * sizeof(*jobs));

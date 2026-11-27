@@ -132,6 +132,16 @@ func TestKSTQRVirtualMachine(t *testing.T) {
 			writebackFault.proxy(w, r, upstream.URL)
 			return
 		}
+		if r.URL.Path == "/__kstqr_test/read-prune" {
+			n, e := writebackFault.ranges.verifyIndexes()
+			if e != nil {
+				t.Logf("index-pruning oracle rejected %d of 64 visited child indexes: %v", n, e)
+				http.Error(w, fmt.Sprintf("%s: %d of 64 branches", e, n), 500)
+			} else {
+				fmt.Fprintf(w, "KSTQR_READ_PRUNE_PASS visited=%d total=64\n", n)
+			}
+			return
+		}
 		if r.URL.Path == "/__kstqr_test/read-window" {
 			if err := writebackFault.ranges.verify(); err != nil {
 				http.Error(w, err.Error(), 500)
@@ -469,6 +479,46 @@ func TestKSTQRVirtualMachine(t *testing.T) {
 	if _, e = conn.Put(ctx, windowFile.ID, node.B, client.PutOptions{}); e != nil {
 		t.Fatal(e)
 	}
+	// A two-level 64 MiB file shares payload bytes but has 64 distinct
+	// valid child-index objects. Tiny reads should fetch only intersecting
+	// branches; this is checked by the proxy, not by a timing assumption.
+	var branchIDs []client.ObjectID
+	parentIndex := client.Encoder{B: []byte("STIX")}
+	parentIndex.U16(1)
+	parentIndex.U32(64)
+	for i := 0; i < 64; i++ {
+		branch := client.ObjectID(sha256.Sum256([]byte(fmt.Sprintf("native-window-branch-%d", i))))
+		if _, e = conn.Put(ctx, branch, index.B, client.PutOptions{}); e != nil {
+			t.Fatal(e)
+		}
+		branchIDs = append(branchIDs, branch)
+		parentIndex.U64(1 << 20)
+		parentIndex.B = append(parentIndex.B, branch[:]...)
+		parentIndex.U32(0)
+	}
+	parentID := client.ObjectID(sha256.Sum256(parentIndex.B))
+	if _, e = conn.Put(ctx, parentID, parentIndex.B, client.PutOptions{}); e != nil {
+		t.Fatal(e)
+	}
+	pruneFile, e := fs.Create(ctx, client.FilesystemRootID(), "read-prune", 0644, 0, 0, false)
+	if e != nil {
+		t.Fatal(e)
+	}
+	prunedNode := client.Encoder{B: []byte("STFS")}
+	prunedNode.U16(1)
+	prunedNode.U8(1)
+	prunedNode.U32(0644)
+	prunedNode.U32(0)
+	prunedNode.U32(0)
+	prunedNode.U64(1)
+	prunedNode.U64(64 << 20)
+	prunedNode.U8(1)
+	prunedNode.U8(2)
+	prunedNode.B = append(prunedNode.B, parentID[:]...)
+	if _, e = conn.Put(ctx, pruneFile.ID, prunedNode.B, client.PutOptions{}); e != nil {
+		t.Fatal(e)
+	}
+	writebackFault.ranges.configureIndexes(branchIDs)
 	writebackFault.ranges.configure(windowLeaves)
 	var loopDigest string
 	if os.Getenv("STQR_KERNEL_LOOP") == "1" {
@@ -1283,7 +1333,7 @@ poweroff -f
 
 	if os.Getenv("STQR_KERNEL_READ_WINDOW") == "1" {
 		for _, line := range strings.Split(string(output), "\n") {
-			if strings.Contains(line, "KSTQR_READ_WINDOW_") || strings.Contains(line, "stqr: cache_hits=") {
+			if strings.Contains(line, "KSTQR_READ_") || strings.Contains(line, "stqr: cache_hits=") {
 				t.Log(strings.TrimSpace(line))
 			}
 		}

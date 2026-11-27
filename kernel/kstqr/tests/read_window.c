@@ -24,5 +24,15 @@ int main(int argc,char **argv) {
     if(!child) { execl("/bin/busybox","wget","-qO-",address,NULL); _exit(127); }
     int status; CHECK(waitpid(child,&status,0)==child && WIFEXITED(status) && !WEXITSTATUS(status));
     puts("KSTQR_READ_WINDOW_PASS");
+    fd=open("/readonly/read-prune",O_RDONLY);CHECK(fd>=0);
+    unsigned char edge[2];
+    CHECK(pread(fd,edge,1,(31U<<20)+123)==1 && edge[0]==1);
+    CHECK(pread(fd,edge,2,(32U<<20)-1)==2 && edge[0]==0 && edge[1]==1);
+    CHECK(!close(fd));
+    CHECK(snprintf(address,sizeof(address),"%s/__kstqr_test/read-prune",argv[1])<(int)sizeof(address));
+    child=fork();CHECK(child>=0);
+    if(!child) { execl("/bin/busybox","wget","-qO-",address,NULL);_exit(127); }
+    CHECK(waitpid(child,&status,0)==child && WIFEXITED(status) && !WEXITSTATUS(status));
+
     return 0;
 }
