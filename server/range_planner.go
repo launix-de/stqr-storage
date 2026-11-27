@@ -32,7 +32,7 @@ func (r *rangeManager) destinations(d BucketDescription, fresh ...bool) ([]range
 		seen[local.Node] = time.Now()
 		s.peerStatsMu.RLock()
 		for _, observation := range s.peerStats {
-			if observation.online && observation.snapshot != nil && observation.connection.Capabilities&client.CapabilityRangeHandoff != 0 {
+			if observation.online && observation.snapshot != nil && observation.snapshot.BootID == observation.connection.Boot && observation.connection.Capabilities&client.CapabilityRangeHandoff != 0 {
 				snapshots = append(snapshots, *observation.snapshot)
 				seen[observation.snapshot.Node] = observation.lastSeen
 			}

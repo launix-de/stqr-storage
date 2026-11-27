@@ -46,7 +46,7 @@ func TestTicket32JavaScriptNativeCASReuse(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cmd := exec.CommandContext(ctx, node, "--experimental-default-type=module", "dashboard_reclamation.mjs")
+	cmd := exec.CommandContext(ctx, node, "dashboard_reclamation.mjs")
 	cmd.Stdin = bytes.NewReader(input)
 	cmd.WaitDelay = 5 * time.Second
 	started := time.Now()

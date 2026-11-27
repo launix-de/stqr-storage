@@ -54,6 +54,8 @@ struct stqr_socket {
 	void (*ready)(void *);
 	void *ready_arg;
 	void (*previous_ready)(struct sock *);
+	void (*previous_state_change)(struct sock *);
+	void (*previous_error_report)(struct sock *);
 };
 static void sq_data_ready(struct sock *sk)
 {
@@ -70,6 +72,26 @@ static void sq_data_ready(struct sock *sk)
      * can be blocked in kernel_recvmsg while the readiness worker is queued. */
     if(previous)previous(sk);
 }
+/* EOF and connection errors may arrive without payload bytes. Wake the same
+ * event worker so outstanding asynchronous requests complete and reconnect.
+ * Preserve socket waiters used by synchronous frame transfers as well. */
+static void sq_socket_event(struct sock *sk, bool error)
+{
+    struct stqr_socket *s;
+    void (*previous)(struct sock *) = NULL;
+    read_lock_bh(&sk->sk_callback_lock);
+    s = sk->sk_user_data;
+    if (s) {
+        previous = error ? s->previous_error_report : s->previous_state_change;
+        if (s->ready)
+            s->ready(s->ready_arg);
+    }
+    read_unlock_bh(&sk->sk_callback_lock);
+    if (previous)
+        previous(sk);
+}
+static void sq_state_change(struct sock *sk) { sq_socket_event(sk, false); }
+static void sq_error_report(struct sock *sk) { sq_socket_event(sk, true); }
 void sq_set_readable(struct stqr_socket *s, void (*ready)(void *), void *arg)
 {
 	struct sock *sk;
@@ -79,15 +101,23 @@ void sq_set_readable(struct stqr_socket *s, void (*ready)(void *), void *arg)
 	write_lock_bh(&sk->sk_callback_lock);
 	if (ready && !s->previous_ready) {
 		s->previous_ready = sk->sk_data_ready;
+		s->previous_state_change = sk->sk_state_change;
+		s->previous_error_report = sk->sk_error_report;
 		sk->sk_user_data = s;
 		sk->sk_data_ready = sq_data_ready;
+		sk->sk_state_change = sq_state_change;
+		sk->sk_error_report = sq_error_report;
 	}
 	s->ready = ready;
 	s->ready_arg = arg;
 	if (!ready && s->previous_ready) {
 		sk->sk_data_ready = s->previous_ready;
+		sk->sk_state_change = s->previous_state_change;
+		sk->sk_error_report = s->previous_error_report;
 		sk->sk_user_data = NULL;
 		s->previous_ready = NULL;
+		s->previous_state_change = NULL;
+		s->previous_error_report = NULL;
 	}
 	write_unlock_bh(&sk->sk_callback_lock);
 }

@@ -57,6 +57,23 @@ class Writer {
     return new Uint8Array(this.a);
   }
 }
+test("FS legacy v2 indexes preserve original 64-bit offsets and reject historical references", () => {
+  const fixture = (token = 0n) => new Writer()
+    .raw(utf8.encode("STIX")).u16(2).u32(2)
+    .u64(16384n).raw(new Uint8Array(32).fill(7)).u64(9n).u64(token)
+    .u64(16384n).raw(new Uint8Array(32)).u64(0n).u64(0n).bytes();
+  const raw = fixture();
+  const parts = decodeIndex(raw, 32768n, 1);
+  assert.equal(parts[0].offset, 9n);
+  assert.equal(parts[0].length, 16384n);
+  assert.equal(parts[1].id, "0".repeat(64));
+  assert.equal(parts[1].length, 16384n);
+  assert.throws(() => decodeIndex(fixture(123n), 32768n, 1));
+  assert.throws(() => decodeIndex(raw.slice(0, -1), 32768n, 1));
+  const extra = new Uint8Array(raw.length + 1);
+  extra.set(raw);
+  assert.throws(() => decodeIndex(extra, 32768n, 1));
+});
 function inode(
   data,
   {
@@ -250,4 +267,15 @@ test("FS validates directory ordering by UTF-8 bytes like the Go codec", () => {
       .raw(id)
       .bytes();
   assert.equal(decodeDirectory(dir).length, 2);
+});
+
+test("FS bootstrap encodes a v7 directory root with an empty v1 directory", async () => {
+  const { Writer } = await import("../client/js/codec.mjs");
+  const { encodeEmptyRoot } = await import("./format-plugins/fs.mjs");
+  const node = decodeNode(encodeEmptyRoot(123456789n, Writer));
+  assert.equal(node.kind, 2);
+  assert.equal(node.links, 2);
+  assert.equal(node.mode, 0o755);
+  assert.equal(node.mtime, 123456789n);
+  assert.deepEqual(decodeDirectory(node.inline), []);
 });

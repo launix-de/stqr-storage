@@ -1,4 +1,10 @@
 // SPDX-License-Identifier: GPL-3.0-only
+import {
+  configureDialog,
+  requestDialogClose,
+  installDialogDismissal,
+  confirmDialog,
+} from "./dialogs.js";
 import { EndlessList, bindSearch } from "./endless.js";
 export const escape = (s) =>
   String(s ?? "").replace(
@@ -122,9 +128,10 @@ export function createList({
   return { element: panel, pager, load, destroy, input };
 }
 export function createWindows() {
+  installDialogDismissal();
   const active = new Set();
   return {
-    open({ title, signal } = {}) {
+    open({ title, signal, canClose = () => true, dismissible = true } = {}) {
       const controller = new AbortController(),
         dialog = document.createElement("dialog");
       dialog.className = "plugin-window";
@@ -133,25 +140,41 @@ export function createWindows() {
       dialog.querySelector("h2").textContent = title ?? "";
       document.body.append(dialog);
       const root = dialog.querySelector(".plugin-window-scroll");
-      const close = () => {
+      const releaseGuard = configureDialog(dialog, { canClose, dismissible });
+      let resolveClosed;
+      const closed = new Promise((resolve) => {
+        resolveClosed = resolve;
+      });
+      const finish = () => {
         if (controller.signal.aborted) return;
         controller.abort();
-        dialog.close();
+        releaseGuard();
         dialog.remove();
+        resolveClosed(dialog.returnValue);
         active.delete(close);
-        signal?.removeEventListener("abort", close);
+        signal?.removeEventListener("abort", abort);
       };
-      dialog.querySelector("button").onclick = close;
-      dialog.addEventListener("cancel", (e) => {
-        e.preventDefault();
-        close();
-      });
-      dialog.addEventListener("close", close);
-      signal?.addEventListener("abort", close, { once: true });
+      const close = (value = "") => {
+          dialog.close(String(value));
+          finish();
+          return closed;
+        },
+        abort = () => close();
+      dialog.querySelector("button").onclick = () =>
+        requestDialogClose(dialog, "button");
+      dialog.addEventListener("close", finish);
+      signal?.addEventListener("abort", abort, { once: true });
       active.add(close);
       if (signal?.aborted) close();
       else dialog.showModal();
-      return { root, scrollRoot: root, signal: controller.signal, close };
+      return {
+        root,
+        scrollRoot: root,
+        signal: controller.signal,
+        close,
+        closed,
+        requestClose: (reason) => requestDialogClose(dialog, reason),
+      };
     },
     closeAll() {
       for (const close of [...active]) close();
@@ -183,4 +206,10 @@ export function download(
   signal?.addEventListener("abort", release, { once: true });
   timer = setTimeout(release, 60000);
 }
-export const ui = Object.freeze({ createList, button, download, escape });
+export const ui = Object.freeze({
+  createList,
+  button,
+  download,
+  escape,
+  confirm: confirmDialog,
+});

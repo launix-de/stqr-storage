@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-only
-// Read-only STFS browser. Namespace, inode and segment rules are plugin-local.
+// STFS browser with idempotent empty-root bootstrap. All format rules stay here.
 export const apiVersion = 1;
 export const css =
   '[data-stqr-plugin="fs"] .fs-tree { list-style: none; padding-left: 20px; } [data-stqr-plugin="fs"] .fs-tree li { padding: 6px 0; } [data-stqr-plugin="fs"] summary { cursor: pointer; } [data-stqr-plugin="fs"] .fs-size { color: #667085; margin-left: 12px; }';
@@ -202,7 +202,7 @@ export function decodeIndex(raw, length, depth) {
     const s = {
       length: r.u64(),
       id: r.id(),
-      offset: version === 3 ? r.u64() : BigInt(r.u32()),
+      offset: version === 1 ? BigInt(r.u32()) : r.u64(),
     };
     if (version === 2 && r.u64())
       fail("Historische Lower-Segmente benötigen einen Overlay-Client.");
@@ -439,6 +439,68 @@ export async function readFile(client, id, { signal, directory = false } = {}) {
   await validate(client, node, signal);
   return { node, blob: new Blob(parts) };
 }
+// Match Go encodeFSNode(v7) and encodeFSDirectory(v1). The initial root is the
+// only bootstrap write; file-management mutations remain planned future work.
+export function encodeEmptyRoot(timestamp, Writer) {
+  const encode = new TextEncoder(),
+    directory = new Writer().raw(encode.encode("STDR")).u16(1).u64(0).bytes();
+  return new Writer()
+    .raw(encode.encode("STFS"))
+    .u16(7)
+    .u8(2)
+    .u32(0o755)
+    .u32(0)
+    .u32(0)
+    .u64(timestamp)
+    .u64(directory.length)
+    .u8(0)
+    .blob(directory)
+    .bool(false)
+    .text("")
+    .u64(timestamp)
+    .u64(timestamp)
+    .u32(2)
+    .u32(0)
+    .bool(false)
+    .raw(new Uint8Array(32))
+    .bool(false)
+    .bytes();
+}
+export async function initialize({
+  connect,
+  signal,
+  initializationID,
+  state = {},
+}) {
+  const client = await connect(),
+    id = await rootID();
+  const existing = async () => {
+    const node = await snapshot(client, id, signal);
+    if (node.kind !== 2 || node.removed)
+      fail("Das Root-Objekt ist kein gültiges Verzeichnis.");
+    return node;
+  };
+  try {
+    await existing();
+    return;
+  } catch (error) {
+    if (error.status !== 404) throw error;
+  }
+  const { Writer } = await import("/assets/sdk/codec.mjs");
+  state.startedAt ??= BigInt(Date.now()) * 1000000n;
+  state.rootImage ??= encodeEmptyRoot(state.startedAt, Writer);
+  try {
+    await client.cas(id, 0n, new Uint8Array(), state.rootImage, {
+      scope: "object",
+      absent: true,
+      requestId: initializationID,
+      signal,
+    });
+  } catch (error) {
+    if (error.status !== 409 && error.status !== 412) throw error;
+    await existing();
+  }
+}
 export async function open({ bucket, connect, windows, ui, signal }) {
   const window = windows.open({ title: `Dateien · ${bucket.name}`, signal }),
     client = await connect();
@@ -464,23 +526,26 @@ export async function open({ bucket, connect, windows, ui, signal }) {
     for (let start = 0; start < entries.length; start += 8) {
       window.signal.throwIfAborted();
       const nodes = await Promise.all(
-        entries
-          .slice(start, start + 8)
-          .map(async (entry) => ({
-            ...entry,
-            node: await snapshot(client, entry.id, window.signal),
-          })),
+        entries.slice(start, start + 8).map(async (entry) => ({
+          ...entry,
+          node: await snapshot(client, entry.id, window.signal),
+        })),
       );
       for (const entry of nodes) {
         if (entry.node.removed) continue;
         const li = document.createElement("li");
         li.setAttribute("role", "treeitem");
+        const icon = document.createElement("span");
+        icon.setAttribute("aria-hidden", "true");
+        icon.textContent =
+          (entry.node.kind === 2 ? "📁" : entry.node.kind === 3 ? "🔗" : "📄") +
+          " ";
         const childPath = path + "/" + entry.name;
         if (entry.node.kind === 2) {
           const details = document.createElement("details"),
             summary = document.createElement("summary"),
             children = document.createElement("ul");
-          summary.textContent = "▸ " + entry.name;
+          summary.append(icon, document.createTextNode(entry.name));
           children.className = "fs-tree";
           children.setAttribute("role", "group");
           details.append(summary, children);
@@ -510,6 +575,7 @@ export async function open({ bucket, connect, windows, ui, signal }) {
           li.append(details);
         } else if (entry.node.kind === 1) {
           li.append(
+            icon,
             ui.button(
               entry.name,
               async () => {
@@ -526,12 +592,16 @@ export async function open({ bucket, connect, windows, ui, signal }) {
           size.textContent = entry.node.length + " Bytes";
           li.append(size);
         } else {
-          li.textContent =
-            entry.name +
-            " · " +
-            ({ 3: "Symbolischer Link", 4: "FIFO", 5: "Socket" }[
-              entry.node.kind
-            ] ?? "Spezialdatei");
+          li.append(
+            icon,
+            document.createTextNode(
+              entry.name +
+                " · " +
+                ({ 3: "Symbolischer Link", 4: "FIFO", 5: "Socket" }[
+                  entry.node.kind
+                ] ?? "Spezialdatei"),
+            ),
+          );
         }
         target.append(li);
       }

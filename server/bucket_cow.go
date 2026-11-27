@@ -32,7 +32,7 @@ type cowSnapshot struct {
 	Data           io.ReaderAt
 	Extents        []volume.Extent
 	Close          func() error
-	// Local-only finite publication cut; never serialized as object metadata.
+	// Local-only finite publication cut, not an object version; never serialized.
 	store      *volume.Volume
 	generation uint64
 }

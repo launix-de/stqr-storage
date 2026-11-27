@@ -37,7 +37,7 @@ func TestKSTQRVirtualMachine(t *testing.T) {
 	// Focused scripts replace the same init section; combining them cannot
 	// represent a valid test and must fail before starting a guest.
 	selectedMode := ""
-	for _, mode := range []string{"PLAIN_BIND", "CACHE_NEGATIVE", "POSTRESTART_PIN", "ASYNC_UNPIN", "SHARED_PINS", "CACHE_REOPEN", "BENCHMARK", "WRITE_BENCHMARK", "READ_WINDOW", "LOOP", "RESTART_ONLY", "OVERLAY", "OVERLAY_PROOF", "OUTAGE", "CACHE_RETENTION", "REFERENCE_LIMIT"} {
+	for _, mode := range []string{"EDIT_RETRY", "PLAIN_BIND", "CACHE_NEGATIVE", "POSTRESTART_PIN", "ASYNC_UNPIN", "SHARED_PINS", "CACHE_REOPEN", "BENCHMARK", "WRITE_BENCHMARK", "READ_WINDOW", "LOOP", "RESTART_ONLY", "OVERLAY", "OVERLAY_PROOF", "OUTAGE", "CACHE_RETENTION", "REFERENCE_LIMIT"} {
 		if os.Getenv("STQR_KERNEL_"+mode) == "1" {
 			if selectedMode != "" {
 				t.Fatalf("incompatible kernel fixture modes %s and %s; run them separately", selectedMode, mode)
@@ -1438,7 +1438,7 @@ umount /mnt
 		init = strings.Replace(init, "insmod /kstqr.ko\n", "insmod /kstqr.ko\n"+plainScript, 1)
 	}
 	if os.Getenv("STQR_KERNEL_EDIT_RETRY") == "1" {
-		probe := fmt.Sprintf("/mount.kstqr --uri %s --bucket %s --credentials /credentials /mnt\n/edit-retry %s\numount /mnt\n", endpoint, editRetryID.String(), endpoint)
+		probe := fmt.Sprintf("echo KSTQR_EDIT_RETRY_MOUNT_BEGIN\n/mount.kstqr --uri %s --bucket %s --credentials /credentials /mnt\necho KSTQR_EDIT_RETRY_WRITE_BEGIN\n/edit-retry %s\necho KSTQR_EDIT_RETRY_UNMOUNT_BEGIN\numount /mnt\n", endpoint, editRetryID.String(), endpoint)
 		init = strings.Replace(init, "insmod /kstqr.ko\n", "insmod /kstqr.ko\n"+probe, 1)
 	}
 
@@ -1687,10 +1687,7 @@ poweroff -f
 		t.Fatalf("cpio: %v %s", err, packErr.String())
 	}
 	guestMemory := "512M"
-	if os.Getenv("STQR_KERNEL_EDIT_RETRY") == "1" {
-		guestMemory = "1024M"
-	}
-	if os.Getenv("STQR_KERNEL_PLAIN_BIND") == "1" || os.Getenv("STQR_KERNEL_CACHE_NEGATIVE") == "1" || os.Getenv("STQR_KERNEL_OVERLAY") == "1" || os.Getenv("STQR_KERNEL_OVERLAY_PROOF") == "1" || os.Getenv("STQR_KERNEL_REFERENCE_LIMIT") == "1" {
+	if os.Getenv("STQR_KERNEL_EDIT_RETRY") == "1" || os.Getenv("STQR_KERNEL_PLAIN_BIND") == "1" || os.Getenv("STQR_KERNEL_CACHE_NEGATIVE") == "1" || os.Getenv("STQR_KERNEL_OVERLAY") == "1" || os.Getenv("STQR_KERNEL_OVERLAY_PROOF") == "1" || os.Getenv("STQR_KERNEL_REFERENCE_LIMIT") == "1" {
 		// These fixtures need 1 GiB to unpack their static test binaries and
 		// debug module, including the longer-path original-source control.
 		guestMemory = "1024M"
@@ -1726,6 +1723,12 @@ poweroff -f
 
 	if os.Getenv("STQR_KERNEL_CACHE_RETENTION") == "1" && !strings.Contains(string(output), "KSTQR_CACHE_RETENTION_PASS") {
 		t.Fatalf("cache retention test did not pass: %v\n%s", err, output)
+	}
+	if os.Getenv("STQR_KERNEL_EDIT_RETRY") == "1" {
+		if !strings.Contains(string(output), "KSTQR_EDIT_RETRY_PASS") {
+			t.Fatalf("edit retry test did not pass: %v\n%s", err, output)
+		}
+		t.Log("KSTQR_EDIT_RETRY_PASS")
 	}
 	if os.Getenv("STQR_KERNEL_OUTAGE") == "1" && !strings.Contains(string(output), "KSTQR_OUTAGE_PASS") {
 		t.Fatalf("outage test did not pass: %v\n%s", err, output)

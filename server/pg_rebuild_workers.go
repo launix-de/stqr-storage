@@ -43,13 +43,13 @@ func (r *rangeManager) startPGWorkers() {
 			catalog.snapshots = []client.StatsSnapshot{s.CollectStats(client.StatsFilter{IncludeRanges: true})}
 			s.peerStatsMu.RLock()
 			for _, p := range s.peerStats {
-				if p.online && p.snapshot != nil && p.connection.Capabilities&client.CapabilityRangeHandoff != 0 {
+				if p.online && p.snapshot != nil && p.snapshot.BootID == p.connection.Boot && p.connection.Capabilities&client.CapabilityRangeHandoff != 0 {
 					catalog.snapshots = append(catalog.snapshots, *p.snapshot)
 					catalog.seen[p.snapshot.Node] = p.lastSeen
 				}
 			}
 			s.peerStatsMu.RUnlock()
-			catalog.volumeRates = placementVolumeRates(catalog.snapshots, r.pgCatalog.Load())
+			catalog.volumeRates = placementVolumeRates(catalog.snapshots, r.pgCatalog.Load(), s.placementStatsHalfLife())
 			for _, d := range s.bucketSnapshots() {
 				if d.ID == systemBucket.String() || d.DeletionComplete || d.State == BucketDeleting {
 					continue
