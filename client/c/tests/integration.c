@@ -99,17 +99,18 @@ int main(void) {
         async_wait(c,&result,1);CHECK(!result.error);CHECK(!stqr_async_pending(c));
         CHECK(!stqr_pending_mark(c,&mark)&&mark.sequence);
         CHECK(!stqr_reconnect(c));
-        CHECK(stqr_connection_sync_async(c,async_completed,&fence)==-ESTALE);
-        CHECK(stqr_sync(c)==-ESTALE);CHECK(!fence.done);
-        /* Filesystem opt-in keeps live accepted visibility after uncertainty,
-         * while explicit persistence confirmation must remain ESTALE. */
-        stqr_set_accepted_references(c,1);memset(&result,0,sizeof(result));
-        o=fresh();o.accepted=1;
+        stqr_commit_mark retained;
+        CHECK(!stqr_pending_mark(c,&retained)&&retained.sequence==mark.sequence&&!memcmp(retained.boot.bytes,mark.boot.bytes,16));
+        /* The accepted result is known. Only explicit sync may recover its
+         * boot-qualified old prefix and join this new socket's later work. */
+        memset(&result,0,sizeof(result));o=fresh();o.accepted=1;
         CHECK(!stqr_cas_async(c,id,1,0,"after",5,"visible",7,&o,async_completed,&result));
-        async_wait(c,&result,1);CHECK(!result.error);
+        CHECK(!stqr_connection_sync_async(c,async_completed,&fence));
+        async_wait(c,&fence,1);CHECK(!fence.error&&result.done&&!result.error);
+        CHECK(!stqr_pending_mark(c,&retained)&&!retained.sequence);
         CHECK(!stqr_get(c,id,&data,&n,&info));CHECK(n==7&&!memcmp(data,"visible",7));stqr_free(data);
-        CHECK(stqr_sync(c)==-ESTALE);
-        stqr_close(c);puts("accepted CAS reconnect preserves uncertain prefix");return 0;
+        CHECK(!stqr_sync(c));
+        stqr_close(c);puts("accepted CAS reconnect recovers acknowledged prefix explicitly");return 0;
     }
     if (mode && !strcmp(mode,"async-close")) {
         struct async_result pending={0};

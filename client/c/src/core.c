@@ -11,7 +11,7 @@ struct sq_channel {
     unsigned port;
     stqr_id runtime;
     stqr_u64 capabilities, used, submitted;
-    stqr_commit_mark pending, synced;
+    stqr_commit_mark pending, synced, detached;
     int lost;
     unsigned reply_waiters;
 };
@@ -45,7 +45,7 @@ struct stqr_client {
     stqr_u64 capabilities;
     stqr_update_handler update;
     void *update_arg;
-    stqr_commit_mark pending_mark, synced_mark;
+    stqr_commit_mark pending_mark, synced_mark, detached_mark;
     int durability_lost;
     char redirect[512];
     stqr_object_id query;
@@ -265,13 +265,13 @@ static void save_channel(stqr_client *c) {
     s->socket=c->socket; memcpy(s->host,c->host,sizeof(s->host));
     memcpy(s->authority,c->authority,sizeof(s->authority)); s->port=c->port;
     s->runtime=c->runtime; s->capabilities=c->capabilities;
-    s->pending=c->pending_mark; s->synced=c->synced_mark; s->lost=c->durability_lost;
+    s->pending=c->pending_mark; s->synced=c->synced_mark; s->detached=c->detached_mark; s->lost=c->durability_lost;
 }
 static void load_channel(stqr_client *c,struct sq_channel *s) {
     c->active=s; c->socket=s->socket; memcpy(c->host,s->host,sizeof(c->host));
     memcpy(c->authority,s->authority,sizeof(c->authority)); c->port=s->port;
     c->runtime=s->runtime; c->capabilities=s->capabilities;
-    c->pending_mark=s->pending; c->synced_mark=s->synced; c->durability_lost=s->lost;
+    c->pending_mark=s->pending; c->synced_mark=s->synced; c->detached_mark=s->detached; c->durability_lost=s->lost;
     s->used=++c->channel_clock;
 }
 static int ensure_channel(stqr_client *c) {
@@ -322,7 +322,7 @@ static int select_endpoint(stqr_client *c,const char *endpoint) {
         if (c->channel_count>=SQ_CHANNEL_LIMIT) {
             struct sq_channel *candidate;
             for (candidate=c->channels;candidate;candidate=candidate->next)
-                if (candidate!=original && candidate!=c->lease_owner && !candidate->reply_waiters && !candidate->pending.sequence && !candidate->lost && !async_channel_pending(c,candidate) && (!s || candidate->used<s->used)) s=candidate;
+                if (candidate!=original && candidate!=c->lease_owner && !candidate->reply_waiters && !candidate->pending.sequence && !candidate->detached.sequence && !candidate->lost && !async_channel_pending(c,candidate) && (!s || candidate->used<s->used)) s=candidate;
             if (!s) { err=-ENOSPC; goto out; }
             /* A channel limit is backpressure, never permission to request
              * persistence. Retain dirty owners until an explicit caller fence. */
@@ -814,8 +814,8 @@ static int request_payload(stqr_client *c, unsigned op, struct buf *body, stqr_i
             if (s) { drop(&s->data); memset(s,0,sizeof(*s)); }
             continue;
         }
-        if (err && !c->status) { broken(c); return mutation ? -EINPROGRESS : err; }
-        if (err==-EPROTO || err==-EBADMSG) broken(c);
+        if (err && !c->status) { if (mutation) c->durability_lost=1; broken(c); return mutation ? -EINPROGRESS : err; }
+        if (err==-EPROTO || err==-EBADMSG) { if (mutation) c->durability_lost=1; broken(c); }
         return err;
     }
     return -ELOOP;
@@ -1219,11 +1219,7 @@ static int sync_through_active(stqr_client *c, const stqr_commit_mark *mark, stq
     err = request(c,0x119,&b,rid,0,&r,NULL);
     if (!err) err = decode_mark(&r,durable);
     if (!err && (memcmp(durable->boot.bytes,mark->boot.bytes,16) || durable->sequence < mark->sequence)) err = -EPROTO;
-    if (!err) {
-        c->synced_mark = *durable;
-        if (!memcmp(c->pending_mark.boot.bytes,durable->boot.bytes,16) && c->pending_mark.sequence <= durable->sequence)
-            memset(&c->pending_mark,0,sizeof(c->pending_mark));
-    }
+    if (!err) note_active(c,durable);
     drop(&b); drop(&r); return err;
 }
 int stqr_sync_through(stqr_client *c,const stqr_commit_mark *mark,stqr_commit_mark *durable) {
@@ -1282,6 +1278,8 @@ int stqr_bucket_space(stqr_client *c, stqr_space *space) {
 }
 static void note_active(stqr_client *c, const stqr_commit_mark *mark) {
     if (!c || !mark || c->durability_lost) return;
+    if (!memcmp(c->detached_mark.boot.bytes,mark->boot.bytes,16) && c->detached_mark.sequence <= mark->sequence)
+        memset(&c->detached_mark,0,sizeof(c->detached_mark));
     if (!memcmp(c->pending_mark.boot.bytes,mark->boot.bytes,16) && c->pending_mark.sequence <= mark->sequence)
         memset(&c->pending_mark,0,sizeof(c->pending_mark));
     if (!memcmp(c->synced_mark.boot.bytes,mark->boot.bytes,16) && c->synced_mark.sequence > mark->sequence) return;
