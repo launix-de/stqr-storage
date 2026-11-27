@@ -136,7 +136,21 @@ func (v *Volume) node(off uint64) (treeNode, error) {
 	}
 	return n, e
 }
+
+// readNode borrows immutable cached entries for inspection only. Its result must
+// never be edited or retained past the enclosing volume operation. Transaction
+// page/spill overlays keep their existing precedence and full page validation.
+func (t *transaction) readNode(off uint64) (treeNode, error) {
+	return t.loadNode(off, false)
+}
+
+// node gives mutation paths private entries; committed cache slices never leak
+// into an edit. Decoded dirty pages already have private entry slices.
 func (t *transaction) node(off uint64) (treeNode, error) {
+	return t.loadNode(off, true)
+}
+
+func (t *transaction) loadNode(off uint64, mutable bool) (treeNode, error) {
 	_, spilled := t.spilled[off]
 	if t.acceptedPages != nil {
 		flag, err := t.acceptedPages.flag(off)
@@ -153,7 +167,7 @@ func (t *transaction) node(off uint64) (treeNode, error) {
 		return decodeNode(b, t.sb.Identity.VolumeID)
 	}
 	n, e := t.v.node(off)
-	if e == nil {
+	if e == nil && mutable {
 		n.entries = append([]treeEntry(nil), n.entries...)
 	}
 	return n, e
@@ -209,7 +223,7 @@ func (t *transaction) insertAt(off uint64, key indexKey, value uint64) (treeEntr
 		}
 	} else {
 		i := childIndex(n, key)
-		if e := checkTreeChild(t.node, n, n.entries[i].value); e != nil {
+		if e := checkTreeChild(t.readNode, n, n.entries[i].value); e != nil {
 			return treeEntry{}, nil, e
 		}
 		a, b, e := t.insertAt(n.entries[i].value, key, value)
@@ -259,7 +273,7 @@ func (t *transaction) set(root *uint64, key indexKey, value uint64) error {
 		return e
 	}
 	if right != nil {
-		old, e := t.node(*root)
+		old, e := t.readNode(*root)
 		if e != nil {
 			return e
 		}
@@ -298,7 +312,7 @@ func (t *transaction) replaceKeyAt(off uint64, key, next indexKey, value uint64)
 			return treeEntry{}, ErrCorrupt
 		}
 		i := childIndex(n, key)
-		if e := checkTreeChild(t.node, n, n.entries[i].value); e != nil {
+		if e := checkTreeChild(t.readNode, n, n.entries[i].value); e != nil {
 			return treeEntry{}, e
 		}
 		entry, e := t.replaceKeyAt(n.entries[i].value, key, next, value)
@@ -326,14 +340,14 @@ func (t *transaction) deleteAt(off uint64, key indexKey) (treeEntry, error) {
 			return treeEntry{}, ErrCorrupt
 		}
 		i := childIndex(n, key)
-		if e := checkTreeChild(t.node, n, n.entries[i].value); e != nil {
+		if e := checkTreeChild(t.readNode, n, n.entries[i].value); e != nil {
 			return treeEntry{}, e
 		}
 		entry, e := t.deleteAt(n.entries[i].value, key)
 		if e != nil {
 			return treeEntry{}, e
 		}
-		child, e := t.node(entry.value)
+		child, e := t.readNode(entry.value)
 		if e != nil {
 			return treeEntry{}, e
 		}
@@ -354,19 +368,23 @@ func (t *transaction) deleteAt(off uint64, key indexKey) (treeEntry, error) {
 				if a > b {
 					a, b = b, a
 				}
-				if e := checkTreeChild(t.node, n, n.entries[j].value); e != nil {
+				if e := checkTreeChild(t.readNode, n, n.entries[j].value); e != nil {
 					return treeEntry{}, e
 				}
-				ln, e := t.node(n.entries[a].value)
+				ln, e := t.readNode(n.entries[a].value)
 				if e != nil {
 					return treeEntry{}, e
 				}
-				rn, e := t.node(n.entries[b].value)
+				rn, e := t.readNode(n.entries[b].value)
 				if e != nil {
 					return treeEntry{}, e
 				}
 				if len(ln.entries)+len(rn.entries) <= ln.capacity() {
-					ln.entries = append(ln.entries, rn.entries...)
+					// Sibling inspection borrows cached entries; only an actual
+					// merge owns a combined slice before changing the left page.
+					entries := make([]treeEntry, 0, len(ln.entries)+len(rn.entries))
+					entries = append(entries, ln.entries...)
+					ln.entries = append(entries, rn.entries...)
 					t.putNode(n.entries[a].value, ln)
 					t.release(n.entries[b].value, PageSize, true)
 					n.entries[a] = t.summary(n.entries[a].value, ln)
@@ -392,7 +410,7 @@ func (t *transaction) remove(root *uint64, key indexKey) error {
 	if e != nil {
 		return e
 	}
-	n, e := t.node(*root)
+	n, e := t.readNode(*root)
 	if e != nil {
 		return e
 	}

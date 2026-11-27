@@ -154,7 +154,7 @@ func (t *transaction) findSpace(n, a uint64, tail bool, lower ...uint64) (uint64
 	var start, length, chosen uint64
 	var visit func(uint64) error
 	visit = func(off uint64) error {
-		node, e := t.node(off)
+		node, e := t.readNode(off)
 		if e != nil {
 			return e
 		}
@@ -167,7 +167,7 @@ func (t *transaction) findSpace(n, a uint64, tail bool, lower ...uint64) (uint64
 				if maxlen < n {
 					continue
 				}
-				if e = checkTreeChild(t.node, node, x.value); e != nil {
+				if e = checkTreeChild(t.readNode, node, x.value); e != nil {
 					return e
 				}
 				if e = visit(x.value); e != nil {
@@ -225,7 +225,7 @@ func (t *transaction) metaPage() (uint64, error) {
 func (t *transaction) claim(off, n uint64) error {
 	t.inClaim = true
 	defer func() { t.inClaim = false }()
-	x, found, e := treeNeighbor(t.node, t.sb.FreeRoot, spaceKey(off), false)
+	x, found, e := treeNeighbor(t.readNode, t.sb.FreeRoot, spaceKey(off), false)
 	if e != nil {
 		return e
 	}
@@ -302,11 +302,11 @@ func (t *transaction) release(off, n uint64, meta bool) {
 	}
 }
 func (t *transaction) freeSpan(off, n uint64) error {
-	previous, hasPrevious, e := treeNeighbor(t.node, t.sb.FreeRoot, spaceKey(off), false)
+	previous, hasPrevious, e := treeNeighbor(t.readNode, t.sb.FreeRoot, spaceKey(off), false)
 	if e != nil {
 		return e
 	}
-	next, hasNext, e := treeNeighbor(t.node, t.sb.FreeRoot, spaceKey(off), true)
+	next, hasNext, e := treeNeighbor(t.readNode, t.sb.FreeRoot, spaceKey(off), true)
 	if e != nil {
 		return e
 	}
