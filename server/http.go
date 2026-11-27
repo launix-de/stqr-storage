@@ -77,10 +77,11 @@ func (s *Server) Handler() http.Handler {
 	assets, _ := fs.Sub(dashboard, "dashboard")
 	files := http.FileServer(http.FS(assets))
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		styleNonce := client.NewRequestID().String()
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("Referrer-Policy", "same-origin")
 		w.Header().Set("X-Frame-Options", "DENY")
-		w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self' ws:; img-src 'self' data:; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'")
+		w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self' 'nonce-"+styleNonce+"'; connect-src 'self' ws:; img-src 'self' data: blob:; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'")
 		w.Header().Set("Cache-Control", "no-store")
 		if !s.allowed(r) {
 			httpError(w, 403, errors.New("source address is outside the allowed subnets"))
@@ -113,6 +114,7 @@ func (s *Server) Handler() http.Handler {
 		}
 		if r.URL.Path == "/" && r.Method == http.MethodGet {
 			b, _ := dashboard.ReadFile("dashboard/index.html")
+			b = bytes.Replace(b, []byte("<head>"), []byte(`<head><meta name="stqr-style-nonce" content="`+styleNonce+`">`), 1)
 			if s.joinPending() || s.joinRequested.Load() {
 				b = bytes.Replace(b, []byte(`id="join-login-pending" hidden`), []byte(`id="join-login-pending"`), 1)
 				b = bytes.Replace(b, []byte(`class="login-note"`), []byte(`class="login-note" hidden`), 1)
@@ -158,6 +160,8 @@ func (s *Server) Handler() http.Handler {
 			return
 		}
 		switch {
+		case r.URL.Path == "/api/format-plugins" || strings.HasPrefix(r.URL.Path, "/format-plugins/"):
+			s.serveFormatPlugins(w, r)
 		case r.URL.Path == "/api/bucket-connect":
 			s.serveBrowserConnect(w, r, p)
 		case r.URL.Path == "/api/bucket-tunnel":

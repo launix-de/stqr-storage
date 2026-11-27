@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-only
+import {EndlessList,bindSearch} from './endless.js';
 import {newID} from './protocol.js';
 import {defaultBucketPolicy} from './bucket-codec.js';
 const $=id=>document.getElementById(id),SYSTEM='53545152535953504701000000000000';
@@ -20,13 +21,19 @@ export function setupPlacementGroups({connection,escape,toast,states}){
  }
  $('pg-node-selection').onchange=renderNodes;
  $('pg-add-node').onclick=()=>{const used=new Set(editor.mask.nodes.map(n=>n.node_id)),id=[...states.keys()].find(id=>!used.has(id));if(!id){$('pg-edit-error').textContent='Keine weitere bekannte Node verfügbar.';return}editor.mask.nodes.push({node_id:id,volume_filter:'all',volumes:[]});renderNodes()};
- async function load(){const seq=++epoch;clearTimeout(poll);try{
-  const list=await listGroups(connection());if(seq!==epoch)return;groups=list;
-  $('pg-error').textContent='';$('pg-rows').innerHTML=groups.map(g=>{const p=g.effective.storage,refs=Number(g.bucket_count??0),waiting=Number(g.pending_buckets??0);return `<tr><td><strong>${escape(g.name)}</strong><div class="volume-path">${escape(g.id)}</div></td><td>${escape(p?.storage_strategy?.toUpperCase()??'—')} · ${p?.placement_mode==='everywhere'?'Jede Node':p?.redundancy.replicas+' Kopie(n)'}</td><td>${escape(p?.compression??'—')}</td><td>${refs}</td><td>${g.desired?'Umstellung · '+waiting+' Bucket(s) ausstehend · Ziel v'+g.desired.version:'Aktiv · v'+g.effective.version}${g.rebuild?'<div class="volume-path">Generation '+escape(g.rebuild.generation)+' · '+escape({idle:'Bereit',preparing:'Vorbereitung',rebuilding:'Rebuild läuft'}[g.rebuild.state]??g.rebuild.state)+'</div>':''}</td><td><button class="row-action" data-edit-pg="${g.id}" ${g.id===SYSTEM||g.desired?'disabled':''}>Bearbeiten</button><button class="row-action danger-action" data-delete-pg="${g.id}" ${g.id===SYSTEM||g.id==='ff5354515244454641554c5401000000'||refs||g.desired?'disabled':''}>Löschen</button></td></tr>`}).join('');
+ const panel=$('pg-rows').closest('.storage-panel');
+ const searchLabel=document.createElement('label');searchLabel.className='search';searchLabel.innerHTML='<span aria-hidden="true">⌕</span><input type="search" placeholder="Placement Groups suchen …" aria-label="Placement Groups durchsuchen">';panel.prepend(searchLabel);
+ const searchInput=searchLabel.querySelector('input');
+ const pager=new EndlessList({container:panel,visible:()=>!$('groups-view').hidden,fetchPage:async(after,limit,query)=>{const page=await connection().listPlacementGroups(after,limit),q=query.toLocaleLowerCase();return {items:page.groups.filter(g=>`${g.name} ${g.id}`.toLocaleLowerCase().includes(q)),next:page.next}},onError:e=>{$('pg-error').textContent=e.message},onLoading:busy=>{$('pg-refresh').disabled=busy},onUpdate:(items,state)=>{if(state.loading)return;groups=items;renderGroups()}});
+ const search=bindSearch(searchInput,()=>load(),{onChange:()=>{epoch++;clearTimeout(poll);pager.cancel()}});
+ async function load(){epoch++;clearTimeout(poll);$('pg-error').textContent='';return pager.reset(searchInput.value.trim())}
+ function renderGroups(){
+$('pg-rows').innerHTML=groups.map(g=>{const p=g.effective.storage,refs=Number(g.bucket_count??0),waiting=Number(g.pending_buckets??0);return `<tr><td><strong>${escape(g.name)}</strong><div class="volume-path">${escape(g.id)}</div></td><td>${escape(p?.storage_strategy?.toUpperCase()??'—')} · ${p?.placement_mode==='everywhere'?'Jede Node':p?.redundancy.replicas+' Kopie(n)'}</td><td>${escape(p?.compression??'—')}</td><td>${refs}</td><td>${g.desired?'Umstellung · '+waiting+' Bucket(s) ausstehend · Ziel v'+g.desired.version:'Aktiv · v'+g.effective.version}${g.rebuild?'<div class="volume-path">Generation '+escape(g.rebuild.generation)+' · '+escape({idle:'Bereit',preparing:'Vorbereitung',rebuilding:'Rebuild läuft'}[g.rebuild.state]??g.rebuild.state)+'</div>':''}</td><td><button class="row-action" data-edit-pg="${g.id}" ${g.id===SYSTEM||g.desired?'disabled':''}>Bearbeiten</button><button class="row-action danger-action" data-delete-pg="${g.id}" ${g.id===SYSTEM||g.id==='ff5354515244454641554c5401000000'||refs||g.desired?'disabled':''}>Löschen</button></td></tr>`}).join('');
   for(const b of $('pg-rows').querySelectorAll('[data-edit-pg]'))b.onclick=()=>open(groups.find(g=>g.id===b.dataset.editPg));
   for(const b of $('pg-rows').querySelectorAll('[data-delete-pg]'))b.onclick=async()=>{const g=groups.find(g=>g.id===b.dataset.deletePg);b.disabled=true;try{await connection().deletePlacementGroup(g.id,g.revision,newID());await load()}catch(e){$('pg-error').textContent=e.message;b.disabled=false}};
-  if(groups.some(g=>g.desired||g.rebuild&&g.rebuild.state!=='idle'))poll=setTimeout(()=>{if(!$('groups-view').hidden)load()},3000);
- }catch(e){if(seq===epoch)$('pg-error').textContent=e.message}}
+  clearTimeout(poll);if(groups.some(g=>g.desired||g.rebuild&&g.rebuild.state!=='idle'))poll=setTimeout(()=>{if(!$('groups-view').hidden)load()},3000);
+
+ }
  function updateReplication(){const ram=$('pg-storage').value==='ram';$('pg-replicas').disabled=$('pg-placement').value==='everywhere';$('pg-replicas').max=ram?'1':'65535';$('pg-replication-note').textContent=ram?'RAM unterstützt derzeit nur eine Kopie mit Platzierung nach Anzahl.':'ACK auf allen erforderlichen Kopien. Fehlt eine Kopie, warten Schreibzugriffe bis zu ihrer Wiederkehr. Auf jeder Node gilt innerhalb der PG-Node-Auswahl.'}
  $('pg-storage').onchange=$('pg-placement').onchange=updateReplication;
  function open(g){const p=defaultBucketPolicy();editor={id:g?.id??newID(),revision:g?.revision??0,mask:structuredClone(g?.effective??{version:1,node_selection:'all',nodes:[],storage:{storage_strategy:p.storage_strategy,compression:p.compression,placement_mode:p.placement_mode,redundancy:p.redundancy,read_acceleration:p.read_acceleration}})};retry=null;const s=editor.mask.storage;$('pg-form').reset();$('pg-name').value=g?.name??'';$('pg-storage').value=s.storage_strategy;$('pg-codec').value=s.compression;$('pg-placement').value=s.placement_mode;$('pg-replicas').value=s.redundancy.replicas||1;$('pg-node-selection').value=editor.mask.node_selection||'list';const domains=editor.mask.failure_domains??[];$('pg-domain').querySelector('[value=existing]')?.remove();if(domains.length>1)$('pg-domain').insertAdjacentHTML('beforeend',`<option value="existing">Bestehend: ${escape(domains.join(', '))}</option>`);$('pg-domain').value=domains.length>1?'existing':domains[0]??'';$('pg-edit-error').textContent='';renderNodes();updateReplication();$('pg-dialog').showModal()}
@@ -47,5 +54,5 @@ export function setupPlacementGroups({connection,escape,toast,states}){
   }
   for(let attempt=0;attempt<20;attempt++){try{await connection().forNode(node).releaseVolumePlacement(volume,newID());return}catch(e){if(e.status!==409||attempt===19)throw e;await new Promise(resolve=>setTimeout(resolve,1000))}}
  }
- return {load,volumeSelection,finishVolume,clear(){epoch++;clearTimeout(poll);groups=[]}};
+ return {load,volumeSelection,finishVolume,clear(){epoch++;clearTimeout(poll);search.clear();pager.clear();groups=[]}};
 }
