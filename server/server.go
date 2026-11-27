@@ -337,9 +337,9 @@ func Open(opts Options) (s *Server, err error) {
 	if e = saveConfig(path, s.cfg); e != nil {
 		return s, e
 	}
-	s.opMu.Lock()
-	e = s.ensureVolumeAuthorityLocked()
-	s.opMu.Unlock()
+	// Header persistence may block on storage; the constructor owns no
+	// admission lock while awaiting its explicit authority cut.
+	e = s.ensureVolumeAuthority()
 	if e != nil {
 		return s, e
 	}

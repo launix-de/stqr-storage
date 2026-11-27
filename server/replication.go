@@ -375,6 +375,18 @@ func (r *replicaManager) validate(header replicaHeader, actor client.ID) (*volum
 }
 
 func (s *Server) replicaPeerMessage(m client.Message, actor client.ID) ([]byte, error) {
+	for {
+		body, err := s.replicaAuthorityAttempt(m, actor)
+		var wait *authorityWait
+		if !errors.As(err, &wait) {
+			return body, err
+		}
+		if err = wait.wait(s.ctx); err != nil {
+			return nil, err
+		}
+	}
+}
+func (s *Server) replicaAuthorityAttempt(m client.Message, actor client.ID) ([]byte, error) {
 	if m.Kind != client.Request {
 		return nil, fail(400, "replica transition requires a request")
 	}
@@ -474,7 +486,7 @@ func (s *Server) replicaPeerMessage(m client.Message, actor client.ID) ([]byte, 
 	if err = s.refreshQuotaProtectionLocked(); err != nil {
 		return nil, err
 	}
-	if err = s.ensureVolumeAuthorityLocked(); err != nil {
+	if err = s.ensureObjectAuthorityLocked(header.Request.Key); err != nil {
 		return nil, err
 	}
 	h, err := v.Open(true)

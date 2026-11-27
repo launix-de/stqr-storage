@@ -24,8 +24,13 @@ type volumeAuthorityRecord struct {
 	Entries               []volumeAuthorityEntry
 }
 type volumeAuthorityState struct {
-	dirty   atomic.Bool
-	records map[volume.ID]volumeAuthorityRecord // protected by node opMu
+	dirty    atomic.Bool
+	revision atomic.Uint64
+	pending  atomic.Pointer[authorityPendingView]
+	records  map[volume.ID]volumeAuthorityRecord // confirmed per-device headers; opMu
+	wanted   map[volume.ID]volumeAuthorityRecord
+	staged   map[volume.ID]authorityTarget
+	batch    *authorityBatch
 }
 
 func readVolumeAuthority(store *volume.Volume) (volumeAuthorityRecord, error) {
@@ -52,6 +57,7 @@ func readVolumeAuthority(store *volume.Volume) (volumeAuthorityRecord, error) {
 
 func (s *Server) dirtyVolumeAuthority() {
 	if s.authority != nil {
+		s.authority.revision.Add(1)
 		s.authority.dirty.Store(true)
 	}
 }
@@ -94,18 +100,14 @@ func (s *Server) volumeAllowedForEntry(bucket client.ID, entry client.RangeEntry
 	return allowed
 }
 
-// Called with opMu held. A cohort change is flushed on ALL participating data
-// volumes before another object mutation is acknowledged. Partial updates are
-// not a usable recovery proof: every volume in the advertised cohort must carry
-// the same active entry. No client payload is copied or included in this record.
-func (s *Server) ensureVolumeAuthorityLocked(allowances ...map[volume.ID]uint64) error {
+func (s *Server) planVolumeAuthorityLocked(allowances ...map[volume.ID]uint64) ([]authorityTarget, error) {
 	if s.controller == nil || s.authority == nil || !s.authority.dirty.Load() {
-		return nil
+		return nil, nil
 	}
 	view := s.currentSystem.Load()
 	image := s.placement.Load()
 	if view == nil || image == nil {
-		return nil
+		return nil, nil
 	}
 	s.mu.RLock()
 	stores := make(map[volume.ID]*volume.Volume)
@@ -115,6 +117,19 @@ func (s *Server) ensureVolumeAuthorityLocked(allowances ...map[volume.ID]uint64)
 		}
 	}
 	s.mu.RUnlock()
+	// Closed, detached devices cannot publish their discarded accepted tail.
+	// Keep staged recovery devices, which have not joined s.volumes yet.
+	for id := range s.authority.staged {
+		if stores[id] == nil && s.recoveryStore(id) == nil {
+			delete(s.authority.staged, id)
+			delete(s.authority.records, id)
+		}
+	}
+	for id := range s.authority.records {
+		if stores[id] == nil && s.recoveryStore(id) == nil {
+			delete(s.authority.records, id)
+		}
+	}
 	desired := make(map[volume.ID]volumeAuthorityRecord)
 	for id, store := range stores {
 		identity := store.Identity()
@@ -129,7 +144,7 @@ func (s *Server) ensureVolumeAuthorityLocked(allowances ...map[volume.ID]uint64)
 	if r := s.scopes; r != nil {
 		r.mu.Lock()
 		for _, txn := range r.txns {
-			if txn.plan.Source == r.node && txn.fenced && !txn.aborted && !txn.forceRetired {
+			if txn.plan.Source == r.node && (txn.fenced || txn.fencing) && !txn.aborted && !txn.forceRetired {
 				fences = append(fences, fence{txn.plan.Before.Bucket, txn.plan.Before.Entries[0], txn.plan.id()})
 			}
 		}
@@ -141,11 +156,11 @@ func (s *Server) ensureVolumeAuthorityLocked(allowances ...map[volume.ID]uint64)
 		}
 		bid, err := bucketID(description.ID)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		b, err := s.Bucket(bid)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		for _, entry := range image.bucketEntries(client.ID(bid)) {
 			if len(entry.Locations) != 1 || entry.Locations[0].Node != s.control.ledger.node || entry.State != 0 && entry.State != 5 || entry.Runtime != (client.ID{}) {
@@ -181,6 +196,8 @@ func (s *Server) ensureVolumeAuthorityLocked(allowances ...map[volume.ID]uint64)
 		ids = append(ids, id)
 	}
 	sort.Slice(ids, func(i, j int) bool { return ids[i].String() < ids[j].String() })
+	var targets []authorityTarget
+	wanted := make(map[volume.ID]volumeAuthorityRecord, len(ids))
 	for _, id := range ids {
 		record := desired[id]
 		sort.Slice(record.Entries, func(i, j int) bool {
@@ -195,7 +212,7 @@ func (s *Server) ensureVolumeAuthorityLocked(allowances ...map[volume.ID]uint64)
 			var err error
 			prior, err = readVolumeAuthority(stores[id])
 			if err != nil && !errors.Is(err, volume.ErrNotFound) {
-				return err
+				return nil, err
 			}
 		}
 
@@ -220,19 +237,23 @@ func (s *Server) ensureVolumeAuthorityLocked(allowances ...map[volume.ID]uint64)
 			}
 			return a.Entry.OwnerEpoch < b.Entry.OwnerEpoch
 		})
-		if !reflect.DeepEqual(prior, record) {
+		s.authority.records[id] = prior
+		wanted[id] = record
+		staged, hasStaged := s.authority.staged[id]
+		if !reflect.DeepEqual(prior, record) || hasStaged {
 			budget := uint64(0)
 			if len(allowances) > 0 {
 				budget = allowances[0][id]
 			}
-			if err := writeVolumeAuthorityBudget(stores[id], record, budget, s.compactAuthorityReady()); err != nil {
-				return err
+			target := authorityTarget{store: stores[id], record: record, budget: budget}
+			if hasStaged && reflect.DeepEqual(staged.record, record) {
+				target.generation = staged.generation
 			}
+			targets = append(targets, target)
 		}
-		s.authority.records[id] = record
 	}
-	s.authority.dirty.Store(false)
-	return nil
+	s.authority.wanted = wanted
+	return targets, nil
 }
 func writeVolumeAuthority(store *volume.Volume, record volumeAuthorityRecord) error {
 	return writeVolumeAuthorityBudget(store, record, 0)
@@ -253,48 +274,6 @@ func writeVolumeAuthorityBudget(store *volume.Volume, record volumeAuthorityReco
 		return err
 	}
 	return h.SetLocalMetadataWithOptions(raw, volume.Options{InFlightAllowance: budget})
-}
-
-// opMu and range-manager mutex are held by fence. Invalidate every member of
-// the source cohort BEFORE publishing source FENCE/READY in its private journal.
-func (s *Server) invalidateVolumeAuthorityLocked(p rangePlan) error {
-	if s.authority == nil || p.ram() {
-		return nil
-	}
-	s.dirtyVolumeAuthority()
-	s.mu.RLock()
-	var stores []*volume.Volume
-	for _, v := range s.volumes {
-		if !v.config.System && v.store.Identity().Class != volume.RAM {
-			stores = append(stores, v.store)
-		}
-	}
-	s.mu.RUnlock()
-	for _, store := range stores {
-		record, err := readVolumeAuthority(store)
-		if errors.Is(err, volume.ErrNotFound) {
-			continue
-		}
-		if err != nil {
-			return err
-		}
-		changed := false
-		for i := range record.Entries {
-			entry := &record.Entries[i]
-			if entry.Bucket == p.Before.Bucket && sameRangeAuthority(entry.Entry, p.Before.Entries[0]) {
-				entry.Active = false
-				entry.Fence = p.id()
-				changed = true
-			}
-		}
-		if changed {
-			if err := writeVolumeAuthorityBudget(store, record, 0, s.compactAuthorityReady()); err != nil {
-				return err
-			}
-			s.authority.records[store.Identity().VolumeID] = record
-		}
-	}
-	return nil
 }
 
 // A committed location is the effective storage contract during a policy

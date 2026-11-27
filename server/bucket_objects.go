@@ -489,6 +489,13 @@ func (b *Bucket) mutateUnmetered(ctx context.Context, p principal, id volume.Obj
 	defer cancel()
 	for {
 		result, err := b.mutateAttempt(ctx, p, id, opcode, offset, length, src, expected, opt)
+		var authority *authorityWait
+		if errors.As(err, &authority) {
+			if err = authority.wait(ctx); err != nil {
+				return volume.Result{}, err
+			}
+			continue
+		}
 		var published *publishedCheckpoint
 		if errors.As(err, &published) {
 			// The object is already published. Complete its durable response
@@ -750,7 +757,7 @@ func (b *Bucket) mutateAttempt(ctx context.Context, p principal, id volume.Objec
 	if err := s.refreshQuotaProtectionLocked(); err != nil {
 		return volume.Result{}, err
 	}
-	if err := s.ensureVolumeAuthorityLocked(); err != nil {
+	if err := s.ensureObjectAuthorityLocked(volume.Key{Bucket: b.ID(), Object: id}); err != nil {
 		return volume.Result{}, err
 	}
 	// Cooperative clients keep filesystem lifetime outside the engine. Only

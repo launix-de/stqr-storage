@@ -311,10 +311,9 @@ func (s *Server) activateRecoveredVolumesLocked(view *systemView) error {
 			if err != nil {
 				return err
 			}
-			if err := store.ReassignIdentityWithMetadata(store.Identity(), volume.ID(l.node), raw); err != nil {
+			if err := s.reassignVolumeAuthorityLocked(store, record, volume.ID(l.node), raw); err != nil {
 				return err
 			}
-			delete(s.authority.records, id)
 		}
 		if s.volumes[id.String()] != nil {
 			continue

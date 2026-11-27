@@ -167,10 +167,10 @@ func TestRecoveryRejectsUnresolvedSourceFence(t *testing.T) {
 	store := source.node.volumes[v.VolumeID].store
 	path := source.node.volumes[v.VolumeID].config.Path
 	createProtocolBucket(t, source.node, "fenced-recovery")
-	source.node.opMu.Lock()
-	if err := source.node.ensureVolumeAuthorityLocked(); err != nil {
+	if err := source.node.ensureVolumeAuthority(); err != nil {
 		t.Fatal(err)
 	}
+	source.node.opMu.Lock()
 	record, err := readVolumeAuthority(store)
 	if err != nil || len(record.Entries) != 1 {
 		t.Fatal("fixture provenance", err)

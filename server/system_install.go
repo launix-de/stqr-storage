@@ -2,6 +2,7 @@
 package server
 
 import (
+	"errors"
 	"reflect"
 
 	"github.com/launix-de/stqr-storage/volume"
@@ -12,6 +13,18 @@ import (
 // ordinary object-backed accounts/catalog APIs while a crash between mirror
 // writes can never make a partial mirror authoritative at the next startup.
 func (s *Server) installSystemView(view *systemView) error {
+	for {
+		err := s.installSystemAuthorityAttempt(view)
+		var wait *authorityWait
+		if !errors.As(err, &wait) {
+			return err
+		}
+		if err = wait.wait(s.ctx); err != nil {
+			return err
+		}
+	}
+}
+func (s *Server) installSystemAuthorityAttempt(view *systemView) error {
 	s.opMu.Lock()
 	defer s.opMu.Unlock()
 	s.mu.RLock()
