@@ -29,7 +29,60 @@ type kernelWritebackFault struct {
 	rejected    atomic.Uint64
 	connections atomic.Uint64
 	before      atomic.Uint64
+	unpin       kernelUnpinGate
 }
+
+// kernelUnpinGate holds one retirement request before storage observes it.
+// The HTTP control channel remains independent, so close must return before
+// the test releases or drops this WebSocket incarnation.
+type kernelUnpinGate struct {
+	mu                            sync.Mutex
+	target                        client.ObjectID
+	release                       chan struct{}
+	enabled, seen, timedOut, drop bool
+}
+
+func (g *kernelUnpinGate) begin() {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.release = make(chan struct{})
+	g.enabled = true
+	g.seen = false
+	g.timedOut = false
+	g.drop = false
+}
+func (g *kernelUnpinGate) match(raw []byte) <-chan struct{} {
+	m, e := client.DecodeMessage(raw)
+	if e != nil || m.Opcode != client.ObjectReference || len(m.Body) < 113 || m.Body[112] != 1 {
+		return nil
+	}
+	var id client.ObjectID
+	copy(id[:], m.Body[80:112])
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if !g.enabled || g.seen || id != g.target {
+		return nil
+	}
+	g.seen = true
+	return g.release
+}
+func (g *kernelUnpinGate) end(drop bool) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if !g.enabled || !g.seen || g.timedOut {
+		return errors.New("UNPIN gate was not observed before close returned")
+	}
+	g.drop = drop
+	g.enabled = false
+	close(g.release)
+	return nil
+}
+func (g *kernelUnpinGate) observed() bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.seen && !g.timedOut
+}
+func (g *kernelUnpinGate) shouldDrop() bool { g.mu.Lock(); defer g.mu.Unlock(); return g.drop }
 
 func (f *kernelWritebackFault) begin() {
 	f.rejected.Store(0)
@@ -128,6 +181,20 @@ func (f *kernelWritebackFault) proxy(w http.ResponseWriter, r *http.Request, ups
 					return
 				}
 				continue
+			}
+		}
+		if release := f.unpin.match(raw); release != nil {
+			select {
+			case <-release:
+				if f.unpin.shouldDrop() {
+					return
+				}
+			case <-time.After(2 * time.Second):
+				f.unpin.mu.Lock()
+				f.unpin.timedOut = true
+				f.unpin.mu.Unlock()
+			case <-r.Context().Done():
+				return
 			}
 		}
 		if peer.WriteMessage(kind, raw) != nil {

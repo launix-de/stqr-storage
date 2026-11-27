@@ -91,6 +91,7 @@ struct ks_fs {
 	stqr_commit_mark durable;
 	struct ks_cache *cache;
 	struct workqueue_struct *read_queue;
+	struct workqueue_struct *reference_queue;
 	size_t cache_budget;
 	struct super_block *sb;
 	spinlock_t inode_lock;

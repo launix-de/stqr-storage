@@ -1123,9 +1123,34 @@ static int ks_fsync(struct file *file, loff_t start, loff_t end, int datasync)
 	return err ? err : ks_checkpoint(file_inode(file)->i_sb->s_fs_info);
 }
 struct ks_file_reference {
+	struct work_struct cleanup;
+	struct ks_fs *fs;
+	stqr_object_id id;
 	stqr_id upper, lower;
 	bool upper_pinned, lower_pinned;
 };
+/* A final fput may run while a generator is exiting. Waiting there for a
+ * remote UNPIN ACK can prevent the entire process group from exiting. Retain
+ * the caller-owned tokens in mount-owned work until their accepted retirement
+ * completes; put_super drains this work before destroying either connection.
+ */
+static void ks_release_reference(struct work_struct *work)
+{
+	struct ks_file_reference *ref = container_of(work, struct ks_file_reference, cleanup);
+	struct ks_fs *f = ref->fs;
+	unsigned saved = enter_fs(f);
+	int err = 0;
+	if (ref->lower_pinned)
+		err = ks_object_reference(f->lower, ref->id, ref->lower, 1);
+	if (!err && ref->upper_pinned)
+		err = ks_object_reference(f, ref->id, ref->upper, 1);
+	if (err)
+		pr_warn_ratelimited("kstqr: retaining open reference after asynchronous close error: %d\n", err);
+	else
+		ks_schedule_orphans(f);
+	leave_fs(f, saved);
+	kfree(ref);
+}
 static int ks_open_file(struct inode *inode, struct file *file)
 {
 	struct ks_fs *f = inode->i_sb->s_fs_info;
@@ -1139,6 +1164,9 @@ static int ks_open_file(struct inode *inode, struct file *file)
 	ref = kzalloc(sizeof(*ref), GFP_NOFS);
 	if (!ref)
 		return -ENOMEM;
+	ref->fs = f;
+	ref->id = id;
+	INIT_WORK(&ref->cleanup, ks_release_reference);
 	saved = enter_fs(f);
 	err = 0;
 	if (f->references) {
@@ -1177,31 +1205,25 @@ static int ks_release_file(struct inode *inode, struct file *file)
 {
 	struct ks_fs *f = inode->i_sb->s_fs_info;
 	struct ks_file_reference *ref = file->private_data;
-	stqr_object_id id = KS_I(inode)->id;
-	unsigned saved;
-	int err, next;
+	int err;
 	if (!ref)
 		return 0;
-	/* VMAs retain struct file, so this also runs only after the final mmap,
-	 * dup and fork reference has gone. Never reclaim dirty unmapped data. */
+	/* VMAs retain struct file, so this runs after the final mmap/dup/fork
+	 * reference. Dirty bytes must reach accepted storage before dropping their
+	 * lifetime protection; this adds no persistence fence. */
 	err = file_write_and_wait_range(file, 0, LLONG_MAX);
-	saved = enter_fs(f);
-	if (!err && ref->lower_pinned)
-		err = ks_object_reference(f->lower, id, ref->lower, 1);
-	if (!err && ref->upper_pinned) {
-		next = ks_object_reference(f, id, ref->upper, 1);
-		if (next)
-			err = next;
-	}
-	if (err)
-		pr_warn_ratelimited("kstqr: retaining durable open reference after close error: %d\n", err);
-	else
-		ks_schedule_orphans(f);
-	leave_fs(f, saved);
 	file->private_data = NULL;
-	kfree(ref);
+	if (err) {
+		pr_warn_ratelimited("kstqr: retaining open reference after writeback close error: %d\n", err);
+		kfree(ref);
+	} else if (ref->lower_pinned || ref->upper_pinned) {
+		queue_work(f->reference_queue, &ref->cleanup);
+	} else {
+		kfree(ref);
+	}
 	return err;
 }
+
 void ks_schedule_orphans(struct ks_fs *f)
 {
 	if (f->references && !f->readonly && !READ_ONCE(f->stopping))
@@ -1523,6 +1545,14 @@ static void ks_put_super(struct super_block *sb)
 		return;
 	WRITE_ONCE(f->stopping, true);
 	cancel_delayed_work_sync(&f->orphan_work);
+	if (f->lower)
+		WRITE_ONCE(f->lower->stopping, true);
+	/* No cleanup callback may outlive its mount or owner connection. Normal
+	 * close never waits for this queue; explicit teardown owns the drain. */
+	if (f->reference_queue) {
+		destroy_workqueue(f->reference_queue);
+		f->reference_queue = NULL;
+	}
  if (f->read_queue) {
   destroy_workqueue(f->read_queue);
   f->read_queue = NULL;
@@ -1730,6 +1760,8 @@ static int ks_fill_super(struct super_block *sb, struct fs_context *fc)
 	set_default_d_op(sb, &ks_dentry_ops);
  f->read_queue = alloc_workqueue("kstqr-read", WQ_UNBOUND | WQ_MEM_RECLAIM, 0);
  if (!f->read_queue) { ks_put_super(sb); return -ENOMEM; }
+ f->reference_queue = alloc_workqueue("kstqr-unpin", WQ_UNBOUND | WQ_MEM_RECLAIM, 0);
+ if (!f->reference_queue) { ks_put_super(sb); return -ENOMEM; }
 
 	saved = enter_fs(f);
 	err = 0;
