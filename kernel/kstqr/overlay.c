@@ -20,6 +20,11 @@ struct ks_overlay_state {
 	unsigned policies;
 	struct ov_dir **dirs;
 	size_t count;
+	/* Only successfully decoded snapshots have sorted, immutable arrays.
+	 * ov_edit deliberately leaves these fields zero in its mutable clone. */
+	bool immutable, upper_indexed;
+	stqr_object_id *upper_ids;
+	size_t upper_count;
 	struct member orphan_member;
 	stqr_object_id orphan_id;
 	bool orphan, orphan_has_inode;
@@ -40,6 +45,7 @@ static void ov_put(struct ks_overlay_state *s)
 	drop(&s->root_head);
 	sq_free(s->policy);
 	sq_free(s->dirs);
+	sq_free(s->upper_ids);
 	sq_free(s);
 }
 void ks_overlay_stop(struct ks_fs *f)
@@ -47,13 +53,7 @@ void ks_overlay_stop(struct ks_fs *f)
 	ov_put(f->overlay_state);
 	f->overlay_state = NULL;
 }
-static struct ov_dir *ov_find(struct ks_overlay_state *s, stqr_object_id id)
-{
-	for (size_t i = 0; i < s->count; i++)
-		if (eqid(s->dirs[i]->id, id))
-			return s->dirs[i];
-	return NULL;
-}
+#include "overlay_lookup.h"
 static int ov_node(struct ov_dir *d, const struct ks_node *node)
 {
 	struct ks_node n = *node;
@@ -260,6 +260,7 @@ static int ov_decode(const void *raw, size_t length, struct ks_overlay_state **o
 		err = -EUCLEAN;
 		goto fail;
 	}
+	ov_index_snapshot(s);
 	*out = s;
 	return 0;
 fail:
@@ -556,14 +557,6 @@ done:
 	drop(&root);
 	return err;
 }
-static bool ov_upper_ref(struct ks_overlay_state *s, stqr_object_id id)
-{
-	for (size_t i = 0; i < s->count; i++)
-		for (size_t j = 0; j < s->dirs[i]->count; j++)
-			if (!nullid(id) && eqid(s->dirs[i]->entries[j].id, id))
-				return true;
-	return false;
-}
 static int ov_entry(struct ov_dir *d, const char *name, stqr_object_id id)
 {
 	long at = find_entry(d->entries, d->count, name);
@@ -608,7 +601,7 @@ static int ov_entries_info(struct ks_fs *f, struct ks_overlay_state *s, stqr_obj
 		return -ENOMEM;
 	}
 	for (size_t i = 0; i < n; i++) {
-		if (d && find_entry(d->entries, d->count, base[i].name) >= 0)
+		if (d && ov_entry_at(s, d, base[i].name) >= 0)
 			continue;
 		if (ov_upper_ref(s, base[i].id)) {
 			err = -EOPNOTSUPP;
@@ -656,7 +649,7 @@ static int ov_child_proven(struct ks_fs *f, struct ks_overlay_state *s, stqr_obj
 	if (d) {
 		if (d->node.removed)
 			return -ENOENT;
-		at = find_entry(d->entries, d->count, name);
+		at = ov_entry_at(s, d, name);
 		if (at >= 0) {
 			if (nullid(d->entries[at].id))
 				err = -ENOENT;
@@ -1498,7 +1491,7 @@ int ks_overlay_copyup(struct ks_fs *f, stqr_object_id id)
 		}
 		d = ov_find(s, parent);
 		if (d) {
-			long at = find_entry(d->entries, d->count, slash ? slash + 1 : path);
+			long at = ov_entry_at(s, d, slash ? slash + 1 : path);
 			if (at >= 0 && eqid(d->entries[at].id, id)) {
 				err = 0;
 				goto end;
