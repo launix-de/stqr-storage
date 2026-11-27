@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"errors"
 	"io"
+	"slices"
 	"sort"
 )
 
@@ -502,8 +503,20 @@ func (t *transaction) commitReserved(useGuaranteed bool, allowance, guaranteedAl
 		owned = t.replacementOwned
 	}
 	dynamicReserve := uint64(0)
+	var afterUsage StorageSnapshot
+	if t.v.admission != nil || accounts != nil && t.v.observer != nil {
+		afterUsage = t.v.storageSnapshot(accounts, owned, t.sb)
+	}
 	if t.v.admission != nil {
-		dynamicReserve, err = t.v.admission(StorageChange{Before: t.v.usage(t.v.accounting, t.v.sb), After: t.v.usage(accounts, t.sb), BeforeOwned: t.v.ownedUsage(t.v.owned, t.v.accounting, t.v.sb), AfterOwned: t.v.ownedUsage(owned, accounts, t.sb), Temporary: allowance != 0})
+		beforeUsage := t.v.storageSnapshot(t.v.accounting, t.v.owned, t.v.sb)
+		admissionAfter := afterUsage
+		if accounts != nil && t.v.observer != nil {
+			// A callback may alter its temporary slices. Keep the later observer's
+			// publication isolated without repeating the accounting calculation.
+			admissionAfter.All = slices.Clone(afterUsage.All)
+			admissionAfter.Owned = slices.Clone(afterUsage.Owned)
+		}
+		dynamicReserve, err = t.v.admission(StorageChange{Before: beforeUsage.All, After: admissionAfter.All, BeforeOwned: beforeUsage.Owned, AfterOwned: admissionAfter.Owned, Temporary: allowance != 0})
 		if err != nil {
 			return err
 		}
@@ -570,7 +583,7 @@ func (t *transaction) commitReserved(useGuaranteed bool, allowance, guaranteedAl
 			t.v.accounting = accounts
 			t.v.owned = owned
 			if t.v.observer != nil {
-				t.v.observer(StorageSnapshot{All: t.v.usage(accounts, t.sb), Owned: t.v.ownedUsage(owned, accounts, t.sb)})
+				t.v.observer(afterUsage)
 			}
 		}
 		t.v.inFlightReserved -= consumed
@@ -684,7 +697,7 @@ func (t *transaction) commitReserved(useGuaranteed bool, allowance, guaranteedAl
 		t.v.accounting = accounts
 		t.v.owned = owned
 		if t.v.observer != nil {
-			t.v.observer(StorageSnapshot{All: t.v.usage(accounts, t.sb), Owned: t.v.ownedUsage(owned, accounts, t.sb)})
+			t.v.observer(afterUsage)
 		}
 	}
 	t.v.inFlightReserved -= consumed
