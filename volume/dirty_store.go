@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"sync"
 )
 
 // dirtyStore is disposable, UNSYNCED writeback storage, never recovery authority.
@@ -31,6 +32,9 @@ type dirtyStore struct {
 	failed           error
 	createTemp       func() (*os.File, error)
 	sortRun          int
+	indexMu          sync.RWMutex // protects mapping lifetime and coherence with positioned flag writes
+	indexMapping     []byte
+	indexExtent      int64
 }
 
 func newDirtyStore(limit int, noSpill bool) *dirtyStore {
@@ -41,6 +45,10 @@ func (s *dirtyStore) close() {
 		return
 	}
 	s.closed = true
+	s.indexMu.Lock()
+	_ = unmapVolumeFile(s.indexMapping)
+	s.indexMapping = nil
+	s.indexMu.Unlock()
 	for _, f := range []*os.File{s.data, s.index, s.log} {
 		if f != nil {
 			name := f.Name()
@@ -99,7 +107,17 @@ func (s *dirtyStore) writeData(off uint64, p []byte) error {
 	return err
 }
 func (s *dirtyStore) addIndex(off uint64, flag byte) error {
-	if _, err := s.index.WriteAt([]byte{flag}, int64(off/PageSize)); err != nil {
+	s.indexMu.Lock()
+	err := s.growIndexLocked(off / PageSize)
+	if err == nil {
+		var n int
+		n, err = s.index.WriteAt([]byte{flag}, int64(off/PageSize))
+		if err == nil && n != 1 {
+			err = io.ErrShortWrite
+		}
+	}
+	s.indexMu.Unlock()
+	if err != nil {
 		return err
 	}
 	var raw [8]byte
@@ -110,6 +128,40 @@ func (s *dirtyStore) addIndex(off uint64, flag byte) error {
 	}
 	return err
 }
+
+// growIndexLocked extends only virtual/sparse address space, never a heap map
+// or an eagerly loaded volume-sized directory. One byte indexes one data page.
+// Geometric growth avoids a remap per newly dirty page. Returned flags are
+// copied while indexMu is held; no borrowed mapping survives a remap or close.
+func (s *dirtyStore) growIndexLocked(at uint64) error {
+	if at >= uint64(^uint64(0)>>1) {
+		return ErrRange
+	}
+	if at < uint64(s.indexExtent) {
+		return nil
+	}
+	size := max(int64(PageSize), s.indexExtent)
+	for uint64(size) <= at {
+		if size > int64(^uint64(0)>>1)/2 {
+			return ErrRange
+		}
+		size *= 2
+	}
+	if err := s.index.Truncate(size); err != nil {
+		return err
+	}
+	mapping, err := mapVolumeFile(s.index, size)
+	if err != nil {
+		return err
+	}
+	if err = unmapVolumeFile(s.indexMapping); err != nil {
+		_ = unmapVolumeFile(mapping)
+		return err
+	}
+	s.indexMapping, s.indexExtent = mapping, size
+	return nil
+}
+
 func (s *dirtyStore) flag(off uint64) (byte, error) {
 	if s != nil {
 		if s.closed {
@@ -128,8 +180,18 @@ func (s *dirtyStore) flag(off uint64) (byte, error) {
 	if s.index == nil {
 		return 0, nil
 	}
+	s.indexMu.RLock()
+	defer s.indexMu.RUnlock()
+	at := off / PageSize
+	if at >= uint64(s.indexExtent) {
+		return 0, nil
+	}
+	if s.indexMapping != nil {
+		return s.indexMapping[at], nil
+	}
+	// Unsupported mapping platforms retain the bounded positioned-read path.
 	var b [1]byte
-	n, err := s.index.ReadAt(b[:], int64(off/PageSize))
+	n, err := s.index.ReadAt(b[:], int64(at))
 	if err == io.EOF && n == 0 {
 		return 0, nil
 	}
