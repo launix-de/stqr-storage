@@ -37,7 +37,7 @@ func TestKSTQRVirtualMachine(t *testing.T) {
 	// Focused scripts replace the same init section; combining them cannot
 	// represent a valid test and must fail before starting a guest.
 	selectedMode := ""
-	for _, mode := range []string{"POSTRESTART_PIN", "ASYNC_UNPIN", "SHARED_PINS", "CACHE_REOPEN", "BENCHMARK", "WRITE_BENCHMARK", "READ_WINDOW", "LOOP", "RESTART_ONLY", "OVERLAY", "OVERLAY_PROOF", "OUTAGE", "CACHE_RETENTION", "REFERENCE_LIMIT"} {
+	for _, mode := range []string{"CACHE_NEGATIVE", "POSTRESTART_PIN", "ASYNC_UNPIN", "SHARED_PINS", "CACHE_REOPEN", "BENCHMARK", "WRITE_BENCHMARK", "READ_WINDOW", "LOOP", "RESTART_ONLY", "OVERLAY", "OVERLAY_PROOF", "OUTAGE", "CACHE_RETENTION", "REFERENCE_LIMIT"} {
 		if os.Getenv("STQR_KERNEL_"+mode) == "1" {
 			if selectedMode != "" {
 				t.Fatalf("incompatible kernel fixture modes %s and %s; run them separately", selectedMode, mode)
@@ -53,7 +53,11 @@ func TestKSTQRVirtualMachine(t *testing.T) {
 	// the complete VM suite; keep a bounded budget for loaded CI hosts.
 	ctx, cancel := context.WithTimeout(context.Background(), 480*time.Second)
 	defer cancel()
-	root, err := filepath.Abs("../kernel/kstqr")
+	sourceRoot := os.Getenv("STQR_KERNEL_SOURCE_ROOT")
+	if sourceRoot == "" {
+		sourceRoot = "../kernel/kstqr"
+	}
+	root, err := filepath.Abs(sourceRoot)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -817,7 +821,7 @@ func TestKSTQRVirtualMachine(t *testing.T) {
 	if err = fs.SetXattr(ctx, file.ID, "user.from-go", []byte("Go metadata"), 0); err != nil {
 		t.Fatal(err)
 	}
-	if !benchmark && os.Getenv("STQR_KERNEL_OVERLAY") != "1" {
+	if !benchmark && os.Getenv("STQR_KERNEL_CACHE_NEGATIVE") != "1" && os.Getenv("STQR_KERNEL_OVERLAY") != "1" {
 		orphan, e := fs.Create(ctx, client.FilesystemRootID(), "online-orphan", 0600, 0, 0, false)
 		if e != nil {
 			t.Fatal(e)
@@ -1128,16 +1132,16 @@ rmmod kstqr
 
 	var nativeUpperID client.ID
 	var watcher *client.Client
-	if os.Getenv("STQR_KERNEL_OVERLAY") == "1" || os.Getenv("STQR_KERNEL_OVERLAY_PROOF") == "1" {
-		// Keep mapped lower files larger than the deliberately tiny cache used
-		// by overlay-cache-quiet. Eviction must not refill that same cache from
-		// an all-inode invalidation worker while the guest is otherwise idle.
+	if os.Getenv("STQR_KERNEL_CACHE_NEGATIVE") == "1" || os.Getenv("STQR_KERNEL_OVERLAY") == "1" || os.Getenv("STQR_KERNEL_OVERLAY_PROOF") == "1" {
+		// External-data files have compact inode heads that can become ready
+		// before the small cache evicts them. Oversized inline heads merely
+		// refuse initial coverage and are not a valid eviction positive control.
 		for n := 0; n < 32; n++ {
 			file, err := fs.Create(ctx, client.FilesystemRootID(), fmt.Sprintf("lower-cache-pressure-%d", n), 0644, 0, 0, false)
 			if err != nil {
 				t.Fatal(err)
 			}
-			if _, err = fs.WriteAt(ctx, file.ID, bytes.Repeat([]byte("L"), 4096), 0); err != nil {
+			if _, err = fs.WriteAt(ctx, file.ID, bytes.Repeat([]byte("L"), 8192), 0); err != nil {
 				t.Fatal(err)
 			}
 		}
@@ -1319,9 +1323,15 @@ if mkdir /fresh/other; then exit 1; fi
 /mount.kstqr --uri %[1]s --bucket %[2]s --readonly-bucket %[3]s --credentials /credentials /mnt
 /overlay-test
 umount /mnt
+# Exercise tightly bounded cache pressure separately from the remote-write
+# assertions at their original 8KiB budget. The C probe requires observing
+# real invalidation work and rejects any native I/O from that worker.
+/mount.kstqr --uri %[1]s --bucket %[2]s --readonly-bucket %[3]s --credentials /credentials --metadata-cache-bytes 512 /mnt
+/overlay-cache-quiet --lower-pressure
+umount /mnt
 /mount.kstqr --uri %[1]s --bucket %[2]s --readonly-bucket %[3]s --credentials /credentials --metadata-cache-bytes 8192 /mnt
 /mount.kstqr --uri %[1]s --bucket %[2]s --readonly-bucket %[3]s --credentials /credentials /other
-/overlay-cache-quiet
+/overlay-cache-quiet --overlay-updates
 umount /other
 umount /mnt
 umount /fresh
@@ -1397,6 +1407,35 @@ poweroff -f
 		default:
 			t.Fatal("unknown overlay proof case")
 		}
+	}
+
+	if os.Getenv("STQR_KERNEL_CACHE_NEGATIVE") == "1" {
+		run("cc", "-static", "-std=c11", "-Wall", "-Wextra", "-Werror", "-O2", "-o", filepath.Join(initrdRoot, "cache-negative"), filepath.Join(root, "tests/cache_negative_invalidation.c"))
+		init = fmt.Sprintf(`#!/bin/sh
+set -eu
+export PATH=/bin
+/bin/busybox --install -s /bin
+trap 'echo KSTQR_VM_FAIL; poweroff -f' EXIT
+mount -t proc proc /proc
+mount -t sysfs sys /sys
+mount -t devtmpfs dev /dev
+mkdir -p /sys/kernel/tracing
+ip link set lo up
+ip link set eth0 up
+ip addr add 10.0.2.15/24 dev eth0
+ip route add default via 10.0.2.2
+insmod /kstqr.ko
+/mount.kstqr --uri %[1]s --bucket %[2]s --readonly-bucket %[3]s --credentials /credentials /mnt
+/mount.kstqr --uri %[1]s --bucket %[2]s --readonly-bucket %[3]s --credentials /credentials /other
+/cache-negative
+umount /other
+umount /mnt
+rmmod kstqr
+if dmesg | grep -E 'BUG:|WARNING:|Oops:|KASAN:'; then exit 1; fi
+echo KSTQR_VM_PASS
+trap - EXIT
+poweroff -f
+`, endpoint, nativeUpperID.String(), client.ID(b.ID()).String())
 	}
 
 	if os.Getenv("STQR_KERNEL_CACHE_RETENTION") == "1" {
@@ -1570,8 +1609,9 @@ poweroff -f
 		t.Fatalf("cpio: %v %s", err, packErr.String())
 	}
 	guestMemory := "512M"
-	if os.Getenv("STQR_KERNEL_OVERLAY_PROOF") == "1" || os.Getenv("STQR_KERNEL_REFERENCE_LIMIT") == "1" {
-		// The isolated fixture initrd requires 1 GiB to unpack.
+	if os.Getenv("STQR_KERNEL_CACHE_NEGATIVE") == "1" || os.Getenv("STQR_KERNEL_OVERLAY") == "1" || os.Getenv("STQR_KERNEL_OVERLAY_PROOF") == "1" || os.Getenv("STQR_KERNEL_REFERENCE_LIMIT") == "1" {
+		// These fixtures need 1 GiB to unpack their static test binaries and
+		// debug module, including the longer-path original-source control.
 		guestMemory = "1024M"
 	}
 	args := []string{"-machine", "q35", "-m", guestMemory, "-smp", "2", "-display", "none", "-serial", "stdio", "-monitor", "none", "-no-reboot", "-kernel", image, "-initrd", archive, "-append", "console=ttyS0 panic=1 oops=panic panic_on_warn=1 rdinit=/init loglevel=6", "-nic", "user,model=virtio-net-pci"}
@@ -1655,6 +1695,18 @@ poweroff -f
 		}
 		for _, line := range strings.Split(string(output), "\n") {
 			if strings.Contains(line, "reference-limit:") || strings.Contains(line, "KSTQR_REFERENCE_LIMIT_PASS") {
+				t.Log(strings.TrimSpace(line))
+			}
+		}
+		return
+	}
+
+	if os.Getenv("STQR_KERNEL_CACHE_NEGATIVE") == "1" {
+		if !strings.Contains(string(output), "KSTQR_NEGATIVE_INVALIDATION_PASS") {
+			t.Fatalf("negative invalidation probe did not pass: %s", output)
+		}
+		for _, line := range strings.Split(string(output), "\n") {
+			if strings.Contains(line, "negative-cache:") || strings.Contains(line, "KSTQR_NEGATIVE_INVALIDATION_PASS") {
 				t.Log(strings.TrimSpace(line))
 			}
 		}

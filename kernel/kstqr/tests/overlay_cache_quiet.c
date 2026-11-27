@@ -106,8 +106,12 @@ static void lower_pressure(void) {
     CHECK(!munmap(mapped[i], 4096));
   alarm(0);
 }
-int main(void) {
-  lower_pressure();
+int main(int argc, char **argv) {
+  if (argc == 2 && !strcmp(argv[1], "--lower-pressure")) {
+    lower_pressure();
+    return 0;
+  }
+  CHECK(argc == 2 && !strcmp(argv[1], "--overlay-updates"));
   char initial[4096];
   memset(initial, 'x', sizeof(initial));
   int original = open("/mnt/mmap-evicted", O_CREAT | O_TRUNC | O_RDWR, 0600);
