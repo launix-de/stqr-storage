@@ -2,6 +2,7 @@
 package server
 
 import (
+	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
@@ -43,16 +44,33 @@ func awaitStatsNativeWait(t *testing.T) {
 }
 
 func TestCollectStatsReleasesNodeLockBeforeNativeVolumeWait(t *testing.T) {
-	v, err := volume.NewRAM(8 << 20)
+	v, err := volume.New(filepath.Join(t.TempDir(), "stats-volume"), 8<<20, volume.HDD)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer v.Close()
+	// Produce real backend write history, rather than letting the retirement
+	// assertion pass on zero counters from a fresh/RAM-only instance.
+	seed, err := v.Open(true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = seed.Put(volume.Key{Bucket: volume.ID{1}, Object: volume.ObjectID{1}}, []byte("history"), volume.Options{Accepted: true})
+	seed.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = v.Sync(); err != nil {
+		t.Fatal(err)
+	}
 	id := v.Identity().VolumeID.String()
 	m := &managedVolume{store: v, config: VolumeConfig{ID: id, Path: "before", State: "active"}}
 	s := &Server{cfg: Config{Node: NodeConfig{ID: newID()}, Generation: 7}, volumes: map[string]*managedVolume{id: m}}
 	s.retiredIO.PhysicalReadBytes = 11
 	nativeIO := volumeAccessIO(v.IOStats())
+	if nativeIO.PhysicalWriteBytes == 0 {
+		t.Fatal("fixture has no native I/O history positive control")
+	}
 	h, err := v.Open(true)
 	if err != nil {
 		t.Fatal(err)
@@ -94,11 +112,11 @@ func TestCollectStatsReleasesNodeLockBeforeNativeVolumeWait(t *testing.T) {
 	if snap.Generation != 7 || snap.NodeState != 0 || len(snap.Volumes) != 1 || snap.Volumes[0].Path != "before" || snap.Volumes[0].State == 0 {
 		t.Fatalf("configuration escaped its coherent snapshot: %+v", snap)
 	}
-	if snap.IO.PhysicalReadBytes != 11+nativeIO.PhysicalReadBytes {
+	if snap.IO.PhysicalReadBytes != 11+nativeIO.PhysicalReadBytes || snap.IO.PhysicalWriteBytes != nativeIO.PhysicalWriteBytes {
 		t.Fatal("detach history counted twice or lost", snap.IO)
 	}
 	next := s.CollectStats(client.StatsFilter{})
-	if len(next.Volumes) != 0 || next.Generation != 99 || next.NodeState != 2 || next.IO.PhysicalReadBytes != snap.IO.PhysicalReadBytes {
+	if len(next.Volumes) != 0 || next.Generation != 99 || next.NodeState != 2 || next.IO.PhysicalReadBytes != snap.IO.PhysicalReadBytes || next.IO.PhysicalWriteBytes != snap.IO.PhysicalWriteBytes {
 		t.Fatal("subsequent snapshot did not see completed detach/config", next)
 	}
 }
