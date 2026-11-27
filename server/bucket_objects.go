@@ -594,7 +594,7 @@ func (b *Bucket) mutateAttempt(ctx context.Context, p principal, id volume.Objec
 			return volume.Result{}, err
 		}
 	}
-	if !p.cowInternal {
+	if !p.cowInternal && !bucketLocalReferenceRoot(id) {
 		if cowLinked {
 			g, e := s.cowGraph()
 			if e != nil {

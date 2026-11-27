@@ -79,6 +79,32 @@ func (s *Server) cowSync(ctx context.Context, bucket volume.ID) error {
 	}
 	return nil
 }
+
+// cowTransferableLogicalUsage is used under the single-node mutation/admin
+// lock. The source usage includes every visible live object once. The reserved
+// reference root is bucket-local, so subtract only the source's own visible
+// live record, never a peer's root or a tombstone. A legacy physical copy with
+// a foreign ORF1 owner still consumes source bytes, but is equally nontransferable;
+// inspect metadata only and do not rewrite or retire any holder tokens here.
+func (b *Bucket) cowTransferableLogicalUsage(ctx context.Context) (uint64, error) {
+	used, err := b.logicalUsage()
+	if err != nil {
+		return 0, err
+	}
+	root, err := b.server.cowLogicalSnapshot(ctx, b.ID(), volume.ObjectID(client.ObjectReferenceRootID()), true)
+	if err != nil {
+		return 0, err
+	}
+	defer root.close()
+	if root != nil && !root.Info.Deleted {
+		if root.Info.Length > used {
+			return 0, volume.ErrCorrupt
+		}
+		used -= root.Info.Length
+	}
+	return used, nil
+}
+
 func (s *Server) cloneCow(ctx context.Context, m client.Message, p principal) ([]byte, error) {
 	if err := s.requireAdmin(p); err != nil {
 		return nil, err
@@ -132,7 +158,7 @@ func (s *Server) cloneCow(ctx context.Context, m client.Message, p principal) ([
 		}
 		a, b := src.Describe(), dst.Describe()
 		if !target.metadataPreview && !b.Policy.Limits.Unlimited && b.Policy.Limits.Accounting == "logical" {
-			used, err := src.logicalUsage()
+			used, err := src.cowTransferableLogicalUsage(ctx)
 			if err != nil {
 				return err
 			}
