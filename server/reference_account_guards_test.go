@@ -11,6 +11,7 @@ import (
 	"github.com/launix-de/stqr-storage/volume"
 	"net/http/httptest"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 )
@@ -402,5 +403,29 @@ func TestReferencePruneGuardRejectsExactPendingReplicaBeforePublication(t *testi
 	f.s.opMu.RUnlock()
 	if err != nil {
 		t.Fatal("completed pending marker still blocked exact lookup", err)
+	}
+}
+
+func TestReferencePrunePreservesNoncanonicalPresentIDsAndRejectsUnknownIDs(t *testing.T) {
+	s := &Server{}
+	owner, gone := volume.ID{0xab}, volume.ID{0xcd}
+	entries := guardEntries(owner)
+	entries[0].account = gone
+	canonical := owner.String()
+	for _, name := range []string{strings.ToUpper(canonical), canonical[:8] + "-" + canonical[8:12] + "-" + canonical[12:16] + "-" + canonical[16:20] + "-" + canonical[20:]} {
+		guardIndex(t, s, []account{{ID: name, Name: "present-disabled", Role: "USER", Disabled: true, PasswordHash: "unused"}})
+		kept, _, err := s.pruneAbsentPlainReferencePins(context.Background(), nil, entries)
+		if err != nil || len(kept) != len(entries)-1 {
+			t.Fatal("present ID misclassified as absent", name, len(kept), err)
+		}
+		for _, entry := range kept {
+			if entry.account != owner {
+				t.Fatal("wrong owner retained")
+			}
+		}
+	}
+	guardIndex(t, s, []account{{ID: "unparseable-account-ID", Name: "uncertain", Role: "USER"}})
+	if _, _, err := s.pruneAbsentPlainReferencePins(context.Background(), nil, entries); statusOf(err) != 503 {
+		t.Fatal("malformed account image used as absence evidence", err)
 	}
 }

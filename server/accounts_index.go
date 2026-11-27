@@ -1,7 +1,10 @@
 // SPDX-License-Identifier: GPL-3.0-only
 package server
 
-import "errors"
+import (
+	"errors"
+	"github.com/launix-de/stqr-storage/volume"
+)
 
 // accountsIndex is the immutable serving view of the persistent accounts object.
 // The admin volume is read at recovery/bootstrap, never for a runtime lookup.
@@ -11,13 +14,15 @@ import "errors"
 // Readers must not mutate image or its slices; mutable admin operations receive
 // a deep copy through readBlob. No failed persistence may publish a new index.
 type accountsIndex struct {
-	image         accountsImage
-	byName        map[string]int
-	byID          map[string]int
-	byAccessKey   map[string]accountAccessKey
-	byReceipt     map[string]int
-	admin         int
-	referenceAuth []*referenceAccountStamp
+	image                accountsImage
+	byName               map[string]int
+	byID                 map[string]int
+	byAccessKey          map[string]accountAccessKey
+	byReceipt            map[string]int
+	admin                int
+	referenceAuth        []*referenceAccountStamp
+	referenceOwners      map[volume.ID]struct{}
+	referenceOwnersKnown bool
 }
 
 type accountAccessKey struct {
@@ -43,9 +48,14 @@ func newAccountsIndex(image accountsImage) (*accountsIndex, error) {
 	if image.Schema != 1 {
 		return nil, errors.New("invalid system account image")
 	}
-	x := &accountsIndex{referenceAuth: make([]*referenceAccountStamp, len(image.Users)), image: cloneAccountsImage(image), byName: make(map[string]int, len(image.Users)), byID: make(map[string]int, len(image.Users)), byAccessKey: make(map[string]accountAccessKey), byReceipt: make(map[string]int, len(image.Receipts)), admin: -1}
+	x := &accountsIndex{referenceOwners: make(map[volume.ID]struct{}, len(image.Users)), referenceOwnersKnown: true, referenceAuth: make([]*referenceAccountStamp, len(image.Users)), image: cloneAccountsImage(image), byName: make(map[string]int, len(image.Users)), byID: make(map[string]int, len(image.Users)), byAccessKey: make(map[string]accountAccessKey), byReceipt: make(map[string]int, len(image.Receipts)), admin: -1}
 	for i, u := range x.image.Users {
 		x.referenceAuth[i] = new(referenceAccountStamp)
+		if id, err := parseID(u.ID); err == nil {
+			x.referenceOwners[id] = struct{}{}
+		} else {
+			x.referenceOwnersKnown = false
+		}
 		if _, exists := x.byName[u.Name]; exists {
 			return nil, errors.New("duplicate account name")
 		}

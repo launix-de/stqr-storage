@@ -84,7 +84,7 @@ type referencePruneKey struct{}
 type referencePruneGuard struct {
 	accounts *accountsIndex
 	bucket   volume.ID
-	absent   map[string]struct{}
+	absent   map[volume.ID]struct{}
 }
 
 // No control/authority uncertainty is evidence that an account is absent. This
@@ -123,14 +123,14 @@ func (s *Server) pruneAbsentPlainReferencePins(ctx context.Context, b *Bucket, e
 		return entries, ctx, nil
 	}
 	x, err := s.accountIndex()
-	if err != nil {
+	if err != nil || !x.referenceOwnersKnown {
 		return nil, ctx, fail(503, "reference cleanup account authority is unavailable")
 	}
 	prior, _ := ctx.Value(referencePruneKey{}).(*referencePruneGuard)
 	if prior != nil && prior.accounts != x {
 		return nil, ctx, volume.ErrPrecondition
 	}
-	absent := map[string]struct{}{}
+	absent := map[volume.ID]struct{}{}
 	if prior != nil {
 		for id := range prior.absent {
 			absent[id] = struct{}{}
@@ -138,13 +138,13 @@ func (s *Server) pruneAbsentPlainReferencePins(ctx context.Context, b *Bucket, e
 	}
 	var kept []objectReferenceEntry
 	for i, r := range entries {
-		_, present := x.byID[r.account.String()]
+		_, present := x.referenceOwners[r.account]
 		if !r.claim && !r.dependency && !present {
 			if kept == nil {
 				kept = make([]objectReferenceEntry, 0, len(entries))
 				kept = append(kept, entries[:i]...)
 			}
-			absent[r.account.String()] = struct{}{}
+			absent[r.account] = struct{}{}
 		} else if kept != nil {
 			kept = append(kept, r)
 		}
@@ -220,11 +220,11 @@ func (s *Server) validateReferenceMutation(ctx context.Context, p principal, id 
 		}
 	}
 	current, err := s.accountIndex()
-	if err != nil || current != guard.accounts {
+	if err != nil || current != guard.accounts || !current.referenceOwnersKnown {
 		return volume.ErrPrecondition
 	}
 	for absent := range guard.absent {
-		if _, present := current.byID[absent]; present {
+		if _, present := current.referenceOwners[absent]; present {
 			return volume.ErrPrecondition
 		}
 	}
