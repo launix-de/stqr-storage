@@ -85,7 +85,10 @@ use the same-origin tunnel when browsers cannot reach those addresses directly.
 ## Native API parity
 
 All operations are Promises and may complete out of order. Await dependent
-operations or fence them explicitly. IDs are canonical hexadecimal native addresses:
+operations before using their results. Durability fences capture receipt marks
+already observed and no-ACK submissions already sent. Await ordinary mutation
+Promises before capturing a fence; an unresolved Promise is not a fence target.
+IDs are canonical hexadecimal native addresses:
 64 digits for objects, 32 for buckets/request IDs. The SDK never rehashes caller
 object IDs. Lengths and offsets use BigInt; unsafe Number integers are rejected.
 
