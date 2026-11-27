@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"path/filepath"
 	"reflect"
 	"sort"
@@ -84,6 +85,7 @@ type rangeTxn struct {
 	plan                                                          rangePlan
 	lease                                                         sync.RWMutex
 	fenced                                                        bool
+	fencing                                                       bool // transient authority-header invalidation; protected by r.mu
 	digest                                                        [32]byte
 	sourceReady, targetReady, commitProof, targetDone, sourceDone client.Proof
 	decision                                                      *rangeCommit
@@ -109,6 +111,7 @@ type rangeManager struct {
 	journal          *controlJournal
 	node             client.ID
 	txns             map[[32]byte]*rangeTxn
+	activeTxns       map[volume.ID]map[[32]byte]*rangeTxn
 	order            [][32]byte
 	initialized      bool
 	memoCursor       *volume.Key
@@ -118,7 +121,7 @@ type rangeManager struct {
 func (s *Server) initRanges(dataDir string) error {
 	node, _ := parseID(s.cfg.Node.ID)
 	cluster, _ := parseID(s.cfg.ClusterID)
-	r := &rangeManager{server: s, node: client.ID(node), txns: make(map[[32]byte]*rangeTxn), capacityWake: make(chan struct{}, 1)}
+	r := &rangeManager{server: s, node: client.ID(node), txns: make(map[[32]byte]*rangeTxn), activeTxns: make(map[volume.ID]map[[32]byte]*rangeTxn), capacityWake: make(chan struct{}, 1)}
 	if s.cfg.RangeVersion > 1 {
 		return volume.ErrUnsupported
 	}
@@ -349,6 +352,7 @@ func (r *rangeManager) replay(record controlRecord) error {
 	default:
 		return volume.ErrCorrupt
 	}
+	r.updateActiveTxnLocked(event.ID)
 	return nil
 }
 func (r *rangeManager) validCommit(t *rangeTxn, c rangeCommit, observed bool) bool {
@@ -568,6 +572,18 @@ func (r *rangeManager) destination(p rangePlan) (*volume.Volume, error) {
 	return managed.store, nil
 }
 func (r *rangeManager) fence(id [32]byte) error {
+	for {
+		err := r.fenceAuthorityAttempt(id)
+		var wait *authorityWait
+		if !errors.As(err, &wait) {
+			return err
+		}
+		if err = wait.wait(r.server.ctx); err != nil {
+			return err
+		}
+	}
+}
+func (r *rangeManager) fenceAuthorityAttempt(id [32]byte) error {
 	r.server.opMu.Lock()
 	defer r.server.opMu.Unlock()
 	r.mu.Lock()
@@ -582,26 +598,46 @@ func (r *rangeManager) fence(id [32]byte) error {
 		return err
 	}
 	t.lease.Lock()
-	defer t.lease.Unlock()
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	if err := r.server.scopedTransition(nil); err != nil {
+		r.mu.Unlock()
+		t.lease.Unlock()
 		return err
 	}
 	if t.aborted || t.forceRetired {
+		r.mu.Unlock()
+		t.lease.Unlock()
 		return errControlConflict
 	}
 	if t.fenced {
+		r.mu.Unlock()
+		t.lease.Unlock()
 		return nil
 	}
 	if t.plan.Source != r.node {
+		r.mu.Unlock()
+		t.lease.Unlock()
 		return errControlConflict
 	}
-	if err := r.server.invalidateVolumeAuthorityLocked(t.plan); err != nil {
+	if !t.fencing {
+		t.fencing = true
+		r.server.dirtyVolumeAuthority()
+	}
+	r.mu.Unlock()
+	t.lease.Unlock()
+	// New writers recheck this transient range fence under opMu. No broad
+	// mutex or range lease survives the returned physical-wait token.
+	if err := r.server.ensureVolumeAuthorityLocked(); err != nil {
 		return err
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if t.aborted || t.forceRetired {
+		return errControlConflict
 	}
 	_, err := r.persist(rangeFenced, rangeEvent{ID: id})
 	if err == nil {
+		t.fencing = false
 		r.server.objectSubscriptions.resyncWhere(func(key volume.Key) bool {
 			return client.ID(key.Bucket) == t.plan.Before.Bucket && t.plan.contains(key.Object)
 		})
@@ -663,7 +699,19 @@ func (r *rangeManager) readyWithForce(id, digest [32]byte, source bool, force *c
 func (r *rangeManager) commit(c rangeCommit) (client.Proof, error) {
 	return r.commitWithForce(c, nil)
 }
-func (r *rangeManager) commitWithForce(c rangeCommit, force *controlClaim) (proof client.Proof, err error) {
+func (r *rangeManager) commitWithForce(c rangeCommit, force *controlClaim) (client.Proof, error) {
+	for {
+		proof, err := r.commitAuthorityAttempt(c, force)
+		var wait *authorityWait
+		if !errors.As(err, &wait) {
+			return proof, err
+		}
+		if err = wait.wait(r.server.ctx); err != nil {
+			return client.Proof{}, err
+		}
+	}
+}
+func (r *rangeManager) commitAuthorityAttempt(c rangeCommit, force *controlClaim) (proof client.Proof, err error) {
 	r.server.opMu.Lock()
 	defer r.server.opMu.Unlock()
 	r.mu.Lock()
@@ -788,10 +836,47 @@ func (r *rangeManager) done(id [32]byte, targetProof *client.Proof) (client.Proo
 	return r.persist(rangeSourceDone, rangeEvent{ID: id, TargetDone: *targetProof})
 }
 
+// activeBucketLocked is a routing index, not a second authority record.
+// Historical transactions stay in txns for proof replay and peer catch-up.
+// All activity-changing fields are written by replay, which updates this index
+// before releasing r.mu. The one-time build also supports recovered managers.
+func (r *rangeManager) activeBucketLocked(bucket volume.ID) map[[32]byte]*rangeTxn {
+	if r.activeTxns == nil {
+		r.activeTxns = make(map[volume.ID]map[[32]byte]*rangeTxn)
+		for id := range r.txns {
+			r.updateActiveTxnLocked(id)
+		}
+	}
+	return r.activeTxns[bucket]
+}
+
+func (r *rangeManager) updateActiveTxnLocked(id [32]byte) {
+	if r.activeTxns == nil {
+		// No readers have built the derived index yet. Replay need not scan history.
+		return
+	}
+	txn := r.txns[id]
+	if txn == nil {
+		return
+	}
+	bucket := volume.ID(txn.plan.Before.Bucket)
+	if !r.active(txn) {
+		delete(r.activeTxns[bucket], id)
+		if len(r.activeTxns[bucket]) == 0 {
+			delete(r.activeTxns, bucket)
+		}
+		return
+	}
+	if r.activeTxns[bucket] == nil {
+		r.activeTxns[bucket] = make(map[[32]byte]*rangeTxn)
+	}
+	r.activeTxns[bucket][id] = txn
+}
+
 func (r *rangeManager) guard(bucket volume.ID, object volume.ObjectID) (func(), error) {
 	r.mu.Lock()
 	var active []*rangeTxn
-	for _, t := range r.txns {
+	for _, t := range r.activeBucketLocked(bucket) {
 		if r.active(t) && volume.ID(t.plan.Before.Bucket) == bucket && t.plan.contains(object) {
 			active = append(active, t)
 		}
@@ -808,7 +893,7 @@ func (r *rangeManager) guard(bucket volume.ID, object volume.ObjectID) (func(), 
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	for _, t := range active {
-		if t.plan.Source == r.node && t.fenced && !(t.plan.Target == r.node && t.decision != nil) {
+		if t.plan.Source == r.node && (t.fenced || t.fencing) && !(t.plan.Target == r.node && t.decision != nil) {
 			release()
 			return nil, fail(503, "range is fenced for durable handoff")
 		}
@@ -818,7 +903,7 @@ func (r *rangeManager) guard(bucket volume.ID, object volume.ObjectID) (func(), 
 func (r *rangeManager) incoming(bucket volume.ID, object volume.ObjectID) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	for _, t := range r.txns {
+	for _, t := range r.activeBucketLocked(bucket) {
 		if !t.plan.ReplicaRemove && !t.plan.ReplicaPromote && !t.plan.ReplicaRelocate && r.active(t) && t.plan.Target == r.node && t.plan.Source != r.node && t.decision == nil && volume.ID(t.plan.Before.Bucket) == bucket && t.plan.contains(object) {
 			return true
 		}

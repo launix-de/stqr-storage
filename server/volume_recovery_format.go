@@ -4,7 +4,6 @@ package server
 import (
 	"crypto/sha256"
 	"encoding/json"
-	"reflect"
 
 	"github.com/launix-de/stqr-storage/client"
 )
@@ -123,7 +122,13 @@ func (s *Server) bucketAwaitingRecovery(bucket client.ID) bool {
 // Policy/ACL/quota revisions can change without changing the writer or the
 // physical cohort. Ownership epochs, scope and locations decide provenance.
 func sameRangeAuthority(a, b client.RangeEntry) bool {
-	a.PolicyVersion = 0
-	b.PolicyVersion = 0
-	return reflect.DeepEqual(a, b)
+	if a.Start != b.Start || a.PrefixBits != b.PrefixBits || a.OwnerEpoch != b.OwnerEpoch || a.State != b.State || a.Runtime != b.Runtime || len(a.Locations) != len(b.Locations) || (a.Locations == nil) != (b.Locations == nil) {
+		return false
+	}
+	for i := range a.Locations {
+		if a.Locations[i] != b.Locations[i] {
+			return false
+		}
+	}
+	return true
 }

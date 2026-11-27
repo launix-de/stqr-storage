@@ -66,7 +66,7 @@ func (h *Handle) SetLocalMetadata(data []byte) error {
 // SetLocalMetadataWithOptions lets a trusted importer spend its own reserved
 // physical budget. Other buckets' and other imports' reserves remain protected.
 func (h *Handle) SetLocalMetadataWithOptions(data []byte, options Options) error {
-	return h.do(true, func(v *Volume) error { return v.setLocalMetadataLocked(data, options, nil) })
+	return h.doAcceptedOptions(options, func(v *Volume) error { return v.setLocalMetadataLocked(data, options, nil) })
 }
 func (v *Volume) setLocalMetadataLocked(data []byte, options Options, node *ID) error {
 	if len(data) > MaxLocalMetadataBytes {
@@ -160,16 +160,26 @@ func (v *Volume) ReassignIdentity(expected Identity, node ID) error {
 // identify the new owner; no intermediate provenance gap can become durable.
 // The same fencing/cluster-decision contract as ReassignIdentity applies.
 func (v *Volume) ReassignIdentityWithMetadata(expected Identity, node ID, data []byte) error {
-	v.mu.Lock()
-	defer v.mu.Unlock()
-	if err := v.check(true); err != nil {
+	return v.ReassignIdentityWithMetadataOptions(expected, node, data, Options{})
+}
+
+// ReassignIdentityWithMetadataOptions retains the same administrative fencing
+// contract. Accepted stages owner and proof in one transaction without Sync;
+// the caller MUST checkpoint its captured generation before attaching the device
+// or acknowledging the recovered ownership. Legacy callers remain durable.
+func (v *Volume) ReassignIdentityWithMetadataOptions(expected Identity, node ID, data []byte, options Options) error {
+	h, err := v.Open(true)
+	if err != nil {
 		return err
 	}
-	if node == (ID{}) || expected.ClusterID == (ID{}) {
-		return ErrIdentity
-	}
-	if v.sb.Identity != expected {
-		return ErrPrecondition
-	}
-	return v.setLocalMetadataLocked(data, Options{}, &node)
+	defer h.Close()
+	return h.doAcceptedOptions(options, func(v *Volume) error {
+		if node == (ID{}) || expected.ClusterID == (ID{}) {
+			return ErrIdentity
+		}
+		if v.sb.Identity != expected {
+			return ErrPrecondition
+		}
+		return v.setLocalMetadataLocked(data, options, &node)
+	})
 }

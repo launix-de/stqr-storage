@@ -12,13 +12,21 @@ import (
 // The cache contains one scalar per bucket, not one entry per object. Growth
 // admission must not walk a million-object index for every ten-byte APPEND.
 // A committed placement image invalidates the count after handoff/checkpoint;
-// local writes adjust it while holding this mutex through the storage commit.
+// exclusive legacy writes hold this mutex through commit; parallel publishers
+// reserve growth and settle committed deltas in short critical sections.
 type bucketUsage struct {
-	mu         sync.Mutex
-	valid      bool
-	bytes      uint64
-	placement  *placementImage
-	generation uint64 // bucket catalog revision; never an object-content counter
+	mu                    sync.Mutex
+	valid                 bool
+	bytes                 uint64
+	reservedGrowth        uint64
+	activeTickets         uint64
+	activeAdmissions      uint64
+	replicaProofSequence  uint64
+	replicaProofPlacement *placementImage
+	replicaProofRevision  uint64
+	replicaProofValid     bool
+	placement             *placementImage
+	generation            uint64 // bucket catalog revision; never an object-content counter
 }
 
 func (b *Bucket) usageStamp() (*placementImage, uint64) {
@@ -40,6 +48,12 @@ func (b *Bucket) logicalUsage() (uint64, error) {
 	if u.valid && u.placement == placement && u.generation == generation {
 		return u.bytes, nil
 	}
+	// Never scan volumes while a parallel publisher can need this mutex to
+	// settle its counters under its Volume handle. Exclusive cold admission
+	// waits for those publishers and reconstructs once; stats report unknown.
+	if u.activeAdmissions != 0 {
+		return 0, fail(503, "bucket usage awaits active publishers")
+	}
 	var value uint64
 	var err error
 	if len(b.storageDescription().ClonePeers) > 0 {
@@ -58,9 +72,10 @@ func (b *Bucket) logicalUsage() (uint64, error) {
 	return value, nil
 }
 
-// Caller holds usage.mu and has closed its volume write handle. Readers always
-// acquire usage.mu before opening scan handles, preventing a lock inversion and
-// a count refreshed between a commit and its incremental adjustment.
+// Caller holds usage.mu. Exclusive callers have closed their Volume handle;
+// parallel callers settle before Close while activeAdmissions prevents a cold
+// reader from scanning volumes under this mutex. Cache hits never take a Volume
+// lock, preventing an inversion or a refresh between publication and adjustment.
 func (b *Bucket) updateUsage(old, next uint64, repeated bool, err error) {
 	u := &b.usage
 	if err != nil {

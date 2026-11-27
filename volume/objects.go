@@ -500,11 +500,11 @@ func (v *Volume) mutateCore(op uint8, k Key, offset, length uint64, src io.Reade
 		if !alive || uint64(len(expected)) != o.Info.Length {
 			return Result{}, ErrPrecondition
 		}
-		actual := make([]byte, len(expected))
-		if e = v.readObject(o, actual, 0); e != nil {
-			return Result{}, e
+		equal, err := v.compareObject(o, 0, expected)
+		if err != nil {
+			return Result{}, err
 		}
-		if !bytes.Equal(actual, expected) {
+		if !equal {
 			return Result{}, ErrPrecondition
 		}
 	}
@@ -512,11 +512,11 @@ func (v *Volume) mutateCore(op uint8, k Key, offset, length uint64, src io.Reade
 		if !alive || end > o.Info.Length {
 			return Result{}, ErrPrecondition
 		}
-		actual := make([]byte, len(expected))
-		if e = v.readObject(o, actual, offset); e != nil {
-			return Result{}, e
+		equal, err := v.compareObject(o, offset, expected)
+		if err != nil {
+			return Result{}, err
 		}
-		if !bytes.Equal(actual, expected) {
+		if !equal {
 			return Result{}, ErrPrecondition
 		}
 	}
@@ -611,7 +611,7 @@ func (v *Volume) mutateCore(op uint8, k Key, offset, length uint64, src io.Reade
 		}
 		return result, nil
 	}
-	if replace && reusableObject(old, codec) {
+	if replace && reusableReplacement(old, codec, length) {
 		if e = t.writeRange(o, 0, length, reader, codec); e != nil {
 			return Result{}, e
 		}
@@ -702,6 +702,28 @@ func (v *Volume) mutateCore(op uint8, k Key, offset, length uint64, src io.Reade
 
 // Reuse independently owned payload allocations under the volume write lock.
 // Compressed chunks stay at their address when their new encoding fits.
+// Whole RAW PUT/CAS represents one packed payload, not an append arena. Reuse
+// an existing contiguous allocation only when the complete replacement fits.
+// Extending it via writeRange would append one new span on every small growth,
+// making later full reads, comparisons and accounting proportional to its edit
+// history. Otherwise allocate one packed replacement and release the old data
+// inside the same transaction/volume lock; the public object ID never changes.
+// Ranged writes and APPEND keep their existing in-place/arena paths. Compressed
+// replacements retain their existing independently encoded chunk semantics.
+func reusableReplacement(o *object, codec Compression, length uint64) bool {
+	if !reusableObject(o, codec) {
+		return false
+	}
+	if codec != Raw {
+		return true
+	}
+	if len(o.Spans) != 1 {
+		return false
+	}
+	span := o.Spans[0]
+	return !span.Direct && span.Offset == 0 && span.Skip == 0 && length <= span.Length
+}
+
 func reusableObject(o *object, codec Compression) bool {
 	if o == nil || o.Info.Deleted || o.Info.Compression != codec || objectAliases(o) {
 		return false

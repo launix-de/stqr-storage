@@ -624,14 +624,17 @@ func (v *Volume) recordImported(key indexKey) (bool, error) {
 		return false, nil
 	}
 	if key[0] == 0 {
-		o, err := v.loadObject(key.object())
-		if errors.Is(err, ErrNotFound) {
-			return false, nil
+		if o := v.cache.get(key.object()); o != nil {
+			return o.importShadow, nil
 		}
+		ptr, err := v.lookup(key)
 		if err != nil {
 			return false, err
 		}
-		return o.importShadow, nil
+		if ptr == 0 {
+			return false, nil
+		}
+		return v.objectImportedAt(ptr)
 	}
 	var id ID
 	copy(id[:], key[1:17])

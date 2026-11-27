@@ -159,6 +159,12 @@ func (h *Handle) PrepareMutation(op uint8, k Key, offset, length uint64, src io.
 	})
 }
 
+// HasPendingReplica performs one exact-key index lookup. It neither scans
+// replica records nor treats a probabilistic membership hint as authority.
+func (h *Handle) HasPendingReplica(key Key) (bool, error) {
+	return withHandle(h, false, func(v *Volume) (bool, error) { return v.pending(key) })
+}
+
 func (h *Handle) ReplicaStatus(id ID) (ReplicaRecord, bool, error) {
 	type answer struct {
 		r     ReplicaRecord
@@ -305,7 +311,14 @@ func (h *Handle) PublishReplica(id ID, binding ReplicaBinding) (Result, error) {
 		defer t.close()
 		// Prepared payload remains durable until this redo transaction commits.
 		// Apply addressed bytes to existing allocations under the volume lock.
-		if reusableObject(old, o.Info.Compression) && (r.operation == opPut || r.operation == opPutRange || r.operation == opCAS) {
+		reusable := reusableObject(old, o.Info.Compression)
+		if r.operation == opPut || r.operation == opCAS && r.whole {
+			// A whole RAW replacement must stay packed after replication too.
+			// When reuse cannot preserve that layout, publish the already packed
+			// prepared object below instead of splitting growth onto the old tail.
+			reusable = reusableReplacement(old, o.Info.Compression, o.Info.Length)
+		}
+		if reusable && (r.operation == opPut || r.operation == opPutRange || r.operation == opCAS) {
 			staged := o
 			next := cloneObject(old)
 			next.Base, next.Size = 0, 0

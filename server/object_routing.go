@@ -52,6 +52,9 @@ func (s *Server) checkObjectOwner(bucket volume.ID, id volume.ObjectID, replicaR
 	node := s.control.ledger.node
 	for _, loc := range patch.Entries[0].Locations {
 		if (loc.Role == 0 || len(replicaRead) > 0 && replicaRead[0] && loc.Role == 1) && loc.Node == node {
+			if s.authorityPending(bucket, id) {
+				return fail(503, "range authority checkpoint is pending")
+			}
 			if patch.Entries[0].State == 4 {
 				return fail(503, "range is waiting for recovered volumes")
 			}

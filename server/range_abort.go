@@ -11,7 +11,7 @@ import (
 func (r *rangeManager) cancelBeforeFence(ctx context.Context, p rangePlan, cause error) error {
 	r.mu.Lock()
 	txn := r.txns[p.id()]
-	allowed := txn != nil && !txn.fenced && txn.decision == nil && txn.sourceReady.RecordSequence == 0
+	allowed := txn != nil && !txn.fenced && !txn.fencing && txn.decision == nil && txn.sourceReady.RecordSequence == 0
 	r.mu.Unlock()
 	if !allowed {
 		return cause
@@ -45,7 +45,7 @@ func (r *rangeManager) abort(p rangePlan) error {
 			if txn.aborted {
 				return nil
 			}
-			if txn.fenced || txn.decision != nil || txn.sourceReady.RecordSequence != 0 || txn.targetReady.RecordSequence != 0 {
+			if txn.fenced || txn.fencing || txn.decision != nil || txn.sourceReady.RecordSequence != 0 || txn.targetReady.RecordSequence != 0 {
 				return errControlConflict
 			}
 		}

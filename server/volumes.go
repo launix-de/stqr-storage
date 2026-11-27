@@ -340,6 +340,7 @@ func (s *Server) AddVolume(id string, r AddVolumeRequest) (op Operation, err err
 	s.volumes[vid] = &managedVolume{config: vc, store: v}
 	s.mu.Unlock()
 	keep = true
+	s.startVolumeMembership(v)
 	op.VolumeID = vid
 	op, err = s.finishOperation(op, nil)
 	return op, err

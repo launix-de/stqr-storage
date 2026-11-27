@@ -361,7 +361,7 @@ func (h *Handle) Recompress(k Key, codec Compression) error {
 // failed encodings leave the previous canonical object readable. Only reserve
 // fields are accepted; logical mutation/precondition options return ErrRange.
 func (h *Handle) RecompressWithOptions(k Key, codec Compression, opts Options) error {
-	return h.do(true, func(v *Volume) error {
+	return h.doAcceptedOptions(opts, func(v *Volume) error {
 		if opts.RequestID != (ID{}) || opts.Compression != nil || opts.ExpectedLength != nil || opts.Compare != nil || opts.CreateOnly || opts.WholeObject {
 			return ErrRange
 		}

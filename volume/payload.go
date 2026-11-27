@@ -300,9 +300,10 @@ func (t *transaction) storePacked(pieces []payloadPiece, codec Compression) ([]d
 	if codec != Raw {
 		return t.storeCompressed(pieces, codec)
 	}
-	var capacity uint64
+	var capacity, scratch uint64
 	for _, p := range pieces {
 		n := p.length
+		scratch = max(scratch, min(n, uint64(BlockSize)))
 		if codec != Raw {
 			chunks := (n + BlockSize - 1) / BlockSize
 			if chunks > (^uint64(0)-8-n)/32 {
@@ -325,7 +326,10 @@ func (t *transaction) storePacked(pieces []payloadPiece, codec Compression) ([]d
 	}
 	at := base
 	var spans []dataSpan
-	buffer := make([]byte, BlockSize)
+	// Only the largest actual read chunk needs scratch space. Tiny metadata
+	// replacements must not allocate a full 1 MiB payload buffer. This private
+	// buffer is reused only after writeBytes has synchronously consumed it.
+	buffer := make([]byte, int(scratch))
 	for _, p := range pieces {
 		if p.length == 0 {
 			continue

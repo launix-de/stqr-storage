@@ -105,10 +105,10 @@ func (s *Server) finishStorageWarmup(opts Options) error {
 	// Install exact reserve floors before advertising READY. apply uses the
 	// configured accounting fast path while the gate remains closed.
 	err := s.installWarmReserves()
-	if err == nil {
-		err = s.ensureVolumeAuthorityLocked()
-	}
 	s.opMu.Unlock()
+	if err == nil {
+		err = s.ensureVolumeAuthority()
+	}
 	if err != nil {
 		return err
 	}
@@ -189,6 +189,7 @@ func (s *Server) WaitStorageReady(ctx context.Context) error {
 }
 
 func (s *Server) startStorageWorkers(opts Options) {
+	s.startVolumeMemberships()
 	s.startLeaseRecovery()
 	s.startDurabilityCleanup()
 	s.startBucketReclaimer()

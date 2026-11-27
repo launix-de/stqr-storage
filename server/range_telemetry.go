@@ -30,7 +30,7 @@ type rangeMetric struct {
 const maxRangeTelemetry = 4096
 
 func (b *Bucket) recordRangeTraffic(p principal, id volume.ObjectID, read, write uint64) {
-	if b.server == nil || b.server.scopes == nil || p.cowInternal || p.ClusterPeer || read == 0 && write == 0 {
+	if p.internalCoordination || b.server == nil || b.server.scopes == nil || p.cowInternal || p.ClusterPeer || read == 0 && write == 0 {
 		return
 	}
 	r := b.server.scopes

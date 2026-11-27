@@ -10,7 +10,9 @@ import (
 )
 
 // Transfer progress is advisory, indexed on disk instead of retained once per
-// object in either the control log or RAM. Canonical data is flushed first;
+// object in either the control log or RAM. Legacy memos are read only by
+// compatibility/tests and garbage collection; imports no longer write them or
+// use them as content evidence because accepted bytes may not be durable.
 // READY still certifies the entire snapshot through the durable phase journal.
 // A missing memo merely causes another copy, never an ownership decision.
 var rangeMemoBucket = func() volume.ID {

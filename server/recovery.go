@@ -34,8 +34,11 @@ func (s *Server) recoverOperations() error {
 			return e
 		}
 		pending := []Operation{}
+		// System names are hashed, so the key cannot reveal an admin-op prefix.
+		// Skip foreign buckets before reading payloads; after decoding, require
+		// the canonical key as well as the shape of an operation.
 		for _, r := range records {
-			if r.Info.Deleted || r.Info.Length > 1<<20 {
+			if r.Key.Bucket != systemBucket || r.Info.Deleted || r.Info.Length > 1<<20 {
 				continue
 			}
 			b, _, e := h.Get(r.Key)
@@ -44,7 +47,7 @@ func (s *Server) recoverOperations() error {
 				return e
 			}
 			var op Operation
-			if json.Unmarshal(b, &op) != nil || op.ID == "" || len(op.Digest) != 64 || op.Kind == "" {
+			if json.Unmarshal(b, &op) != nil || op.ID == "" || len(op.Digest) != 64 || op.Kind == "" || r.Key != systemKey("admin-op/"+op.ID) {
 				continue
 			}
 			if op.State == "requested" || op.State == "running" {
