@@ -179,13 +179,30 @@ func TestDaemonPlacementImprovement(t *testing.T) {
 	s.scopes.start()
 	peer.node.scopes.start()
 	for {
+		// Publishing the target map precedes the asynchronous authority cut.
+		// Wait for automatic handoff completion and its confirmed header before
+		// checking payloads and receipts directly through Bucket below.
+		s.opMu.RLock()
 		entry, _ := s.placement.Load().lookup(client.ID(b.ID()), client.ObjectID(object))
-		if len(entry.Locations) == 1 && entry.Locations[0].Volume == client.ID(cold.Identity().VolumeID) {
+		ready := !s.authorityPending(b.ID(), object)
+		if a := s.authority; a != nil {
+			ready = ready && a.wanted != nil && a.wantedRevision == a.revision.Load()
+		}
+		s.scopes.mu.Lock()
+		for _, txn := range s.scopes.activeBucketLocked(b.ID()) {
+			if s.scopes.active(txn) && txn.plan.contains(object) {
+				ready = false
+				break
+			}
+		}
+		s.scopes.mu.Unlock()
+		s.opMu.RUnlock()
+		if len(entry.Locations) == 1 && entry.Locations[0].Volume == client.ID(cold.Identity().VolumeID) && ready {
 			break
 		}
 		select {
 		case <-ctx.Done():
-			t.Fatal("continuous worker did not improve unchanged policy", entry)
+			t.Fatal("continuous worker did not finish unchanged-policy improvement", entry, "authority/handoff ready", ready)
 		case <-time.After(20 * time.Millisecond):
 		}
 	}

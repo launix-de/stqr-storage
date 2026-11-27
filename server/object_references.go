@@ -266,82 +266,40 @@ referenceRetry:
 		} else if err != nil {
 			return nil, err
 		}
-		entries, err := decodeObjectReferences(raw, op.bucket.ID())
+		table, err := borrowReferenceBytes(raw, op.bucket.ID(), 1)
 		if err != nil {
 			return nil, err
 		}
 		casCtx := ctx
-		var own, count int
-		var busy bool
-		for {
-			own = -1
-			count = 0
-			busy = false
-			for i, r := range entries {
-				if r.account == uid {
-					count++
-				}
-				if action != 6 && r.proof == proof {
-					ownerOK := r.account == uid || account.Role == "ADMIN" && (action == 1 || action == 3 || action == 5)
-					if !ownerOK || r.object != target || r.claim != (action == 2 || action == 3) || r.dependency != (action == 4 || action == 5) {
-						return nil, ErrBucketForbidden
-					}
-					own = i
-				}
-				if r.object == target && (action == 2 || (action == 0 || action == 4) && r.claim) {
-					busy = true
-				}
+		full, err := table.apply(target, proof, uid, account.Role == "ADMIN", action, true)
+		if full {
+			entries, e := decodeObjectReferences(raw, op.bucket.ID())
+			if e != nil {
+				return nil, e
 			}
-			// Reclaim only when a genuinely new operation needs a full-root
-			// slot. Own-limit, proof and claim conflicts retain their existing
-			// outcomes; disabled/present users are never considered absent.
-			if own < 0 && count < maxAccountReferences && len(entries) >= maxObjectReferences &&
-				(action == 0 || action == 2 || action == 4) && (!busy || action == 2) {
-				filtered, nextCtx, e := s.pruneAbsentPlainReferencePins(casCtx, op.bucket, entries)
+			filtered, nextCtx, e := s.pruneAbsentPlainReferencePins(casCtx, op.bucket, entries)
+			if e != nil {
+				if errors.Is(e, volume.ErrPrecondition) && !errors.Is(e, volume.ErrRecovery) {
+					continue referenceRetry
+				}
+				return nil, e
+			}
+			casCtx = nextCtx
+			if len(filtered) < len(entries) {
+				table, e = borrowReferenceBytes(encodeObjectReferences(filtered, op.bucket.ID()), op.bucket.ID(), 1)
 				if e != nil {
-					if errors.Is(e, volume.ErrPrecondition) && !errors.Is(e, volume.ErrRecovery) {
-						continue referenceRetry
-					}
 					return nil, e
 				}
-				casCtx = nextCtx
-				if len(filtered) < len(entries) {
-					entries = filtered
-					continue
-				}
 			}
-			break
+			_, err = table.apply(target, proof, uid, account.Role == "ADMIN", action, false)
 		}
-
-		if action == 6 {
-			kept := entries[:0]
-			for _, entry := range entries {
-				if entry.dependency {
-					kept = append(kept, entry)
-				}
-			}
-			if len(kept) == len(entries) {
-				return []byte{1}, nil
-			}
-			entries = kept
-		} else if action == 1 || action == 3 || action == 5 {
-			if own < 0 {
-				return []byte{1}, nil
-			}
-			entries = append(entries[:own], entries[own+1:]...)
-		} else {
-			if own >= 0 {
-				return []byte{1}, nil
-			}
-			if busy {
-				return nil, fail(409, "object reference is busy")
-			}
-			if len(entries) >= maxObjectReferences || count >= maxAccountReferences {
-				return nil, fail(429, "object reference limit reached")
-			}
-			entries = append(entries, objectReferenceEntry{target, proof, uid, action == 2, action == 4})
+		if err != nil {
+			return nil, err
 		}
-		next := encodeObjectReferences(entries, op.bucket.ID())
+		if !table.changed {
+			return []byte{1}, nil
+		}
+		next := table.raw
 		_, err = op.bucket.CAS(casCtx, internal, op.object, 0, raw, next, volume.Options{RequestID: volume.ID(client.NewRequestID()), CreateOnly: absent, WholeObject: true, Accepted: accepted})
 		if errors.Is(err, volume.ErrPrecondition) && !errors.Is(err, volume.ErrRecovery) {
 			continue
