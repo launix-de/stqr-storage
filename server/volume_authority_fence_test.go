@@ -550,3 +550,50 @@ func TestAuthorityFenceRecoverySubsetCannotConfirmOtherPendingHeader(t *testing.
 		t.Fatal(err)
 	}
 }
+
+func TestAuthorityFenceUsesCommittedPlacementClassDuringPolicyTransition(t *testing.T) {
+	s, v, _, a, _ := authorityFenceFixture(t)
+	s.opMu.Lock()
+	defer s.opMu.Unlock()
+	// Model a committed replacement on HDD before the old SSD bucket policy has
+	// finalized. This pinned map is the effective contract, not its old policy.
+	view := *s.currentSystem.Load()
+	view.descriptions = append([]BucketDescription{}, view.descriptions...)
+	for i := range view.descriptions {
+		if view.descriptions[i].ID == a.ID().String() {
+			view.descriptions[i].Policy.StorageStrategy = "ssd"
+		}
+	}
+	s.currentSystem.Store(&view)
+	patches := append([]client.MapPatch{}, view.patches...)
+	for i := range patches {
+		if patches[i].Bucket == client.ID(a.ID()) {
+			patches[i].Entries = append([]client.RangeEntry{}, patches[i].Entries...)
+			for j := range patches[i].Entries {
+				patches[i].Entries[j].Locations = append([]client.Location{}, patches[i].Entries[j].Locations...)
+				patches[i].Entries[j].Locations[0].Volume = client.ID(v.Identity().VolumeID)
+				patches[i].Entries[j].Locations[0].Class = uint8(volume.HDD)
+				patches[i].Entries[j].OwnerEpoch++
+			}
+		}
+	}
+	image, err := buildPlacement(patches)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.placement.Store(image)
+	s.dirtyVolumeAuthority()
+	if _, err = s.planVolumeAuthorityLocked(); err != nil {
+		t.Fatal(err)
+	}
+	wanted := s.authority.wanted[v.Identity().VolumeID]
+	for _, claim := range wanted.Entries {
+		if claim.Bucket == client.ID(a.ID()) {
+			if len(claim.Cohort) != 1 || claim.Cohort[0] != client.ID(v.Identity().VolumeID) {
+				t.Fatal("wrong target cohort", claim.Cohort)
+			}
+			return
+		}
+	}
+	t.Fatal("committed HDD owner lost its recovery proof under old SSD policy")
+}
