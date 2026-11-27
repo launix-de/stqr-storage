@@ -158,10 +158,23 @@ func TestKSTQRVirtualMachine(t *testing.T) {
 				http.NotFound(w, r)
 				return
 			}
-			if parts[1] == "begin" {
+			switch parts[1] {
+			case "begin":
 				writebackFault.editRetry.begin(parts[0])
-			} else if err := writebackFault.editRetry.verify(parts[0]); err != nil {
-				http.Error(w, err.Error(), 500)
+			case "seen":
+				if !writebackFault.editRetry.fatalSeen() {
+					http.Error(w, "payload reply not held", 409)
+				}
+			case "release":
+				if err := writebackFault.editRetry.releaseFatal(); err != nil {
+					http.Error(w, err.Error(), 500)
+				}
+			case "verify":
+				if err := writebackFault.editRetry.verify(parts[0]); err != nil {
+					http.Error(w, err.Error(), 500)
+				}
+			default:
+				http.NotFound(w, r)
 			}
 			return
 		}

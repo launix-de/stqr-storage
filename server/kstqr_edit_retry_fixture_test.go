@@ -9,18 +9,21 @@ import (
 	"fmt"
 	"github.com/launix-de/stqr-storage/client"
 	"sync"
+	"time"
 )
 
 // Inject short outages before or after one independent payload edit. The guest
 // must retry that same REDO request, without starting its append again.
 type kernelEditRetryFault struct {
-	mu                      sync.Mutex
-	mode                    string
-	armed, faulted, dropped bool
-	id                      client.ID
-	raw                     []byte
-	retries                 int
-	mismatch                bool
+	mu                                     sync.Mutex
+	mode                                   string
+	armed, faulted, dropped                bool
+	id                                     client.ID
+	raw                                    []byte
+	retries                                int
+	mismatch                               bool
+	fatalHeld, fatalReleased, fatalTimeout bool
+	fatalRelease                           chan struct{}
 }
 
 func (f *kernelEditRetryFault) begin(mode string) {
@@ -33,6 +36,10 @@ func (f *kernelEditRetryFault) begin(mode string) {
 	f.retries = 0
 	f.mismatch = false
 	f.raw = nil
+	f.fatalHeld, f.fatalReleased, f.fatalTimeout = false, false, false
+	if mode == "fatal-caller" {
+		f.fatalRelease = make(chan struct{})
+	}
 }
 func (f *kernelEditRetryFault) request(raw []byte) (reject, disconnect bool) {
 	m, err := client.DecodeMessage(raw)
@@ -75,9 +82,55 @@ func (f *kernelEditRetryFault) response(raw []byte) bool {
 	}
 	return false
 }
+
+// Hold a real accepted payload reply while the guest kills its submitting
+// task. The server-side write has completed, but the filesystem must still
+// finish its marked descriptor and release its exclusive claim safely.
+func (f *kernelEditRetryFault) holdFatalReply(raw []byte) {
+	m, err := client.DecodeMessage(raw)
+	if err != nil || m.Kind != client.Response {
+		return
+	}
+	f.mu.Lock()
+	if f.mode != "fatal-caller" || !f.faulted || f.fatalHeld || m.ID != f.id {
+		f.mu.Unlock()
+		return
+	}
+	f.fatalHeld = true
+	release := f.fatalRelease
+	f.mu.Unlock()
+	select {
+	case <-release:
+	case <-time.After(8 * time.Second):
+		f.mu.Lock()
+		f.fatalTimeout = true
+		f.mu.Unlock()
+	}
+}
+func (f *kernelEditRetryFault) fatalSeen() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.mode == "fatal-caller" && f.fatalHeld
+}
+func (f *kernelEditRetryFault) releaseFatal() error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.mode != "fatal-caller" || !f.fatalHeld || f.fatalReleased {
+		return fmt.Errorf("fatal caller reply is not held")
+	}
+	f.fatalReleased = true
+	close(f.fatalRelease)
+	return nil
+}
 func (f *kernelEditRetryFault) verify(mode string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if mode == "fatal-caller" {
+		if f.mode != mode || !f.fatalHeld || !f.fatalReleased || f.fatalTimeout {
+			return fmt.Errorf("fatal caller completion not observed: held=%v released=%v timeout=%v", f.fatalHeld, f.fatalReleased, f.fatalTimeout)
+		}
+		return nil
+	}
 	if f.mode != mode || !f.faulted || f.retries < 1 || f.mismatch || mode == "disconnect-after" && !f.dropped {
 		return fmt.Errorf("edit outage not recovered: mode=%s fault=%v retries=%d changed=%v dropped=%v", f.mode, f.faulted, f.retries, f.mismatch, f.dropped)
 	}
