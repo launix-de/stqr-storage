@@ -15,7 +15,10 @@ import (
 func TestFormatPluginsDiscoveryAndAssets(t *testing.T) {
 	s := testServer(t)
 	dir := t.TempDir()
+	s.mu.Lock()
 	s.cfg.FormatPluginsDir = dir
+	a := s.cfg.Auth.BootstrapAdmin
+	s.mu.Unlock()
 	// An arbitrary format name is discovered without core registration.
 	for name, body := range map[string]string{"custom format.mjs": "export const apiVersion=1; export function open(){}", "custom format.js": "wrong extension priority", "s3.mjs": "export const external=true", "ignore.txt": "ignored"} {
 		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0644); err != nil {
@@ -27,7 +30,7 @@ func TestFormatPluginsDiscoveryAndAssets(t *testing.T) {
 		r := httptest.NewRequest(http.MethodGet, path, nil)
 		r.RemoteAddr = "127.0.0.1:1234"
 		if auth {
-			r.SetBasicAuth(s.cfg.Auth.BootstrapAdmin.Username, s.cfg.Auth.BootstrapAdmin.Password)
+			r.SetBasicAuth(a.Username, a.Password)
 		}
 		w := httptest.NewRecorder()
 		handler.ServeHTTP(w, r)

@@ -40,7 +40,11 @@ func dashboardPluginsBrowser(t *testing.T, cluster bool) {
 		s = testServer(t)
 		storage = s
 	}
-	s.cfg.FormatPluginsDir = t.TempDir()
+	pluginDir := t.TempDir()
+	s.mu.Lock()
+	s.cfg.FormatPluginsDir = pluginDir
+	a := s.cfg.Auth.BootstrapAdmin
+	s.mu.Unlock()
 	custom := `export const apiVersion=1;
 export const css='[data-stqr-plugin="custom"] .custom-output { color: rgb(12, 34, 56); }';
 export async function open({bucket,windows,ui,signal}) {
@@ -50,10 +54,10 @@ export async function open({bucket,windows,ui,signal}) {
  renderRow:item=>{const row=document.createElement('tr');const cell=document.createElement('td');cell.className='custom-output';cell.textContent=item.key;row.append(cell);return row}});
  await list.load();
 }`
-	if err := os.WriteFile(filepath.Join(s.cfg.FormatPluginsDir, "custom.mjs"), []byte(custom), 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(pluginDir, "custom.mjs"), []byte(custom), 0644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(s.cfg.FormatPluginsDir, "badcss.mjs"), []byte(`export const apiVersion=1;export const css='body{display:none}';export function open(){throw Error('must not run')}`), 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(pluginDir, "badcss.mjs"), []byte(`export const apiVersion=1;export const css='body{display:none}';export function open(){throw Error('must not run')}`), 0644); err != nil {
 		t.Fatal(err)
 	}
 	addTestVolume(t, storage, "plugins", "hdd", 96<<20)
@@ -61,7 +65,6 @@ export async function open({bucket,windows,ui,signal}) {
 	defer host.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
-	a := s.cfg.Auth.BootstrapAdmin
 	ids := map[string]string{}
 	dial := func(format string) *client.Client {
 		b, _ := createProtocolBucket(t, s, "plugin-"+format)
