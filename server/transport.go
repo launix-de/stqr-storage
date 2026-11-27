@@ -256,7 +256,7 @@ func (s *Server) serveWebSocket(w http.ResponseWriter, r *http.Request, p princi
 				return
 			}
 		}
-		if m.Opcode >= 0x0100 && m.Opcode <= 0x0108 || m.Opcode == client.ObjectSubscribe || m.Opcode == client.ObjectAccepted || m.Opcode == client.BucketObjectLease || m.Opcode == client.BucketMaintenanceEnd || m.Opcode == client.BucketStatFS || m.Opcode == client.BucketSync || m.Opcode == client.BucketMaintenance || m.Opcode == client.BucketScan {
+		if usesObjectRequestContext(m.Opcode) {
 			if !ws.registerObjectContext(m.ID) {
 				return
 			}
@@ -414,7 +414,7 @@ func (ws *wsSession) executeRequest(m client.Message, p principal) {
 		return
 	}
 	defer ws.completeConnectionMessage(m, status, body)
-	if m.Opcode >= 0x0100 && m.Opcode <= 0x0108 || m.Opcode == client.ObjectSubscribe || m.Opcode == client.ObjectAccepted || m.Opcode == client.BucketObjectLease || m.Opcode == client.BucketMaintenanceEnd || m.Opcode == client.BucketStatFS || m.Opcode == client.BucketSync || m.Opcode == client.BucketMaintenance || m.Opcode == client.BucketScan {
+	if usesObjectRequestContext(m.Opcode) {
 		ws.releaseObjectContext(m.ID)
 	}
 	if m.Kind == client.Request || m.Kind == client.FireAndForget && ws.connectionFenceCap.Load() && (status >= 300 || m.Opcode == 0x0100 || m.Opcode == 0x0101 || m.Opcode == 0x0107 || m.Opcode == client.ConnectionSync) {
