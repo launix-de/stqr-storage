@@ -140,6 +140,7 @@ func (s *Server) publishBucket(d BucketDescription) {
 		s.bucketsByName[d.Name] = b
 	}
 	s.invalidateBucketConnections(b, d)
+	s.publishQuotaPoliciesLocked()
 }
 func (s *Server) Bucket(id volume.ID) (*Bucket, error) {
 	s.bucketMu.RLock()

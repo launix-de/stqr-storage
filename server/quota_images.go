@@ -12,7 +12,10 @@ type quotaUsageImage struct {
 	volumes map[volume.ID][]volume.BucketStorage
 	all     map[volume.ID][]volume.BucketStorage
 }
-type quotaPolicyImage struct{ descriptions []BucketDescription }
+type quotaPolicyImage struct {
+	source       *systemView // identifies bulk control installs which bypass publishBucket
+	descriptions []BucketDescription
+}
 
 func (s *Server) publishQuotaUsage(id volume.ID, usage []volume.BucketStorage, all []volume.BucketStorage) {
 	for {

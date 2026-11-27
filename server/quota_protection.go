@@ -88,12 +88,47 @@ func (s *Server) refreshQuotaProtectionLocked() error {
 	}
 	return s.applyQuotaProtectionLocked()
 }
+
+// ensureQuotaPolicies is allocation-free between catalog/control publications.
+// Usage, allowances and physical reservations are deliberately NOT cached here.
+func (s *Server) ensureQuotaPolicies() *quotaPolicyImage {
+	view := s.currentSystem.Load()
+	if image := s.quotaPolicies.Load(); image != nil && image.source == view {
+		return image
+	}
+	s.bucketMu.Lock()
+	defer s.bucketMu.Unlock()
+	view = s.currentSystem.Load()
+	if image := s.quotaPolicies.Load(); image != nil && image.source == view {
+		return image
+	}
+	return s.publishQuotaPoliciesLocked()
+}
+
+// Caller holds bucketMu. Descriptions expose immutable configuration slices;
+// admission/stats need only these scalar policy fields, never ACLs, receipts,
+// clone graphs or local placement arrays. DesiredPolicy is separately owned.
+func (s *Server) publishQuotaPoliciesLocked() *quotaPolicyImage {
+	image := &quotaPolicyImage{source: s.currentSystem.Load(), descriptions: make([]BucketDescription, 0, len(s.bucketsByID))}
+	for _, b := range s.bucketsByID {
+		d := b.storageDescription()
+		compact := BucketDescription{ID: d.ID, Policy: d.Policy, DeletionComplete: d.DeletionComplete}
+		if d.DesiredPolicy != nil {
+			desired := *d.DesiredPolicy
+			compact.DesiredPolicy = &desired
+		}
+		image.descriptions = append(image.descriptions, compact)
+	}
+	s.quotaPolicies.Store(image)
+	return image
+}
+
 func (s *Server) applyQuotaProtectionLocked() error {
-	s.quotaPolicies.Store(&quotaPolicyImage{descriptions: s.bucketSnapshots()})
-	s.mu.RLock()
-	node, _ := parseID(s.cfg.Node.ID)
-	s.mu.RUnlock()
+	s.ensureQuotaPolicies()
 	if s.quotaNode == (client.ID{}) {
+		s.mu.RLock()
+		node, _ := parseID(s.cfg.Node.ID)
+		s.mu.RUnlock()
 		s.quotaNode = client.ID(node)
 	}
 	if s.quotaHooked == nil {
