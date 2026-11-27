@@ -62,6 +62,7 @@ type VolumeConfig struct {
 	OperationID            string   `yaml:"operation_id,omitempty" json:"operation_id,omitempty"`
 }
 type Config struct {
+	BrowserOrigins         []string       `yaml:"browser_origins,omitempty" json:"browser_origins,omitempty"`
 	RecoveryVolumes        []VolumeConfig `yaml:"recovery_volumes,omitempty" json:"recovery_volumes,omitempty"`
 	Node                   NodeConfig     `yaml:"node" json:"node"`
 	ClusterID              string         `yaml:"cluster_id" json:"cluster_id"`
@@ -317,6 +318,18 @@ func validateConfig(c Config) error {
 	}
 	if c.Auth.ClusterToken == "" || !c.JoinPending && c.ControlVersion == 0 && (c.Auth.BootstrapAdmin.Username == "" || c.Auth.BootstrapAdmin.Password == "") {
 		return errors.New("existing cluster credentials are missing; refusing to recreate them")
+	}
+	for _, origin := range c.BrowserOrigins {
+		u, err := url.Parse(origin)
+		scheme, cidr, isCIDR := strings.Cut(origin, "://")
+		if isCIDR && (scheme == "http" || scheme == "https") {
+			if _, err := netip.ParsePrefix(cidr); err == nil {
+				continue
+			}
+		}
+		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Hostname() == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || u.Path != "" {
+			return fmt.Errorf("invalid browser origin %q", origin)
+		}
 	}
 	for _, s := range c.AllowSubnets {
 		if _, e = netip.ParsePrefix(s); e != nil {
