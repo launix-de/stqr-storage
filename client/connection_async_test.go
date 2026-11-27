@@ -330,20 +330,22 @@ func TestConnectionAsyncOwnerFencesRunConcurrently(t *testing.T) {
 		t.Fatal("fence broadcast or opened redundant owner connection")
 	}
 }
-func TestConnectionAsyncLegacyFallback(t *testing.T) {
+func TestConnectionAsyncRejectsDurableLegacyFallback(t *testing.T) {
 	p, host := newWirePeer(t)
 	c := dialConnectionTest(t, host)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	if e := c.PutAsync(ctx, ObjectID{1}, []byte("fallback"), PutOptions{}); e != nil {
-		t.Fatal(e)
+	var unsupported *StatusError
+	if e := c.PutAsync(ctx, ObjectID{1}, []byte("fallback"), PutOptions{}); !errors.As(e, &unsupported) || unsupported.Status != 426 {
+		t.Fatal("missing accepted capability rejection", e)
 	}
-	if p.commits.Load() != 1 {
-		t.Fatal("old peer write skipped")
+	if p.commits.Load() != 0 || p.nativeHeaders.Load() != 0 {
+		t.Fatal("async write fell back to durable native operation")
 	}
 	if e := c.Sync(ctx); e != nil {
 		t.Fatal(e)
 	}
+
 }
 
 type burstIntentStore struct {

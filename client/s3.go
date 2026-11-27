@@ -34,6 +34,12 @@ func NewS3(store S3Store) *S3 {
 	if fs, ok := store.(*filesystemNativeStore); ok {
 		store = fs.Client
 	}
+	// Custom stores without Sync retain their historical durable-operation
+	// contract. Actual native Clients and daemon adapters implement Sync and
+	// must use accepted writes plus the explicit S3 publication fence.
+	if fence, ok := store.(s3SyncStore); ok {
+		store = &s3AcceptedStore{S3Store: store, fence: fence}
+	}
 	return &S3{store: store}
 }
 
@@ -116,7 +122,9 @@ func (s *S3) Stat(ctx context.Context, key string) (S3Object, error) {
 	return o, err
 }
 
-func (s *S3) Put(ctx context.Context, key string, src io.Reader, size uint64, opt S3PutOptions) (S3Object, error) {
+func (s *S3) Put(ctx context.Context, key string, src io.Reader, size uint64, opt S3PutOptions) (_ S3Object, resultErr error) {
+	ctx, finish := s.beginWrite(ctx)
+	defer finish(&resultErr)
 	if !validS3Key(key) {
 		return S3Object{}, ErrRange
 	}
@@ -225,7 +233,9 @@ func (s *S3) Put(ctx context.Context, key string, src io.Reader, size uint64, op
 	}
 	return o, ErrPrecondition
 }
-func (s *S3) Delete(ctx context.Context, key string) error {
+func (s *S3) Delete(ctx context.Context, key string) (resultErr error) {
+	ctx, finish := s.beginWrite(ctx)
+	defer finish(&resultErr)
 	for attempt := 0; attempt < 128; attempt++ {
 		o, err := s.Stat(ctx, key)
 		if errors.Is(err, ErrNotFound) {

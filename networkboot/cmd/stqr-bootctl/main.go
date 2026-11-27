@@ -527,6 +527,9 @@ func run() error {
 }
 func main() {
 	if err := run(); err != nil {
+		if errors.Is(err, errSessionActive) {
+			os.Exit(75) // Expected active-session deferral; no credentials or repeated stderr.
+		}
 		if errors.Is(err, flag.ErrHelp) {
 			return
 		}

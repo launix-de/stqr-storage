@@ -1,0 +1,58 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-3.0-only
+# Used by the offline mkinitramfs hook and the pre-PID1 boot script. The marker
+# records completed image preparation, not a runtime object/payload cache. Only
+# the tiny marker is read from STQR; payload hashing reads initramfs RAM.
+stqr_login_assets() {
+    printf '%s\n' "lib/modules/$1/extra/kstqr.ko" \
+        usr/lib/stqr-networkboot/login.json \
+        usr/lib/stqr-networkboot/install-login \
+        usr/lib/stqr-networkboot/pam_stqr.so \
+        usr/lib/stqr-networkboot/home-template.json \
+        usr/libexec/stqr-home usr/libexec/stqr-bootctl
+}
+stqr_login_manifest() {
+    printf '%s\n' '# STQR prepared boot assets v1'
+    stqr_login_assets "$2" | while IFS= read -r stqr_login_manifest_asset; do
+        (cd "${1:-/}" && sha256sum "$stqr_login_manifest_asset") || exit 1
+    done
+}
+stqr_login_install() {
+    chroot "$1" /usr/bin/python3 /usr/lib/stqr-networkboot/install-login \
+        /usr/lib/stqr-networkboot/login.json --server "$2"
+}
+stqr_prepare_login() {
+    stqr_login_root=$1 stqr_login_server=$2 stqr_login_kernel=$3 stqr_login_payload=${4:-/}
+    stqr_login_marker=usr/lib/stqr-networkboot/prepared.sha256
+    stqr_login_current=$(mktemp /run/stqr-login.XXXXXX) || return 1
+    stqr_login_manifest "$stqr_login_payload" "$stqr_login_kernel" > "$stqr_login_current" || { rm -f "$stqr_login_current"; return 1; }
+    if ! cmp -s "$stqr_login_current" "$stqr_login_root/$stqr_login_marker"; then
+        # An old/missing marker is a conservative migration path. A changed
+        # module alone does not require copying bootctl or rewriting identities.
+        stqr_login_reinstall=0
+        if ! grep -qx '# STQR prepared boot assets v1' "$stqr_login_root/$stqr_login_marker" 2>/dev/null; then
+            stqr_login_reinstall=1
+        fi
+        while IFS= read -r stqr_login_line; do
+            case "$stqr_login_line" in '# '*) continue;; esac
+            stqr_login_asset=${stqr_login_line#*  }
+            if ! grep -Fqx "$stqr_login_line" "$stqr_login_root/$stqr_login_marker" 2>/dev/null; then
+                mkdir -p "$stqr_login_root/$(dirname "$stqr_login_asset")" || { rm -f "$stqr_login_current"; return 1; }
+                cp -p "$stqr_login_payload/$stqr_login_asset" "$stqr_login_root/$stqr_login_asset" || { rm -f "$stqr_login_current"; return 1; }
+                case "$stqr_login_asset" in
+                    */login.json|*/install-login|*/home-template.json) stqr_login_reinstall=1;;
+                esac
+            fi
+        done < "$stqr_login_current"
+        if [ "$stqr_login_reinstall" = 1 ]; then
+            stqr_login_install "$stqr_login_root" "$stqr_login_server" || { rm -f "$stqr_login_current"; return 1; }
+        fi
+        mkdir -p "$stqr_login_root/$(dirname "$stqr_login_marker")" || { rm -f "$stqr_login_current"; return 1; }
+        cp "$stqr_login_current" "$stqr_login_root/$stqr_login_marker" || { rm -f "$stqr_login_current"; return 1; }
+        chmod 0600 "$stqr_login_root/$stqr_login_marker" || { rm -f "$stqr_login_current"; return 1; }
+    fi
+    rm -f "$stqr_login_current"
+    # This static initramfs helper replaces only a numeric runtime endpoint in
+    # a small prepared JSON template; it does not start Python or call fsync.
+    "$stqr_login_payload/bin/stqr-boot-root" --login-uri "$stqr_login_root" "$stqr_login_server"
+}

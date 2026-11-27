@@ -4,6 +4,7 @@ package volume
 import (
 	"bytes"
 	"errors"
+	"runtime"
 	"testing"
 )
 
@@ -182,9 +183,21 @@ func TestCleanCloseRejectsNewPublicationsDuringFinalFence(t *testing.T) {
 	}
 	entered, release := gate.arm(nil)
 	defer release()
+	fenced := make(chan error, 1)
+	go func() { fenced <- v.Sync() }()
+	<-entered
 	done := make(chan error, 1)
 	go func() { done <- v.Close() }()
-	<-entered
+	// Close may wait for this already requested fence, but cannot start one.
+	for {
+		v.mu.RLock()
+		closing := v.closing
+		v.mu.RUnlock()
+		if closing {
+			break
+		}
+		runtime.Gosched()
+	}
 	h, err := v.Open(true)
 	if h != nil {
 		h.Close()
@@ -193,6 +206,7 @@ func TestCleanCloseRejectsNewPublicationsDuringFinalFence(t *testing.T) {
 		t.Fatalf("close admitted a publication: %v", err)
 	}
 	release()
+	awaitCheckpointTest(t, fenced)
 	awaitCheckpointTest(t, done)
 	reopened, err := Open(disk.crash(), OpenOptions{})
 	if err != nil {

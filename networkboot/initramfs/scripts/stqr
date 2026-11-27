@@ -19,21 +19,8 @@ mountroot() {
     modprobe kstqr || panic "STQR kernel module unavailable"
     mkdir -p "$rootmnt"
     /bin/stqr-boot-root "$stqr_server" "$stqr_port" "$stqr_session" "$rootmnt" || panic "STQR native root mount failed"
-    # Keep future module reloads consistent without changing the shared lower.
-    stqr_module=/lib/modules/$(uname -r)/extra/kstqr.ko
-    mkdir -p "$rootmnt/lib/modules/$(uname -r)/extra"
-    cp "$stqr_module" "$rootmnt$stqr_module" || panic "STQR root module update failed"
-    # Apply to the private upper before PID1 reads passwd/PAM. This also allows
-    # a login-support hotpatch without rewriting the immutable published lower.
-    mkdir -p "$rootmnt/usr/lib/stqr-networkboot" "$rootmnt/usr/libexec"
-    for stqr_file in login.json install-login pam_stqr.so; do
-        cp -p "/usr/lib/stqr-networkboot/$stqr_file" "$rootmnt/usr/lib/stqr-networkboot/" || panic "STQR login payload missing"
-    done
-    cp -p /usr/libexec/stqr-home /usr/libexec/stqr-bootctl "$rootmnt/usr/libexec/" || panic "STQR login helpers missing"
-    chmod 0755 "$rootmnt/usr/lib/stqr-networkboot" "$rootmnt/usr/lib/stqr-networkboot/install-login" "$rootmnt/usr/libexec/stqr-home" "$rootmnt/usr/libexec/stqr-bootctl" || panic "STQR login permissions failed"
-    chmod 0644 "$rootmnt/usr/lib/stqr-networkboot/pam_stqr.so" || panic "STQR PAM permissions failed"
-    chmod 0600 "$rootmnt/usr/lib/stqr-networkboot/login.json" || panic "STQR login manifest permissions failed"
-    chroot "$rootmnt" /usr/bin/python3 /usr/lib/stqr-networkboot/install-login /usr/lib/stqr-networkboot/login.json --server "$stqr_server" || panic "STQR login setup failed"
+    . /usr/lib/stqr-networkboot/prepare-login
+    stqr_prepare_login "$rootmnt" "$stqr_server" "$(uname -r)" || panic "STQR login preparation failed"
     # PXE supplies networking and identity; cloud metadata and local GRUB
     # bookkeeping do not apply to this private network-root boot session.
     if [ -d "$rootmnt/etc/cloud" ]; then

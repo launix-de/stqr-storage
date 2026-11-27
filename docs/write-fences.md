@@ -20,14 +20,30 @@ contract. The server completes ordinary single-copy durable acknowledgements
 outside node admission and never replays an already published APPEND/CAS merely
 because its physical acknowledgement is pending.
 
-Both the checkpoint and the next overlay have bounded resources. The existing
-4-MiB accepted-page budget applies to each overlay; temporary WAL allocation
-adapts to available space and excludes the in-flight journal. Native-sized writes
-up to 1 MiB can publish while a fence is running. Oversized writes or exhausted
-buffers apply backpressure. Explicit volume resizing/defragmentation keeps its
-allocation-management exclusion while allowing reads at physical fences. Clean
-close stops new publications before flushing its final buffer. An ambiguous
-checkpoint failure fences the volume until recovery.
+Accepted mode never calls Sync because a request is large, metadata is fragmented,
+a buffer is full, an input fails, or a handle/connection/volume closes. File and
+block volumes keep at most 4 MiB of page payload per active cache; disposable
+unsynced sparse files hold overflow. Their presence index and unique dirty-offset
+log are disk-backed, so omitting Sync forever cannot grow an all-dirty-page RAM
+map. RAM/RAM-cache volumes never spill and return `ErrWritebackPressure` when
+their bounded overlay cannot admit another mutation.
+
+Redo space starts at 32 KiB and grows from ranges free in BOTH the previous
+durable and planned allocator. Newly allocated payload pages need no old-data
+redo image; protected overwrites do. If safe redo space cannot be reserved, the
+mutation returns explicit backpressure before publication. This is not a fixed
+8-MiB overwrite ceiling and never authorizes an automatic fence. A caller may
+explicitly request Sync to release resources, or retain its unsynced state and
+handle pressure. Explicit checkpoint iteration/redo spooling is bounded in RAM;
+the existing on-volume format and four-stage crash-recovery order remain.
+
+Close waits only for an already-running explicit fence, then discards any later
+unrequested accepted tail. Such data is currently lost even on a clean same-host
+process restart; the private spill is not a startup recovery authority. Only
+completed explicit fences are promised across restart/power loss. An ambiguous
+checkpoint failure fences the volume until recovery. Explicit administrative
+allocator operations and durable control/history records retain their separate
+protocol contracts.
 
 ## Reclamation
 
@@ -41,9 +57,9 @@ until its durable completion, so an empty volatile view cannot prematurely
 complete the persistent deletion intent. Restart reconstructs cleanup from the
 existing catalog/index state.
 
-Idle work yields between bounded pages. A tiny/full volume that cannot fit a
-buffered metadata page uses the existing bounded durable WAL path; its backend
-fences also run without the volume metadata lock. That fallback may still hold
+Idle work yields between bounded pages. Accepted cleanup that cannot fit safely
+returns backpressure; it cannot silently switch to a durable fallback. A caller
+that explicitly needs durable cleanup must request and await that fence outside
 node admission. Range retirement's existing distributed completion point remains
 after confirmed source cleanup; this patch does not change the PG wire protocol.
 

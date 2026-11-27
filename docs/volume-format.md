@@ -36,8 +36,22 @@ lock. A complete published image is readable before its durable ACK. Later
 bounded mutations use a separate overlay while an earlier image is being
 checkpointed; an old fence confirms only the image it wrote. Both WAL allocations
 and page images remain protected until completion. Closing rejects new
-publications before flushing the final overlay. See [write fences](write-fences.md)
+publications, waits for an already requested fence, and discards a later unfenced
+overlay. See [write fences](write-fences.md)
 for acknowledgement ordering, Linux persistence primitives and resource bounds.
+
+`Options.Accepted=true` never starts a persistence fence, even for oversized
+requests, fragmented metadata, resource exhaustion or rejected input. Accepted
+builders (including trusted restore/receipt helpers) share bounded writeback
+staging. File/block backends may spill to private UNSYNCED files with a disk-backed
+page directory; RAM classes backpressure rather than spill. On-volume redo
+reservations grow with protected dirty bytes when safe free space exists;
+otherwise `ErrWritebackPressure` rejects before publication. An explicit Sync is
+the only way to confirm those bytes. Handle/connection/volume Close does not ask
+for Sync, and an unrequested accepted tail is discarded even at clean process
+restart. See [write fences](write-fences.md) for the exact limits and recovery
+contract. Default library durable operations and explicit control/admin history
+remain separate requests for durability.
 
 `Volume.Stat` is an independent general metadata query. All other object access
 is exclusively through a handle from `Volume.Open(write bool)`; there is no
