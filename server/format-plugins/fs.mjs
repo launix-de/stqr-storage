@@ -202,7 +202,7 @@ export function decodeIndex(raw, length, depth) {
     const s = {
       length: r.u64(),
       id: r.id(),
-      offset: version === 3 ? r.u64() : BigInt(r.u32()),
+      offset: version === 1 ? BigInt(r.u32()) : r.u64(),
     };
     if (version === 2 && r.u64())
       fail("Historische Lower-Segmente benötigen einen Overlay-Client.");

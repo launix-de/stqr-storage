@@ -67,7 +67,25 @@ static void mmap_growth(void)
  CHECK(!munmap(p,4096));CHECK(!close(fd));CHECK(!unlink("/mnt/mmap-grow"));
  puts("KSTQR_OVERLAY_MMAP_GROWTH_PASS");
 }
+static void legacy_local_index(void)
+{
+ const char *paths[]={"/fresh/legacy-local-index","/mnt/legacy-local-index"};
+ for(unsigned n=0;n<2;n++){
+  int fd=open(paths[n],O_RDONLY);CHECK(fd>=0);
+  char data[32768];CHECK(pread(fd,data,sizeof data,0)==(ssize_t)sizeof data);
+  CHECK(!memcmp(data,"\xda\x1ajour",6));
+  for(unsigned i=6;i<16384;i++)CHECK(data[i]=='J');
+  for(unsigned i=16384;i<sizeof data;i++)CHECK(!data[i]);
+  CHECK(!posix_fadvise(fd,0,sizeof data,POSIX_FADV_DONTNEED));
+  char *p=mmap(NULL,sizeof data,PROT_READ,MAP_SHARED,fd,0);CHECK(p!=MAP_FAILED);
+  CHECK(!memcmp(p,data,sizeof data));CHECK(!munmap(p,sizeof data));CHECK(!close(fd));
+ }
+ int fd=open("/fresh/legacy-historical-index",O_RDONLY);CHECK(fd>=0);char c;
+ errno=0;CHECK(pread(fd,&c,1,0)==-1&&errno==EIO);CHECK(!close(fd));
+ puts("KSTQR_LEGACY_LOCAL_INDEX_PASS");
+}
 int main(void){
+ legacy_local_index();
  mutable_sparse_read();
  mmap_growth();
  char value[64];
