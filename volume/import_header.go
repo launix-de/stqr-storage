@@ -11,7 +11,9 @@ import "hash/crc32"
 // inline descriptors include their span bytes in the same CRC; stream those
 // bytes through bounded scratch space without decoding or following spans.
 func (v *Volume) objectImportedAt(ptr uint64) (bool, error) {
-	if ptr < dataStart || ptr > v.sb.Identity.Size || objectHeader > v.sb.Identity.Size-ptr {
+	// OBJ2 descriptors and SEG2 lists are metadata. Retired initial index
+	// pages below dataStart may be reused for metadata, but never payload.
+	if ptr < treeStart || ptr > v.sb.Identity.Size || objectHeader > v.sb.Identity.Size-ptr {
 		return false, ErrCorrupt
 	}
 	var head [objectHeader]byte
@@ -40,7 +42,7 @@ func (v *Volume) objectImportedAt(ptr uint64) (bool, error) {
 		if segmented {
 			first, last, total := diskOrder.Uint64(part), diskOrder.Uint64(part[8:]), diskOrder.Uint64(part[16:])
 			valid := func(p uint64) bool {
-				return p >= dataStart && p <= v.sb.Identity.Size && listBytes <= v.sb.Identity.Size-p
+				return p >= treeStart && p <= v.sb.Identity.Size && listBytes <= v.sb.Identity.Size-p
 			}
 			if total != count || count == 0 && (first != 0 || last != 0) || count > 0 && (!valid(first) || !valid(last)) {
 				return false, ErrCorrupt

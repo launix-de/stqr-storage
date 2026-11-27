@@ -245,3 +245,105 @@ func TestImportHeaderAccountingTransitionsAndReceipts(t *testing.T) {
 		}
 	}
 }
+
+func TestImportHeaderMetadataCanReuseRetiredInitialIndexPage(t *testing.T) {
+	v, _ := memoryVolume(t, 8<<20)
+	defer v.Close()
+	relocatePayloadTestRoot(t, v)
+	key := testKey(500)
+	h, err := v.Open(true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = h.Restore(key, Info{Length: 1 << 40, Compression: Raw}, func(yield func(uint64, io.Reader, uint64) error) error {
+		for i := uint64(0); i < 9; i++ {
+			if err := yield(i*2, bytes.NewReader([]byte{byte(i)}), 1); err != nil {
+				return err
+			}
+		}
+		return nil
+	}, Options{ImportShadow: true, restoreSegmented: true})
+	h.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	o, err := v.loadObject(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Exercise the same valid descriptor/list bytes at the earliest reusable
+	// metadata addresses, independent of free-list allocation order. The full
+	// decoder is the positive control for this metadata placement contract.
+	disk, err := NewMemory(int64(v.sb.Identity.Size))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer disk.Close()
+	base := treeStart
+	lists := make([]uint64, len(o.ListBlocks))
+	for i := range lists {
+		lists[i] = base + 64 + uint64(i)*listBytes
+	}
+	for i, old := range o.ListBlocks {
+		block := make([]byte, listBytes)
+		if err = v.readBytes(block, old); err != nil {
+			t.Fatal(err)
+		}
+		next := uint64(0)
+		if i+1 < len(lists) {
+			next = lists[i+1]
+		}
+		diskOrder.PutUint64(block[8:], next)
+		diskOrder.PutUint32(block[508:], checksum(block[:508]))
+		if _, err = disk.WriteAt(block, int64(lists[i])); err != nil {
+			t.Fatal(err)
+		}
+	}
+	header := make([]byte, 64)
+	if err = v.readBytes(header, o.Base); err != nil {
+		t.Fatal(err)
+	}
+	diskOrder.PutUint64(header[40:], lists[0])
+	diskOrder.PutUint64(header[48:], lists[len(lists)-1])
+	diskOrder.PutUint32(header[32:], 0)
+	diskOrder.PutUint32(header[32:], checksum(header))
+	if _, err = disk.WriteAt(header, int64(base)); err != nil {
+		t.Fatal(err)
+	}
+	view := &Volume{dev: &meteredIO{VolumeIO: disk}, sb: v.sb, limit: v.limit}
+	if _, err = view.loadObjectAt(base); err != nil {
+		t.Fatal("full decoder rejects legal metadata fixture", err)
+	}
+	if flag, err := view.objectImportedAt(base); err != nil || !flag {
+		t.Fatal("legal retired-page metadata rejected", flag, err)
+	}
+	if _, err := view.objectImportedAt(treeStart - 1); !errors.Is(err, ErrCorrupt) {
+		t.Fatal("reserved-region descriptor accepted", err)
+	}
+	for _, span := range o.Spans {
+		if span.Location < dataStart {
+			t.Fatal("payload below dataStart", span)
+		}
+	}
+	// Corrupt only the external list. Header flag reads must not follow it;
+	// complete descriptor loading must continue checking the external CRC.
+	block := make([]byte, listBytes)
+	if _, err = disk.ReadAt(block, int64(lists[0])); err != nil {
+		t.Fatal(err)
+	}
+	block[508] ^= 1
+	if _, err = disk.WriteAt(block, int64(lists[0])); err != nil {
+		t.Fatal(err)
+	}
+	before := view.IOStats()
+	if flag, err := view.objectImportedAt(base); err != nil || !flag {
+		t.Fatal("header lookup followed external metadata list", flag, err)
+	}
+	after := view.IOStats()
+	if reads := testReadWorkOps(after) - testReadWorkOps(before); reads > 2 {
+		t.Fatal("header lookup walked external lists", reads)
+	}
+	if _, err := view.loadObjectAt(base); !errors.Is(err, ErrCorrupt) {
+		t.Fatal("full decoder ignored external list CRC", err)
+	}
+}
