@@ -54,7 +54,8 @@ on logout or session replacement. The SDK is independently available under
 `/assets/sdk/index.mjs`, with codecs under `/assets/sdk/codec.mjs`; see its own
 API and transport documentation for standalone direct mode.
 
-`windows.open({title,signal})` returns `{root,scrollRoot,signal,close}`. Titles are
+`windows.open({title,signal,canClose,dismissible})` returns
+`{root,scrollRoot,signal,close,requestClose,closed}`. Titles are
 plain text. The host adds `data-stqr-plugin="FORMAT"` to the content root.
 Nested windows should use their parent window's signal. Closing a parent closes
 its children; closing the last window ends the plugin lifetime. Observe signals
@@ -62,10 +63,94 @@ on every asynchronous operation. Never use global IDs or global DOM selectors
 for plugin content. Use `view.root.querySelector(...)` instead. Templates must
 escape interpolated text; prefer `textContent` for data from buckets.
 
-`ui` supplies `escape`, `button`, `download` and `createList`. Buttons show action
+`ui` supplies `escape`, `button`, `download`, `createList` and `confirm`. Buttons show action
 errors and disable themselves during a request. Downloads use Blob URLs with
 bounded lifetimes. Blob downloads consume memory proportional to the payload;
 large files should use browser streaming-to-disk APIs when available.
+
+## Bucket creation and optional initialization
+
+The creation dialog offers an optional format dropdown populated from the same
+plugin-directory index used by the bucket format buttons. Empty selection creates
+an unbound bare bucket and never opens a native object connection. A selected
+format is bound through the native JS client after administrative creation; no
+format fields or format-specific operations are added to the server protocol.
+The format is immutable in the existing bucket settings dialog.
+
+A module may additionally export an asynchronous initializer:
+
+```js
+export async function initialize({bucket, connect, signal, initializationID, state, ui}) {
+  const client = await connect(); // same cached native client for this attempt
+  // Format-owned, idempotent bootstrap using native object operations.
+  // initializationID and state survive retries of this creation dialog.
+}
+```
+
+Initializers receive `bucket`, `connect`, `signal`, `initializationID`, `state`,
+`ui`, `escape` and `toast`. The host binds the opaque format even when the hook is
+absent, awaits the hook and `client.sync()`, then closes the client. User grants
+are installed only after initialization succeeds. Validate a plugin module before
+creating the bare bucket. A rejected hook or synchronization leaves that bucket
+intact; retry resumes initialization on the same bucket and operation identity,
+then installs the pending grant without creating a duplicate. Completed phases
+are not repeated. Abandoning a partially initialized bucket asks for confirmation.
+
+The initializer must tolerate retries and concurrent first use: prefer absent CAS
+and validate existing records rather than overwriting them. Use `state` for stable
+request payloads and request IDs. Acknowledged accepted writes whose durability
+was uncertain must be replayed/fenced with their original identities on retry.
+Do not treat an uncertain sync as successful bootstrap merely because a read sees
+its bytes. A reconnect or reload cannot rely on the in-memory `state` object;
+format records remain the authority.
+
+`bd` and `s3` have no initializer: a bound bucket with no objects is a valid empty
+inventory. `fs` needs an empty directory root for interoperability with the Go
+filesystem client. Its plugin alone writes the native STFS v7/STDR v1 root with
+absent whole-object CAS, retaining its timestamp and request identity across
+retries. An already valid root is preserved, and a corrupt or incompatible root
+is never overwritten. Initializing a filesystem does not enable the planned
+file-management write actions in its browser.
+
+## Promise-based popup lifecycle
+
+`await view.requestClose(reason)` returns `true` after a permitted user dismissal
+or `false` when closing is denied, cancelled, superseded or interrupted. Background
+click, Escape and the window close button all use this same asynchronous path.
+`canClose({reason,dialog,signal})` returns `boolean | Promise<boolean>`. Repeated
+close attempts share the pending Promise, so a confirmation is never asked twice.
+Existing native `cancel` listeners can still call `preventDefault()` after the
+async condition passes. Failed conditions display an error and keep the popup open.
+An earlier decision cannot close a reopened dialog or a window whose policy changed.
+
+```js
+const view = windows.open({
+  title: bucket.name,
+  signal,
+  canClose: async ({signal}) => {
+    if (saving) return false;
+    if (!dirty) return true;
+    return ui.confirm({
+      title: 'Discard changes?', message: 'Unsaved edits will be lost.',
+      confirmLabel: 'Discard', cancelLabel: 'Keep editing', signal,
+    });
+  },
+});
+const result = await view.closed; // resolves once; owner-defined string value
+```
+
+`ui.confirm(options)` returns `Promise<boolean>`; dismissing or aborting a question
+means `false`. `dismissible:false` prevents user dismissal entirely; the native
+focus-modal behavior is independent of this policy. Legacy dialogs can opt out
+with `data-dialog-dismissible="false"` or use `configureDialog` from
+`/assets/dialogs.js`. `await view.close('saved')` completes the window explicitly,
+bypassing user guards. Logout and parent-lifetime abort also force cleanup, so a
+pending confirmation cannot retain a client after its session ends.
+
+Pending BD mutations and S3 ACL writes veto dismissal. Existing dashboard save,
+join, grow, recovery and other operation guards remain active for all dismissal
+paths. Clicking content/padding or dragging from content onto the backdrop does
+not dismiss a popup. Only the top modal window receives a backdrop dismissal.
 
 ## CSS contract
 

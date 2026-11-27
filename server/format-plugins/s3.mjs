@@ -212,7 +212,12 @@ export async function open({ bucket, connect, windows, ui, signal }) {
     "Suche nach Objektschlüsseln; die Metadaten werden seitenweise im Client gelesen.";
   window.root.append(note);
   const details = async (object) => {
-    const detail = windows.open({ title: object.key, signal: window.signal }),
+    let saving = false;
+    const detail = windows.open({
+        title: object.key,
+        signal: window.signal,
+        canClose: async () => !saving,
+      }),
       root = detail.root;
     root.innerHTML =
       '<dl class="plugin-details"></dl><div class="plugin-toolbar"></div><div class="s3-preview"></div>';
@@ -249,11 +254,16 @@ export async function open({ bucket, connect, windows, ui, signal }) {
       ui.button(
         "ACL speichern",
         async () => {
-          await setPublicRead(client, object, select.value === "public", {
-            signal: detail.signal,
-          });
-          detail.close();
-          await list.load();
+          saving = true;
+          try {
+            await setPublicRead(client, object, select.value === "public", {
+              signal: detail.signal,
+            });
+            await detail.close();
+            await list.load();
+          } finally {
+            saving = false;
+          }
         },
         { signal: detail.signal },
       ),
