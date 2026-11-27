@@ -80,6 +80,15 @@ func TestFilesystemLegacyIndexStrictLayout(t *testing.T) {
 			t.Fatal("accepted malformed legacy index", err)
 		}
 	}
+	for _, part := range []fsSegment{{length: 32768, legacyVersion: 1}, {length: 32768, id: ObjectID{1}, legacyVersion: 1}} {
+		depth := uint8(1)
+		if part.id != (ObjectID{}) {
+			depth = 2
+		}
+		if _, err := decodeFSIndex(legacyIndexFixture([]fsSegment{part}), 32768, depth); !errors.Is(err, ErrFSFormat) {
+			t.Fatal("accepted historical reference in hole/index", err)
+		}
+	}
 	parts[0].legacyVersion = 123
 	got, err = decodeFSIndex(legacyIndexFixture(parts), 32768, 1)
 	if err != nil || got[0].offset != 9 || got[0].legacyVersion != 123 {
