@@ -20,6 +20,11 @@ struct ks_overlay_state {
 	unsigned policies;
 	struct ov_dir **dirs;
 	size_t count;
+	/* Only successfully decoded snapshots have sorted, immutable arrays.
+	 * ov_edit deliberately leaves these fields zero in its mutable clone. */
+	bool immutable, upper_indexed;
+	stqr_object_id *upper_ids;
+	size_t upper_count;
 	struct member orphan_member;
 	stqr_object_id orphan_id;
 	bool orphan, orphan_has_inode;
@@ -40,6 +45,7 @@ static void ov_put(struct ks_overlay_state *s)
 	drop(&s->root_head);
 	sq_free(s->policy);
 	sq_free(s->dirs);
+	sq_free(s->upper_ids);
 	sq_free(s);
 }
 void ks_overlay_stop(struct ks_fs *f)
@@ -47,13 +53,7 @@ void ks_overlay_stop(struct ks_fs *f)
 	ov_put(f->overlay_state);
 	f->overlay_state = NULL;
 }
-static struct ov_dir *ov_find(struct ks_overlay_state *s, stqr_object_id id)
-{
-	for (size_t i = 0; i < s->count; i++)
-		if (eqid(s->dirs[i]->id, id))
-			return s->dirs[i];
-	return NULL;
-}
+#include "overlay_lookup.h"
 static int ov_node(struct ov_dir *d, const struct ks_node *node)
 {
 	struct ks_node n = *node;
@@ -260,6 +260,7 @@ static int ov_decode(const void *raw, size_t length, struct ks_overlay_state **o
 		err = -EUCLEAN;
 		goto fail;
 	}
+	ov_index_snapshot(s);
 	*out = s;
 	return 0;
 fail:
@@ -317,8 +318,15 @@ static int ov_state_once(struct ks_fs *f, struct ks_overlay_state **out)
 	info = root.info;
 	mutex_lock(&f->overlay_cache_lock);
 	s = f->overlay_state;
+	/* Cached state includes the exact observation used to certify directory
+	 * proofs, not merely decoded bytes. Equal content after replacement or
+	 * re-subscription must rebuild an immutable state with the new stamp;
+	 * reusing the old info would make every subsequent proof uncertifiable.
+	 * Never refresh shared s->info in place while readers retain this state. */
 	if (s && s->root_head.n == raw.n && !memcmp(s->root_head.p, raw.p, raw.n) &&
-	    !memcmp(s->info.runtime.bytes, info.runtime.bytes, 16)) {
+	    !memcmp(s->info.runtime.bytes, info.runtime.bytes, 16) &&
+	    s->info.proof.cursor == info.proof.cursor &&
+	    !memcmp(s->info.proof.subscription.bytes, info.proof.subscription.bytes, 16)) {
 		refcount_inc(&s->refs);
 		mutex_unlock(&f->overlay_cache_lock);
 		ks_snapshot_free(&root);
@@ -549,14 +557,6 @@ done:
 	drop(&root);
 	return err;
 }
-static bool ov_upper_ref(struct ks_overlay_state *s, stqr_object_id id)
-{
-	for (size_t i = 0; i < s->count; i++)
-		for (size_t j = 0; j < s->dirs[i]->count; j++)
-			if (!nullid(id) && eqid(s->dirs[i]->entries[j].id, id))
-				return true;
-	return false;
-}
 static int ov_entry(struct ov_dir *d, const char *name, stqr_object_id id)
 {
 	long at = find_entry(d->entries, d->count, name);
@@ -601,7 +601,7 @@ static int ov_entries_info(struct ks_fs *f, struct ks_overlay_state *s, stqr_obj
 		return -ENOMEM;
 	}
 	for (size_t i = 0; i < n; i++) {
-		if (d && find_entry(d->entries, d->count, base[i].name) >= 0)
+		if (d && ov_entry_at(s, d, base[i].name) >= 0)
 			continue;
 		if (ov_upper_ref(s, base[i].id)) {
 			err = -EOPNOTSUPP;
@@ -649,7 +649,7 @@ static int ov_child_proven(struct ks_fs *f, struct ks_overlay_state *s, stqr_obj
 	if (d) {
 		if (d->node.removed)
 			return -ENOENT;
-		at = find_entry(d->entries, d->count, name);
+		at = ov_entry_at(s, d, name);
 		if (at >= 0) {
 			if (nullid(d->entries[at].id))
 				err = -ENOENT;
@@ -778,22 +778,27 @@ fail:
 	return err;
 }
 static int ov_inode_match(struct inode *, void *);
+/* The VFS already indexes every live inode by the complete stable object ID.
+ * Do not walk the mount list under inode_lock: an invalidation of N cached
+ * inodes would otherwise perform N full list searches and block unrelated
+ * inode insertion/eviction for the duration of each search. ilookup5 also
+ * retains the inode and waits for I_NEW before its metadata is inspected. */
+static struct inode *ov_inode_get(struct ks_fs *f, stqr_object_id id)
+{
+	unsigned long hash = 0;
+	if (!f->sb)
+		return NULL;
+	for (unsigned k = 0; k < 32; k++)
+		hash = hash * 31 + id.bytes[k];
+	return ilookup5(f->sb, hash, ov_inode_match, id.bytes);
+}
 static bool ov_absent(struct ks_fs *f, stqr_object_id id, stqr_proof proof)
 {
-	struct ks_inode *entry;
-	struct inode *inode = NULL;
+	struct inode *inode;
 	bool absent = false;
 	if (!proof.cursor || zero(proof.subscription.bytes, 16))
 		return false;
-	spin_lock(&f->inode_lock);
-	list_for_each_entry(entry, &f->inodes, mount_list)
-	{
-		if (eqid(entry->id, id)) {
-			inode = igrab(&entry->inode);
-			break;
-		}
-	}
-	spin_unlock(&f->inode_lock);
+	inode = ov_inode_get(f, id);
 	if (inode) {
 		mutex_lock(&KS_I(inode)->metadata_lock);
 		absent = !memcmp(&KS_I(inode)->upper_absent, &proof, sizeof(proof));
@@ -1006,15 +1011,10 @@ static int ov_inode_match(struct inode *i, void *id)
 }
 static char *ov_vfs_path(struct ks_fs *f, stqr_object_id id)
 {
-	unsigned long hash = 0;
 	struct inode *i;
 	struct dentry *d;
 	char *buf, *name, *out = NULL;
-	if (!f->sb)
-		return NULL;
-	for (unsigned k = 0; k < 32; k++)
-		hash = hash * 31 + id.bytes[k];
-	i = ilookup5(f->sb, hash, ov_inode_match, id.bytes);
+	i = ov_inode_get(f, id);
 	if (!i)
 		return NULL;
 	d = d_find_alias(i);
@@ -1491,7 +1491,7 @@ int ks_overlay_copyup(struct ks_fs *f, stqr_object_id id)
 		}
 		d = ov_find(s, parent);
 		if (d) {
-			long at = find_entry(d->entries, d->count, slash ? slash + 1 : path);
+			long at = ov_entry_at(s, d, slash ? slash + 1 : path);
 			if (at >= 0 && eqid(d->entries[at].id, id)) {
 				err = 0;
 				goto end;

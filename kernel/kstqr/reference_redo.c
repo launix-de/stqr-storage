@@ -109,11 +109,18 @@ static int help_tx_pinned(struct ks_fs *f, stqr_object_id first, stqr_id *origin
 			if (own)
 				memset(origin, 0, sizeof(*origin));
 			err = stqr_request_id(&claim);
-			if (!err)
+			/* Drain helper pins in one direction. Re-entering the outer loop
+			 * would PIN this decided intent again while other helpers try to
+			 * claim it, so sufficiently many helpers can keep each other busy
+			 * forever. Keep one claim token and remain unpinned while waiting,
+			 * exactly as the Go filesystem helper does. A dependency still
+			 * blocks retirement; cancellation is an error, never permission to
+			 * replay REDO or publish heads without the exclusive claim. */
+			while (!err) {
 				err = ks_object_reference(f, id, claim, 2);
-			if (err == -EBUSY) {
+				if (err != -EBUSY)
+					break;
 				err = sq_pause(1);
-				goto cleanup;
 			}
 			if (err)
 				goto cleanup;
