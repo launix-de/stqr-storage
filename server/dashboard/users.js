@@ -6,7 +6,7 @@ import {newID} from './protocol.js';
 import {setupS3Keys} from './s3-keys.js';
 const $=id=>document.getElementById(id);
 export function setupUserViews({connection,currentUsername,escape,toast,showView,requireLogin,openBucketCreate,onUserDeleted=()=>{},statsEntries=()=>[]}){
- let users=[],createRetry,passwordRetry,selected,deleteRetry,loading=0,pageMeta={},searchTimer;
+ let users=[],createRetry,passwordRetry,selected,deleteRetry,loading=0,pageMeta={};
  const keys=setupS3Keys({connection});
  const traffic=new Map();let trafficPoll;
  const roleRetries=new Map(),deleteJobs=new Map();
@@ -27,7 +27,7 @@ export function setupUserViews({connection,currentUsername,escape,toast,showView
  }
  $('user-rows').closest('.storage-panel').querySelector('.panel-heading').insertAdjacentHTML('beforeend','<label class="search"><span>⌕</span><input id="user-search" placeholder="Name oder ID suchen …" aria-label="Benutzer durchsuchen"></label>');
  const pager=new EndlessList({container:$('user-rows').closest('.storage-panel'),visible:()=>!$('users-view').hidden,fetchPage:(after,limit,query)=>connection().listUsersPage(after,limit,query),entries:page=>page.users,onUpdate:(items,state)=>{if(!state.loading){users=items;pageMeta=state.meta;observeTraffic(state.meta);scheduleTraffic()}render(state)},onError:e=>{$('users-error').textContent=e.message},onLoading:busy=>{$('refresh-users').disabled=busy}});
- async function load(force=false){loading++;$('users-error').textContent='';return pager.reset($('user-search').value.trim())}
+ async function load(){loading++;$('users-error').textContent='';return pager.reset($('user-search').value.trim())}
 
  function observeTraffic(page){
   if(!page.node||!page.boot||!page.captured_ns)return;

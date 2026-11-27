@@ -29,7 +29,7 @@ function beginSession(session){
  joinView.stop();formatPlugins.clear();
  $('login').hidden=true;$('app').hidden=false;$('profile-name').textContent=session.username;volumeGrowth.clear();userViews.clear();bucketViews.clear();pgViews.clear();node?.stop();nodeStates.clear();fetchingConfigs.clear();snapshot=null;configView=null;volumeNode=null;
  const connection=node=new NodeConnection(session.csrf_token,connected=>{if(node===connection)setConnected(connected)},stats=>{if(node===connection)onStats(stats)});
- connection.onOpen=async()=>{try{const [cfg]=await Promise.all([connection.getConfig(),formatPlugins.refresh(),connection.subscribeVersions(),connection.subscribeStats(),userViews.load(),bucketViews.load()]);if(node===connection)applyConfig(cfg)}catch(e){if(node===connection)toast(e.message,true)}};
+ connection.onOpen=async()=>{try{const [cfg]=await Promise.all([connection.getConfig(),formatPlugins.refresh().catch(e=>{if(node===connection)toast(e.message,true)}),connection.subscribeVersions(),connection.subscribeStats(),userViews.load(),bucketViews.load()]);if(node===connection)applyConfig(cfg)}catch(e){if(node===connection)toast(e.message,true)}};
  connection.onVersions=versions=>{if(node===connection){if(configView)configView.node_versions=versions;renderVolumes()}};
  connection.onProtocolError=e=>{if(node===connection)toast('Protokollfehler: '+e.message,true)};
  connection.onDisconnect=async()=>{

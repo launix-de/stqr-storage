@@ -12,6 +12,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -24,6 +25,22 @@ func TestDashboardPluginsBrowser(t *testing.T) {
 		t.Skip("set STQR_TEST_BROWSER_MODULE for Playwright")
 	}
 	s := testServer(t)
+	s.cfg.FormatPluginsDir = t.TempDir()
+	custom := `export const apiVersion=1;
+export const css='[data-stqr-plugin="custom"] .custom-output { color: rgb(12, 34, 56); }';
+export async function open({bucket,windows,ui,signal}) {
+ const view=windows.open({title:bucket.name,signal});
+ const list=ui.createList({container:view.root,root:view.scrollRoot,signal:view.signal,columns:['Result'],key:x=>x.key,
+ fetchPage:async(a,n,q,{signal})=>{await new Promise(r=>setTimeout(r,q?10:1200));return {items:[{key:q||'initial'}],next:''}},
+ renderRow:item=>{const row=document.createElement('tr');const cell=document.createElement('td');cell.className='custom-output';cell.textContent=item.key;row.append(cell);return row}});
+ await list.load();
+}`
+	if err := os.WriteFile(filepath.Join(s.cfg.FormatPluginsDir, "custom.mjs"), []byte(custom), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(s.cfg.FormatPluginsDir, "badcss.mjs"), []byte(`export const apiVersion=1;export const css='body{display:none}';export function open(){throw Error('must not run')}`), 0644); err != nil {
+		t.Fatal(err)
+	}
 	addTestVolume(t, s, "plugins", "hdd", 96<<20)
 	host := httptest.NewServer(s.Handler())
 	defer host.Close()
@@ -100,6 +117,10 @@ func TestDashboardPluginsBrowser(t *testing.T) {
 	bdClient.Close()
 	unknown := dial("unknown")
 	unknown.Close()
+	customClient := dial("custom")
+	customClient.Close()
+	badCSSClient := dial("badcss")
+	badCSSClient.Close()
 	ids["admin"] = systemBucket.String()
 	sum := sha256.Sum256(largePayload)
 	input, _ := json.Marshal(map[string]any{"url": host.URL, "username": a.Username, "password": a.Password, "ids": ids, "largeSHA256": hex.EncodeToString(sum[:])})

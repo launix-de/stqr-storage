@@ -30,7 +30,7 @@ const permissions=[[1,'Lesen'],[2,'Schreiben'],[4,'Anhängen'],[8,'Löschen']];
 export function setupBucketViews({connection,escape,toast,showView,onUsersChanged=()=>{},statsEntries=()=>[],formatPlugins}){
  const seenStats=new Set(),checkedCatalog=new Set(),pendingCatalog=new Set();let syncingCatalog=false;
  let groups=[],buckets=[],users=[],epoch=0,poll,editor,createProgress,access,grantRetry,action,actionRetry,editorPending=false;
- let pageMeta={},searchTimer,userChoices=[],userSearchTimer,userSearchEpoch=0;
+ let pageMeta={},userChoices=[],userSearchTimer,userSearchEpoch=0;
  let quotaInfo=null,quotaSteps=[],quotaEpoch=0,quotaPoll,grantRows=[],lockRetry;
  async function fetchGroups(){const out=[];let after='';const seen=new Set;for(;;){const page=await connection().listPlacementGroups(after);out.push(...page.groups);if(!page.next)return out;if(seen.has(page.next))throw Error('Ungültige PG-Folgeseite.');seen.add(page.next);after=page.next}}
  function applyGroup(){const g=groups.find(g=>g.id===$('bucket-pg').value);if(!g)return;const p=(g.desired??g.effective).storage;$('bucket-storage').value=p.storage_strategy;$('bucket-compression').value=p.compression;$('bucket-placement').value=p.placement_mode;$('bucket-replicas').value=p.redundancy.replicas||1;updateFields()}
@@ -73,7 +73,7 @@ export function setupBucketViews({connection,escape,toast,showView,onUsersChange
   for(const b of document.querySelectorAll('[data-copy-bucket]'))b.onclick=async e=>{e.stopPropagation();try{await copyText(b.dataset.copyBucket);toast('Bucket-ID kopiert')}catch(error){toast(error.message,true)}};
   for(const b of document.querySelectorAll('[data-bucket-action]'))b.onclick=()=>openAction(b.dataset.id,b.dataset.bucketAction);
  }
- $('refresh-buckets').onclick=()=>load();const search=bindSearch($('bucket-search'),()=>load(),{onChange:()=>{epoch++;clearTimeout(poll);pager.cancel()}});$('add-bucket').onclick=()=>openCreate();
+ $('refresh-buckets').onclick=async()=>{try{await formatPlugins?.refresh();await load()}catch(e){$('buckets-error').textContent=e.message}};const search=bindSearch($('bucket-search'),()=>load(),{onChange:()=>{epoch++;clearTimeout(poll);pager.cancel()}});$('add-bucket').onclick=()=>openCreate();
  function fillEditor(b,create){
   const p=b.policy,l=p.limits;editor={bucket:b,create};createProgress=null;
  $('bucket-pg').innerHTML=groups.filter(g=>g.id!=='53545152535953504701000000000000').map(g=>`<option value="${g.id}">${escape(g.name)}</option>`).join('');$('bucket-pg').value=p.placement_group??groups.find(g=>g.name==='Standard')?.id??groups[0]?.id??'';

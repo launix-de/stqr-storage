@@ -20,7 +20,8 @@ External files override bundled modules with the same stem. Within a directory,
 `.mjs` takes precedence over `.js`. The generic authenticated
 `GET /api/format-plugins` returns `{plugins:[{format,url}]}`; it never returns
 filesystem paths. Modules are served with JavaScript MIME type under
-`/format-plugins/`. Refresh the dashboard after installing or updating a package:
+`/format-plugins/`. The bucket refresh button discovers newly installed filenames. Reload the page
+after updating the contents of a module:
 ES modules are cached for the lifetime of the page. Missing modules keep the
 format cell as text. No `admin` module is shipped, so its cell remains text.
 
@@ -124,7 +125,7 @@ menus, whose semantics require the full set.
   the plugin reports that condition explicitly. Symlinks/FIFOs/sockets are shown
   without following or reading them. Create directory, rename, upload and delete
   are future work and do not appear as enabled actions.
-* `s3`: scans native object pages and filters keys in the plugin; displays metadata,
+* `s3`: scans pages in native object-address order and filters keys in the plugin; displays metadata,
   payload downloads, private/public-read ACL editing with byte-comparing ranged CAS,
   and text/image previews. Text is shown literally, including HTML; SVG and other
   active document types are never rendered as documents. Text previews are capped

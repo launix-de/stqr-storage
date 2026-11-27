@@ -3,18 +3,20 @@
 export const apiVersion=1;
 export const css='[data-stqr-plugin="s3"] .s3-key { max-width: 42ch; overflow-wrap: anywhere; } [data-stqr-plugin="s3"] .s3-preview { margin-top: 18px; }';
 const utf8=new TextEncoder,decode=new TextDecoder('utf-8',{fatal:true}),hex=b=>Array.from(b,v=>v.toString(16).padStart(2,'0')).join('');
+const magic=(b,s)=>b.length>=s.length&&Array.from(s).every((c,i)=>b[i]===c.charCodeAt(0));
+const compareText=(a,b)=>{const x=new TextEncoder().encode(a),y=new TextEncoder().encode(b);for(let i=0;i<Math.min(x.length,y.length);i++)if(x[i]!==y[i])return x[i]-y[i];return x.length-y.length};
 const fail=()=>{throw Error('Ungültige S3-Metadaten.')};
 class Reader{constructor(b){this.b=b;this.at=0}take(n){if(!Number.isSafeInteger(n)||n<0||n>this.b.length-this.at)fail();const out=this.b.subarray(this.at,this.at+n);this.at+=n;return out}u16(){const b=this.take(2);return new DataView(b.buffer,b.byteOffset,2).getUint16(0,true)}u32(){const b=this.take(4);return new DataView(b.buffer,b.byteOffset,4).getUint32(0,true)}u64(){const b=this.take(8);return new DataView(b.buffer,b.byteOffset,8).getBigUint64(0,true)}v(){let n=0n;for(let i=0;i<10;i++){const b=this.take(1)[0];if(i===9&&b>1)fail();n|=BigInt(b&127)<<BigInt(i*7);if(!(b&128)){if(i&&b===0)fail();if(n>65536n)fail();return Number(n)}}fail()}text(){return decode.decode(this.take(this.v()))}done(){if(this.at!==this.b.length)fail()}}
 export async function metadataID(key){const {sha256}=await import('/assets/sdk/codec.mjs');return hex(await sha256(utf8.encode('stqr:s3:meta:v1:\0'+key)))}
 export function decodeObject(data,id,length){
- const r=new Reader(data);if(decode.decode(r.take(4))!=='STS3')return null;const version=r.u16(),parts=r.u16(),flags=r.u32();if(!((version===2&&parts===0)||(version===3&&parts>0&&parts<=10000))||(flags&~3))fail();const payload=hex(r.take(32)),size=r.u64(),modified=r.u64(),etag=hex(r.take(16))+(version===3?'-'+parts:''),metadataLength=r.u32(),offset=80+metadataLength;
+ const r=new Reader(data);if(!magic(r.take(4),'STS3'))return null;const version=r.u16(),parts=r.u16(),flags=r.u32();if(!((version===2&&parts===0)||(version===3&&parts>0&&parts<=10000))||(flags&~3))fail();const payload=hex(r.take(32)),size=r.u64(),modified=r.u64(),etag=hex(r.take(16))+(version===3?'-'+parts:''),metadataLength=r.u32(),offset=80+metadataLength;
  if(offset>65536||offset>data.length||payload!==id||BigInt(offset)+size!==BigInt(length))fail();const m=new Reader(data.subarray(80,offset)),key=m.text();if(!key||utf8.encode(key).length>1024||key.includes('\0'))fail();const maps=[];
- for(let i=0;i<2;i++){const map=Object.create(null),count=m.v();if(count>4096)fail();let previous='';for(let j=0;j<count;j++){const k=m.text(),v=m.text();if(!k||j&&k<=previous)fail();map[k]=v;previous=k}maps.push(map)}m.done();
+ for(let i=0;i<2;i++){const map=Object.create(null),count=m.v();if(count>4096)fail();let previous='';for(let j=0;j<count;j++){const k=m.text(),v=m.text();if(!k||j&&compareText(k,previous)<=0)fail();map[k]=v;previous=k}maps.push(map)}m.done();
  return {id,key,size,modified,etag,flags,publicRead:!!(flags&2),deleted:!!(flags&1),headers:maps[0],metadata:maps[1],offset,header:data.slice(0,offset)};
 }
 export async function listPage(client,after,limit,query,{signal}={}){
  const page=await client.scanObjects(after,limit,{signal}),items=[];
- for(const entry of page.objects){signal?.throwIfAborted();let result;try{result=await client.getRange(entry.id,0n,65536n,{signal})}catch(e){if(e.status===404)continue;throw e}if(result.data.length<4||decode.decode(result.data.subarray(0,4))!=='STS3')continue;const o=decodeObject(result.data,entry.id,result.info.length);if(await metadataID(o.key)!==entry.id)fail();if(!o.deleted&&o.key.toLocaleLowerCase().includes(query.toLocaleLowerCase()))items.push(o)}
+ for(const entry of page.objects){signal?.throwIfAborted();let result;try{result=await client.getRange(entry.id,0n,65536n,{signal})}catch(e){if(e.status===404)continue;throw e}if(!magic(result.data,'STS3'))continue;const o=decodeObject(result.data,entry.id,result.info.length);if(await metadataID(o.key)!==entry.id)fail();if(!o.deleted&&o.key.toLocaleLowerCase().includes(query.toLocaleLowerCase()))items.push(o)}
  return {items,next:page.next};
 }
 async function chunks(client,object,{signal,max=object.size}={}){
