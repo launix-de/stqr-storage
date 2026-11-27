@@ -243,10 +243,20 @@ func (v *Volume) accountingDigest() ([32]byte, error) {
 	return sha256.Sum256(b), nil
 }
 func (v *Volume) encodeAccountingCacheLocked() (string, []byte, error) {
-	if v.accountCachePath == "" || !v.accountManaged.Load() || !v.accountReady.Load() || v.failed != nil || v.sb.Identity.Class == RAM || v.sb.Identity.Class == RAMCache {
+	if v.sb.Generation != v.durableGeneration || v.deferred != nil || v.checkpointing {
 		return "", nil, nil
 	}
-	if v.sb.Generation != v.durableGeneration || v.deferred != nil || v.checkpointing {
+	return v.encodeAccountingCheckpointCacheLocked()
+}
+
+// encodeAccountingCheckpointCacheLocked captures ONLY the currently published
+// cut while its accounting maps and superblock still agree under v.mu. Unlike a
+// general cache save, that cut need not be durable yet: runFence owns the bytes
+// and may publish them only after confirming this exact generation. Later
+// accepted writes cannot alter this frozen O(buckets) buffer. No object scan,
+// user-data write, or Sync is performed here.
+func (v *Volume) encodeAccountingCheckpointCacheLocked() (string, []byte, error) {
+	if v.accountCachePath == "" || !v.accountManaged.Load() || !v.accountReady.Load() || v.failed != nil || v.sb.Identity.Class == RAM || v.sb.Identity.Class == RAMCache {
 		return "", nil, nil
 	}
 	key, known := ownershipKey(v.ownerStamp, v.ownerFilter)
