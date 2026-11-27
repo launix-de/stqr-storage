@@ -597,3 +597,62 @@ func TestAuthorityFenceUsesCommittedPlacementClassDuringPolicyTransition(t *test
 	}
 	t.Fatal("committed HDD owner lost its recovery proof under old SSD policy")
 }
+
+func TestAuthorityFenceConcurrentStartAndClose(t *testing.T) {
+	for i := 0; i < 32; i++ {
+		dev, err := volume.NewMemory(2 << 20)
+		if err != nil {
+			t.Fatal(err)
+		}
+		v, err := volume.Format(dev, volume.FormatOptions{Class: volume.HDD})
+		if err != nil {
+			t.Fatal(err)
+		}
+		h, err := v.Open(true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		err = h.SetLocalMetadataWithOptions([]byte("requested administrative header"), volume.Options{Accepted: true})
+		cut, gerr := h.Generation()
+		h.Close()
+		if err != nil || gerr != nil {
+			t.Fatal(err, gerr)
+		}
+		beforeSync := v.IOStats().SyncOps
+		ctx, cancel := context.WithCancel(context.Background())
+		id := v.Identity().VolumeID
+		target := authorityTarget{store: v, generation: cut, record: volumeAuthorityRecord{Schema: 1, Cluster: client.ID(v.Identity().ClusterID), Node: client.ID(v.Identity().NodeID), Volume: client.ID(id)}}
+		s := &Server{ctx: ctx, cancel: cancel, volumes: map[string]*managedVolume{id.String(): {store: v}}, authority: &volumeAuthorityState{records: make(map[volume.ID]volumeAuthorityRecord), staged: map[volume.ID]authorityTarget{id: target}}}
+		start := make(chan struct{})
+		done, closed := make(chan struct{}), make(chan error, 1)
+		go func() {
+			<-start
+			s.opMu.Lock()
+			err := s.startAuthorityBatchLocked([]authorityTarget{target})
+			s.opMu.Unlock()
+			var wait *authorityWait
+			if errors.As(err, &wait) {
+				_ = wait.wait(ctx)
+			}
+			close(done)
+		}()
+		go func() { <-start; closed <- s.Close() }()
+		close(start)
+		select {
+		case err := <-closed:
+			if err != nil {
+				t.Fatal(err)
+			}
+		case <-time.After(3 * time.Second):
+			t.Fatal("concurrent Close stranded an authority worker")
+		}
+		select {
+		case <-done:
+		case <-time.After(3 * time.Second):
+			t.Fatal("authority enqueue survived Close")
+		}
+		if extra := v.IOStats().SyncOps - beforeSync; extra != 0 && extra != 4 {
+			t.Fatal("concurrent close started an unexpected extra fence", extra)
+		}
+	}
+}
