@@ -485,6 +485,9 @@ func (b *Bucket) mutateAttempt(ctx context.Context, p principal, id volume.Objec
 		return volume.Result{}, fail(503, "bucket not attached")
 	}
 	s := b.server
+	if bucketLocalReferenceRoot(id) && !referencePrincipalSupported(p) {
+		return volume.Result{}, ErrBucketForbidden
+	}
 	if p.internalCoordination && bucketLocalReferenceRoot(id) && !p.cowInternal && p.referenceAuth == nil {
 		_, stamp, err := s.referenceAccountSnapshot(p)
 		if err != nil {

@@ -4,6 +4,7 @@ package server
 import (
 	"context"
 	"errors"
+	"github.com/launix-de/stqr-storage/client"
 	"github.com/launix-de/stqr-storage/volume"
 )
 
@@ -47,6 +48,9 @@ func (s *Server) findAccountWithReferenceStamp(name string) (account, *reference
 // an original stamp with a newer one: delete/recreate is a new identity even if
 // every account field is identical. Registered connection revocation also wins.
 func (s *Server) referenceAccountSnapshot(p principal) (account, *referenceAccountStamp, error) {
+	if !referencePrincipalSupported(p) {
+		return account{}, nil, ErrBucketForbidden
+	}
 	if p.connection != nil && p.connection.invalid.Load() {
 		return account{}, nil, ErrBucketForbidden
 	}
@@ -108,12 +112,15 @@ func (s *Server) referenceAccountsStable() bool {
 // The returned context derives from ctx, preserving the collector's original
 // connectionWork/fence linkage. CAS must validate this guard under admission.
 func (s *Server) pruneAbsentPlainReferencePins(ctx context.Context, entries []objectReferenceEntry) ([]objectReferenceEntry, context.Context, error) {
-	if len(entries) < maxObjectReferences || !s.referenceAccountsStable() {
+	if len(entries) < maxObjectReferences {
 		return entries, ctx, nil
+	}
+	if !s.referenceAccountsStable() {
+		return nil, ctx, fail(503, "reference cleanup awaits stable account authority")
 	}
 	x, err := s.accountIndex()
 	if err != nil {
-		return entries, ctx, nil
+		return nil, ctx, fail(503, "reference cleanup account authority is unavailable")
 	}
 	prior, _ := ctx.Value(referencePruneKey{}).(*referencePruneGuard)
 	if prior != nil && prior.accounts != x {
@@ -148,7 +155,19 @@ func (s *Server) pruneAbsentPlainReferencePins(ctx context.Context, entries []ob
 // Caller holds the SAME shared/exclusive node admission as the real mutation,
 // before any Volume access. UserDelete/system installation use its exclusive
 // side; no queued old actor may publish after that deletion has completed.
+// Scoped frontend credentials intentionally have no lifetime-reference capability.
+// Their cross-node grant currently proves an HTTP operation, not continuity of
+// the ORIGINAL account incarnation. Never upgrade them to a fresh local stamp.
+// Native Basic/cookie clients and internal native reference operations retain
+// their original continuity proof; ordinary frontend data access is unaffected.
+func referencePrincipalSupported(p principal) bool {
+	return p.frontendIssuer == (client.ID{}) && (p.connection == nil || p.connection.frontendPermission == 0)
+}
+
 func (s *Server) validateReferenceMutation(ctx context.Context, p principal, id volume.ObjectID) error {
+	if bucketLocalReferenceRoot(id) && !referencePrincipalSupported(p) {
+		return ErrBucketForbidden
+	}
 	if p.internalCoordination && bucketLocalReferenceRoot(id) && !p.cowInternal {
 		if p.referenceAuth == nil {
 			return ErrBucketForbidden

@@ -200,6 +200,7 @@ func (s *Server) findAccount(name string) (account, error) {
 }
 
 type session struct {
+	referenceAuth          *referenceAccountStamp
 	Username, UserID, CSRF string
 	Expires                time.Time
 }
@@ -268,7 +269,7 @@ func (s *Server) authenticate(r *http.Request) (principal, error) {
 		return principal{}, errors.New("session expired")
 	}
 	u, stamp, e := s.findAccountWithReferenceStamp(ss.Username)
-	if e != nil || u.ID != ss.UserID || u.Role != "ADMIN" {
+	if e != nil || u.ID != ss.UserID || u.Role != "ADMIN" || ss.referenceAuth == nil || ss.referenceAuth != stamp {
 		return principal{}, errors.New("session revoked")
 	}
 	return principal{User: u, referenceAuth: stamp, SessionToken: c.Value, CSRF: ss.CSRF, Cookie: true}, nil
@@ -281,6 +282,11 @@ func (s *Server) createSession(w http.ResponseWriter, p principal) {
 		httpError(w, 403, err)
 		return
 	}
+	_, stamp, authErr := s.referenceAccountSnapshot(p)
+	if authErr != nil || p.referenceAuth == nil {
+		httpError(w, 403, ErrBucketForbidden)
+		return
+	}
 	token, e := randomSecret()
 	if e != nil {
 		httpError(w, 500, e)
@@ -291,7 +297,7 @@ func (s *Server) createSession(w http.ResponseWriter, p principal) {
 		httpError(w, 500, e)
 		return
 	}
-	ss := session{Username: p.User.Name, UserID: p.User.ID, CSRF: csrf, Expires: time.Now().Add(12 * time.Hour)}
+	ss := session{referenceAuth: stamp, Username: p.User.Name, UserID: p.User.ID, CSRF: csrf, Expires: time.Now().Add(12 * time.Hour)}
 	s.authMu.Lock()
 	for k, v := range s.sessions {
 		if time.Now().After(v.Expires) {
