@@ -73,6 +73,9 @@ jobs:
         with:
           go-version-file: go.mod
           cache-dependency-path: go.sum
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '24'
       - name: Disjoint server tests, examples and fuzz seeds with race detector
         run: python3 tools/ci/server-tests.py --shard ${{ matrix.shard }} --shards 4
 
@@ -106,7 +109,7 @@ jobs:
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: '24'
-      - run: node --test server/dashboard_*_test.mjs
+      - run: node --test client/js/*.test.mjs server/dashboard_*_test.mjs
       - run: npm ci --prefix tools/ci --no-audit --no-fund
       - run: npm exec --prefix tools/ci -- playwright install --with-deps chromium
       - name: Select the installed browser and module
