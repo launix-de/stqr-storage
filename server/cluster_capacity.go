@@ -23,6 +23,9 @@ func (b *Bucket) administrativeUsage(ctx context.Context, p principal) (uint64, 
 		return 0, fail(503, "bucket has unavailable recovery ranges")
 	}
 	if b.server.controller == nil {
+		if d := b.storageDescription(); len(d.ClonePeers) > 0 && d.Policy.Limits.Accounting == "logical" {
+			return b.observedCOWLogicalUsage()
+		}
 		return b.accountedUsage()
 	}
 	return b.clusterLogicalUsage(ctx, p)
@@ -129,9 +132,13 @@ func (s *Server) administrativeQuotaCapacity(id volume.ID, strategy uint8, p pri
 }
 
 func (s *Server) quotaCapacitySnapshot(ctx context.Context, id volume.ID, strategy uint8, p principal, internal bool, selection ...BucketPolicy) (bucketQuotaCapacity, error) {
+	return s.quotaCapacitySnapshotMode(ctx, id, strategy, p, internal, false, selection...)
+}
+
+func (s *Server) quotaCapacitySnapshotMode(ctx context.Context, id volume.ID, strategy uint8, p principal, internal, physicalPool bool, selection ...BucketPolicy) (bucketQuotaCapacity, error) {
 	view := s.currentSystem.Load()
 	if s.controller == nil || view == nil || len(view.manifest.Membership.Members) <= 1 {
-		return s.bucketQuotaCapacity(id, strategy, selection...)
+		return s.bucketQuotaCapacityMode(id, strategy, physicalPool, selection...)
 	}
 	if strategy > 2 {
 		return bucketQuotaCapacity{}, fail(400, "invalid storage strategy")
@@ -152,7 +159,9 @@ func (s *Server) quotaCapacitySnapshot(ctx context.Context, id volume.ID, strate
 		if len(selection) > 0 {
 			accounting = selection[0].Limits.Accounting
 		}
-		used, err = b.clusterUsageMode(ctx, p, accounting, internal)
+		if !physicalPool {
+			used, err = b.clusterUsageMode(ctx, p, accounting, internal)
+		}
 		if err != nil {
 			return bucketQuotaCapacity{}, err
 		}
@@ -195,6 +204,9 @@ func (s *Server) quotaCapacitySnapshot(ctx context.Context, id volume.ID, strate
 				continue
 			}
 			class := int(v.Class)
+			if physicalPool && volume.Class(strategy).Allows(volume.Class(v.Class)) {
+				used = addCapacity(used, v.AllocatedPhysical)
+			}
 			node.Free[class] = addCapacity(node.Free[class], addCapacity(v.AdmissionFreePhysical, v.GuaranteedRemainingPhysical))
 			node.Reserved[class] = addCapacity(node.Reserved[class], subtractCapacity(v.GuaranteedRemainingPhysical, shares[member.ID][v.ID.String()]))
 		}

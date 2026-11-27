@@ -29,6 +29,22 @@ type bucketUsage struct {
 	generation            uint64 // bucket catalog revision; never an object-content counter
 }
 
+// Observation must never reconstruct a COW namespace while holding node
+// admission or block behind a publisher settling its usage counters. Unknown
+// logical usage is unavailable, not zero and not permission to exceed a quota.
+func (b *Bucket) observedCOWLogicalUsage() (uint64, error) {
+	u := &b.usage
+	if !u.mu.TryLock() {
+		return 0, fail(503, "bucket logical usage is being updated")
+	}
+	defer u.mu.Unlock()
+	placement, revision := b.usageStamp()
+	if !u.valid || u.placement != placement || u.generation != revision {
+		return 0, fail(503, "inherited bucket logical usage is not available")
+	}
+	return u.bytes, nil
+}
+
 func (b *Bucket) usageStamp() (*placementImage, uint64) {
 	s := b.server
 	if s.controller != nil {
