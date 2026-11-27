@@ -88,6 +88,7 @@ func (v *Volume) adoptBackendSizeLocked() (uint64, error) {
 		return 0, e
 	}
 	if n < 0 || uint64(n) < v.sb.Identity.Size {
+		v.invalidateKeyMembership()
 		v.failed = ErrIdentity
 		return 0, ErrIdentity
 	}
@@ -210,6 +211,7 @@ func (v *Volume) Shrink(sizeBytes int64) error {
 		d.mu.Unlock()
 	case *FileIO:
 		if e = d.remap(n); e != nil {
+			v.invalidateKeyMembership()
 			v.failed = e
 			return e
 		}
@@ -217,6 +219,7 @@ func (v *Volume) Shrink(sizeBytes int64) error {
 			e = d.file.Sync()
 		}
 		if e != nil {
+			v.invalidateKeyMembership()
 			v.failed = e
 			return e
 		}

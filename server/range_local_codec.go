@@ -13,11 +13,6 @@ func (r *rangeManager) reencodeLocalDestination(ctx context.Context, p rangePlan
 	if p.Source != p.Target {
 		return nil
 	}
-	end, err := r.server.beginRebuildIO(ctx)
-	if err != nil {
-		return err
-	}
-	defer end()
 	store, err := r.destination(p)
 	if err != nil {
 		return err
@@ -37,57 +32,57 @@ func (r *rangeManager) reencodeLocalDestination(ctx context.Context, p rangePlan
 		if err := r.server.waitForUserIO(ctx); err != nil {
 			return err
 		}
-		done, err := func() (bool, error) {
-			r.server.opMu.Lock()
-			defer r.server.opMu.Unlock()
-			h, err := store.Open(false)
+		// Bounded read-only enumeration does not need node-wide admission.
+		h, err := store.Open(false)
+		if err != nil {
+			return err
+		}
+		records, err := p.scanObjects(h, after, 128)
+		h.Close()
+		if err != nil {
+			return err
+		}
+		if len(records) == 0 {
+			return nil
+		}
+		for _, record := range records {
+			if !p.contains(record.Key.Object) || record.Info.Deleted || record.Info.Compression == p.Compression {
+				continue
+			}
+			end, err := r.server.beginRebuildIO(ctx)
 			if err != nil {
-				return false, err
+				return err
 			}
-			records, err := p.scanObjects(h, after, 128)
-			h.Close()
-			if err != nil {
-				return false, err
-			}
-			if len(records) == 0 {
-				return true, nil
-			}
-			for _, record := range records {
-				if !p.contains(record.Key.Object) || record.Info.Deleted || record.Info.Compression == p.Compression {
-					continue
-				}
-				selected, _, _, err := b.selectVolume(b.Describe(), record.Key, volume.ID{}, false)
+			err = func() error {
+				defer end()
+				r.server.opMu.Lock()
+				defer r.server.opMu.Unlock()
+				selected, _, _, err := b.selectVolume(b.storageDescription(), record.Key, volume.ID{}, false)
 				if err != nil {
-					return false, err
+					return err
 				}
 				if selected != store {
-					continue
+					return nil
 				}
 				allowance, err := r.allowance(txn)
 				if err != nil {
-					return false, err
+					return err
 				}
 				before := store.Stats().InFlightReservedPhysical
 				h, err := store.Open(true)
 				if err != nil {
-					return false, err
+					return err
 				}
-				err = h.RecompressWithOptions(record.Key, p.Compression, volume.Options{InFlightAllowance: allowance})
+				err = h.RecompressWithOptions(record.Key, p.Compression, volume.Options{Accepted: true, InFlightAllowance: allowance})
 				h.Close()
 				r.consumed(txn, store, before)
-				if err != nil {
-					return false, err
-				}
+				return err
+			}()
+			if err != nil {
+				return err
 			}
-			next := records[len(records)-1].Key.Object
-			after = &next
-			return false, nil
-		}()
-		if err != nil {
-			return err
 		}
-		if done {
-			return nil
-		}
+		next := records[len(records)-1].Key.Object
+		after = &next
 	}
 }

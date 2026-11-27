@@ -41,6 +41,7 @@ type rangeSnapshot struct {
 	mu          sync.Mutex
 	final       bool
 	logicalUsed uint64
+	generation  uint64
 	digest      hash.Hash
 	object      *rangeIncomingObject
 }
@@ -138,12 +139,17 @@ func (r *rangeManager) receiveSnapshot(m client.Message, actor client.ID, force 
 			}
 			snapshot.mu.Unlock()
 		}
+		store, err := r.destination(t.plan)
+		if err != nil {
+			return nil, err
+		}
+		generation := store.Stats().Generation
 		r.mu.Lock()
 		defer r.mu.Unlock()
 		if t.aborted || t.forceRetired {
 			return nil, errControlConflict
 		}
-		t.snapshot = &rangeSnapshot{final: final, digest: sha256.New()}
+		t.snapshot = &rangeSnapshot{final: final, digest: sha256.New(), generation: generation}
 		return nil, nil
 	}
 	if snapshot == nil {
@@ -168,31 +174,62 @@ func (r *rangeManager) receiveSnapshot(m client.Message, actor client.ID, force 
 		if d.Done() != nil || key.Bucket != volume.ID(t.plan.Before.Bucket) || !t.plan.contains(key.Object) || snapshot.object != nil {
 			return nil, client.ErrProtocol
 		}
-		memo, exists, err := r.objectMemo(id, key)
+		// Memos from an earlier process cannot certify accepted bytes: a crash
+		// may discard them while a private journal checkpoint survives. Compare
+		// the actual shadow content instead of trusting an on-disk digest.
+		store, err := r.destination(t.plan)
 		if err != nil {
 			return nil, err
 		}
-		available := exists && memo.Info == info && memo.Codec == t.plan.Compression && memo.Digest == expected
-		if available {
-			store, err := r.destination(t.plan)
-			if err != nil {
-				return nil, err
-			}
+		end, err := r.server.beginRebuildIO(r.server.ctx)
+		if err != nil {
+			return nil, err
+		}
+		var actual [32]byte
+		available := false
+		err = func() error {
+			defer end()
 			h, err := store.Open(false)
 			if err != nil {
-				return nil, err
+				return err
 			}
+			defer h.Close()
 			current, err := h.RecordInfo(key)
-			h.Close()
-			available = err == nil && current.Length == info.Length && current.Deleted == info.Deleted && current.Compression == t.plan.Compression
+			if errors.Is(err, volume.ErrNotFound) {
+				return nil
+			}
+			if err != nil {
+				return err
+			}
+			if current.Length != info.Length || current.Deleted != info.Deleted || current.Compression != t.plan.Compression {
+				return nil
+			}
+			// Encode the source header while decoding the destination's actual
+			// codec; compression conversion must not change logical identity.
+			actual, err = rangeObjectDigest(r.server.ctx, h, key, info)
+			if err != nil {
+				return err
+			}
+			available = actual == expected
+			if available {
+				generation, err := h.Generation()
+				if err != nil {
+					return err
+				}
+				snapshot.generation = max(snapshot.generation, generation)
+			}
+			return nil
+		}()
+		if err != nil {
+			return nil, err
 		}
 		e := client.Encoder{}
 		e.Bool(available)
 		if available {
-			e.B = append(e.B, memo.Digest[:]...)
+			e.B = append(e.B, actual[:]...)
 			snapshot.digest.Write([]byte{0})
 			snapshot.digest.Write(header)
-			snapshot.digest.Write(memo.Digest[:])
+			snapshot.digest.Write(actual[:])
 			if !info.Deleted {
 				if info.Length > math.MaxUint64-snapshot.logicalUsed {
 					return nil, volume.ErrRange
@@ -316,6 +353,12 @@ func (r *rangeManager) receiveSnapshot(m client.Message, actor client.ID, force 
 				return err
 			}
 			defer h.Close()
+			defer func() {
+				generation, e := h.Generation()
+				if e == nil {
+					snapshot.generation = max(snapshot.generation, generation)
+				}
+			}()
 			info := o.info
 			info.Compression = t.plan.Compression
 			source := func(yield func(uint64, io.Reader, uint64) error) error {
@@ -356,13 +399,13 @@ func (r *rangeManager) receiveSnapshot(m client.Message, actor client.ID, force 
 				if e != nil {
 					return e
 				}
-				return h.RestoreDelta(o.key, o.baseDigest, info, patches, volume.Options{InFlightAllowance: allowance, ImportShadow: true})
+				return h.RestoreDelta(o.key, o.baseDigest, info, patches, volume.Options{Accepted: true, InFlightAllowance: allowance, ImportShadow: true})
 			}
 			_, err = h.RecordInfo(o.key)
 			if err == nil {
 				// This copy is not authoritative yet. Reclaim it before replacing
 				// it, so catch-up needs no second full object allocation (MVCC).
-				if err := h.Purge(o.key); err != nil {
+				if _, err := h.PurgeAccepted(o.key); err != nil {
 					return err
 				}
 			}
@@ -370,18 +413,12 @@ func (r *rangeManager) receiveSnapshot(m client.Message, actor client.ID, force 
 				return err
 			}
 			if o.encoded {
-				return h.RestoreEncoded(o.key, info, o.encodedSource(), volume.Options{InFlightAllowance: allowance, ImportShadow: true})
+				return h.RestoreEncoded(o.key, info, o.encodedSource(), volume.Options{Accepted: true, InFlightAllowance: allowance, ImportShadow: true})
 			}
-			return h.RestoreSeekable(o.key, info, source, volume.Options{InFlightAllowance: allowance, ImportShadow: true})
+			return h.RestoreSeekable(o.key, info, source, volume.Options{Accepted: true, InFlightAllowance: allowance, ImportShadow: true})
 		}()
 		r.consumed(t, store, reservedBefore)
 		r.server.opMu.Unlock()
-		if err != nil {
-			return nil, err
-		}
-		var sum [32]byte
-		copy(sum[:], digest)
-		err = r.storeObjectMemo(id, rangeObjectMemo{Key: o.key, Info: o.info, Codec: t.plan.Compression, Digest: sum})
 		if err != nil {
 			return nil, err
 		}
@@ -421,12 +458,15 @@ func (r *rangeManager) receiveSnapshot(m client.Message, actor client.ID, force 
 		if err != nil {
 			return nil, err
 		}
-		r.server.opMu.Lock()
-		err = func() error {
-			for _, record := range records {
-				if err := r.server.ctx.Err(); err != nil {
-					return err
-				}
+		for _, record := range records {
+			end, err := r.server.beginRebuildIO(r.server.ctx)
+			if err != nil {
+				return nil, err
+			}
+			err = func() error {
+				defer end()
+				r.server.opMu.Lock()
+				defer r.server.opMu.Unlock()
 				before := store.Stats().InFlightReservedPhysical
 				allowance, err := r.allowance(t, force)
 				if err != nil {
@@ -436,18 +476,22 @@ func (r *rangeManager) receiveSnapshot(m client.Message, actor client.ID, force 
 				if err != nil {
 					return err
 				}
-				err = h.RestoreRequestWithOptions(record, volume.Options{InFlightAllowance: allowance, ImportShadow: true})
+				err = h.RestoreRequestWithOptions(record, volume.Options{Accepted: true, InFlightAllowance: allowance, ImportShadow: true})
+				generation, generationErr := h.Generation()
 				h.Close()
 				r.consumed(t, store, before)
 				if err != nil {
 					return err
 				}
+				if generationErr != nil {
+					return generationErr
+				}
+				snapshot.generation = max(snapshot.generation, generation)
+				return nil
+			}()
+			if err != nil {
+				return nil, err
 			}
-			return nil
-		}()
-		r.server.opMu.Unlock()
-		if err != nil {
-			return nil, err
 		}
 		for _, b := range raw {
 			snapshot.digest.Write([]byte{1})
@@ -468,6 +512,19 @@ func (r *rangeManager) receiveSnapshot(m client.Message, actor client.ID, force 
 		}
 		if !snapshot.final {
 			return append([]byte{}, digest...), nil
+		}
+		// Bulk ACKs only acknowledge accepted shadow progress. READY is the
+		// durable ownership promise: fence the captured import cut first, while
+		// holding neither node admission nor a volume handle. Source authority
+		// and its durable fence remain intact if this checkpoint fails.
+		if snapshot.generation != 0 {
+			store, err := r.destination(t.plan)
+			if err != nil {
+				return nil, err
+			}
+			if err := store.CheckpointThrough(snapshot.generation); err != nil {
+				return nil, err
+			}
 		}
 		var sum [32]byte
 		copy(sum[:], digest)

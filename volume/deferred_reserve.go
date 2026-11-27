@@ -69,7 +69,7 @@ func (g *deferredGroup) reserveRedo(t *transaction, protected uint64) error {
 			candidates = append(candidates, (g.journal.off+g.journal.n-n)/PageSize*PageSize)
 		}
 		for _, off := range candidates {
-			current, err := freeContains(t.node, t.sb.FreeRoot, off, n)
+			current, err := t.freeContains(t.sb.FreeRoot, off, n)
 			if err != nil {
 				return err
 			}
@@ -190,6 +190,7 @@ func (g *deferredGroup) publishStaging(t *transaction) error {
 		return g.store.put(off, page, flag)
 	})
 	if err != nil {
+		t.v.invalidateKeyMembership()
 		t.v.failed = err
 		return fmt.Errorf("%w: unsynced spill: %v", ErrRecovery, err)
 	}

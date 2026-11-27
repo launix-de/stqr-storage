@@ -60,6 +60,7 @@ func TestFullPUTReuseAcrossLengths(t *testing.T) {
 	v, _ := memoryVolume(t, 4<<20)
 	k := testKey(1)
 	var location uint64
+	priorLength := 0
 	for _, length := range []int{128 << 10, 64 << 10, 192 << 10, 0, 24 << 10} {
 		data := bytes.Repeat([]byte{byte(length / 1024)}, length)
 		if _, e := testPut(v, k, data, Options{}); e != nil {
@@ -71,13 +72,19 @@ func TestFullPUTReuseAcrossLengths(t *testing.T) {
 			t.Fatal(e)
 		}
 		if length > 0 {
-			if location != 0 && state.Spans[0].Location != location {
-				t.Fatal("retained prefix relocated", length)
+			if len(state.Spans) != 1 || state.Segmented {
+				t.Fatal("whole PUT must remain one packed payload", length, len(state.Spans))
+			}
+			// A fitting replacement stays in place. Growth may relocate the
+			// payload to retain the whole-object contiguous-storage contract.
+			if location != 0 && length <= priorLength && state.Spans[0].Location != location {
+				t.Fatal("fitting replacement relocated", length)
 			}
 			location = state.Spans[0].Location
 		} else {
 			location = 0
 		}
+		priorLength = length
 		assertFreeTree(t, v)
 	}
 	if e := testDelete(v, k, Options{}); e != nil {

@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"errors"
+	"sync"
 
 	"github.com/launix-de/stqr-storage/client"
 	"github.com/launix-de/stqr-storage/volume"
@@ -13,6 +14,26 @@ import (
 
 const maxObjectReferences = 8192
 const maxAccountReferences = 1024
+
+// referenceCoordination contains only running/waiting requests, never object
+// metadata or cached ownership. The registry mutex covers lifetimes only;
+// storage work holds one bucket gate. Ordinary volume/replica locks still apply. A gate
+// disappears when its last holder/waiter leaves; cancellation is not a release
+// of a durable object pin. The volume lock and ordinary CAS remain authoritative.
+type referenceCoordination struct {
+	mu    sync.Mutex
+	gates map[volume.ID]*referenceGate
+}
+type referenceGate struct {
+	held    bool
+	refs    int
+	pending []*referenceWaiter
+}
+
+func (r *referenceCoordination) acquire(ctx context.Context, bucket volume.ID) (func(), error) {
+	_, release, err := r.join(ctx, bucket, nil)
+	return release, err
+}
 
 type objectReferenceEntry struct {
 	object     volume.ObjectID
@@ -35,7 +56,13 @@ func decodeObjectReferences(raw []byte, bucket volume.ID) ([]objectReferenceEntr
 	if n > maxObjectReferences || uint64(n)*81 != uint64(len(raw)-24) {
 		return nil, volume.ErrCorrupt
 	}
-	entries := make([]objectReferenceEntry, 0, n)
+	// PIN commonly appends one entry immediately after decoding. Reserve that
+	// slot without relaxing the encoded length or global reference limit.
+	capacity := n
+	if capacity < maxObjectReferences {
+		capacity++
+	}
+	entries := make([]objectReferenceEntry, 0, capacity)
 	for i := uint32(0); i < n; i++ {
 		var e objectReferenceEntry
 		copy(e.object[:], d.Take(32))
@@ -59,7 +86,10 @@ func decodeObjectReferences(raw []byte, bucket volume.ID) ([]objectReferenceEntr
 	return entries, nil
 }
 func encodeObjectReferences(entries []objectReferenceEntry, bucket volume.ID) []byte {
-	e := client.Encoder{B: []byte("ORF1")}
+	// Entries are bounded by maxObjectReferences. Reserve the exact encoded
+	// size so whole-root updates do not repeatedly grow and copy the buffer.
+	e := client.Encoder{B: make([]byte, 4, 24+81*len(entries))}
+	copy(e.B, "ORF1")
 	e.ID(client.ID(bucket))
 	e.U32(uint32(len(entries)))
 	for _, r := range entries {
@@ -112,6 +142,13 @@ func (s *Server) checkReferenceAwareMaintenance(b *Bucket, aware bool) error {
 }
 
 func (s *Server) executeObjectReference(ctx context.Context, m client.Message, ws *wsSession, p principal) ([]byte, error) {
+	return s.executeObjectReferenceHeld(ctx, m, ws, p, false)
+}
+
+func (s *Server) executeObjectReferenceHeld(ctx context.Context, m client.Message, ws *wsSession, p principal, held bool) ([]byte, error) {
+	if !referencePrincipalSupported(p) {
+		return nil, ErrBucketForbidden
+	}
 	if m.Kind != client.Request {
 		return nil, fail(400, "object references require requests")
 	}
@@ -137,6 +174,23 @@ func (s *Server) executeObjectReference(ctx context.Context, m client.Message, w
 	}
 	if d.Done() != nil || action > 8 || token == (client.ID{}) || target == op.object {
 		return nil, fail(400, "invalid object reference")
+	}
+	if !held && accepted && (action == 0 || action == 1) {
+		return s.combineObjectReference(ctx, m, ws, p, op.bucket.ID(), token)
+	}
+	if action <= 8 && !held {
+		release, err := s.referenceCoordination.acquire(ctx, op.bucket.ID())
+		if err != nil {
+			return nil, err
+		}
+		defer release()
+		// Placement epochs, maintenance and permissions may change while a
+		// request waits. Reparse before touching the root, then retain the
+		// ordinary read/CAS loop so external object writers cannot be lost.
+		op, _, err = s.parseObject(m, ws, p)
+		if err != nil {
+			return nil, err
+		}
 	}
 	if _, err = op.bucket.authorize(p, BucketRead); err != nil {
 		return nil, err
@@ -169,8 +223,8 @@ func (s *Server) executeObjectReference(ctx context.Context, m client.Message, w
 	if err = s.checkObjectOwner(op.bucket.ID(), op.object); err != nil {
 		return nil, err
 	}
-	account, err := s.findAccount(p.User.Name)
-	if err != nil || account.ID != p.User.ID {
+	account, stamp, err := s.referenceAccountSnapshot(p)
+	if err != nil {
 		return nil, ErrBucketForbidden
 	}
 	uid, err := bucketID(account.ID)
@@ -180,8 +234,10 @@ func (s *Server) executeObjectReference(ctx context.Context, m client.Message, w
 	// READ authorizes only this bounded, server-encoded reference object; it
 	// confers no WRITE or DELETE capability on user objects.
 	internal := p
+	internal.internalCoordination = true
 	internal.User = account
 	internal.frontendPermission = BucketRead
+	internal.referenceAuth = stamp
 	if action == 8 {
 		s.opMu.Lock()
 		safe := s.canReclaimDependencyAnchors(op.bucket.ID())
@@ -198,11 +254,12 @@ func (s *Server) executeObjectReference(ctx context.Context, m client.Message, w
 		return []byte{1}, nil
 	}
 	proof := sha256.Sum256(token[:])
+referenceRetry:
 	for retry := 0; retry < 128; retry++ {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		raw, _, err := op.bucket.Get(ctx, internal, op.object)
+		raw, _, err := op.bucket.Get(withMembershipRead(ctx), internal, op.object)
 		absent := errors.Is(err, volume.ErrNotFound)
 		if absent {
 			raw = nil
@@ -213,24 +270,49 @@ func (s *Server) executeObjectReference(ctx context.Context, m client.Message, w
 		if err != nil {
 			return nil, err
 		}
-		own := -1
-		count := 0
-		busy := false
-		for i, r := range entries {
-			if r.account == uid {
-				count++
-			}
-			if action != 6 && r.proof == proof {
-				ownerOK := r.account == uid || account.Role == "ADMIN" && (action == 1 || action == 3 || action == 5)
-				if !ownerOK || r.object != target || r.claim != (action == 2 || action == 3) || r.dependency != (action == 4 || action == 5) {
-					return nil, ErrBucketForbidden
+		casCtx := ctx
+		var own, count int
+		var busy bool
+		for {
+			own = -1
+			count = 0
+			busy = false
+			for i, r := range entries {
+				if r.account == uid {
+					count++
 				}
-				own = i
+				if action != 6 && r.proof == proof {
+					ownerOK := r.account == uid || account.Role == "ADMIN" && (action == 1 || action == 3 || action == 5)
+					if !ownerOK || r.object != target || r.claim != (action == 2 || action == 3) || r.dependency != (action == 4 || action == 5) {
+						return nil, ErrBucketForbidden
+					}
+					own = i
+				}
+				if r.object == target && (action == 2 || (action == 0 || action == 4) && r.claim) {
+					busy = true
+				}
 			}
-			if r.object == target && (action == 2 || (action == 0 || action == 4) && r.claim) {
-				busy = true
+			// Reclaim only when a genuinely new operation needs a full-root
+			// slot. Own-limit, proof and claim conflicts retain their existing
+			// outcomes; disabled/present users are never considered absent.
+			if own < 0 && count < maxAccountReferences && len(entries) >= maxObjectReferences &&
+				(action == 0 || action == 2 || action == 4) && (!busy || action == 2) {
+				filtered, nextCtx, e := s.pruneAbsentPlainReferencePins(casCtx, op.bucket, entries)
+				if e != nil {
+					if errors.Is(e, volume.ErrPrecondition) && !errors.Is(e, volume.ErrRecovery) {
+						continue referenceRetry
+					}
+					return nil, e
+				}
+				casCtx = nextCtx
+				if len(filtered) < len(entries) {
+					entries = filtered
+					continue
+				}
 			}
+			break
 		}
+
 		if action == 6 {
 			kept := entries[:0]
 			for _, entry := range entries {
@@ -260,8 +342,8 @@ func (s *Server) executeObjectReference(ctx context.Context, m client.Message, w
 			entries = append(entries, objectReferenceEntry{target, proof, uid, action == 2, action == 4})
 		}
 		next := encodeObjectReferences(entries, op.bucket.ID())
-		_, err = op.bucket.CAS(ctx, internal, op.object, 0, raw, next, volume.Options{RequestID: volume.ID(client.NewRequestID()), CreateOnly: absent, WholeObject: true, Accepted: accepted})
-		if errors.Is(err, volume.ErrPrecondition) {
+		_, err = op.bucket.CAS(casCtx, internal, op.object, 0, raw, next, volume.Options{RequestID: volume.ID(client.NewRequestID()), CreateOnly: absent, WholeObject: true, Accepted: accepted})
+		if errors.Is(err, volume.ErrPrecondition) && !errors.Is(err, volume.ErrRecovery) {
 			continue
 		}
 		if err != nil {

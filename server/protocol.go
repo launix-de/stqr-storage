@@ -688,6 +688,10 @@ func (s *Server) execute(m client.Message, ws *wsSession) ([]byte, int, error) {
 	case client.Hello:
 		min, max := d.U16(), d.U16()
 		requestedCapabilities := d.U64()
+		referenceSupported := ws == nil || referencePrincipalSupported(ws.principal)
+		if !referenceSupported {
+			requestedCapabilities &^= client.CapabilityObjectReferences | client.CapabilityAcceptedReferences
+		}
 		if ws != nil && ws.authorization != nil {
 			ws.authorization.objectReferences.Store(requestedCapabilities&client.CapabilityObjectReferences != 0)
 		}
@@ -714,6 +718,9 @@ func (s *Server) execute(m client.Message, ws *wsSession) ([]byte, int, error) {
 			e.U16(1)
 		}
 		caps, membership, revision := capabilityAcceptedStreams|client.CapabilityAcceptedReferences|client.CapabilityConnectionSync|client.CapabilityBucketFormat|client.CapabilityObjectReferences|client.CapabilityPeerTransport|client.CapabilityNodeAdmin|client.CapabilityObjectSubscriptions|client.CapabilityDurability, uint64(1), c.Generation
+		if !referenceSupported {
+			caps &^= client.CapabilityObjectReferences | client.CapabilityAcceptedReferences
+		}
 		if s.control != nil {
 			caps |= client.CapabilityClusterControl
 			s.control.ledger.mu.Lock()

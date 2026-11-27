@@ -152,14 +152,14 @@ func (t *transaction) findSpace(n, a uint64, tail bool, lower ...uint64) (uint64
 		minimum = lower[0]
 	}
 	var start, length, chosen uint64
-	var visit func(uint64) error
-	visit = func(off uint64) error {
-		node, e := t.node(off)
-		if e != nil {
-			return e
+	var visit func(transactionTreeView, int) error
+	visit = func(node transactionTreeView, depth int) error {
+		if depth > 32 || node.kind() != treeFree {
+			return ErrCorrupt
 		}
-		for _, x := range node.entries {
-			if node.level > 0 {
+		for i := 0; i < node.count(); i++ {
+			x := node.entry(i)
+			if node.level() > 0 {
 				maxlen := x.maximum
 				if a == PageSize {
 					maxlen = x.aligned
@@ -167,11 +167,15 @@ func (t *transaction) findSpace(n, a uint64, tail bool, lower ...uint64) (uint64
 				if maxlen < n {
 					continue
 				}
-				if e = checkTreeChild(t.node, node, x.value); e != nil {
-					return e
+				child, err := t.readTreeView(x.value)
+				if err != nil {
+					return err
 				}
-				if e = visit(x.value); e != nil {
-					return e
+				if !treeViewChildValid(node, child) {
+					return ErrCorrupt
+				}
+				if err = visit(child, depth+1); err != nil {
+					return err
 				}
 				continue
 			}
@@ -186,10 +190,18 @@ func (t *transaction) findSpace(n, a uint64, tail bool, lower ...uint64) (uint64
 		}
 		return nil
 	}
-	e := visit(t.sb.FreeRoot)
+	root, e := t.readTreeView(t.sb.FreeRoot)
+	if e == nil {
+		e = visit(root, 0)
+	}
 	if e == nil {
 		for _, off := range t.freeSiblings {
-			if e = visit(off); e != nil {
+			sibling, err := t.readTreeView(off)
+			if err != nil {
+				e = err
+				break
+			}
+			if e = visit(sibling, 0); e != nil {
 				break
 			}
 		}
@@ -225,7 +237,7 @@ func (t *transaction) metaPage() (uint64, error) {
 func (t *transaction) claim(off, n uint64) error {
 	t.inClaim = true
 	defer func() { t.inClaim = false }()
-	x, found, e := treeNeighbor(t.node, t.sb.FreeRoot, spaceKey(off), false)
+	x, found, e := t.neighbor(t.sb.FreeRoot, spaceKey(off), false)
 	if e != nil {
 		return e
 	}
@@ -302,11 +314,11 @@ func (t *transaction) release(off, n uint64, meta bool) {
 	}
 }
 func (t *transaction) freeSpan(off, n uint64) error {
-	previous, hasPrevious, e := treeNeighbor(t.node, t.sb.FreeRoot, spaceKey(off), false)
+	previous, hasPrevious, e := t.neighbor(t.sb.FreeRoot, spaceKey(off), false)
 	if e != nil {
 		return e
 	}
-	next, hasNext, e := treeNeighbor(t.node, t.sb.FreeRoot, spaceKey(off), true)
+	next, hasNext, e := t.neighbor(t.sb.FreeRoot, spaceKey(off), true)
 	if e != nil {
 		return e
 	}
@@ -683,6 +695,7 @@ func (t *transaction) commitReserved(useGuaranteed bool, allowance, guaranteedAl
 	for off := range all {
 		b, err := t.page(off)
 		if err != nil {
+			live.invalidateKeyMembership()
 			live.failed = err
 			return err
 		}

@@ -27,8 +27,13 @@ func (s *Server) quotaReserve(device client.ID, usage []volume.BucketStorage) ui
 func (s *Server) quotaAdmission(store *volume.Volume, device client.ID) volume.Admission {
 	return func(change volume.StorageChange) (uint64, error) {
 		before, after := change.BeforeOwned, change.AfterOwned
-		// Metadata-only preview servers never attach these hooks. The current local
-		// mutation/import path holds opMu across all affected volumes.
+		// Exact cross-volume budget admission: callbacks hold their Volume lock,
+		// then this short reservation mutex. No storage/node lock is acquired here.
+		q := &s.parallelQuota
+		q.mu.Lock()
+		defer q.mu.Unlock()
+		ticket := q.slots[volume.ID(device)]
+		var planned map[volume.ID]uint64
 		policies := s.quotaPolicies.Load()
 		if policies == nil {
 			return s.quotaReserve(device, change.After), nil
@@ -61,12 +66,33 @@ func (s *Server) quotaAdmission(store *volume.Volume, device client.ID) volume.A
 					return 0, err
 				}
 			}
+			pending := q.physical[bid]
+			if ticket != nil {
+				pending = subtractCapacity(pending, ticket.physical[bid])
+			}
+			others = addCapacity(others, pending)
 			if others > limit || next > limit-others {
 				waiting := false
 				if s.quotas != nil && addCapacity(others, next) <= p.Limits.Absolute {
 					waiting = s.quotas.requestActivation(bid, volume.ObjectID{0xff, 0x51}, addCapacity(others, next))
 				}
 				return 0, &physicalQuotaFull{Bucket: bid, Growth: next - prior, Waiting: waiting}
+			}
+			if ticket != nil {
+				if planned == nil {
+					planned = make(map[volume.ID]uint64)
+				}
+				planned[bid] = next - prior
+			}
+		}
+		if ticket != nil {
+			q.releasePhysicalLocked(ticket)
+			if len(planned) > 0 && q.physical == nil {
+				q.physical = make(map[volume.ID]uint64)
+			}
+			ticket.physical = planned
+			for id, n := range planned {
+				q.physical[id] = addCapacity(q.physical[id], n)
 			}
 		}
 		return s.quotaReserve(device, change.After), nil
@@ -88,12 +114,47 @@ func (s *Server) refreshQuotaProtectionLocked() error {
 	}
 	return s.applyQuotaProtectionLocked()
 }
+
+// ensureQuotaPolicies is allocation-free between catalog/control publications.
+// Usage, allowances and physical reservations are deliberately NOT cached here.
+func (s *Server) ensureQuotaPolicies() *quotaPolicyImage {
+	view := s.currentSystem.Load()
+	if image := s.quotaPolicies.Load(); image != nil && image.source == view {
+		return image
+	}
+	s.bucketMu.Lock()
+	defer s.bucketMu.Unlock()
+	view = s.currentSystem.Load()
+	if image := s.quotaPolicies.Load(); image != nil && image.source == view {
+		return image
+	}
+	return s.publishQuotaPoliciesLocked()
+}
+
+// Caller holds bucketMu. Descriptions expose immutable configuration slices;
+// admission/stats need only these scalar policy fields, never ACLs, receipts,
+// clone graphs or local placement arrays. DesiredPolicy is separately owned.
+func (s *Server) publishQuotaPoliciesLocked() *quotaPolicyImage {
+	image := &quotaPolicyImage{source: s.currentSystem.Load(), descriptions: make([]BucketDescription, 0, len(s.bucketsByID))}
+	for _, b := range s.bucketsByID {
+		d := b.storageDescription()
+		compact := BucketDescription{ID: d.ID, Policy: d.Policy, DeletionComplete: d.DeletionComplete}
+		if d.DesiredPolicy != nil {
+			desired := *d.DesiredPolicy
+			compact.DesiredPolicy = &desired
+		}
+		image.descriptions = append(image.descriptions, compact)
+	}
+	s.quotaPolicies.Store(image)
+	return image
+}
+
 func (s *Server) applyQuotaProtectionLocked() error {
-	s.quotaPolicies.Store(&quotaPolicyImage{descriptions: s.bucketSnapshots()})
-	s.mu.RLock()
-	node, _ := parseID(s.cfg.Node.ID)
-	s.mu.RUnlock()
+	s.ensureQuotaPolicies()
 	if s.quotaNode == (client.ID{}) {
+		s.mu.RLock()
+		node, _ := parseID(s.cfg.Node.ID)
+		s.mu.RUnlock()
 		s.quotaNode = client.ID(node)
 	}
 	if s.quotaHooked == nil {

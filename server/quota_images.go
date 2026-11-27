@@ -6,15 +6,36 @@ import (
 	"github.com/launix-de/stqr-storage/volume"
 )
 
-// Storage callbacks run under a volume lock. They use immutable images only:
-// taking node/config/range locks here would invert CollectStats' lock order.
+// Storage callbacks run under a volume lock. The dedicated quota reservation
+// mutex may be acquired here; it must never acquire volume/node/config/range
+// locks. Configuration remains immutable while a mutation holds admission.
 type quotaUsageImage struct {
 	volumes map[volume.ID][]volume.BucketStorage
 	all     map[volume.ID][]volume.BucketStorage
 }
-type quotaPolicyImage struct{ descriptions []BucketDescription }
+type quotaPolicyImage struct {
+	source       *systemView // identifies bulk control installs which bypass publishBucket
+	descriptions []BucketDescription
+}
 
 func (s *Server) publishQuotaUsage(id volume.ID, usage []volume.BucketStorage, all []volume.BucketStorage) {
+	q := &s.parallelQuota
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	// Convert exactly this publication's reservations into committed usage in
+	// one critical section. Other volumes cannot see both or neither charge.
+	if t := q.slots[id]; t != nil {
+		q.releasePhysicalLocked(t)
+	}
+	if charges := q.quarantine[id]; charges != nil {
+		for bucket, n := range charges {
+			q.physical[bucket] -= n
+			if q.physical[bucket] == 0 {
+				delete(q.physical, bucket)
+			}
+		}
+		delete(q.quarantine, id)
+	}
 	for {
 		prior := s.quotaUsage.Load()
 		next := &quotaUsageImage{volumes: make(map[volume.ID][]volume.BucketStorage), all: make(map[volume.ID][]volume.BucketStorage)}
