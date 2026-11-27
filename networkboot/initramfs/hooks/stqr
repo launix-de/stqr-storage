@@ -7,11 +7,20 @@ case "$1" in prereqs) prereqs; exit 0;; esac
 manual_add_modules kstqr
 copy_exec /usr/lib/stqr-networkboot/boot-root /bin/stqr-boot-root
 copy_exec /sbin/mount.kstqr /bin/mount.kstqr
+# Minimal initramfs BusyBox builds may omit the sha256sum applet.
+copy_exec /usr/bin/sha256sum /bin/sha256sum
 # MODULES=most includes network drivers for physical boot clients.
 
 # Login support is copied verbatim, without a credential-bearing host config.
 mkdir -p "$DESTDIR/usr/lib/stqr-networkboot" "$DESTDIR/usr/libexec"
-for stqr_file in login.json install-login pam_stqr.so; do
+for stqr_file in login.json install-login pam_stqr.so home-template.json prepare-login; do
     cp -p "/usr/lib/stqr-networkboot/$stqr_file" "$DESTDIR/usr/lib/stqr-networkboot/" || exit 1
 done
 cp -p /usr/libexec/stqr-home /usr/libexec/stqr-bootctl "$DESTDIR/usr/libexec/" || exit 1
+
+# All identity/PAM work was completed offline before mkinitramfs. Bind the exact
+# installed payload to a small marker in both the published lower and initrd.
+. /usr/lib/stqr-networkboot/prepare-login
+stqr_login_manifest / "${version:?kernel version required}" > "$DESTDIR/usr/lib/stqr-networkboot/prepared.sha256" || exit 1
+cp "$DESTDIR/usr/lib/stqr-networkboot/prepared.sha256" /usr/lib/stqr-networkboot/prepared.sha256 || exit 1
+chmod 0600 /usr/lib/stqr-networkboot/prepared.sha256 "$DESTDIR/usr/lib/stqr-networkboot/prepared.sha256" || exit 1
