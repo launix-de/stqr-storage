@@ -2,6 +2,7 @@
 """Real ephemeral mount/chroot proof, confined to a disposable user namespace."""
 import hashlib
 import os
+import shutil
 from pathlib import Path
 import subprocess
 import unittest
@@ -21,6 +22,12 @@ class RuntimePayloadMounts(unittest.TestCase):
         fixture.setUp()
         self.addCleanup(fixture.doCleanups)
         root, payload, work = fixture.root, fixture.payload, fixture.work
+        # Ubuntu's merged-/usr aliases are essential: mountinfo records the
+        # canonical usr/lib path even when the caller binds via /lib.
+        for tree in (root, payload):
+            shutil.move(tree/'lib/modules', tree/'usr/lib/modules')
+            (tree/'lib').rmdir()
+            (tree/'lib').symlink_to('usr/lib')
         (root/fastpath.MARKER).unlink()
         (root/'run').mkdir()
         (work/'run').mkdir()

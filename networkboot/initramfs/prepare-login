@@ -46,7 +46,9 @@ stqr_login_bind_changes() {
         # supported. Refuse an unexpected leaf link or special device target.
         [ -f "$stqr_bind_target" ] && [ ! -L "$stqr_bind_target" ] || return 1
         stqr_login_mount --bind "$stqr_bind_ram/$stqr_bind_asset" "$stqr_bind_target" || return 1
-        stqr_login_mount -o remount,bind,ro,nodev,nosuid,exec "$stqr_bind_target" || return 1
+        # Give both paths explicitly: BusyBox otherwise searches /proc/mounts
+        # for the literal target, which fails for /lib -> usr/lib aliases.
+        stqr_login_mount -o remount,bind,ro,nodev,nosuid,exec "$stqr_bind_ram/$stqr_bind_asset" "$stqr_bind_target" || return 1
     done < "$stqr_bind_list"
 }
 stqr_prepare_login() {
