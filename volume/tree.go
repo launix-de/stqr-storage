@@ -167,17 +167,30 @@ func (t *transaction) nodePage(off uint64) ([]byte, bool, error) {
 	}
 	return nil, false, nil
 }
-func (t *transaction) loadNode(off uint64, mutable bool) (treeNode, error) {
+
+// inspectNode reports ownership AT LOAD. Recursive edits may later dirty this
+// address, but cannot turn an earlier borrowed cached slice into owned memory.
+func (t *transaction) inspectNode(off uint64) (treeNode, bool, error) {
 	b, overlay, err := t.nodePage(off)
 	if err != nil {
-		return treeNode{}, err
+		return treeNode{}, false, err
 	}
 	if overlay {
-		return decodeNode(b, t.sb.Identity.VolumeID)
+		n, err := decodeNode(b, t.sb.Identity.VolumeID)
+		return n, false, err
 	}
 	n, err := t.v.node(off)
-	if err == nil && mutable {
+	return n, true, err
+}
+func ownNodeEntries(n *treeNode, borrowed bool) {
+	if borrowed {
 		n.entries = append([]treeEntry(nil), n.entries...)
+	}
+}
+func (t *transaction) loadNode(off uint64, mutable bool) (treeNode, error) {
+	n, borrowed, err := t.inspectNode(off)
+	if err == nil && mutable {
+		ownNodeEntries(&n, borrowed)
 	}
 	return n, err
 }
@@ -215,7 +228,7 @@ func (t *transaction) summary(off uint64, n treeNode) treeEntry {
 	return e
 }
 func (t *transaction) insertAt(off uint64, key indexKey, value uint64) (treeEntry, *treeEntry, error) {
-	n, e := t.node(off)
+	n, borrowed, e := t.inspectNode(off)
 	if e != nil {
 		return treeEntry{}, nil, e
 	}
@@ -225,8 +238,10 @@ func (t *transaction) insertAt(off uint64, key indexKey, value uint64) (treeEntr
 			if n.entries[i].value == value {
 				return t.summary(off, n), nil, nil
 			}
+			ownNodeEntries(&n, borrowed)
 			n.entries[i].value = value
 		} else {
+			ownNodeEntries(&n, borrowed)
 			n.entries = append(n.entries, treeEntry{})
 			copy(n.entries[i+1:], n.entries[i:])
 			n.entries[i] = treeEntry{key: key, value: value}
@@ -243,6 +258,7 @@ func (t *transaction) insertAt(off uint64, key indexKey, value uint64) (treeEntr
 		if b == nil && n.entries[i] == a {
 			return t.summary(off, n), nil, nil
 		}
+		ownNodeEntries(&n, borrowed)
 		n.entries[i] = a
 		if b != nil {
 			n.entries = append(n.entries, treeEntry{})
