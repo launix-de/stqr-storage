@@ -48,3 +48,28 @@ func (v *Volume) compareObject(o *object, offset uint64, expected []byte) (bool,
 	}
 	return true, nil
 }
+
+// compareObjectZeroExtended compares the selected stored prefix with the same
+// corruption checks as ordinary CAS, then compares the virtual zero tail.
+// It never allocates or reads the gap between EOF and a sparse write offset.
+func (v *Volume) compareObjectZeroExtended(o *object, offset uint64, expected []byte) (bool, error) {
+	if _, err := add(offset, uint64(len(expected))); err != nil {
+		return false, err
+	}
+	present := uint64(0)
+	if offset < o.Info.Length {
+		present = min(uint64(len(expected)), o.Info.Length-offset)
+	}
+	if present > 0 {
+		equal, err := v.compareObject(o, offset, expected[:int(present)])
+		if err != nil || !equal {
+			return equal, err
+		}
+	}
+	for _, b := range expected[int(present):] {
+		if b != 0 {
+			return false, nil
+		}
+	}
+	return true, nil
+}
