@@ -219,7 +219,11 @@ func (s *Server) cowCaptureLocal(ctx context.Context, bucket volume.ID, object v
 		return nil, err
 	}
 	if info.Deleted || metadata {
-		return &cowSnapshot{Info: info}, nil
+		generation, err := h.Generation()
+		if err != nil {
+			return nil, err
+		}
+		return &cowSnapshot{Info: info, store: v, generation: generation}, nil
 	}
 	extents, err := h.Extents(key)
 	if err != nil {
