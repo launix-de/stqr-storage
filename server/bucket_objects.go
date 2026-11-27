@@ -519,7 +519,7 @@ func (b *Bucket) mutateAttempt(ctx context.Context, p principal, id volume.Objec
 			}
 		}
 	}
-	cowProof, cowLinked, cowErr := s.cowPrepareWrite(ctx, b, id, p)
+	cowProof, cowLinked, cowErr := s.cowPrepareWrite(ctx, b, id, p, opt.Accepted)
 	if cowErr != nil {
 		return volume.Result{}, cowErr
 	}
