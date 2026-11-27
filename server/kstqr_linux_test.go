@@ -34,6 +34,17 @@ func TestKSTQRVirtualMachine(t *testing.T) {
 	if os.Getenv("STQR_TEST_KERNEL") != "1" {
 		t.Skip("set STQR_TEST_KERNEL=1 and STQR_KERNEL_IMAGE to run isolated kernel tests")
 	}
+	// Focused scripts replace the same init section; combining them cannot
+	// represent a valid test and must fail before starting a guest.
+	selectedMode := ""
+	for _, mode := range []string{"BENCHMARK", "WRITE_BENCHMARK", "READ_WINDOW", "LOOP", "RESTART_ONLY", "OVERLAY", "OUTAGE", "CACHE_RETENTION"} {
+		if os.Getenv("STQR_KERNEL_"+mode) == "1" {
+			if selectedMode != "" {
+				t.Fatalf("incompatible kernel fixture modes %s and %s; run them separately", selectedMode, mode)
+			}
+			selectedMode = mode
+		}
+	}
 	image := os.Getenv("STQR_KERNEL_IMAGE")
 	if image == "" {
 		t.Fatal("STQR_KERNEL_IMAGE is required")
