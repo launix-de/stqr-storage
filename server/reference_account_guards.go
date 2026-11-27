@@ -59,7 +59,18 @@ func (s *Server) referenceAccountSnapshot(p principal) (account, *referenceAccou
 		return account{}, nil, ErrBucketForbidden
 	}
 	u := x.image.Users[i]
-	if u.Disabled || (u.Role != "ADMIN" && u.Role != "USER") || !sameReferenceAuth(u, p.User) || p.referenceAuth != nil && p.referenceAuth != x.referenceAuth[i] {
+	identity := u.ID == p.User.ID && u.Name == p.User.Name && u.Role == p.User.Role && u.Disabled == p.User.Disabled
+	if p.connection != nil && p.User.PasswordHash == "" {
+		// Upgraded sockets deliberately erase the password hash. Their original
+		// stamp was captured from that hash before erasure; never rebind it.
+		identity = identity && p.referenceAuth != nil && p.referenceAuth == x.referenceAuth[i] && p.connection.accountID == u.ID
+		if p.frontendPermission != 0 {
+			identity = identity && p.connection.accountRevision == frontendAccountRevision(u)
+		}
+	} else {
+		identity = identity && constantEqual(u.PasswordHash, p.User.PasswordHash)
+	}
+	if u.Disabled || (u.Role != "ADMIN" && u.Role != "USER") || !identity || p.referenceAuth != nil && p.referenceAuth != x.referenceAuth[i] {
 		return account{}, nil, ErrBucketForbidden
 	}
 	return cloneAccount(u), x.referenceAuth[i], nil

@@ -146,7 +146,13 @@ func (s *Server) authenticateFrontend(r *http.Request, name, password string) (p
 	}
 	account, err := s.findAccountID(user.String())
 	if err == nil && (account.Role == "ADMIN" || account.Role == "USER") && frontendAccountRevision(account) == revision {
-		return principal{User: account, frontendPermission: required, frontendIssuer: issuer}, nil
+		actor := principal{User: account, frontendPermission: required, frontendIssuer: issuer}
+		_, stamp, err := s.referenceAccountSnapshot(actor)
+		if err != nil {
+			return denied()
+		}
+		actor.referenceAuth = stamp
+		return actor, nil
 	}
 	return denied()
 }
