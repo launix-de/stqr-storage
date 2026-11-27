@@ -498,7 +498,7 @@ func TestNativeImageEditorAndRecursiveCOW(t *testing.T) {
 
 func TestBootCleanupRetainsMountedUpperUntilStorageConnectionCloses(t *testing.T) {
 	cfg, _, _ := imageTestNode(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
 	if err := publish(ctx, cfg, "ubuntu", imageTestArchive(t)); err != nil {
 		t.Fatal(err)
@@ -536,13 +536,18 @@ func TestBootCleanupRetainsMountedUpperUntilStorageConnectionCloses(t *testing.T
 		t.Fatal("live upper access revoked", err)
 	}
 	mounted.Close()
+	// Two guests and eight active probes are preparation, not collection.
+	// Keep the actual post-disconnect collection bound at thirty seconds.
+	cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cleanupCancel()
+	cleanupStarted := time.Now()
 	for {
-		err = removeBootSession(ctx, cfg, session.User, session.Upper, session.Lower)
+		err = removeBootSession(cleanupCtx, cfg, session.User, session.Upper, session.Lower)
 		if err == nil {
 			break
 		}
-		if ctx.Err() != nil {
-			t.Fatal(err)
+		if cleanupCtx.Err() != nil {
+			t.Fatal("collection did not complete after guest close", time.Since(cleanupStarted), err)
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
