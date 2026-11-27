@@ -116,6 +116,7 @@ func TestKSTQRVirtualMachine(t *testing.T) {
 	run("cc", "-static", "-std=c11", "-Wall", "-Wextra", "-Werror", "-O2", "-o", filepath.Join(initrdRoot, "shared-pins"), filepath.Join(root, "tests/shared_pins.c"))
 	run("cc", "-static", "-std=c11", "-Wall", "-Wextra", "-Werror", "-O2", "-o", filepath.Join(initrdRoot, "postrestart-pin"), filepath.Join(root, "tests/postrestart_pin.c"))
 	run("cc", "-static", "-std=c11", "-Wall", "-Wextra", "-Werror", "-O2", "-o", filepath.Join(initrdRoot, "writeback"), filepath.Join(root, "tests/writeback.c"))
+	run("cc", "-static", "-std=c11", "-Wall", "-Wextra", "-Werror", "-O2", "-o", filepath.Join(initrdRoot, "edit-retry"), filepath.Join(root, "tests/edit_retry.c"))
 	run("cc", "-static", "-std=c11", "-Wall", "-Wextra", "-Werror", "-O2", "-o", filepath.Join(initrdRoot, "crash-reconnect"), filepath.Join(root, "tests/crash_reconnect.c"))
 	run("cc", "-static", "-std=c11", "-Wall", "-Wextra", "-Werror", "-O2", "-o", filepath.Join(initrdRoot, "mmap-test"), filepath.Join(root, "tests/mmap.c"), "-lsqlite3", "-lm", "-ldl", "-lpthread")
 	s := testServer(t)
@@ -151,6 +152,19 @@ func TestKSTQRVirtualMachine(t *testing.T) {
 	}))
 	defer upstream.Close()
 	host := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/__kstqr_test/edit-retry/") {
+			parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/__kstqr_test/edit-retry/"), "/")
+			if len(parts) != 2 {
+				http.NotFound(w, r)
+				return
+			}
+			if parts[1] == "begin" {
+				writebackFault.editRetry.begin(parts[0])
+			} else if err := writebackFault.editRetry.verify(parts[0]); err != nil {
+				http.Error(w, err.Error(), 500)
+			}
+			return
+		}
 		if r.URL.Path == "/__kstqr_test/read-failure/start" {
 			writebackFault.ranges.beginFailure()
 			return
@@ -910,6 +924,23 @@ func TestKSTQRVirtualMachine(t *testing.T) {
 		t.Logf("seeded exact %d-entry global reference limit", len(entries))
 	}
 
+	var editRetryID client.ID
+	if os.Getenv("STQR_KERNEL_EDIT_RETRY") == "1" {
+		// The outage deliberately loses a connection's unconfirmed durability
+		// prefix. Isolate it from the original suite's clean-fsync assertions.
+		retryBucket, _ := createProtocolBucket(t, s, "kernel-edit-outage")
+		editRetryID = client.ID(retryBucket.ID())
+		retryConn, e := client.Dial(ctx, host.URL, admin.Username, admin.Password, editRetryID, "fs")
+		if e != nil {
+			t.Fatal(e)
+		}
+		if _, e = client.OpenFilesystem(ctx, retryConn, client.FSOptions{Create: true}); e != nil {
+			retryConn.Close()
+			t.Fatal(e)
+		}
+		retryConn.Close()
+	}
+
 	if err = os.WriteFile(filepath.Join(initrdRoot, "readonly-credentials"), []byte("username="+user.Name+"\npassword=bucket-test-password\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -1367,6 +1398,11 @@ poweroff -f
 `, endpoint, nativeUpperID.String(), client.ID(b.ID()).String(), policyID.String(), controlURL.Port(), strings.Repeat("a", 64), client.ID(empty.ID()).String())
 	}
 
+	if os.Getenv("STQR_KERNEL_EDIT_RETRY") == "1" {
+		probe := fmt.Sprintf("/mount.kstqr --uri %s --bucket %s --credentials /credentials /mnt\n/edit-retry %s\numount /mnt\n", endpoint, editRetryID.String(), endpoint)
+		init = strings.Replace(init, "insmod /kstqr.ko\n", "insmod /kstqr.ko\n"+probe, 1)
+	}
+
 	if os.Getenv("STQR_KERNEL_OVERLAY_PROOF") == "1" {
 		run("cc", "-static", "-O2", "-Wall", "-Wextra", "-Werror", "-o", filepath.Join(initrdRoot, "overlay-proof"), filepath.Join(root, "tests/overlay_proof.c"))
 		init = fmt.Sprintf(`#!/bin/sh
@@ -1612,6 +1648,9 @@ poweroff -f
 		t.Fatalf("cpio: %v %s", err, packErr.String())
 	}
 	guestMemory := "512M"
+	if os.Getenv("STQR_KERNEL_EDIT_RETRY") == "1" {
+		guestMemory = "1024M"
+	}
 	if os.Getenv("STQR_KERNEL_CACHE_NEGATIVE") == "1" || os.Getenv("STQR_KERNEL_OVERLAY") == "1" || os.Getenv("STQR_KERNEL_OVERLAY_PROOF") == "1" || os.Getenv("STQR_KERNEL_REFERENCE_LIMIT") == "1" {
 		// These fixtures need 1 GiB to unpack their static test binaries and
 		// debug module, including the longer-path original-source control.
