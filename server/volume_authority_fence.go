@@ -166,6 +166,17 @@ func (s *Server) ensureVolumeAuthorityLocked(allowances ...map[volume.ID]uint64)
 	if !a.dirty.Load() && a.batch == nil && len(a.staged) == 0 {
 		return nil
 	}
+	if a.batch != nil && a.wanted != nil && a.wantedRevision == a.revision.Load() {
+		if len(allowances) > 0 {
+			if a.budgets == nil {
+				a.budgets = make(map[volume.ID]uint64)
+			}
+			for id, budget := range allowances[0] {
+				a.budgets[id] = budget
+			}
+		}
+		return &authorityWait{batch: a.batch}
+	}
 	targets, err := s.planVolumeAuthorityLocked(allowances...)
 	if err != nil {
 		return err
@@ -249,14 +260,25 @@ func (s *Server) checkpointAuthorityBatch(batch *authorityBatch) {
 	s.opMu.Lock()
 	a := s.authority
 	a.batch = nil
-	if batch.err == nil && a.revision.Load() == batch.revision {
-		a.dirty.Store(false)
+	// Recovery can checkpoint a subset while another topology header is still
+	// unstaged. Matching revision alone does not confirm that wanted image.
+	needsPlan := a.revision.Load() != batch.revision || len(a.staged) != 0
+	if !needsPlan {
+		for id, wanted := range a.wanted {
+			if !reflect.DeepEqual(a.records[id], wanted) {
+				needsPlan = true
+				break
+			}
+		}
 	}
-	// Recompute current scopes before releasing a stale cohort gate. A topology
-	// update during Sync must never be mistaken for this batch's confirmed view.
+	a.dirty.Store(batch.err != nil || needsPlan)
 	if a.dirty.Load() {
-		if _, err := s.planVolumeAuthorityLocked(); err != nil && batch.err == nil {
+		remaining, err := s.planVolumeAuthorityLocked()
+		if err != nil && batch.err == nil {
 			batch.err = err
+		}
+		if err == nil && len(remaining) == 0 && len(a.staged) == 0 && batch.err == nil {
+			a.dirty.Store(false)
 		}
 	}
 	s.publishAuthorityPendingLocked()
@@ -272,7 +294,7 @@ func (s *Server) checkpointAuthorityBatch(batch *authorityBatch) {
 func (s *Server) continueAuthorityProgress() {
 	for {
 		s.opMu.Lock()
-		if s.ctx.Err() != nil || s.authority.batch != nil || !s.authority.dirty.Load() {
+		if s.ctx.Err() != nil || s.authority.batch != nil || !s.authority.dirty.Load() && len(s.authority.staged) == 0 {
 			s.opMu.Unlock()
 			return
 		}
@@ -303,6 +325,12 @@ func (s *Server) ensureVolumeAuthority() error {
 	}
 }
 func (s *Server) ensureObjectAuthorityLocked(key volume.Key) error {
+	// The normalized wanted image and pending index already prove unchanged
+	// cohorts. Do not walk any buckets/ranges or restage an unrelated failure
+	// on each foreground write while another scope waits for its device.
+	if a := s.authority; a != nil && a.wanted != nil && a.wantedRevision == a.revision.Load() && !s.authorityPending(key.Bucket, key.Object) {
+		return nil
+	}
 	err := s.ensureVolumeAuthorityLocked()
 	var wait *authorityWait
 	var staged *authorityStageError

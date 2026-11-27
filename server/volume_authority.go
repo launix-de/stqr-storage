@@ -24,13 +24,17 @@ type volumeAuthorityRecord struct {
 	Entries               []volumeAuthorityEntry
 }
 type volumeAuthorityState struct {
-	dirty    atomic.Bool
-	revision atomic.Uint64
-	pending  atomic.Pointer[authorityPendingView]
-	records  map[volume.ID]volumeAuthorityRecord // confirmed per-device headers; opMu
-	wanted   map[volume.ID]volumeAuthorityRecord
-	staged   map[volume.ID]authorityTarget
-	batch    *authorityBatch
+	dirty          atomic.Bool
+	revision       atomic.Uint64
+	pending        atomic.Pointer[authorityPendingView]
+	records        map[volume.ID]volumeAuthorityRecord // confirmed per-device headers; opMu
+	wanted         map[volume.ID]volumeAuthorityRecord
+	wantedRevision uint64
+	wantedStores   map[volume.ID]*volume.Volume
+	wantedIDs      []volume.ID
+	budgets        map[volume.ID]uint64
+	staged         map[volume.ID]authorityTarget
+	batch          *authorityBatch
 }
 
 func readVolumeAuthority(store *volume.Volume) (volumeAuthorityRecord, error) {
@@ -101,8 +105,26 @@ func (s *Server) volumeAllowedForEntry(bucket client.ID, entry client.RangeEntry
 }
 
 func (s *Server) planVolumeAuthorityLocked(allowances ...map[volume.ID]uint64) ([]authorityTarget, error) {
-	if s.controller == nil || s.authority == nil || !s.authority.dirty.Load() {
+	if s.controller == nil || s.authority == nil || !s.authority.dirty.Load() && len(s.authority.staged) == 0 {
 		return nil, nil
+	}
+	a := s.authority
+	revision := a.revision.Load()
+	// Admission allowances are valid only for this topology revision. Never
+	// carry an earlier handoff's reserve permission into a later cohort plan.
+	if a.wanted == nil || a.wantedRevision != revision {
+		a.budgets = nil
+	}
+	if len(allowances) > 0 {
+		if a.budgets == nil {
+			a.budgets = make(map[volume.ID]uint64)
+		}
+		for id, budget := range allowances[0] {
+			a.budgets[id] = budget
+		}
+	}
+	if a.wanted != nil && a.wantedRevision == revision {
+		return s.cachedAuthorityTargetsLocked(), nil
 	}
 	view := s.currentSystem.Load()
 	image := s.placement.Load()
@@ -241,10 +263,7 @@ func (s *Server) planVolumeAuthorityLocked(allowances ...map[volume.ID]uint64) (
 		wanted[id] = record
 		staged, hasStaged := s.authority.staged[id]
 		if !reflect.DeepEqual(prior, record) || hasStaged {
-			budget := uint64(0)
-			if len(allowances) > 0 {
-				budget = allowances[0][id]
-			}
+			budget := a.budgets[id]
 			target := authorityTarget{store: stores[id], record: record, budget: budget}
 			if hasStaged && reflect.DeepEqual(staged.record, record) {
 				target.generation = staged.generation
@@ -252,7 +271,10 @@ func (s *Server) planVolumeAuthorityLocked(allowances ...map[volume.ID]uint64) (
 			targets = append(targets, target)
 		}
 	}
-	s.authority.wanted = wanted
+	a.wanted = wanted
+	a.wantedRevision = revision
+	a.wantedStores = stores
+	a.wantedIDs = ids
 	return targets, nil
 }
 func writeVolumeAuthority(store *volume.Volume, record volumeAuthorityRecord) error {
@@ -286,4 +308,24 @@ func (s *Server) rangeClass(policy BucketPolicy, entry client.RangeEntry) volume
 		}
 	}
 	return bucketClass(policy)
+}
+
+// Reuse the complete normalized desired image for this exact topology revision.
+// Confirmed/staged cuts and admission allowances may advance independently.
+func (s *Server) cachedAuthorityTargetsLocked() []authorityTarget {
+	a := s.authority
+	var targets []authorityTarget
+	for _, id := range a.wantedIDs {
+		record := a.wanted[id]
+		staged, hasStaged := a.staged[id]
+		if reflect.DeepEqual(a.records[id], record) && !hasStaged {
+			continue
+		}
+		target := authorityTarget{store: a.wantedStores[id], record: record, budget: a.budgets[id]}
+		if hasStaged && reflect.DeepEqual(staged.record, record) {
+			target.generation = staged.generation
+		}
+		targets = append(targets, target)
+	}
+	return targets
 }

@@ -133,11 +133,28 @@ func TestAuthorityFenceOnlyChangedRangeWaits(t *testing.T) {
 	if !s.authorityPending(a.ID(), volume.ObjectID{1}) || s.authorityPending(b.ID(), volume.ObjectID{1}) {
 		t.Fatal("pending header blocked wrong scopes")
 	}
+	s.opMu.Lock()
+	desiredBefore := s.authority.wanted[v.Identity().VolumeID].Entries
+	desiredRevision := s.authority.wantedRevision
+	desiredAddress := &desiredBefore[0]
+	budgetWait := s.ensureVolumeAuthorityLocked(map[volume.ID]uint64{v.Identity().VolumeID: 123})
+	budget := s.authority.budgets[v.Identity().VolumeID]
+	s.opMu.Unlock()
+	var pendingBudget *authorityWait
+	if !errors.As(budgetWait, &pendingBudget) || budget != 123 {
+		t.Fatal("cached plan ignored allowance refresh", budgetWait, budget)
+	}
 	if _, err = a.Put(context.Background(), quotaPrincipal(t, s), volume.ObjectID{1}, []byte("must not ACK"), volume.Options{Accepted: true, RequestID: volume.ID(client.NewRequestID())}); err == nil {
 		t.Fatal("changed authority acknowledged before header persisted")
 	}
 	unrelated := make(chan error, 1)
 	go func() {
+		for i := 0; i < 16; i++ {
+			if _, err := b.Put(context.Background(), quotaPrincipal(t, s), volume.ObjectID{1}, []byte("accepted during header fence"), volume.Options{Accepted: true, RequestID: volume.ID(client.NewRequestID())}); err != nil {
+				unrelated <- err
+				return
+			}
+		}
 		_, err := b.Put(context.Background(), quotaPrincipal(t, s), volume.ObjectID{1}, []byte("accepted during header fence"), volume.Options{Accepted: true, RequestID: volume.ID(client.NewRequestID())})
 		if err == nil {
 			var data []byte
@@ -160,6 +177,13 @@ func TestAuthorityFenceOnlyChangedRangeWaits(t *testing.T) {
 	case err := <-done:
 		t.Fatal("header returned before physical fence", err)
 	default:
+	}
+	s.opMu.Lock()
+	desiredAfter := s.authority.wanted[v.Identity().VolumeID].Entries
+	stablePlan := s.authority.wantedRevision == desiredRevision && &desiredAfter[0] == desiredAddress
+	s.opMu.Unlock()
+	if !stablePlan {
+		t.Fatal("unaffected writes rebuilt the entire desired authority image")
 	}
 	s.opMu.Lock()
 	confirmed := s.authority.records[v.Identity().VolumeID]
@@ -462,5 +486,67 @@ func TestAuthorityFenceRequiresEveryCohortHeader(t *testing.T) {
 	}
 	if s.authorityPending(a.ID(), volume.ObjectID{1}) {
 		t.Fatal("complete cohort remains gated")
+	}
+}
+
+func TestAuthorityFenceRecoverySubsetCannotConfirmOtherPendingHeader(t *testing.T) {
+	s, _, probe, a, _ := authorityFenceFixture(t)
+	changeAuthorityEpoch(t, s, a)
+	// A separately recovered device can finish its owner fence while a topology
+	// header on another device is not staged yet. Both obligations must survive.
+	memory, err := volume.NewMemory(2 << 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recovered, err := volume.Format(memory, volume.FormatOptions{ClusterID: volume.ID(s.control.ledger.cluster), NodeID: volume.ID{99}, Class: volume.HDD})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { recovered.Close() })
+	identity := recovered.Identity()
+	old := volumeAuthorityRecord{Schema: 1, Cluster: client.ID(identity.ClusterID), Node: client.ID(identity.NodeID), Volume: client.ID(identity.VolumeID)}
+	if err = writeVolumeAuthority(recovered, old); err != nil {
+		t.Fatal(err)
+	}
+	next := old
+	next.Node = s.control.ledger.node
+	raw, err := marshalVolumeAuthority(next, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entered, release := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	unblock := func() { once.Do(func() { close(release) }) }
+	defer unblock()
+	probe.mu.Lock()
+	probe.entered = entered
+	probe.release = release
+	probe.mu.Unlock()
+	s.opMu.Lock()
+	if _, err = s.planVolumeAuthorityLocked(); err != nil {
+		s.opMu.Unlock()
+		t.Fatal(err)
+	}
+	s.recoveryVolumes[identity.VolumeID] = &stagedRecoveryVolume{store: recovered}
+	err = s.reassignVolumeAuthorityLocked(recovered, next, volume.ID(next.Node), raw)
+	s.opMu.Unlock()
+	var wait *authorityWait
+	if !errors.As(err, &wait) {
+		t.Fatal("recovery did not request owner fence", err)
+	}
+	if err = wait.wait(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-entered:
+	case <-time.After(3 * time.Second):
+		t.Fatal("recovery subset dropped another pending header")
+	}
+	if !s.authorityPending(a.ID(), volume.ObjectID{1}) {
+		t.Fatal("recovery subset falsely confirmed topology authority")
+	}
+	unblock()
+	if err = s.ensureVolumeAuthority(); err != nil {
+		t.Fatal(err)
 	}
 }
