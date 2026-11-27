@@ -180,7 +180,10 @@ func TestDaemonPlacementImprovement(t *testing.T) {
 	peer.node.scopes.start()
 	for {
 		entry, _ := s.placement.Load().lookup(client.ID(b.ID()), client.ObjectID(object))
-		if len(entry.Locations) == 1 && entry.Locations[0].Volume == client.ID(cold.Identity().VolumeID) {
+		// Placement publication can precede the asynchronous authority fence.
+		// Assert payloads only after that range becomes readable, just as a
+		// protocol client waits through the documented pending-authority 503.
+		if len(entry.Locations) == 1 && entry.Locations[0].Volume == client.ID(cold.Identity().VolumeID) && !s.authorityPending(b.ID(), object) {
 			break
 		}
 		select {
