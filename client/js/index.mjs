@@ -159,6 +159,37 @@ async function delay(ms, signal) {
   });
 }
 
+function closeTransport(transport, callerSignal) {
+  const ws = transport.ws;
+  if (ws.readyState === 3) {
+    transport.fail(abortError());
+    return Promise.resolve();
+  }
+  const signal = AbortSignal.any([
+    transport.client.life.signal,
+    ...(callerSignal ? [callerSignal] : []),
+    AbortSignal.timeout(transport.client.requestTimeout),
+  ]);
+  return new Promise((resolve, reject) => {
+    const cleanup = () => {
+      ws.removeEventListener("close", closed);
+      signal.removeEventListener("abort", aborted);
+    };
+    const closed = () => {
+      cleanup();
+      resolve();
+    };
+    const aborted = () => {
+      cleanup();
+      reject(signal.reason);
+    };
+    ws.addEventListener("close", closed, { once: true });
+    signal.addEventListener("abort", aborted, { once: true });
+    transport.fail(abortError());
+    if (signal.aborted) aborted();
+  });
+}
+
 class Transport {
   constructor(ws, client) {
     this.ws = ws;
@@ -209,6 +240,11 @@ class Transport {
       maxBuffered = MAX_BUFFER,
     } = {},
   ) {
+    signal = AbortSignal.any([
+      this.client.life.signal,
+      ...(signal ? [signal] : []),
+      AbortSignal.timeout(this.client.requestTimeout),
+    ]);
     checkSignal(signal);
     if (this.closed) return Promise.reject(abortError());
     if (this.pending.size >= 12)
@@ -479,7 +515,11 @@ export class Client {
       throw RangeError("Unknown routing mode");
     if (!WebSocketClass)
       throw Error("Provide a browser-compatible WebSocket implementation");
-    signal?.addEventListener("abort", () => this.close(), { once: true });
+    if (!Number.isSafeInteger(requestTimeout) || requestTimeout < 1)
+      throw RangeError("requestTimeout must be a positive safe integer");
+    this.externalSignal = signal;
+    this.externalAbort = () => this.close();
+    signal?.addEventListener("abort", this.externalAbort, { once: true });
     checkSignal(signal);
   }
   async authorization() {
@@ -1393,14 +1433,7 @@ export class Client {
       const seed = await this.establish(this.endpoint, { signal: o.signal });
       for (const t of this.transports.values()) {
         if (t === seed) continue;
-        const closed =
-          t.ws.readyState === 3
-            ? Promise.resolve()
-            : new Promise((resolve) =>
-                t.ws.addEventListener("close", resolve, { once: true }),
-              );
-        t.fail(abortError());
-        await closed;
+        await closeTransport(t, o.signal);
       }
       for (const [key, t] of this.transports)
         if (t !== seed) this.transports.delete(key);
@@ -1453,14 +1486,7 @@ export class Client {
     this.lease = null;
     this.leaseTransport = null;
     for (const t of this.transports.values()) {
-      const closed =
-        t.ws.readyState === 3
-          ? Promise.resolve()
-          : new Promise((resolve) =>
-              t.ws.addEventListener("close", resolve, { once: true }),
-            );
-      t.fail(abortError());
-      await closed;
+      await closeTransport(t, o.signal);
     }
     this.transports.clear();
   }
@@ -1634,6 +1660,7 @@ export class Client {
     if (this.closed) return Promise.resolve();
     const finish = () => {
       this.closed = true;
+      this.externalSignal?.removeEventListener("abort", this.externalAbort);
       this.life.abort();
       for (const t of this.allTransports) t.fail(abortError());
       this.transports.clear();
