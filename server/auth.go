@@ -204,8 +204,9 @@ type session struct {
 	Expires                time.Time
 }
 type principal struct {
-	requestContext context.Context
-	cowInternal    bool // admitted node preservation; never decoded from a client
+	requestContext       context.Context
+	internalCoordination bool // private metrics-only marker; never grants permission or comes from wire
+	cowInternal          bool // admitted node preservation; never decoded from a client
 	// Internal S3 operations retain the original HTTP operation grant, including
 	// write-only/delete-only users. Native clients cannot set this field.
 	frontendPermission BucketPermissions
