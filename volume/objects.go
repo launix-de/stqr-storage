@@ -500,11 +500,11 @@ func (v *Volume) mutateCore(op uint8, k Key, offset, length uint64, src io.Reade
 		if !alive || uint64(len(expected)) != o.Info.Length {
 			return Result{}, ErrPrecondition
 		}
-		actual := make([]byte, len(expected))
-		if e = v.readObject(o, actual, 0); e != nil {
-			return Result{}, e
+		equal, err := v.compareObject(o, 0, expected)
+		if err != nil {
+			return Result{}, err
 		}
-		if !bytes.Equal(actual, expected) {
+		if !equal {
 			return Result{}, ErrPrecondition
 		}
 	}
@@ -512,11 +512,11 @@ func (v *Volume) mutateCore(op uint8, k Key, offset, length uint64, src io.Reade
 		if !alive || end > o.Info.Length {
 			return Result{}, ErrPrecondition
 		}
-		actual := make([]byte, len(expected))
-		if e = v.readObject(o, actual, offset); e != nil {
-			return Result{}, e
+		equal, err := v.compareObject(o, offset, expected)
+		if err != nil {
+			return Result{}, err
 		}
-		if !bytes.Equal(actual, expected) {
+		if !equal {
 			return Result{}, ErrPrecondition
 		}
 	}
