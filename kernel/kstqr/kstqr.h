@@ -91,6 +91,7 @@ struct ks_fs {
 	stqr_commit_mark durable;
 	struct ks_cache *cache;
 	struct workqueue_struct *read_queue;
+	struct workqueue_struct *reference_queue;
 	size_t cache_budget;
 	struct super_block *sb;
 	spinlock_t inode_lock;
@@ -116,6 +117,8 @@ struct ks_inode {
 	struct ks_cache_stamp data_stamp, page_stamp;
 	struct ks_directory_proof directory_proof;
 	struct mutex metadata_lock;
+	struct mutex reference_lock;
+	struct ks_file_reference *reference;
     struct mutex writeback_publish_lock;
 	struct list_head mount_list;
 	u64 invalidated_generation;
