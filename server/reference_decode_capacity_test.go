@@ -101,6 +101,17 @@ func TestReferenceDecodeSpareSlotDoesNotRelaxAdmission(t *testing.T) {
 			if global {
 				count = maxObjectReferences
 			}
+			if global {
+				// A full root owned by an absent account is intentionally reclaimed.
+				// Use a present owner to test the global admission limit instead.
+				image := cloneAccountsImage(s.accounts.Load().image)
+				image.Users = append(image.Users, account{ID: (volume.ID{9}).String(), Name: "capacity-owner", Role: "USER"})
+				index, err := newAccountsIndex(image)
+				if err != nil {
+					t.Fatal(err)
+				}
+				s.publishAccountIndex(index)
+			}
 			entries := make([]objectReferenceEntry, count)
 			for i := range entries {
 				entries[i].object[0] = byte(i)

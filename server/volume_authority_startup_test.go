@@ -6,15 +6,16 @@ import (
 	"context"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/launix-de/stqr-storage/client"
 	"github.com/launix-de/stqr-storage/volume"
 )
 
-// The legacy constructor returns only after its authority cut is durable. The
-// separate background-startup integration uses the same unlocked fence helper
-// before lifting its mutation gate instead of blocking Open.
-func TestAuthorityFenceLegacyConstructorRepairAndErrorClose(t *testing.T) {
+// Open may expose reads before background recovery completes. The authority
+// cut must be durable before storage readiness permits mutations. Both immediate
+// and background startup failures must release ownership after their owner closes.
+func TestAuthorityFenceStartupRepairAndErrorClose(t *testing.T) {
 	n := startDaemonTestNode(t, filepath.Join(t.TempDir(), "node.yaml"), nil, false)
 	added := addTestVolume(t, n.node, "startup-authority", "hdd", 8<<20)
 	b, _ := createProtocolBucket(t, n.node, "startup-authority")
@@ -39,9 +40,15 @@ func TestAuthorityFenceLegacyConstructorRepairAndErrorClose(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
 	reopened, err := Open(Options{ConfigPath: n.path, manualRanges: true})
 	if err != nil {
 		t.Fatal("legacy startup did not await missing header", err)
+	}
+	if err = reopened.WaitStorageReady(ctx); err != nil {
+		reopened.Close()
+		t.Fatal("startup did not confirm authority", err)
 	}
 	dataVolume := reopened.volumes[added.VolumeID].store
 	h, err = dataVolume.Open(false)
@@ -52,11 +59,11 @@ func TestAuthorityFenceLegacyConstructorRepairAndErrorClose(t *testing.T) {
 	h.Close()
 	if err != nil || len(proof) == 0 {
 		reopened.Close()
-		t.Fatal("constructor returned without authority proof", err)
+		t.Fatal("storage readiness returned without authority proof", err)
 	}
 	if !dataVolume.IsDurableThrough(dataVolume.Stats().Generation) {
 		reopened.Close()
-		t.Fatal("legacy Open acknowledged unconfirmed header")
+		t.Fatal("storage readiness acknowledged unconfirmed header")
 	}
 	if err = reopened.Close(); err != nil {
 		t.Fatal(err)
@@ -78,11 +85,16 @@ func TestAuthorityFenceLegacyConstructorRepairAndErrorClose(t *testing.T) {
 	}
 	failed, err := Open(Options{ConfigPath: n.path, manualRanges: true})
 	if err == nil {
-		failed.Close()
+		err = failed.WaitStorageReady(ctx)
+		if closeErr := failed.Close(); closeErr != nil {
+			t.Fatal("background startup failure could not close", closeErr)
+		}
+	}
+	if err == nil {
 		t.Fatal("corrupt authority accepted")
 	}
-	// Do not call failed.Close here: Open's own error path must join workers and
-	// release the device claim. Reopening immediately proves that ownership ends.
+	// An immediate Open error closes itself; a returned server is explicitly
+	// closed above after its readiness failure. Either path must release claims.
 	disk, err = volume.New(path, 0, volume.HDD)
 	if err != nil {
 		t.Fatal("constructor error leaked volume lock", err)
@@ -112,6 +124,10 @@ func TestAuthorityFenceLegacyConstructorRepairAndErrorClose(t *testing.T) {
 	healthy, err := Open(Options{ConfigPath: n.path, manualRanges: true})
 	if err != nil {
 		t.Fatal("repair could not reopen constructor", err)
+	}
+	if err = healthy.WaitStorageReady(ctx); err != nil {
+		healthy.Close()
+		t.Fatal("repaired authority never became ready", err)
 	}
 	healthy.Close()
 }
