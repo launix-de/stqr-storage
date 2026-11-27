@@ -165,7 +165,7 @@ func (b *Bucket) selectVolume(d BucketDescription, key volume.Key, request volum
 			d.Policy = *d.DesiredPolicy
 		}
 	}
-	var selected, target *volume.Volume
+	var selected *volume.Volume
 	var latest volume.Info
 	found := false
 	class := bucketClass(d.Policy)
@@ -174,7 +174,12 @@ func (b *Bucket) selectVolume(d BucketDescription, key volume.Key, request volum
 			class = b.server.rangeClass(d.Policy, entry)
 		}
 	}
-	for _, v := range b.volumesFor(d) {
+	// volumesFor returns a request-owned slice. Retain exactly the same
+	// class/authority-eligible cohort while probing EVERY possible physical copy.
+	// Capacity ranking is unrelated to reads or an already located object.
+	volumes := b.volumesFor(d)
+	candidates := volumes[:0]
+	for _, v := range volumes {
 		if !class.Allows(v.Identity().Class) {
 			continue
 		}
@@ -185,6 +190,7 @@ func (b *Bucket) selectVolume(d BucketDescription, key volume.Key, request volum
 				}
 			}
 		}
+		candidates = append(candidates, v)
 		h, err := v.Open(false)
 		if err != nil {
 			return nil, latest, false, err
@@ -241,16 +247,6 @@ func (b *Bucket) selectVolume(d BucketDescription, key volume.Key, request volum
 		} else if !errors.Is(err, volume.ErrNotFound) {
 			return nil, latest, false, err
 		}
-		allocatable := true
-		if b.server.controller != nil {
-			b.server.mu.RLock()
-			managed := b.server.volumes[v.Identity().VolumeID.String()]
-			allocatable = managed != nil && managed.config.State == "active"
-			b.server.mu.RUnlock()
-		}
-		if allocatable && v.State() == volume.Active && class.Allows(v.Identity().Class) && (target == nil || v.Stats().AdmissionFreePhysical > target.Stats().AdmissionFreePhysical) {
-			target = v
-		}
 	}
 	if found {
 		if !class.Allows(selected.Identity().Class) {
@@ -260,6 +256,23 @@ func (b *Bucket) selectVolume(d BucketDescription, key volume.Key, request volum
 	}
 	if !create {
 		return nil, latest, false, volume.ErrNotFound
+	}
+	var target *volume.Volume
+	var bestFree uint64
+	for _, v := range candidates {
+		allocatable := true
+		if b.server.controller != nil {
+			b.server.mu.RLock()
+			managed := b.server.volumes[v.Identity().VolumeID.String()]
+			allocatable = managed != nil && managed.config.State == "active"
+			b.server.mu.RUnlock()
+		}
+		if allocatable && v.State() == volume.Active && class.Allows(v.Identity().Class) {
+			free := v.AdmissionFreePhysical()
+			if target == nil || free > bestFree {
+				target, bestFree = v, free
+			}
+		}
 	}
 	if target == nil {
 		return nil, latest, false, volume.ErrFull
