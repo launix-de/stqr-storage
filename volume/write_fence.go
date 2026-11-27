@@ -85,6 +85,11 @@ func (v *Volume) runFence(f *writeFence, ioView *Volume, run func() error) (err 
 	if v.prepareCond == nil {
 		v.prepareCond = sync.NewCond(&v.mu)
 	}
+	// Freeze derived counters before physical I/O releases the metadata lock.
+	// Concurrent accepted writes publish a later cut; they must never leak into
+	// the sidecar for this checkpoint. Encoding/cache failures are advisory.
+	cacheGeneration := v.sb.Generation
+	cachePath, cacheData, _ := v.encodeAccountingCheckpointCacheLocked()
 	v.fence, v.checkpointing = f, true
 	completed := false
 	v.mu.Unlock()
@@ -108,6 +113,12 @@ func (v *Volume) runFence(f *writeFence, ioView *Volume, run func() error) (err 
 	}()
 	err = run()
 	completed = true
+	if err == nil && ioView.durableGeneration >= cacheGeneration {
+		// The canonical checkpoint is confirmed already. Sidecar filesystem work
+		// stays outside v.mu, performs no fsync, and cannot fail the user's ACK.
+		// Keeping checkpointing set serializes this publication with later cuts.
+		_ = writeAccountingCache(cachePath, cacheData)
+	}
 	return err
 }
 

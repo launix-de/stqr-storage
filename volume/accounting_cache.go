@@ -181,6 +181,22 @@ func (d *accountingContextIO) ReadAt(p []byte, off int64) (int, error) {
 	return d.VolumeIO.ReadAt(p, off)
 }
 
+// The census holds the source volume's shared lock for the entire scan. Forward
+// its read-only view capability without extending that lifetime or bypassing
+// cancellation. Hiding this optional capability would allocate and copy a whole
+// page for every small object header, even on a mapped backend.
+func (d *accountingContextIO) borrowAt(off uint64, n int) ([]byte, int, error) {
+	if err := d.ctx.Err(); err != nil {
+		return nil, 0, err
+	}
+	if reader, ok := d.VolumeIO.(interface {
+		borrowAt(uint64, int) ([]byte, int, error)
+	}); ok {
+		return reader.borrowAt(off, n)
+	}
+	return nil, 0, ErrUnsupported
+}
+
 func ownershipKey(stamp any, include func(Key, bool) bool) ([32]byte, bool) {
 	if key, ok := stamp.(OwnershipCheckpointKey); ok {
 		return key.OwnershipCheckpointKey(), true
@@ -227,10 +243,20 @@ func (v *Volume) accountingDigest() ([32]byte, error) {
 	return sha256.Sum256(b), nil
 }
 func (v *Volume) encodeAccountingCacheLocked() (string, []byte, error) {
-	if v.accountCachePath == "" || !v.accountManaged.Load() || !v.accountReady.Load() || v.failed != nil || v.sb.Identity.Class == RAM || v.sb.Identity.Class == RAMCache {
+	if v.sb.Generation != v.durableGeneration || v.deferred != nil || v.checkpointing {
 		return "", nil, nil
 	}
-	if v.sb.Generation != v.durableGeneration || v.deferred != nil || v.checkpointing {
+	return v.encodeAccountingCheckpointCacheLocked()
+}
+
+// encodeAccountingCheckpointCacheLocked captures ONLY the currently published
+// cut while its accounting maps and superblock still agree under v.mu. Unlike a
+// general cache save, that cut need not be durable yet: runFence owns the bytes
+// and may publish them only after confirming this exact generation. Later
+// accepted writes cannot alter this frozen O(buckets) buffer. No object scan,
+// user-data write, or Sync is performed here.
+func (v *Volume) encodeAccountingCheckpointCacheLocked() (string, []byte, error) {
+	if v.accountCachePath == "" || !v.accountManaged.Load() || !v.accountReady.Load() || v.failed != nil || v.sb.Identity.Class == RAM || v.sb.Identity.Class == RAMCache {
 		return "", nil, nil
 	}
 	key, known := ownershipKey(v.ownerStamp, v.ownerFilter)
