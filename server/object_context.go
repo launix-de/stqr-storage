@@ -50,3 +50,10 @@ func (ws *wsSession) releaseObjectContext(id client.ID) {
 		delete(ws.objectContexts, id)
 	}
 }
+
+// usesObjectRequestContext is shared by reader registration and completion.
+// ObjectReference uses its own accepted trailer, not ObjectAccepted's envelope,
+// but must still receive per-request CANCEL and retire its context on response.
+func usesObjectRequestContext(op uint16) bool {
+	return op >= 0x0100 && op <= 0x0108 || op == client.ObjectSubscribe || op == client.ObjectAccepted || op == client.ObjectReference || op == client.BucketObjectLease || op == client.BucketMaintenanceEnd || op == client.BucketStatFS || op == client.BucketSync || op == client.BucketMaintenance || op == client.BucketScan
+}
