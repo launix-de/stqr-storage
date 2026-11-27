@@ -67,7 +67,11 @@ func (s *Server) receiveBucketUsage(ctx context.Context, body []byte, actor clie
 		used, exact, err = b.pinnedLogicalUsage()
 	}
 	if !exact && err == nil {
-		used, err = b.accountedUsageFor(policy)
+		if accounting == "logical" && len(b.storageDescription().ClonePeers) > 0 {
+			used, err = b.observedCOWLogicalUsage()
+		} else {
+			used, err = b.accountedUsageFor(policy)
+		}
 	}
 	if err != nil {
 		return nil, err

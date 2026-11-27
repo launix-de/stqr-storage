@@ -81,6 +81,12 @@ func quotaCapacity(nodes []quotaNodeCapacity, strategy uint8, used uint64, guara
 // guaranteed quotas remain unsupported by admission; this preview also protects
 // reservations present in catalog metadata and volume-level reserve counters.
 func (s *Server) bucketQuotaCapacity(id volume.ID, strategy uint8, selection ...BucketPolicy) (bucketQuotaCapacity, error) {
+	return s.bucketQuotaCapacityMode(id, strategy, false, selection...)
+}
+
+// physicalPool is reserved for unlimited COW STATFS. It measures the eligible
+// storage pool, never claims to have counted an inherited logical namespace.
+func (s *Server) bucketQuotaCapacityMode(id volume.ID, strategy uint8, physicalPool bool, selection ...BucketPolicy) (bucketQuotaCapacity, error) {
 	if strategy > 2 {
 		return bucketQuotaCapacity{}, fail(400, "invalid storage strategy")
 	}
@@ -99,7 +105,13 @@ func (s *Server) bucketQuotaCapacity(id volume.ID, strategy uint8, selection ...
 		if len(selection) > 0 {
 			policy.Limits.Accounting = selection[0].Limits.Accounting
 		}
-		used, err = b.accountedUsageFor(policy)
+		if !physicalPool {
+			if len(b.storageDescription().ClonePeers) > 0 && policy.Limits.Accounting == "logical" {
+				used, err = b.observedCOWLogicalUsage()
+			} else {
+				used, err = b.accountedUsageFor(policy)
+			}
+		}
 		if err != nil {
 			return bucketQuotaCapacity{}, err
 		}
@@ -116,6 +128,9 @@ func (s *Server) bucketQuotaCapacity(id volume.ID, strategy uint8, selection ...
 		class := int(stats.Identity.Class)
 		if class > 2 {
 			continue
+		}
+		if physicalPool && volume.Class(strategy).Allows(stats.Identity.Class) {
+			used = addCapacity(used, stats.AllocatedPhysical)
 		}
 		node.Free[class] = addCapacity(node.Free[class], addCapacity(stats.AdmissionFreePhysical, stats.GuaranteedRemainingPhysical))
 		own := uint64(0)
@@ -154,7 +169,17 @@ func (s *Server) bucketQuotaCapacity(id volume.ID, strategy uint8, selection ...
 		if e != nil {
 			return bucketQuotaCapacity{}, e
 		}
-		usage, e := b.logicalUsage()
+		var usage uint64
+		if physicalPool {
+			// Legacy standalone catalogs have no committed reserve shares.
+			// Reserve the complete guarantee conservatively rather than scan
+			// another namespace merely to answer a filesystem-capacity probe.
+			usage = 0
+		} else if len(b.storageDescription().ClonePeers) > 0 {
+			usage, e = b.observedCOWLogicalUsage()
+		} else {
+			usage, e = b.logicalUsage()
+		}
 		if e != nil {
 			return bucketQuotaCapacity{}, e
 		}

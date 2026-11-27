@@ -10,7 +10,9 @@ import (
 const BucketStatFS uint16 = 0x011b
 
 // BucketSpace is a live advisory snapshot, not a reservation. Used counts live
-// object bytes (including filesystem metadata and objects awaiting fsck). Free
+// object bytes (including filesystem metadata and objects awaiting fsck). For
+// an unlimited COW bucket, Used instead measures allocated physical bytes in
+// its eligible storage pool, without scanning the inherited namespace. Free
 // is remaining eligible physical cluster space, capped by the bucket quota.
 // Total = Used + Free. Compression and future metadata growth affect admission.
 type BucketSpace struct {
