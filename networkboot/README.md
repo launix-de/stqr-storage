@@ -412,9 +412,16 @@ login -> PAM -> persistent username_home bucket at /home/username
 Image preparation installs helpers, the matching module, account tables and PAM
 configuration once. A small hash manifest binds that completed preparation to
 the initramfs payload. Matching boots read only the manifest from the lower and
-skip helper copying and Python account installation. A hotpatched payload copies
-only changed files; a changed login plan or installer reapplies identities before
-PID1. Missing markers conservatively prepare the private upper. Payload hashes
+skip helper copying and Python account installation. For stale or missing markers, changed helper/module payloads are copied only
+into a root-only executable tmpfs below `/run`, made readonly, and file-bound
+onto their runtime paths. Existing backing helper bytes remain untouched; a
+missing path needs only an empty placeholder. The `/run` child and binds survive
+initramfs-tools moving `/run` into the final root. The dedicated child is
+executable even though `/run` itself is mounted `noexec`.
+
+Changed login plans/installers still refresh small account/config files before
+PID1. Runtime RAM bindings never advance the persistent prepared marker: a
+reused upper or edited image must bind them again on its next boot. Payload hashes
 are calculated from initramfs RAM, not by reading all helpers back from STQR.
 
 A static helper substitutes the numeric per-boot server address into the small
