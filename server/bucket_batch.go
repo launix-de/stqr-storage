@@ -48,10 +48,7 @@ func (c *BucketCatalog) saveBatch(changes []BucketDescription) error {
 			if !c.upgrading && (d.Policy.Version < old.Policy.Version || d.Policy != old.Policy && d.Policy.Version == old.Policy.Version) {
 				return ErrBucketInvalid
 			}
-			d.Schema = 1
-			if d.Format != "" {
-				d.Schema = 2
-			}
+			d.Schema = bucketDescriptionSchema(d)
 			d.Revision++
 			d, err = normalizeBucketDescription(d)
 			if err != nil {

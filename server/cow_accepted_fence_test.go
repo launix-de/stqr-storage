@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -241,6 +242,26 @@ func testCOWAcceptedPreservation(t *testing.T, remote bool) {
 		handle.Close()
 		if err != nil || !bytes.Equal(preserved, original) {
 			t.Fatalf("source fence lost failed-CAS child preimage across crash: %q %v", preserved, err)
+		}
+	}
+	if remote {
+		// An old required owner remains unavailable storage, never a missing object
+		// or unsupported filesystem operation. Actual peer gates still report 426.
+		previous := sourceNode.compatibility.Load()
+		old := sourceNode.protocolVersion()
+		old.Operations = currentOperationSemantics()
+		old.Operations[fmt.Sprintf("%04x", peerCowCapture)] = operationSemantics{Emit: 2, Min: 2, Max: 2}
+		sourceNode.compatibility.Store(&old)
+		defer sourceNode.compatibility.Store(previous)
+		unknown := volume.ObjectID{0xff}
+		snap, err := targetNode.cowLogicalSnapshot(ctx, target.ID(), unknown, true)
+		snap.close()
+		if statusOf(err) != 503 {
+			t.Fatalf("incompatible COW read owner returned %v", err)
+		}
+		_, _, err = targetNode.cowPrepareWrite(ctx, localTarget, unknown, userPrincipal(t, targetNode), true)
+		if statusOf(err) != 503 {
+			t.Fatalf("incompatible COW mutation owner returned %v", err)
 		}
 	}
 	t.Logf("accepted inherited CAS: implicit syncs=0 remote-source=%v explicit fence persisted generation=%d; cross-bucket barrier retained", remote, generation)
