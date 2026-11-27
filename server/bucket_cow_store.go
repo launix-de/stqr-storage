@@ -20,6 +20,7 @@ type cowProofKey struct{}
 type cowLeaseKey struct{}
 type cowLocalOwnerKey struct{}
 type cowRestoreKey struct{}
+type cowAcceptedBucketKey struct{}
 type cowRestore struct {
 	info   volume.Info
 	source volume.ID
@@ -339,11 +340,21 @@ func (s *Server) cowPeerMutation(ctx context.Context, m client.Message, bucket v
 	if err != nil {
 		return nil, err
 	}
-	_, err = b.mutate(ctx, principal{cowInternal: true}, object, cowRestoreOpcode, 0, uint64(stream.length), stream, nil, volume.Options{RequestID: request})
+	// Copying an inherited preimage into the writing bucket is part of that
+	// same owner's accepted mutation. Its generation is tracked by the usual
+	// bucket/connection fence, so it must not introduce a physical checkpoint
+	// before the caller can publish its change. The context is deliberately
+	// local: preserving a DIFFERENT linked namespace still requires the existing
+	// durability barrier, including when that namespace has a remote owner.
+	// Removing that barrier requires cross-owner preservation dependencies at
+	// every volume checkpoint, not merely a flag on this RPC.
+	acceptedBucket, accepted := ctx.Value(cowAcceptedBucketKey{}).(volume.ID)
+	opt := volume.Options{RequestID: request, Accepted: accepted && acceptedBucket == bucket}
+	_, err = b.mutate(ctx, principal{cowInternal: true}, object, cowRestoreOpcode, 0, uint64(stream.length), stream, nil, opt)
 	return nil, err
 }
 
-func (s *Server) cowPrepareWrite(ctx context.Context, b *Bucket, id volume.ObjectID, p principal) ([32]byte, bool, error) {
+func (s *Server) cowPrepareWrite(ctx context.Context, b *Bucket, id volume.ObjectID, p principal, accepted bool) ([32]byte, bool, error) {
 	if p.cowInternal || bucketLocalReferenceRoot(id) || len(b.storageDescription().ClonePeers) == 0 {
 		return [32]byte{}, false, nil
 	}
@@ -356,6 +367,9 @@ func (s *Server) cowPrepareWrite(ctx context.Context, b *Bucket, id volume.Objec
 		return proof, false, err
 	}
 	ctx = context.WithValue(ctx, cowProofKey{}, proof)
+	if accepted {
+		ctx = context.WithValue(ctx, cowAcceptedBucketKey{}, b.ID())
+	}
 	if p.connection != nil {
 		ctx = context.WithValue(ctx, cowLocalOwnerKey{}, p.connection)
 		if lease := p.connection.lease.Load(); lease != nil {
