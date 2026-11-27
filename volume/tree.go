@@ -80,6 +80,10 @@ func decodeNode(b []byte, id ID) (treeNode, error) {
 	if n.kind < 1 || n.kind > 2 || n.level > 32 || count > n.capacity() || n.level > 0 && count == 0 {
 		return n, ErrCorrupt
 	}
+	// The validated page entry count bounds this allocation before decoding.
+	if count > 0 {
+		n.entries = make([]treeEntry, 0, count)
+	}
 	at := 32
 	for i := 0; i < count; i++ {
 		var e treeEntry
