@@ -180,6 +180,7 @@ func (s *Server) executeObjectReference(ctx context.Context, m client.Message, w
 	// READ authorizes only this bounded, server-encoded reference object; it
 	// confers no WRITE or DELETE capability on user objects.
 	internal := p
+	internal.internalCoordination = true
 	internal.User = account
 	internal.frontendPermission = BucketRead
 	if action == 8 {
