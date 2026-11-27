@@ -27,8 +27,8 @@ func TestAcceptedCleanupReleasesClosedVolumesWhilePeerPending(t *testing.T) {
 		}
 		g := connectionTestPut(t, v, volume.Key{Bucket: bucket, Object: volume.ObjectID{n}}, "closed")
 		s.recordAccepted(bucket, v, g)
-		// Close is not a durability request. This positive control retires an
-		// explicitly checkpointed generation before testing pruning.
+		// Closing is not a durability request. Establish the confirmed fixture
+		// through an explicit fence before testing nonblocking prefix pruning.
 		if err := v.CheckpointThrough(g); err != nil {
 			t.Fatal(err)
 		}
@@ -36,7 +36,7 @@ func TestAcceptedCleanupReleasesClosedVolumesWhilePeerPending(t *testing.T) {
 			t.Fatal(err)
 		}
 		if !v.TryIsDurableThrough(g) {
-			t.Fatal("explicitly checkpointed closed volume lost durability confirmation")
+			t.Fatal("explicitly fenced closed volume lost confirmation")
 		}
 		stats[v] = v.IOStats()
 	}
@@ -88,8 +88,9 @@ func TestAcceptedCleanupReleasesClosedVolumesWhilePeerPending(t *testing.T) {
 	}
 }
 
-// Unrequested tails discarded at close are not proof of durable completion.
-func TestAcceptedCleanupDoesNotConfirmDiscardedClosedTail(t *testing.T) {
+// A disconnected/unmounted device must never turn a dropped accepted tail into
+// a false persistence confirmation just because its handle has been closed.
+func TestAcceptedClosedUnconfirmedVolumeNeverConfirms(t *testing.T) {
 	s := testServer(t)
 	bucket := volume.ID(client.NewRequestID())
 	v, err := volume.NewRAM(16 << 20)
@@ -99,15 +100,18 @@ func TestAcceptedCleanupDoesNotConfirmDiscardedClosedTail(t *testing.T) {
 	generation := connectionTestPut(t, v, volume.Key{Bucket: bucket, Object: volume.ObjectID{1}}, "unconfirmed")
 	s.recordAccepted(bucket, v, generation)
 	before := v.IOStats()
-	if err := v.Close(); err != nil {
+	if err = v.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if v.TryIsDurableThrough(generation) || v.IOStats().SyncOps != before.SyncOps {
-		t.Fatal("ordinary close confirmed or persisted an unrequested tail")
+	if v.IOStats().SyncOps != before.SyncOps {
+		t.Fatal("Close issued an unsolicited Sync")
 	}
 	s.pruneDurability()
-	if _, pending := s.acceptedMark(bucket); !pending {
-		t.Fatal("pruning confirmed a discarded tail")
+	if v.TryIsDurableThrough(generation) {
+		t.Fatal("Close invented persistence")
+	}
+	if _, ok := s.acceptedMark(bucket); !ok {
+		t.Fatal("dropped accepted generation falsely confirmed")
 	}
 	s.durability.mu.Lock()
 	retained := s.durability.buckets[bucket].volumes[v]

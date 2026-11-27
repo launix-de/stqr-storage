@@ -9,10 +9,10 @@ import (
 	"github.com/launix-de/stqr-storage/volume"
 )
 
-// Accepted writes may exceed the former fixed group budget without fencing.
-// Explicit bucket deletion must still checkpoint its cleanup before reporting
-// completion and retain a failed fence obligation for either cleanup lane.
-func TestCleanupLargeAcceptedGroupIntegration(t *testing.T) {
+// Spill-backed accepted groups do not force a pressure checkpoint. An explicit,
+// committed bucket deletion still fences its cleanup cut outside the handle;
+// a failed deletion fence must preserve the exact later-generation obligation.
+func TestCleanupFullAcceptedGroupIntegration(t *testing.T) {
 	for _, receipts := range []bool{false, true} {
 		for _, failFence := range []bool{false, true} {
 			name := "objects"
@@ -37,24 +37,30 @@ func TestCleanupLargeAcceptedGroupIntegration(t *testing.T) {
 						t.Fatal(err)
 					}
 				}
+				keep := volume.Key{Bucket: volume.ID{250}, Object: volume.ObjectID{1}}
+				payload := bytes.Repeat([]byte("k"), 1<<20)
 				h.Close()
-				before := v.IOStats().SyncOps
+				acceptedBefore := v.IOStats()
 				h, err = v.Open(true)
 				if err != nil {
 					t.Fatal(err)
 				}
-				keep := volume.Key{Bucket: volume.ID{250}, Object: volume.ObjectID{1}}
-				payload := bytes.Repeat([]byte("k"), 1<<20)
-				for i := byte(1); i <= 2; i++ {
+				for i := byte(1); i <= 5; i++ {
 					keep.Object[0] = i
 					if _, err = h.Put(keep, payload, volume.Options{Accepted: true}); err != nil {
 						t.Fatal(err)
 					}
 				}
-				generation, err := h.Generation()
 				h.Close()
-				if err != nil || generation == 0 || v.IsDurableThrough(generation) || v.IOStats().SyncOps != before {
-					t.Fatal("positive control: large accepted group must remain unconfirmed without an implicit fence", err)
+				if v.IOStats().SyncOps != acceptedBefore.SyncOps {
+					t.Fatal("accepted burst introduced implicit Sync")
+				}
+				if generation, pressure := v.PendingCheckpoint(true, 0); pressure || generation != 0 {
+					t.Fatal("accepted spill requested a pressure checkpoint", generation, pressure)
+				}
+				generation, pending := v.PendingCheckpoint(false, 0)
+				if !pending || generation == 0 || v.IsDurableThrough(generation) {
+					t.Fatal("positive control: accepted generation is not pending", generation, pending)
 				}
 				s.cleanupReceiptTurn = receipts
 				if failFence {
@@ -65,8 +71,8 @@ func TestCleanupLargeAcceptedGroupIntegration(t *testing.T) {
 				s.reclaimBucketStep()
 				job := s.cleanupJobs[doomed.Bucket]
 				if failFence {
-					if job.done || job.volumes[0].checkpoint < generation {
-						t.Fatal("lost the captured failed-checkpoint obligation", job)
+					if job.done || job.volumes[0].checkpoint <= generation || job.volumes[0].checkpoint != v.Stats().Generation {
+						t.Fatal("lost the exact accepted cleanup generation after failed fence", job)
 					}
 					return
 				}
@@ -74,15 +80,18 @@ func TestCleanupLargeAcceptedGroupIntegration(t *testing.T) {
 					s.reclaimBucketStep()
 				}
 				if !job.done || !v.IsDurableThrough(generation) {
-					t.Fatal("cleanup did not confirm the large accepted group", job)
+					t.Fatal("cleanup did not resume after full-group checkpoint", job)
 				}
 				h, err = v.Open(false)
 				if err != nil {
 					t.Fatal(err)
 				}
 				defer h.Close()
-				if got, _, err := h.Get(keep); err != nil || !bytes.Equal(got, payload) {
-					t.Fatal("unrelated accepted payload changed", err)
+				for i := byte(1); i <= 5; i++ {
+					keep.Object[0] = i
+					if got, _, err := h.Get(keep); err != nil || !bytes.Equal(got, payload) {
+						t.Fatal("unrelated accepted payload changed", i, err)
+					}
 				}
 				if _, found, err := h.OperationStatus(cleanupID(1)); err != nil || found {
 					t.Fatal("deleted receipt retained after completion", found, err)
