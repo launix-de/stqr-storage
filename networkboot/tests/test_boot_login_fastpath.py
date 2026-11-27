@@ -83,15 +83,17 @@ r=Path(sys.argv[1]);i.install(r,json.loads((r/'usr/lib/stqr-networkboot/login.js
 
     def prepare(self, server='192.0.2.8', fail=False):
         script = '''. "$1"; shift
-mktemp() { command mktemp "$TEST_WORK/login.XXXXXX"; }
 cp() { printf '%s\\n' "$*" >> "$TEST_WORK/copies"; command cp "$@"; }
+# Shell unit fixture: visibility simulation only. The separate namespace
+# fixture exercises actual mount/read-only/pivot behavior.
+stqr_login_mount() { printf '%s\\n' "$*" >> "$TEST_WORK/mounts"; if [ "$1" = --bind ]; then command cp -p "$2" "$3"; fi; }
 stqr_login_install() { printf '%s\\n' install >> "$TEST_WORK/installs"; python3 "$TEST_WORK/install.py" "$1" "$2"; }
 stqr_prepare_login "$@"
 '''
         if fail:
             script = script.replace('python3 "$TEST_WORK/install.py" "$1" "$2"', 'return 1')
         return subprocess.run(['sh', '-c', script, 'sh', ROOT/'initramfs/prepare-login',
-                               self.root, server, KERNEL, self.payload],
+                               self.root, server, KERNEL, self.payload, self.work],
                               env={**os.environ, 'TEST_WORK': str(self.work)}, capture_output=True, text=True)
 
     def checked_prepare(self, **kw):
@@ -108,24 +110,31 @@ stqr_prepare_login "$@"
         self.assertEqual(before, (heavy.stat().st_ino, heavy.stat().st_mtime_ns, identity.stat().st_ino))
         self.assertEqual(json.loads((self.root/'etc/security/stqr-home.json').read_text())['uri'], 'http://192.0.2.8:7419')
 
-    def test_module_only_mismatch_copies_only_module_and_marker(self):
+    def test_module_only_mismatch_uses_ram_bind_without_advancing_marker(self):
+        marker_before = (self.root/MARKER).read_bytes()
         (self.payload/ASSETS[0]).write_bytes(b'updated module')
         self.checked_prepare()
         copies = (self.work/'copies').read_text().splitlines()
-        self.assertEqual(len(copies), 2)
+        self.assertEqual(len(copies), 1)
+        self.assertNotIn(str(self.root), copies[0])
+        self.assertEqual((self.root/MARKER).read_bytes(), marker_before)
+        self.assertIn('--bind', (self.work/'mounts').read_text())
         self.assertIn('kstqr.ko', copies[0])
         self.assertFalse((self.work/'installs').exists())
         self.assertEqual((self.root/ASSETS[0]).read_bytes(), b'updated module')
 
-    def test_missing_marker_conservatively_installs_then_next_boot_is_fast(self):
+    def test_missing_marker_uses_ram_each_boot_without_false_persistent_marker(self):
         (self.root/MARKER).unlink()
         self.checked_prepare()
         self.assertEqual((self.work/'installs').read_text(), 'install\n')
-        self.assertEqual(len((self.work/'copies').read_text().splitlines()), len(ASSETS)+1)
+        self.assertEqual(len((self.work/'copies').read_text().splitlines()), len(ASSETS))
         (self.work/'copies').unlink(); (self.work/'installs').unlink()
         self.checked_prepare()
-        self.assertFalse((self.work/'copies').exists())
-        self.assertFalse((self.work/'installs').exists())
+        self.assertEqual(len((self.work/'copies').read_text().splitlines()), len(ASSETS))
+        self.assertEqual((self.work/'installs').read_text(), 'install\n')
+        self.assertFalse((self.root/MARKER).exists())
+        for line in (self.work/'copies').read_text().splitlines():
+            self.assertNotIn(str(self.root), line)
 
     def test_changed_login_plan_refreshes_dynamic_users(self):
         self.plan['accounts'].append({'name': 'other', 'id': '22345678'+'00'*12,
