@@ -10,6 +10,53 @@ import (
 	"testing"
 )
 
+func TestFilesystemMutableWriteAfterSparseGrowth(t *testing.T) {
+	for _, size := range []uint64{8192, FSObjectSize + 4096} {
+		t.Run(fmt.Sprint(size), func(t *testing.T) {
+			ctx := context.Background()
+			f, _ := newTestFS(t)
+			file := createTestFile(t, f, "sparse-growth")
+			if _, err := f.WriteAt(ctx, file.ID, bytes.Repeat([]byte{'A'}, 4096), 0); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := f.Truncate(ctx, file.ID, size); err != nil {
+				t.Fatal(err)
+			}
+			before, _, err := f.load(ctx, file.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			parts, err := f.segmentsReadOnly(ctx, before.blob)
+			if err != nil || len(parts) == 0 {
+				t.Fatal(parts, err)
+			}
+			id := parts[0].id
+			if _, err = f.WriteAt(ctx, file.ID, []byte{'Z'}, 0); err != nil {
+				t.Fatal(err)
+			}
+			got := make([]byte, int(size))
+			n, err := f.ReadAt(ctx, file.ID, got, 0)
+			if err != nil || n != len(got) {
+				t.Fatalf("read after growth: bytes=%d want=%d error=%v", n, len(got), err)
+			}
+			want := make([]byte, int(size))
+			copy(want, bytes.Repeat([]byte{'A'}, 4096))
+			want[0] = 'Z'
+			if !bytes.Equal(got, want) {
+				t.Fatal("write lost data or exposed nonzero hole bytes")
+			}
+			after, _, err := f.load(ctx, file.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			parts, err = f.segmentsReadOnly(ctx, after.blob)
+			if err != nil || len(parts) == 0 || parts[0].id != id {
+				t.Fatal("payload identity changed", err)
+			}
+		})
+	}
+}
+
 // Repeated changes must mutate the existing pages, leave unrelated pages alone,
 // and discard the transient redo payload once the inode is published.
 func TestFilesystemMutablePagesKeepIdentity(t *testing.T) {
