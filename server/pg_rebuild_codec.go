@@ -147,7 +147,7 @@ func (s *Server) applyPGCodec(ctx context.Context, body []byte, actor client.ID)
 			continue
 		}
 		if loc.Volume == (client.ID{}) {
-			for _, v := range b.volumesFor(b.Describe()) {
+			for _, v := range b.volumesFor(b.storageDescription()) {
 				if s.volumeAllowedForEntry(p.Before.Bucket, p.Before.Entries[0], v.Identity().VolumeID, s.currentSystem.Load()) {
 					stores = append(stores, v)
 				}
@@ -168,24 +168,21 @@ func (s *Server) applyPGCodec(ctx context.Context, body []byte, actor client.ID)
 	}
 	defer end()
 	for _, store := range stores {
+		generation := store.Stats().Generation
 		var after *volume.ObjectID
 		for {
 			if err = s.waitForUserIO(ctx); err != nil {
 				return nil, err
 			}
-			s.opMu.Lock()
 			h, e := store.Open(false)
 			if e != nil {
-				s.opMu.Unlock()
 				return nil, e
 			}
 			records, e := p.scanObjects(h, after, 128)
 			h.Close()
 			if e != nil {
-				s.opMu.Unlock()
 				return nil, e
 			}
-			s.opMu.Unlock()
 			if len(records) == 0 {
 				break
 			}
@@ -199,7 +196,12 @@ func (s *Server) applyPGCodec(ctx context.Context, body []byte, actor client.ID)
 				s.opMu.Lock()
 				h, e = store.Open(true)
 				if e == nil {
-					e = h.RecompressWithOptions(record.Key, p.Compression, volume.Options{})
+					e = h.RecompressWithOptions(record.Key, p.Compression, volume.Options{Accepted: true})
+					if e == nil {
+						var cut uint64
+						cut, e = h.Generation()
+						generation = max(generation, cut)
+					}
 					h.Close()
 				}
 				s.opMu.Unlock()
@@ -209,6 +211,12 @@ func (s *Server) applyPGCodec(ctx context.Context, body []byte, actor client.ID)
 			}
 			next := records[len(records)-1].Key.Object
 			after = &next
+		}
+		// This reply contributes to the coordinator's READY decision. Persist
+		// the complete local conversion cut after releasing node admission and
+		// volume handles; a failed device fence must not return a successful ACK.
+		if err := store.CheckpointThrough(generation); err != nil {
+			return nil, err
 		}
 	}
 	return nil, nil

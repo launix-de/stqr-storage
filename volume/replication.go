@@ -159,6 +159,12 @@ func (h *Handle) PrepareMutation(op uint8, k Key, offset, length uint64, src io.
 	})
 }
 
+// HasPendingReplica performs one exact-key index lookup. It neither scans
+// replica records nor treats a probabilistic membership hint as authority.
+func (h *Handle) HasPendingReplica(key Key) (bool, error) {
+	return withHandle(h, false, func(v *Volume) (bool, error) { return v.pending(key) })
+}
+
 func (h *Handle) ReplicaStatus(id ID) (ReplicaRecord, bool, error) {
 	type answer struct {
 		r     ReplicaRecord

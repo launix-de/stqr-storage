@@ -87,6 +87,11 @@ func localMutationSource(src io.Reader) bool {
 }
 
 func (b *Bucket) recordTraffic(p principal, read, write uint64) {
+	// Reference-control requests transfer tokens, not the root internally read
+	// and rewritten to maintain them. Backend volume counters remain intact.
+	if p.internalCoordination {
+		return
+	}
 	b.io.read.Add(read)
 	b.io.write.Add(write)
 	if b.server == nil || p.ClusterPeer || read == 0 && write == 0 {

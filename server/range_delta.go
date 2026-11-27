@@ -18,10 +18,8 @@ func (r *rangeManager) deltaHashes(t *rangeTxn, key volume.Key, source volume.In
 	if source.Deleted || source.Compression != volume.Raw || t.plan.Compression != volume.Raw || source.Length == 0 || source.Length > rangeDeltaPage*rangeDeltaMaxPages {
 		return nil, [32]byte{}, nil
 	}
-	memo, ok, err := r.objectMemo(t.plan.id(), key)
-	if err != nil || !ok || memo.Info.Deleted || memo.Info.Length != source.Length || memo.Codec != volume.Raw {
-		return nil, [32]byte{}, err
-	}
+	// The current shadow and its exact content hash are the precondition.
+	// Advisory persisted transfer memos can outlive accepted shadow bytes.
 	store, err := r.destination(t.plan)
 	if err != nil {
 		return nil, [32]byte{}, err

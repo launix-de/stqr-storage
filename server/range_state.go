@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"path/filepath"
 	"reflect"
 	"sort"
@@ -84,6 +85,7 @@ type rangeTxn struct {
 	plan                                                          rangePlan
 	lease                                                         sync.RWMutex
 	fenced                                                        bool
+	fencing                                                       bool // transient authority-header invalidation; protected by r.mu
 	digest                                                        [32]byte
 	sourceReady, targetReady, commitProof, targetDone, sourceDone client.Proof
 	decision                                                      *rangeCommit
@@ -568,6 +570,18 @@ func (r *rangeManager) destination(p rangePlan) (*volume.Volume, error) {
 	return managed.store, nil
 }
 func (r *rangeManager) fence(id [32]byte) error {
+	for {
+		err := r.fenceAuthorityAttempt(id)
+		var wait *authorityWait
+		if !errors.As(err, &wait) {
+			return err
+		}
+		if err = wait.wait(r.server.ctx); err != nil {
+			return err
+		}
+	}
+}
+func (r *rangeManager) fenceAuthorityAttempt(id [32]byte) error {
 	r.server.opMu.Lock()
 	defer r.server.opMu.Unlock()
 	r.mu.Lock()
@@ -582,26 +596,46 @@ func (r *rangeManager) fence(id [32]byte) error {
 		return err
 	}
 	t.lease.Lock()
-	defer t.lease.Unlock()
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	if err := r.server.scopedTransition(nil); err != nil {
+		r.mu.Unlock()
+		t.lease.Unlock()
 		return err
 	}
 	if t.aborted || t.forceRetired {
+		r.mu.Unlock()
+		t.lease.Unlock()
 		return errControlConflict
 	}
 	if t.fenced {
+		r.mu.Unlock()
+		t.lease.Unlock()
 		return nil
 	}
 	if t.plan.Source != r.node {
+		r.mu.Unlock()
+		t.lease.Unlock()
 		return errControlConflict
 	}
-	if err := r.server.invalidateVolumeAuthorityLocked(t.plan); err != nil {
+	if !t.fencing {
+		t.fencing = true
+		r.server.dirtyVolumeAuthority()
+	}
+	r.mu.Unlock()
+	t.lease.Unlock()
+	// New writers recheck this transient range fence under opMu. No broad
+	// mutex or range lease survives the returned physical-wait token.
+	if err := r.server.ensureVolumeAuthorityLocked(); err != nil {
 		return err
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if t.aborted || t.forceRetired {
+		return errControlConflict
 	}
 	_, err := r.persist(rangeFenced, rangeEvent{ID: id})
 	if err == nil {
+		t.fencing = false
 		r.server.objectSubscriptions.resyncWhere(func(key volume.Key) bool {
 			return client.ID(key.Bucket) == t.plan.Before.Bucket && t.plan.contains(key.Object)
 		})
@@ -663,7 +697,19 @@ func (r *rangeManager) readyWithForce(id, digest [32]byte, source bool, force *c
 func (r *rangeManager) commit(c rangeCommit) (client.Proof, error) {
 	return r.commitWithForce(c, nil)
 }
-func (r *rangeManager) commitWithForce(c rangeCommit, force *controlClaim) (proof client.Proof, err error) {
+func (r *rangeManager) commitWithForce(c rangeCommit, force *controlClaim) (client.Proof, error) {
+	for {
+		proof, err := r.commitAuthorityAttempt(c, force)
+		var wait *authorityWait
+		if !errors.As(err, &wait) {
+			return proof, err
+		}
+		if err = wait.wait(r.server.ctx); err != nil {
+			return client.Proof{}, err
+		}
+	}
+}
+func (r *rangeManager) commitAuthorityAttempt(c rangeCommit, force *controlClaim) (proof client.Proof, err error) {
 	r.server.opMu.Lock()
 	defer r.server.opMu.Unlock()
 	r.mu.Lock()
@@ -808,7 +854,7 @@ func (r *rangeManager) guard(bucket volume.ID, object volume.ObjectID) (func(), 
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	for _, t := range active {
-		if t.plan.Source == r.node && t.fenced && !(t.plan.Target == r.node && t.decision != nil) {
+		if t.plan.Source == r.node && (t.fenced || t.fencing) && !(t.plan.Target == r.node && t.decision != nil) {
 			release()
 			return nil, fail(503, "range is fenced for durable handoff")
 		}

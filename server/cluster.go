@@ -157,6 +157,7 @@ func (s *Server) completeDetach(id, vid string, src *managedVolume) error {
 	// All object copies and retry records have synced on their destinations. The
 	// source bytes remain on disk for explicit reuse/recovery; removal never unlinks
 	// a file or wipes a raw device. Library Close releases the exclusive device claim.
+	s.stopVolumeMembership(src.store)
 	counters := volumeAccessIO(src.store.IOStats())
 	e := src.store.Close()
 	s.mu.Lock()

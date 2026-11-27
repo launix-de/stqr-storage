@@ -16,6 +16,15 @@ import (
 // explicit tombstone. A record must never be purged while a clone depends on it.
 type cowGraph map[volume.ID][]volume.ID
 
+// The server's reference root describes holders in exactly one bucket. Its
+// embedded bucket ID has always made inherited holders invalid (see ORF1
+// decoding). It is coordination state, not clonable user payload. Never read it
+// through a clone edge or preserve a source holder list into another bucket:
+// doing so adds useless cross-bucket writes and durability fences to open/close.
+func bucketLocalReferenceRoot(object volume.ObjectID) bool {
+	return object == volume.ObjectID(client.ObjectReferenceRootID())
+}
+
 type cowSnapshot struct {
 	bucket         volume.ID
 	node, transfer client.ID
@@ -49,7 +58,7 @@ func (g cowGraph) resolve(ctx context.Context, store cowObjects, bucket volume.I
 		return nil, err
 	}
 	own, err := store.capture(ctx, bucket, object)
-	if err != nil || own != nil {
+	if err != nil || own != nil || bucketLocalReferenceRoot(object) {
 		return own, err
 	}
 	if seen[bucket] {
@@ -84,7 +93,7 @@ func (g cowGraph) resolve(ctx context.Context, store cowObjects, bucket volume.I
 // revalidated under the server's mutation lock before applying that mutation.
 // Concurrent preservation is safe because materialize never replaces a record.
 func (g cowGraph) prepareWrite(ctx context.Context, store cowObjects, bucket volume.ID, object volume.ObjectID) error {
-	if len(g[bucket]) == 0 {
+	if len(g[bucket]) == 0 || bucketLocalReferenceRoot(object) {
 		return nil
 	}
 	// Positive physical presence is permanent while this graph remains linked.

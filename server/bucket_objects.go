@@ -160,30 +160,26 @@ func bucketLocalPolicy(p BucketPolicy) error {
 	return nil
 }
 func (b *Bucket) selectVolume(d BucketDescription, key volume.Key, request volume.ID, create bool) (*volume.Volume, volume.Info, bool, error) {
-	if b.server.controller != nil && d.DesiredPolicy != nil {
-		if entry, known := b.server.placement.Load().lookup(client.ID(key.Bucket), client.ObjectID(key.Object)); known && entry.PolicyVersion == d.DesiredPolicy.Version {
-			d.Policy = *d.DesiredPolicy
-		}
+	return b.selectVolumeProof(d, key, request, create, nil)
+}
+func (b *Bucket) selectVolumeProof(d BucketDescription, key volume.Key, request volume.ID, create bool, proof *cohortMembershipProof) (*volume.Volume, volume.Info, bool, error) {
+	var class volume.Class
+	var volumes []*volume.Volume
+	if proof == nil {
+		d, class, volumes = b.probeCohort(d, key)
+	} else {
+		d, class, volumes = proof.description, proof.class, proof.volumes
 	}
-	var selected, target *volume.Volume
+	var selected *volume.Volume
 	var latest volume.Info
 	found := false
-	class := bucketClass(d.Policy)
-	if b.server.controller != nil {
-		if entry, known := b.server.placement.Load().lookup(client.ID(key.Bucket), client.ObjectID(key.Object)); known {
-			class = b.server.rangeClass(d.Policy, entry)
-		}
-	}
-	for _, v := range b.volumesFor(d) {
-		if !class.Allows(v.Identity().Class) {
+	// Keep ALL eligible stores for new-create capacity ranking. A negative key
+	// proof suppresses only the existing-object/receipt probe, never capacity.
+	candidates := volumes[:0]
+	for _, v := range volumes {
+		candidates = append(candidates, v)
+		if proof != nil && proof.absent[v] {
 			continue
-		}
-		if b.server.controller != nil {
-			if patch, ok := b.server.routingPatch(key.Bucket, key.Object); ok {
-				if !b.server.volumeAllowedForEntry(client.ID(b.ID()), patch.Entries[0], v.Identity().VolumeID, b.server.currentSystem.Load()) {
-					continue
-				}
-			}
 		}
 		h, err := v.Open(false)
 		if err != nil {
@@ -241,16 +237,6 @@ func (b *Bucket) selectVolume(d BucketDescription, key volume.Key, request volum
 		} else if !errors.Is(err, volume.ErrNotFound) {
 			return nil, latest, false, err
 		}
-		allocatable := true
-		if b.server.controller != nil {
-			b.server.mu.RLock()
-			managed := b.server.volumes[v.Identity().VolumeID.String()]
-			allocatable = managed != nil && managed.config.State == "active"
-			b.server.mu.RUnlock()
-		}
-		if allocatable && v.State() == volume.Active && class.Allows(v.Identity().Class) && (target == nil || v.Stats().AdmissionFreePhysical > target.Stats().AdmissionFreePhysical) {
-			target = v
-		}
 	}
 	if found {
 		if !class.Allows(selected.Identity().Class) {
@@ -260,6 +246,23 @@ func (b *Bucket) selectVolume(d BucketDescription, key volume.Key, request volum
 	}
 	if !create {
 		return nil, latest, false, volume.ErrNotFound
+	}
+	var target *volume.Volume
+	var bestFree uint64
+	for _, v := range candidates {
+		allocatable := true
+		if b.server.controller != nil {
+			b.server.mu.RLock()
+			managed := b.server.volumes[v.Identity().VolumeID.String()]
+			allocatable = managed != nil && managed.config.State == "active"
+			b.server.mu.RUnlock()
+		}
+		if allocatable && v.State() == volume.Active && class.Allows(v.Identity().Class) {
+			free := v.AdmissionFreePhysical()
+			if target == nil || free > bestFree {
+				target, bestFree = v, free
+			}
+		}
 	}
 	if target == nil {
 		return nil, latest, false, volume.ErrFull
@@ -306,21 +309,11 @@ func (b *Bucket) getRange(ctx context.Context, p principal, id volume.ObjectID, 
 	if err := ctx.Err(); err != nil {
 		return nil, volume.Info{}, err
 	}
-	d, err := b.authorize(p, BucketRead)
+	v, h, d, prior, err := b.openSelectedRead(ctx, p, id)
 	if err != nil {
-		return nil, volume.Info{}, err
-	}
-	if err := b.server.checkObjectOwner(b.ID(), id, true); err != nil {
-		return nil, volume.Info{}, err
-	}
-	v, prior, _, err := b.selectVolume(d, volume.Key{Bucket: b.ID(), Object: id}, volume.ID{}, false)
-	if err != nil {
-		if bindingErr := b.server.checkObjectBinding(ctx, b.ID(), id, true); bindingErr != nil {
-			return nil, volume.Info{}, bindingErr
-		}
 		if errors.Is(err, volume.ErrNotFound) && len(d.ClonePeers) > 0 {
 			var data bytes.Buffer
-			info, _, e := b.cowCopyTo(ctx, id, offset, min(length, uint64(volume.MaxBufferedRead)+1), &data, nil)
+			info, _, e := b.cowCopyTo(withoutMembershipRead(ctx), id, offset, min(length, uint64(volume.MaxBufferedRead)+1), &data, nil)
 			if data.Len() > volume.MaxBufferedRead {
 				return nil, info, volume.ErrRange
 			}
@@ -330,10 +323,6 @@ func (b *Bucket) getRange(ctx context.Context, p principal, id volume.ObjectID, 
 	}
 	b.server.ioPriority.users.Add(1)
 	defer b.server.ioPriority.users.Add(-1)
-	h, err := v.Open(false)
-	if err != nil {
-		return nil, volume.Info{}, err
-	}
 	defer h.Close()
 	if err := b.server.checkObjectBinding(ctx, b.ID(), id, true); err != nil {
 		return nil, volume.Info{}, err
@@ -372,30 +361,16 @@ func (b *Bucket) copyToCheckedUnmetered(ctx context.Context, p principal, id vol
 	if err := ctx.Err(); err != nil {
 		return volume.Info{}, 0, err
 	}
-	d, err := b.authorize(p, BucketRead)
-	if err != nil {
-		return volume.Info{}, 0, err
-	}
-	if err := b.server.checkObjectOwner(b.ID(), id, true); err != nil {
-		return volume.Info{}, 0, err
-	}
 	key := volume.Key{Bucket: b.ID(), Object: id}
-	v, prior, _, err := b.selectVolume(d, key, volume.ID{}, false)
+	v, h, d, prior, err := b.openSelectedRead(ctx, p, id)
 	if err != nil {
-		if bindingErr := b.server.checkObjectBinding(ctx, b.ID(), id, true); bindingErr != nil {
-			return volume.Info{}, 0, bindingErr
-		}
 		if errors.Is(err, volume.ErrNotFound) && len(d.ClonePeers) > 0 {
-			return b.cowCopyTo(ctx, id, offset, length, dst, condition)
+			return b.cowCopyTo(withoutMembershipRead(ctx), id, offset, length, dst, condition)
 		}
 		return volume.Info{}, 0, b.absenceError(id, prior, err)
 	}
 	b.server.ioPriority.users.Add(1)
 	defer b.server.ioPriority.users.Add(-1)
-	h, err := v.Open(false)
-	if err != nil {
-		return volume.Info{}, 0, err
-	}
 	defer h.Close()
 	if err := b.server.checkObjectBinding(ctx, b.ID(), id, true); err != nil {
 		return volume.Info{}, 0, err
@@ -443,19 +418,8 @@ func (b *Bucket) Stat(ctx context.Context, p principal, id volume.ObjectID) (vol
 	if err := ctx.Err(); err != nil {
 		return volume.Info{}, err
 	}
-	d, err := b.authorize(p, BucketRead)
-	if err != nil {
-		return volume.Info{}, err
-	}
-	if err := b.server.checkObjectOwner(b.ID(), id, true); err != nil {
-		return volume.Info{}, err
-	}
-	v, info, _, err := b.selectVolume(d, volume.Key{Bucket: b.ID(), Object: id}, volume.ID{}, false)
+	v, h, d, info, err := b.openSelectedRead(ctx, p, id)
 	if err == nil && v != nil {
-		h, openErr := v.Open(false)
-		if openErr != nil {
-			return volume.Info{}, openErr
-		}
 		info, err = h.Stat(volume.Key{Bucket: b.ID(), Object: id})
 		if err == nil {
 			generation, _ := h.Generation()
@@ -463,11 +427,8 @@ func (b *Bucket) Stat(ctx context.Context, p principal, id volume.ObjectID) (vol
 		}
 		h.Close()
 	}
-	if bindingErr := b.server.checkObjectBinding(ctx, b.ID(), id, true); bindingErr != nil {
-		err = bindingErr
-	}
 	if errors.Is(err, volume.ErrNotFound) && len(d.ClonePeers) > 0 {
-		snapshot, e := b.server.cowLogicalSnapshot(ctx, b.ID(), id, true)
+		snapshot, e := b.server.cowLogicalSnapshot(withoutMembershipRead(ctx), b.ID(), id, true)
 		if e != nil {
 			return volume.Info{}, e
 		}
@@ -489,6 +450,18 @@ func (b *Bucket) mutateUnmetered(ctx context.Context, p principal, id volume.Obj
 	defer cancel()
 	for {
 		result, err := b.mutateAttempt(ctx, p, id, opcode, offset, length, src, expected, opt)
+		var exclusive *exclusiveMutationRetry
+		if errors.As(err, &exclusive) {
+			ctx = context.WithValue(ctx, exclusiveMutationKey{}, true)
+			continue
+		}
+		var authority *authorityWait
+		if errors.As(err, &authority) {
+			if err = authority.wait(ctx); err != nil {
+				return volume.Result{}, err
+			}
+			continue
+		}
 		var published *publishedCheckpoint
 		if errors.As(err, &published) {
 			// The object is already published. Complete its durable response
@@ -514,6 +487,16 @@ func (b *Bucket) mutateAttempt(ctx context.Context, p principal, id volume.Objec
 	s := b.server
 	if s.storageWarming.Load() {
 		return volume.Result{}, s.storageUnavailable()
+	}
+	if bucketLocalReferenceRoot(id) && !referencePrincipalSupported(p) {
+		return volume.Result{}, ErrBucketForbidden
+	}
+	if bucketLocalReferenceRoot(id) && !p.cowInternal && p.referenceAuth == nil {
+		_, stamp, err := s.referenceAccountSnapshot(p)
+		if err != nil {
+			return volume.Result{}, err
+		}
+		p.referenceAuth = stamp
 	}
 	if s.metadataPreview {
 		return volume.Result{}, fail(503, "metadata preview cannot mutate user objects")
@@ -549,13 +532,50 @@ func (b *Bucket) mutateAttempt(ctx context.Context, p principal, id volume.Objec
 			}
 		}()
 	}
-	s.lockUserObjectIO()
+	// Only buffered publication keeps the quota slot under one uninterrupted
+	// Volume write handle. Large legacy durable mutations can release that
+	// lock inside their WAL fence and retain the exclusive fallback instead.
+	requestRelease, requestErr := s.lockRequestID(ctx, opt.RequestID)
+	if requestErr != nil {
+		return volume.Result{}, requestErr
+	}
+	defer func() {
+		if requestRelease != nil {
+			requestRelease()
+		}
+	}()
+	physicalOnly := opt.Accepted && parallelReferenceCoordination(b, p, id)
+	parallel := (!parallelReferenceCoordination(b, p, id) || physicalOnly) && !parallelForcedExclusive(ctx) && (opt.Accepted || length <= 1<<20 && opcode != cowRestoreOpcode) && s.parallelMutationCandidate(b, p, id)
+	lockObjectIO, unlockObjectIO := s.lockUserObjectIO, s.unlockUserObjectIO
+	if parallel {
+		lockObjectIO, unlockObjectIO = s.lockParallelUserObjectIO, s.unlockParallelUserObjectIO
+	}
+	lockObjectIO()
 	opLocked := true
 	defer func() {
 		if opLocked {
-			s.unlockUserObjectIO()
+			unlockObjectIO()
 		}
 	}()
+	// Account deletion/publication takes exclusive node admission. Revalidate
+	// reference actor continuity and any pruning absence proof while this exact
+	// R/W admission remains held through the ordinary Volume CAS publication.
+	if err := s.validateReferenceMutation(ctx, p, id, b); err != nil {
+		return volume.Result{}, err
+	}
+	var membership *cohortMembershipProof
+	if parallel {
+		// Policy may have changed while acquiring admission. The physical-only
+		// exception must be classified again under the lifetime barrier.
+		physicalOnly = opt.Accepted && parallelReferenceCoordination(b, p, id)
+		membership = b.membershipProof(b.storageDescription(), volume.Key{Bucket: b.ID(), Object: id}, opt.RequestID)
+	}
+	if parallel {
+		if !s.parallelMutationReadyProof(b, p, id, membership) || !b.beginParallelUsage(physicalOnly) {
+			return volume.Result{}, &exclusiveMutationRetry{}
+		}
+		defer b.endParallelUsage()
+	}
 	if b.underMaintenance() {
 		if view := s.currentSystem.Load(); view != nil && len(view.manifest.Membership.Members) > 1 && s.leaseRecord(b) == nil {
 			return volume.Result{}, fail(501, "exclusive maintenance cannot mutate after multi-node admission")
@@ -597,7 +617,7 @@ func (b *Bucket) mutateAttempt(ctx context.Context, p principal, id volume.Objec
 			return volume.Result{}, err
 		}
 	}
-	if !p.cowInternal {
+	if !p.cowInternal && !bucketLocalReferenceRoot(id) {
 		if cowLinked {
 			g, e := s.cowGraph()
 			if e != nil {
@@ -656,8 +676,12 @@ func (b *Bucket) mutateAttempt(ctx context.Context, p principal, id volume.Objec
 			mutationRelease = nil
 		}
 		if opLocked {
-			s.unlockUserObjectIO()
+			unlockObjectIO()
 			opLocked = false
+		}
+		if requestRelease != nil {
+			requestRelease()
+			requestRelease = nil
 		}
 		if replicaRelease != nil {
 			replicaRelease()
@@ -684,7 +708,14 @@ func (b *Bucket) mutateAttempt(ctx context.Context, p principal, id volume.Objec
 		return volume.Result{}, fail(400, "mutation request ID is required")
 	}
 	key := volume.Key{Bucket: b.ID(), Object: id}
-	v, old, exists, err := b.selectVolume(d, key, opt.RequestID, true)
+	create := true
+	if parallel && len(membership.volumes) > 1 {
+		create = false
+	}
+	v, old, exists, err := b.selectVolumeProof(d, key, opt.RequestID, create, membership)
+	if parallel && len(membership.volumes) > 1 && (errors.Is(err, volume.ErrNotFound) || err == nil && (!exists || len(membership.possible) != 1 || v != membership.possible[0])) {
+		return volume.Result{}, &exclusiveMutationRetry{}
+	}
 	if err != nil {
 		if errors.Is(err, volume.ErrFull) && s.scopes != nil {
 			failed := volume.ID{}
@@ -753,11 +784,16 @@ func (b *Bucket) mutateAttempt(ctx context.Context, p principal, id volume.Objec
 		}
 		d = saved.Describe()
 	}
-	if err := s.refreshQuotaProtectionLocked(); err != nil {
-		return volume.Result{}, err
-	}
-	if err := s.ensureVolumeAuthorityLocked(); err != nil {
-		return volume.Result{}, err
+	if !parallel {
+		if err := s.refreshQuotaProtectionLocked(); err != nil {
+			return volume.Result{}, err
+		}
+		if err := s.ensureObjectAuthorityLocked(volume.Key{Bucket: b.ID(), Object: id}); err != nil {
+			return volume.Result{}, err
+		}
+		if err := s.prepareParallelMutation(b, p, id); err != nil {
+			return volume.Result{}, err
+		}
 	}
 	// Cooperative clients keep filesystem lifetime outside the engine. Only
 	// APPEND needs a durable replay result after a completed ordinary write.
@@ -821,7 +857,7 @@ func (b *Bucket) mutateAttempt(ctx context.Context, p principal, id volume.Objec
 		}
 		src = spool
 	}
-	if !p.cowInternal && !repeated && !d.Policy.Limits.Unlimited && d.Policy.Limits.Accounting == "logical" {
+	if !parallel && !p.cowInternal && !repeated && !d.Policy.Limits.Unlimited && d.Policy.Limits.Accounting == "logical" {
 		oldLength := old.Length
 		if old.Deleted {
 			oldLength = 0
@@ -873,12 +909,12 @@ func (b *Bucket) mutateAttempt(ctx context.Context, p principal, id volume.Objec
 			// Local committed usage is a lower bound on global usage. Once even
 			// that lower bound cannot fit, borrowing can never make the write legal.
 			if usage >= d.Policy.Limits.Absolute || next-oldLength > d.Policy.Limits.Absolute-usage {
-				return volume.Result{}, volume.ErrFull
+				return volume.Result{}, &prepublicationQuotaFull{}
 			}
 			if s.quotas != nil && s.quotas.request(b.ID(), id, next-oldLength) {
 				return volume.Result{}, fail(503, "waiting for bucket growth credits")
 			}
-			return volume.Result{}, volume.ErrFull
+			return volume.Result{}, &prepublicationQuotaFull{}
 		}
 	}
 	if len(replicatedEntry.Locations) > 1 {
@@ -911,7 +947,7 @@ func (b *Bucket) mutateAttempt(ctx context.Context, p principal, id volume.Objec
 				mutationRelease()
 				mutationRelease = nil
 			}
-			s.unlockUserObjectIO()
+			unlockObjectIO()
 			opLocked = false
 			return result, b.releaseCompletedResult(ctx, v, replicatedEntry, header)
 		}
@@ -919,7 +955,7 @@ func (b *Bucket) mutateAttempt(ctx context.Context, p principal, id volume.Objec
 			mutationRelease()
 			mutationRelease = nil
 		}
-		s.unlockUserObjectIO()
+		unlockObjectIO()
 		opLocked = false
 		if record.State == volume.ReplicaPrepared {
 			if e = s.replicas.preparePeers(ctx, replicatedEntry, header, src.(io.ReadSeeker)); e != nil {
@@ -928,9 +964,9 @@ func (b *Bucket) mutateAttempt(ctx context.Context, p principal, id volume.Objec
 				}
 				return result, fail(503, "waiting for required replicas: "+e.Error())
 			}
-			s.lockUserObjectIO()
+			lockObjectIO()
 			if s.forceFrozen() {
-				s.unlockUserObjectIO()
+				unlockObjectIO()
 				return result, fail(503, "replica decision is frozen for explicit exclusion")
 			}
 			h, e = v.Open(true)
@@ -938,7 +974,7 @@ func (b *Bucket) mutateAttempt(ctx context.Context, p principal, id volume.Objec
 				e = h.DecideReplica(opt.RequestID, record.Binding)
 				h.Close()
 			}
-			s.unlockUserObjectIO()
+			unlockObjectIO()
 			if e != nil {
 				return result, e
 			}
@@ -946,7 +982,7 @@ func (b *Bucket) mutateAttempt(ctx context.Context, p principal, id volume.Objec
 		if e = s.replicas.commitPeers(ctx, replicatedEntry, header); e != nil {
 			return result, fail(503, "commit is waiting for required replicas: "+e.Error())
 		}
-		s.lockUserObjectIO()
+		lockObjectIO()
 		opLocked = true
 		if s.forceFrozen() {
 			return result, fail(503, "replica publication is frozen for explicit exclusion")
@@ -971,7 +1007,7 @@ func (b *Bucket) mutateAttempt(ctx context.Context, p principal, id volume.Objec
 			b.usage.mu.Unlock()
 		}
 		if e == nil && releaseResult {
-			s.unlockUserObjectIO()
+			unlockObjectIO()
 			opLocked = false
 			e = b.releaseCompletedResult(ctx, v, replicatedEntry, header)
 		}
@@ -982,8 +1018,11 @@ func (b *Bucket) mutateAttempt(ctx context.Context, p principal, id volume.Objec
 		opt.Accepted = true
 	}
 	var publishedGeneration uint64
-	b.usage.mu.Lock()
-	usageLocked := true
+	usageLocked := false
+	if !parallel {
+		b.usage.mu.Lock()
+		usageLocked = true
+	}
 	defer func() {
 		if usageLocked {
 			b.usage.mu.Unlock()
@@ -1003,7 +1042,48 @@ func (b *Bucket) mutateAttempt(ctx context.Context, p principal, id volume.Objec
 		// Do not take a second, potentially blocking read lock here.
 		return volume.Result{}, &acceptedCheckpoint{v, 0}
 	}
-	defer h.Close()
+	var result volume.Result
+	var ticket *mutationQuotaTicket
+	quotaOutcome := error(volume.ErrRecovery)
+	quotaOld := old.Length
+	if old.Deleted {
+		quotaOld = 0
+	}
+	closeMutationHandle := func() {
+		if ticket != nil {
+			next := result.Info.Length
+			if opcode == 0x0106 || result.Info.Deleted {
+				next = 0
+			}
+			s.finishMutationQuota(ticket, quotaOld, next, repeated, quotaOutcome, err)
+			ticket = nil
+		}
+		h.Close()
+	}
+	defer closeMutationHandle()
+	if parallel {
+		// Re-read under the selected volume's write lock. A previous same-object
+		// publisher may have completed since placement/precondition inspection.
+		current, e := h.RecordInfo(key)
+		if errors.Is(e, volume.ErrNotFound) {
+			current = volume.Info{Deleted: true}
+		} else if e != nil {
+			return volume.Result{}, e
+		}
+		old = current
+		quotaOld = old.Length
+		if old.Deleted {
+			quotaOld = 0
+		}
+		kind := mutationLogicalQuota
+		if physicalOnly {
+			kind = mutationPhysicalOnlyQuota
+		}
+		ticket, err = s.reserveMutationQuota(b, d, v.Identity().VolumeID, key, opcode, offset, length, old, repeated, opt, kind)
+		if err != nil {
+			return volume.Result{}, err
+		}
+	}
 	if src != nil {
 		if seeker, ok := src.(io.ReadSeeker); ok {
 			src = bucketContextReadSeeker{bucketContextReader{ctx: ctx, r: src}, seeker}
@@ -1014,7 +1094,6 @@ func (b *Bucket) mutateAttempt(ctx context.Context, p principal, id volume.Objec
 	if !retainResult {
 		opt.RequestID = volume.ID{} // WAL/atomicity remain; no historical result entry
 	}
-	var result volume.Result
 	defer func() {
 		if err == nil && s.quotas != nil {
 			s.quotas.fulfilled(b.ID(), id)
@@ -1037,7 +1116,9 @@ func (b *Bucket) mutateAttempt(ctx context.Context, p principal, id volume.Objec
 		err = h.Delete(key, opt)
 	case 0x0108:
 		if length > 1<<20 {
-			return result, volume.ErrRange
+			err = volume.ErrRange
+			quotaOutcome = err
+			return result, err
 		}
 		replacement := make([]byte, int(length))
 		_, err = io.ReadFull(src, replacement)
@@ -1047,6 +1128,7 @@ func (b *Bucket) mutateAttempt(ctx context.Context, p principal, id volume.Objec
 	default:
 		err = volume.ErrUnsupported
 	}
+	quotaOutcome = err
 	mutationPublished := err == nil
 	notify := mutationPublished && !p.cowInternal && !repeated && s.objectSubscriptions.watched(key)
 	var notification volume.Info
@@ -1096,9 +1178,9 @@ func (b *Bucket) mutateAttempt(ctx context.Context, p principal, id volume.Objec
 			s.objectSubscriptions.resyncWhere(func(k volume.Key) bool { return k == key })
 		}
 	}
-	// Release the write handle before consulting capacity/index statistics.
-	// An unchanged logical request ID safely retries after ownership cutover.
-	h.Close()
+	// Clear quota slots while still holding the write handle, before another
+	// publisher on this volume can install its own ticket.
+	closeMutationHandle()
 	oldLength, newLength := old.Length, result.Info.Length
 	if old.Deleted {
 		oldLength = 0
@@ -1106,11 +1188,13 @@ func (b *Bucket) mutateAttempt(ctx context.Context, p principal, id volume.Objec
 	if opcode == 0x0106 || result.Info.Deleted {
 		newLength = 0
 	}
-	if !p.cowInternal {
+	if !parallel && !p.cowInternal {
 		b.updateUsage(oldLength, newLength, repeated, err)
 	}
-	b.usage.mu.Unlock()
-	usageLocked = false
+	if usageLocked {
+		b.usage.mu.Unlock()
+		usageLocked = false
+	}
 	var quotaFull *physicalQuotaFull
 	if errors.As(err, &quotaFull) {
 		if quotaFull.Waiting {

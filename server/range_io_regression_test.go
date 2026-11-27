@@ -122,6 +122,11 @@ func TestCatchupWritesOnlyChangedPages(t *testing.T) {
 	if err = r.fence(plan.id()); err != nil {
 		t.Fatal(err)
 	}
+	// Bulk progress is intentionally accepted, not yet durable. Establish an
+	// explicit baseline before measuring the incremental catch-up write cost.
+	if err := dst.CheckpointThrough(dst.Stats().Generation); err != nil {
+		t.Fatal(err)
+	}
 	rb, wb := testStorageReadBytes(src.IOStats()), dst.IOStats().WriteBytes
 	if _, _, err = r.sendSnapshot(ctx, plan, true); err != nil {
 		t.Fatal(err)
