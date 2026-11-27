@@ -1,0 +1,142 @@
+// SPDX-License-Identifier: GPL-3.0-only
+import test from "node:test";
+import assert from "node:assert/strict";
+import { EndlessList, bindSearch } from "./dashboard/endless.js";
+function element() {
+  return {
+    textContent: "",
+    setAttribute() {},
+    append() {},
+    remove() {
+      this.removed = true;
+    },
+    getBoundingClientRect: () => ({ top: 10000, bottom: 10100 }),
+  };
+}
+globalThis.document = { createElement: element };
+globalThis.innerHeight = 800;
+globalThis.requestAnimationFrame = (fn) => queueMicrotask(fn);
+globalThis.IntersectionObserver = class {
+  constructor(cb, options) {
+    this.cb = cb;
+    this.options = options;
+  }
+  observe() {}
+  disconnect() {
+    this.disconnected = true;
+  }
+};
+const defer = () => {
+  let resolve;
+  const promise = new Promise((r) => (resolve = r));
+  return { promise, resolve };
+};
+function list(fetchPage, options = {}) {
+  return new EndlessList({
+    container: { append() {} },
+    fetchPage,
+    onUpdate() {},
+    ...options,
+  });
+}
+test("plugin keys deduplicate without changing provider order", async () => {
+  let page = 0;
+  const l = list(
+    async () =>
+      ++page === 1
+        ? { items: [{ key: "z" }, { key: "a" }], next: "next" }
+        : { items: [{ key: "z", updated: true }, { key: "b" }], next: "" },
+    { key: (e) => e.key },
+  );
+  await l.reset();
+  await l.loadMore();
+  assert.deepEqual(
+    l.items.map((e) => e.key),
+    ["z", "a", "b"],
+  );
+  assert.equal(l.items[0].updated, true);
+});
+test("query replacement aborts pending work and publishes newest search", async () => {
+  const pending = defer(),
+    seen = [];
+  const l = list((a, n, q, { signal }) => {
+    seen.push(signal);
+    return q === "old"
+      ? pending.promise
+      : Promise.resolve({ items: [{ id: "new" }], next: "" });
+  });
+  const old = l.reset("old");
+  await l.reset("new");
+  assert.equal(seen[0].aborted, true);
+  pending.resolve({ items: [{ id: "old" }], next: "" });
+  await old;
+  assert.equal(l.items[0].id, "new");
+});
+test("cursor cycles fail instead of draining indefinitely", async () => {
+  let page = 0;
+  const errors = [];
+  const l = list(async () => ({ items: [], next: ++page === 2 ? "b" : "a" }), {
+    onError: (e) => errors.push(e.message),
+  });
+  await l.reset();
+  await l.loadMore();
+  await l.loadMore();
+  assert.equal(errors.length, 1);
+  assert.equal(l.error, true);
+});
+test("overlay roots and destroy release all observer/request resources", async () => {
+  const pending = defer(),
+    root = element();
+  let signal;
+  const l = list(
+    (a, n, q, o) => {
+      signal = o.signal;
+      return pending.promise;
+    },
+    { root },
+  );
+  const request = l.reset();
+  assert.equal(l.observer.options.root, root);
+  l.destroy();
+  assert.equal(signal.aborted, true);
+  assert.equal(l.observer.disconnected, true);
+  assert.equal(l.sentinel.removed, true);
+  pending.resolve({ items: [{ id: "late" }] });
+  await request;
+  assert.deepEqual(l.items, []);
+});
+test("shared debounce never discards a query just because an old request is busy", async () => {
+  const input = new EventTarget();
+  input.value = "";
+  const queries = [];
+  const search = bindSearch(input, (q) => queries.push(q), { delay: 1 });
+  input.value = "first";
+  input.dispatchEvent(new Event("input"));
+  input.value = "latest";
+  input.dispatchEvent(new Event("input"));
+  await new Promise((r) => setTimeout(r, 10));
+  assert.deepEqual(queries, ["latest"]);
+  search.destroy();
+  input.value = "closed";
+  input.dispatchEvent(new Event("input"));
+  await new Promise((r) => setTimeout(r, 10));
+  assert.deepEqual(queries, ["latest"]);
+});
+
+test("patching uses plugin keys and supports removals without a forced rerender", async () => {
+  let renders = 0;
+  const l = list(
+    async () => ({
+      items: [
+        { key: "a", n: 1 },
+        { key: "b", n: 2 },
+      ],
+    }),
+    { key: (e) => e.key, onUpdate: () => renders++ },
+  );
+  await l.reset();
+  const before = renders;
+  l.patch([{ key: "a", n: 3 }], { remove: ["b"], notify: false });
+  assert.deepEqual(l.items, [{ key: "a", n: 3 }]);
+  assert.equal(renders, before);
+});

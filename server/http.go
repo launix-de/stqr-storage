@@ -15,6 +15,7 @@ import (
 	"strings"
 
 	"github.com/launix-de/stqr-storage/client"
+	jssdk "github.com/launix-de/stqr-storage/client/js"
 )
 
 //go:embed dashboard/*
@@ -76,14 +77,36 @@ func (s *Server) Handler() http.Handler {
 	assets, _ := fs.Sub(dashboard, "dashboard")
 	files := http.FileServer(http.FS(assets))
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		styleNonce := client.NewRequestID().String()
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("Referrer-Policy", "same-origin")
 		w.Header().Set("X-Frame-Options", "DENY")
-		w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self' ws:; img-src 'self' data:; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'")
+		w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self' 'nonce-"+styleNonce+"'; connect-src 'self' ws:; img-src 'self' data: blob:; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'")
 		w.Header().Set("Cache-Control", "no-store")
 		if !s.allowed(r) {
 			httpError(w, 403, errors.New("source address is outside the allowed subnets"))
 			return
+		}
+		if browserPath(r.URL.Path) {
+			if !s.browserOriginAllowed(r) {
+				httpError(w, 403, errors.New("origin rejected"))
+				return
+			}
+			if origin := r.Header.Get("Origin"); origin != "" {
+				w.Header().Set("Access-Control-Allow-Origin", origin)
+				w.Header().Set("Vary", "Origin")
+				w.Header().Set("Access-Control-Allow-Credentials", "true")
+				w.Header().Set("Access-Control-Allow-Headers", "Authorization, X-STQR-Bucket, X-STQR-Format, X-CSRF-Token")
+				w.Header().Set("Access-Control-Allow-Methods", "POST, GET, OPTIONS")
+			}
+			if r.Method == "OPTIONS" {
+				w.WriteHeader(204)
+				return
+			}
+			if err := browserHeaders(r); err != nil {
+				httpError(w, 400, err)
+				return
+			}
 		}
 		if r.URL.Path == "/s3" || strings.HasPrefix(r.URL.Path, "/s3/") {
 			s.serveS3(w, r)
@@ -91,12 +114,17 @@ func (s *Server) Handler() http.Handler {
 		}
 		if r.URL.Path == "/" && r.Method == http.MethodGet {
 			b, _ := dashboard.ReadFile("dashboard/index.html")
+			b = bytes.Replace(b, []byte("<head>"), []byte(`<head><meta name="stqr-style-nonce" content="`+styleNonce+`">`), 1)
 			if s.joinPending() || s.joinRequested.Load() {
 				b = bytes.Replace(b, []byte(`id="join-login-pending" hidden`), []byte(`id="join-login-pending"`), 1)
 				b = bytes.Replace(b, []byte(`class="login-note"`), []byte(`class="login-note" hidden`), 1)
 			}
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
 			w.Write(b)
+			return
+		}
+		if strings.HasPrefix(r.URL.Path, "/assets/sdk/") && r.Method == http.MethodGet {
+			http.StripPrefix("/assets/sdk/", http.FileServer(http.FS(jssdk.Files))).ServeHTTP(w, r)
 			return
 		}
 		if strings.HasPrefix(r.URL.Path, "/assets/") && r.Method == http.MethodGet {
@@ -115,11 +143,11 @@ func (s *Server) Handler() http.Handler {
 			httpError(w, 401, errors.New("authentication required"))
 			return
 		}
-		if p.User.Role != "ADMIN" && r.URL.Path != "/api/ws" && r.URL.Path != "/api/message" {
+		if p.User.Role != "ADMIN" && r.URL.Path != "/api/ws" && r.URL.Path != "/api/message" && r.URL.Path != "/api/bucket-connect" && r.URL.Path != "/api/bucket-tunnel" {
 			httpError(w, 403, errors.New("administrator required"))
 			return
 		}
-		if !sameOrigin(r) {
+		if !sameOrigin(r) && !(browserPath(r.URL.Path) && s.browserOriginAllowed(r)) {
 			httpError(w, 403, errors.New("origin rejected"))
 			return
 		}
@@ -132,6 +160,12 @@ func (s *Server) Handler() http.Handler {
 			return
 		}
 		switch {
+		case r.URL.Path == "/api/format-plugins" || strings.HasPrefix(r.URL.Path, "/format-plugins/"):
+			s.serveFormatPlugins(w, r)
+		case r.URL.Path == "/api/bucket-connect":
+			s.serveBrowserConnect(w, r, p)
+		case r.URL.Path == "/api/bucket-tunnel":
+			s.serveBucketTunnel(w, r, p)
 		case r.URL.Path == "/api/session":
 			switch r.Method {
 			case "GET":

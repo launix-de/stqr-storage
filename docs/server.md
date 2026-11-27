@@ -1149,7 +1149,9 @@ The storage dashboard does not interpret bucket objects or manage virtual disks.
 It displays the client-declared, opaque format string from bucket metadata.
 The first authorized bucket connection persists an unset format atomically;
 a later connection declaring a different format is rejected with HTTP 409.
-Format-specific operations belong to external clients.
+Format-specific operations belong to clients. The dashboard can load optional
+[format plugins](dashboard-plugins.md); only those modules interpret objects.
+The generic host supplies windows, shared lists and a tunnel-mode native JS client.
 
 
 ## PG-local rebuild cycles
