@@ -458,7 +458,7 @@ func TestFilesystemNestedLowerReadSharesObjectBudget(t *testing.T) {
 	for i := 0; i < 2; i++ {
 		e.U64(uint64(len(want)))
 		e.B = append(e.B, id[:]...)
-		e.U32(0)
+		e.U64(0)
 		e.U64(1)
 	}
 	upperRoot, err := f.putImmutable(ctx, e.B)

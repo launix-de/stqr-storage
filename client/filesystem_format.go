@@ -30,7 +30,10 @@ package client
 // lowerOwner:OID, lowerDigest:Bytes32. These are representation/integrity fields,
 // never content counters. Namespace caches use actual inode metadata hashes.
 // Layout 2 stores a lower index root (depth:u8, root:OID). Lower data must remain
-// read-only; a writable origin requires a separate COW bucket. STIX v3 records
+// read-only; a writable origin requires a separate COW bucket. Legacy STIX v2
+// stores source_offset:u64 and a historical-lower token:u64; a zero token
+// denotes ordinary local data. Readers preserve that original field width;
+// current writers never emit v2. STIX v3 records
 // source_offset:u64 and lower:Bool. Known old layouts are decoder-only; legacy
 // lower inode references are materialized before writing the new format.
 // Namespace intents use STFT v3, state:u8 (pending=0, committed=1, aborted=2),
@@ -374,13 +377,15 @@ func decodeFSIndex(data []byte, length uint64, depth uint8) ([]fsSegment, error)
 		if version == 3 {
 			s.offset = d.U64()
 			s.lower = d.Bool()
+		} else if version == 2 {
+			// Original v2 writers used two 64-bit fields, including when
+			// the historical-lower token was zero (ordinary local data).
+			s.offset = d.U64()
+			s.legacyVersion = d.U64()
 		} else {
 			s.offset = uint64(d.U32())
-			if version == 2 {
-				s.legacyVersion = d.U64()
-			}
 		}
-		if s.length == 0 || s.length > length-total || s.offset > math.MaxInt64 || s.length > math.MaxInt64-s.offset || (depth > 1 && (s.offset != 0 || s.lower)) || (s.id == (ObjectID{}) && (s.offset != 0 || s.lower)) || (depth == 1 && s.id != (ObjectID{}) && (s.length > FSObjectSize || s.offset+s.length > FSObjectSize)) {
+		if s.length == 0 || s.length > length-total || s.offset > math.MaxInt64 || s.length > math.MaxInt64-s.offset || (depth > 1 && (s.offset != 0 || s.lower || s.legacyVersion != 0)) || (s.id == (ObjectID{}) && (s.offset != 0 || s.lower || s.legacyVersion != 0)) || (depth == 1 && s.id != (ObjectID{}) && (s.length > FSObjectSize || s.offset+s.length > FSObjectSize)) {
 			return nil, ErrFSFormat
 		}
 		total += s.length
