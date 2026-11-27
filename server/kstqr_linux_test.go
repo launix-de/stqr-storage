@@ -37,7 +37,7 @@ func TestKSTQRVirtualMachine(t *testing.T) {
 	// Focused scripts replace the same init section; combining them cannot
 	// represent a valid test and must fail before starting a guest.
 	selectedMode := ""
-	for _, mode := range []string{"CACHE_NEGATIVE", "POSTRESTART_PIN", "ASYNC_UNPIN", "SHARED_PINS", "CACHE_REOPEN", "BENCHMARK", "WRITE_BENCHMARK", "READ_WINDOW", "LOOP", "RESTART_ONLY", "OVERLAY", "OVERLAY_PROOF", "OUTAGE", "CACHE_RETENTION", "REFERENCE_LIMIT"} {
+	for _, mode := range []string{"PLAIN_BIND", "CACHE_NEGATIVE", "POSTRESTART_PIN", "ASYNC_UNPIN", "SHARED_PINS", "CACHE_REOPEN", "BENCHMARK", "WRITE_BENCHMARK", "READ_WINDOW", "LOOP", "RESTART_ONLY", "OVERLAY", "OVERLAY_PROOF", "OUTAGE", "CACHE_RETENTION", "REFERENCE_LIMIT"} {
 		if os.Getenv("STQR_KERNEL_"+mode) == "1" {
 			if selectedMode != "" {
 				t.Fatalf("incompatible kernel fixture modes %s and %s; run them separately", selectedMode, mode)
@@ -910,6 +910,33 @@ func TestKSTQRVirtualMachine(t *testing.T) {
 		t.Logf("seeded exact %d-entry global reference limit", len(entries))
 	}
 
+	var plainBindID client.ID
+	if os.Getenv("STQR_KERNEL_PLAIN_BIND") == "1" {
+		// Keep the complete suite's interrupted-transaction fixture intact.
+		// This additional filesystem isolates namespace/bind observations.
+		plain, _ := createProtocolBucket(t, s, "kernel-plain-bind")
+		plainBindID = client.ID(plain.ID())
+		plainGrant := client.Encoder{}
+		plainGrant.ID(plainBindID)
+		plainGrant.ID(client.ID(uid))
+		plainGrant.U32(uint32(BucketAllPermissions))
+		if _, status, _ := adminBucketMessage(t, s, client.BucketGrant, plainGrant.B); status != 200 {
+			t.Fatal(status)
+		}
+		if err = os.WriteFile(filepath.Join(initrdRoot, "plain-credentials"), []byte("username="+user.Name+"\npassword=bucket-test-password\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		plainConn, e := client.Dial(ctx, host.URL, admin.Username, admin.Password, plainBindID, "fs")
+		if e != nil {
+			t.Fatal(e)
+		}
+		if _, e = client.OpenFilesystem(ctx, plainConn, client.FSOptions{Create: true}); e != nil {
+			plainConn.Close()
+			t.Fatal(e)
+		}
+		plainConn.Close()
+	}
+
 	if err = os.WriteFile(filepath.Join(initrdRoot, "readonly-credentials"), []byte("username="+user.Name+"\npassword=bucket-test-password\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -1367,6 +1394,20 @@ poweroff -f
 `, endpoint, nativeUpperID.String(), client.ID(b.ID()).String(), policyID.String(), controlURL.Port(), strings.Repeat("a", 64), client.ID(empty.ID()).String())
 	}
 
+	if os.Getenv("STQR_KERNEL_PLAIN_BIND") == "1" {
+		run("cc", "-static", "-O2", "-Wall", "-Wextra", "-Werror", "-o", filepath.Join(initrdRoot, "plain-bind"), filepath.Join(root, "tests/plain_bind.c"))
+		plainScript := fmt.Sprintf(`
+/mount.kstqr --uri %[1]s --bucket %[2]s --credentials /plain-credentials /mnt
+/mount.kstqr --uri %[1]s --bucket %[2]s --credentials /plain-credentials /other
+/plain-bind
+umount /other
+umount /mnt
+`, endpoint, plainBindID.String())
+		// Run the existing complete suite after the added regression, including
+		// interrupted transaction recovery and its host-side assertions.
+		init = strings.Replace(init, "insmod /kstqr.ko\n", "insmod /kstqr.ko\n"+plainScript, 1)
+	}
+
 	if os.Getenv("STQR_KERNEL_OVERLAY_PROOF") == "1" {
 		run("cc", "-static", "-O2", "-Wall", "-Wextra", "-Werror", "-o", filepath.Join(initrdRoot, "overlay-proof"), filepath.Join(root, "tests/overlay_proof.c"))
 		init = fmt.Sprintf(`#!/bin/sh
@@ -1612,7 +1653,7 @@ poweroff -f
 		t.Fatalf("cpio: %v %s", err, packErr.String())
 	}
 	guestMemory := "512M"
-	if os.Getenv("STQR_KERNEL_CACHE_NEGATIVE") == "1" || os.Getenv("STQR_KERNEL_OVERLAY") == "1" || os.Getenv("STQR_KERNEL_OVERLAY_PROOF") == "1" || os.Getenv("STQR_KERNEL_REFERENCE_LIMIT") == "1" {
+	if os.Getenv("STQR_KERNEL_PLAIN_BIND") == "1" || os.Getenv("STQR_KERNEL_CACHE_NEGATIVE") == "1" || os.Getenv("STQR_KERNEL_OVERLAY") == "1" || os.Getenv("STQR_KERNEL_OVERLAY_PROOF") == "1" || os.Getenv("STQR_KERNEL_REFERENCE_LIMIT") == "1" {
 		// These fixtures need 1 GiB to unpack their static test binaries and
 		// debug module, including the longer-path original-source control.
 		guestMemory = "1024M"
@@ -1635,6 +1676,17 @@ poweroff -f
 	vm.Stdout, vm.Stderr = writer, writer
 	err = vm.Run()
 	output := captured.Bytes()
+	if os.Getenv("STQR_KERNEL_PLAIN_BIND") == "1" {
+		if !strings.Contains(string(output), "KSTQR_PLAIN_DIRECTORY_MOUNTS_PASS") {
+			t.Fatalf("plain directory mount retention test did not pass: %v\n%s", err, output)
+		}
+		if !strings.Contains(string(output), "KSTQR_PLAIN_BIND_PASS") {
+			t.Fatalf("plain bind test did not pass: %v\n%s", err, output)
+		}
+		t.Log("KSTQR_PLAIN_BIND_PASS")
+		t.Log("KSTQR_PLAIN_DIRECTORY_MOUNTS_PASS")
+	}
+
 	if os.Getenv("STQR_KERNEL_CACHE_RETENTION") == "1" && !strings.Contains(string(output), "KSTQR_CACHE_RETENTION_PASS") {
 		t.Fatalf("cache retention test did not pass: %v\n%s", err, output)
 	}
