@@ -887,12 +887,12 @@ func (b *Bucket) mutateAttempt(ctx context.Context, p principal, id volume.Objec
 			// Local committed usage is a lower bound on global usage. Once even
 			// that lower bound cannot fit, borrowing can never make the write legal.
 			if usage >= d.Policy.Limits.Absolute || next-oldLength > d.Policy.Limits.Absolute-usage {
-				return volume.Result{}, volume.ErrFull
+				return volume.Result{}, &prepublicationQuotaFull{}
 			}
 			if s.quotas != nil && s.quotas.request(b.ID(), id, next-oldLength) {
 				return volume.Result{}, fail(503, "waiting for bucket growth credits")
 			}
-			return volume.Result{}, volume.ErrFull
+			return volume.Result{}, &prepublicationQuotaFull{}
 		}
 	}
 	if len(replicatedEntry.Locations) > 1 {

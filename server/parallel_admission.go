@@ -228,12 +228,12 @@ func (s *Server) reserveMutationQuota(b *Bucket, d BucketDescription, device vol
 		}
 		if used > limit || growth > limit-used {
 			if used >= d.Policy.Limits.Absolute || growth > d.Policy.Limits.Absolute-used {
-				return nil, volume.ErrFull
+				return nil, &prepublicationQuotaFull{}
 			}
 			if s.quotas != nil && s.quotas.request(b.ID(), key.Object, growth) {
 				return nil, fail(503, "waiting for bucket growth credits")
 			}
-			return nil, volume.ErrFull
+			return nil, &prepublicationQuotaFull{}
 		}
 	}
 	if growth > math.MaxUint64-u.reservedGrowth {

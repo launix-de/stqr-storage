@@ -17,7 +17,7 @@ const maxAccountReferences = 1024
 
 // referenceCoordination contains only running/waiting requests, never object
 // metadata or cached ownership. The registry mutex covers lifetimes only;
-// storage work holds one bucket token. Ordinary volume/replica locks still apply. A gate
+// storage work holds one bucket gate. Ordinary volume/replica locks still apply. A gate
 // disappears when its last holder/waiter leaves; cancellation is not a release
 // of a durable object pin. The volume lock and ordinary CAS remain authoritative.
 type referenceCoordination struct {
@@ -25,50 +25,14 @@ type referenceCoordination struct {
 	gates map[volume.ID]*referenceGate
 }
 type referenceGate struct {
-	token chan struct{}
-	refs  int
+	held    bool
+	refs    int
+	pending []*referenceWaiter
 }
 
 func (r *referenceCoordination) acquire(ctx context.Context, bucket volume.ID) (func(), error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	r.mu.Lock()
-	if r.gates == nil {
-		r.gates = make(map[volume.ID]*referenceGate)
-	}
-	gate := r.gates[bucket]
-	if gate == nil {
-		gate = &referenceGate{token: make(chan struct{}, 1)}
-		r.gates[bucket] = gate
-	}
-	gate.refs++
-	r.mu.Unlock()
-	drop := func() {
-		r.mu.Lock()
-		gate.refs--
-		if gate.refs == 0 {
-			delete(r.gates, bucket)
-			if len(r.gates) == 0 {
-				r.gates = nil
-			}
-		}
-		r.mu.Unlock()
-	}
-	select {
-	case gate.token <- struct{}{}:
-		if err := ctx.Err(); err != nil {
-			<-gate.token
-			drop()
-			return nil, err
-		}
-		// Private software contract: the successful caller defers this exactly
-		// once and never reacquires this bucket recursively while holding it.
-		return func() { <-gate.token; drop() }, nil
-	case <-ctx.Done():
-		drop()
-		return nil, ctx.Err()
-	}
+	_, release, err := r.join(ctx, bucket, nil)
+	return release, err
 }
 
 type objectReferenceEntry struct {
@@ -169,6 +133,10 @@ func (s *Server) checkReferenceAwareMaintenance(b *Bucket, aware bool) error {
 }
 
 func (s *Server) executeObjectReference(ctx context.Context, m client.Message, ws *wsSession, p principal) ([]byte, error) {
+	return s.executeObjectReferenceHeld(ctx, m, ws, p, false)
+}
+
+func (s *Server) executeObjectReferenceHeld(ctx context.Context, m client.Message, ws *wsSession, p principal, held bool) ([]byte, error) {
 	if m.Kind != client.Request {
 		return nil, fail(400, "object references require requests")
 	}
@@ -195,7 +163,10 @@ func (s *Server) executeObjectReference(ctx context.Context, m client.Message, w
 	if d.Done() != nil || action > 8 || token == (client.ID{}) || target == op.object {
 		return nil, fail(400, "invalid object reference")
 	}
-	if action <= 6 {
+	if !held && accepted && (action == 0 || action == 1) {
+		return s.combineObjectReference(ctx, m, ws, p, op.bucket.ID(), token)
+	}
+	if action <= 8 && !held {
 		release, err := s.referenceCoordination.acquire(ctx, op.bucket.ID())
 		if err != nil {
 			return nil, err
