@@ -95,8 +95,10 @@ func (v *Volume) runFence(f *writeFence, ioView *Volume, run func() error) (err 
 		}
 		v.fence, v.checkpointing = nil, false
 		if !completed {
+			v.invalidateKeyMembership()
 			v.failed = ErrRecovery
 		} else if err != nil {
+			v.invalidateKeyMembership()
 			v.failed = ioView.failed
 			if v.failed == nil {
 				v.failed = err

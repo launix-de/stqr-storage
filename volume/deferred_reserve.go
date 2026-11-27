@@ -190,6 +190,7 @@ func (g *deferredGroup) publishStaging(t *transaction) error {
 		return g.store.put(off, page, flag)
 	})
 	if err != nil {
+		t.v.invalidateKeyMembership()
 		t.v.failed = err
 		return fmt.Errorf("%w: unsynced spill: %v", ErrRecovery, err)
 	}

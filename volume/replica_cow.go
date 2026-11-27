@@ -62,6 +62,7 @@ func (v *Volume) stageReplicaData(t *transaction, produce func() ([]dataSpan, er
 		v.preparing = false
 		t.v = v
 		if shadow.failed != nil {
+			v.invalidateKeyMembership()
 			v.failed = shadow.failed
 		}
 		v.prepareCond.Broadcast()
