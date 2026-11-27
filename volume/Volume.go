@@ -464,10 +464,7 @@ func (v *Volume) Stats() Stats {
 	v.mu.RLock()
 	defer v.mu.RUnlock()
 	s := v.sb
-	admit := uint64(0)
-	if s.FreeBytes > v.guaranteed && s.FreeBytes-v.guaranteed > v.inFlightReserved {
-		admit = s.FreeBytes - v.guaranteed - v.inFlightReserved
-	}
+	admit := v.admissionFreePhysicalLocked()
 	return Stats{IO: v.ioStatsLocked(), Identity: s.Identity, Generation: s.Generation, Objects: s.Objects, LogicalBytes: s.LogicalBytes, CapacityPhysical: s.Identity.Size, AllocatedPhysical: s.MetadataBytes + s.PayloadBytes, MetadataPhysical: s.MetadataBytes, DataPhysical: s.PayloadBytes, ArenaUnusedPhysical: s.ArenaUnused, OperatingReservePhysical: scratchPages * PageSize, GuaranteedRemainingPhysical: v.guaranteed, InFlightReservedPhysical: v.inFlightReserved, AdmissionFreePhysical: admit}
 }
 func (v *Volume) SetCacheLimits(entries int, bytes uint64) {
