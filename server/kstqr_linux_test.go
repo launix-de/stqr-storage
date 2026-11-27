@@ -34,11 +34,15 @@ func TestKSTQRVirtualMachine(t *testing.T) {
 	if os.Getenv("STQR_TEST_KERNEL") != "1" {
 		t.Skip("set STQR_TEST_KERNEL=1 and STQR_KERNEL_IMAGE to run isolated kernel tests")
 	}
-	if os.Getenv("STQR_KERNEL_CACHE_REOPEN") == "1" {
-		for _, mode := range []string{"BENCHMARK", "WRITE_BENCHMARK", "READ_WINDOW", "LOOP", "RESTART_ONLY", "OVERLAY", "OUTAGE", "CACHE_RETENTION"} {
-			if os.Getenv("STQR_KERNEL_"+mode) == "1" {
-				t.Fatalf("incompatible kernel fixture modes CACHE_REOPEN and %s; run them separately", mode)
+	// Focused scripts replace the same init section; combining them cannot
+	// represent a valid test and must fail before starting a guest.
+	selectedMode := ""
+	for _, mode := range []string{"CACHE_REOPEN", "BENCHMARK", "WRITE_BENCHMARK", "READ_WINDOW", "LOOP", "RESTART_ONLY", "OVERLAY", "OUTAGE", "CACHE_RETENTION"} {
+		if os.Getenv("STQR_KERNEL_"+mode) == "1" {
+			if selectedMode != "" {
+				t.Fatalf("incompatible kernel fixture modes %s and %s; run them separately", selectedMode, mode)
 			}
+			selectedMode = mode
 		}
 	}
 	image := os.Getenv("STQR_KERNEL_IMAGE")
@@ -102,6 +106,7 @@ func TestKSTQRVirtualMachine(t *testing.T) {
 	run("cc", "-static", "-std=c11", "-Wall", "-Wextra", "-Werror", "-O2", "-o", filepath.Join(initrdRoot, "cache-capacity"), filepath.Join(root, "tests/cache_capacity.c"))
 	run("cc", "-static", "-std=c11", "-Wall", "-Wextra", "-Werror", "-O2", "-o", filepath.Join(initrdRoot, "throughput"), filepath.Join(root, "tests/throughput.c"))
 	run("cc", "-static", "-std=c11", "-Wall", "-Wextra", "-Werror", "-O2", "-o", filepath.Join(initrdRoot, "cache-reopen"), filepath.Join(root, "tests/cache_reopen.c"))
+	run("cc", "-static", "-std=c11", "-Wall", "-Wextra", "-Werror", "-O2", "-o", filepath.Join(initrdRoot, "read-window"), filepath.Join(root, "tests/read_window.c"))
 	run("cc", "-static", "-std=c11", "-Wall", "-Wextra", "-Werror", "-O2", "-o", filepath.Join(initrdRoot, "writeback"), filepath.Join(root, "tests/writeback.c"))
 	run("cc", "-static", "-std=c11", "-Wall", "-Wextra", "-Werror", "-O2", "-o", filepath.Join(initrdRoot, "crash-reconnect"), filepath.Join(root, "tests/crash_reconnect.c"))
 	run("cc", "-static", "-std=c11", "-Wall", "-Wextra", "-Werror", "-O2", "-o", filepath.Join(initrdRoot, "mmap-test"), filepath.Join(root, "tests/mmap.c"), "-lsqlite3", "-lm", "-ldl", "-lpthread")
@@ -135,8 +140,38 @@ func TestKSTQRVirtualMachine(t *testing.T) {
 	}))
 	defer upstream.Close()
 	host := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/__kstqr_test/read-failure/start" {
+			writebackFault.ranges.beginFailure()
+			return
+		}
+		if r.URL.Path == "/__kstqr_test/read-failure/verify" {
+			if n, err := writebackFault.ranges.verifyFailure(); err != nil {
+				http.Error(w, err.Error(), 500)
+			} else {
+				fmt.Fprintf(w, "KSTQR_READ_FAILURE_DRAIN_PASS replies=%d\n", n)
+			}
+			return
+		}
 		if r.URL.Path == "/api/ws" {
 			writebackFault.proxy(w, r, upstream.URL)
+			return
+		}
+		if r.URL.Path == "/__kstqr_test/read-prune" {
+			n, e := writebackFault.ranges.verifyIndexes()
+			if e != nil {
+				t.Logf("index-pruning oracle rejected %d of 64 visited child indexes: %v", n, e)
+				http.Error(w, fmt.Sprintf("%s: %d of 64 branches", e, n), 500)
+			} else {
+				fmt.Fprintf(w, "KSTQR_READ_PRUNE_PASS visited=%d total=64\n", n)
+			}
+			return
+		}
+		if r.URL.Path == "/__kstqr_test/read-window" {
+			if err := writebackFault.ranges.verify(); err != nil {
+				http.Error(w, err.Error(), 500)
+			} else {
+				w.WriteHeader(200)
+			}
 			return
 		}
 		if strings.HasPrefix(r.URL.Path, "/__kstqr_test/writeback-") {
@@ -429,6 +464,158 @@ func TestKSTQRVirtualMachine(t *testing.T) {
 	if _, e = fs.WriteAt(ctx, reopenFile.ID, bytes.Repeat([]byte("R"), 1<<20), 0); e != nil {
 		t.Fatal(e)
 	}
+	// Seed a valid, immutable STFS/STIX file with many independent leaves
+	// inside one page-cache window. Holes and nonzero payload offsets exercise
+	// placement-independent slice addressing, not only dense whole objects.
+	windowFile, e := fs.Create(ctx, client.FilesystemRootID(), "read-window", 0644, 0, 0, false)
+	if e != nil {
+		t.Fatal(e)
+	}
+	index := client.Encoder{B: []byte("STIX")}
+	index.U16(1)
+	index.U32(64)
+	var windowLeaves []client.ObjectID
+	for i := 0; i < 64; i++ {
+		var leaf client.ObjectID
+		if i%8 != 7 {
+			leaf = sha256.Sum256([]byte(fmt.Sprintf("native-window-leaf-%d", i)))
+			if _, e = conn.Put(ctx, leaf, bytes.Repeat([]byte{byte(i + 1)}, 16384+13), client.PutOptions{}); e != nil {
+				t.Fatal(e)
+			}
+			windowLeaves = append(windowLeaves, leaf)
+		}
+		index.U64(16384)
+		index.B = append(index.B, leaf[:]...)
+		if leaf == (client.ObjectID{}) {
+			index.U32(0)
+		} else {
+			index.U32(13)
+		}
+	}
+	indexID := client.ObjectID(sha256.Sum256(index.B))
+	if _, e = conn.Put(ctx, indexID, index.B, client.PutOptions{}); e != nil {
+		t.Fatal(e)
+	}
+	node := client.Encoder{B: []byte("STFS")}
+	node.U16(1)
+	node.U8(1)
+	node.U32(0644)
+	node.U32(0)
+	node.U32(0)
+	node.U64(1)
+	node.U64(1 << 20)
+	node.U8(1)
+	node.U8(1)
+	node.B = append(node.B, indexID[:]...)
+	if _, e = conn.Put(ctx, windowFile.ID, node.B, client.PutOptions{}); e != nil {
+		t.Fatal(e)
+	}
+	failureFile, e := fs.Create(ctx, client.FilesystemRootID(), "read-failure-window", 0644, 0, 0, false)
+	if e != nil {
+		t.Fatal(e)
+	}
+	failureIndex := append([]byte(nil), index.B...)
+	var failureLeaves []client.ObjectID
+	for i := 0; i < 64; i++ {
+		if i%8 == 7 {
+			continue
+		}
+		leaf := client.ObjectID(sha256.Sum256([]byte(fmt.Sprintf("native-failure-leaf-%d", i))))
+		if _, e = conn.Put(ctx, leaf, bytes.Repeat([]byte{byte(i + 1)}, 16384+13), client.PutOptions{}); e != nil {
+			t.Fatal(e)
+		}
+		copy(failureIndex[10+i*44+8:], leaf[:])
+		failureLeaves = append(failureLeaves, leaf)
+	}
+	failureIndexID := client.ObjectID(sha256.Sum256(failureIndex))
+	if _, e = conn.Put(ctx, failureIndexID, failureIndex, client.PutOptions{}); e != nil {
+		t.Fatal(e)
+	}
+	failureNode := append([]byte(nil), node.B...)
+	copy(failureNode[len(failureNode)-32:], failureIndexID[:])
+	if _, e = conn.Put(ctx, failureFile.ID, failureNode, client.PutOptions{}); e != nil {
+		t.Fatal(e)
+	}
+	// A two-level 64 MiB file shares payload bytes but has 64 distinct
+	// valid child-index objects. Tiny reads should fetch only intersecting
+	// branches; this is checked by the proxy, not by a timing assumption.
+	var branchIDs []client.ObjectID
+	parentIndex := client.Encoder{B: []byte("STIX")}
+	parentIndex.U16(1)
+	parentIndex.U32(64)
+	for i := 0; i < 64; i++ {
+		branch := client.ObjectID(sha256.Sum256([]byte(fmt.Sprintf("native-window-branch-%d", i))))
+		if _, e = conn.Put(ctx, branch, index.B, client.PutOptions{}); e != nil {
+			t.Fatal(e)
+		}
+		branchIDs = append(branchIDs, branch)
+		parentIndex.U64(1 << 20)
+		parentIndex.B = append(parentIndex.B, branch[:]...)
+		parentIndex.U32(0)
+	}
+	parentID := client.ObjectID(sha256.Sum256(parentIndex.B))
+	if _, e = conn.Put(ctx, parentID, parentIndex.B, client.PutOptions{}); e != nil {
+		t.Fatal(e)
+	}
+	pruneFile, e := fs.Create(ctx, client.FilesystemRootID(), "read-prune", 0644, 0, 0, false)
+	if e != nil {
+		t.Fatal(e)
+	}
+	prunedNode := client.Encoder{B: []byte("STFS")}
+	prunedNode.U16(1)
+	prunedNode.U8(1)
+	prunedNode.U32(0644)
+	prunedNode.U32(0)
+	prunedNode.U32(0)
+	prunedNode.U64(1)
+	prunedNode.U64(64 << 20)
+	prunedNode.U8(1)
+	prunedNode.U8(2)
+	prunedNode.B = append(prunedNode.B, parentID[:]...)
+	if _, e = conn.Put(ctx, pruneFile.ID, prunedNode.B, client.PutOptions{}); e != nil {
+		t.Fatal(e)
+	}
+	writebackFault.ranges.configureIndexes(branchIDs)
+	writebackFault.ranges.configure(windowLeaves)
+	writebackFault.ranges.configureFailure(failureLeaves)
+	var loopDigest string
+	if os.Getenv("STQR_KERNEL_LOOP") == "1" {
+		squashRoot := t.TempDir()
+		binaryData, e := os.ReadFile(busybox)
+		if e != nil {
+			t.Fatal(e)
+		}
+		if e = os.WriteFile(filepath.Join(squashRoot, "busybox"), binaryData, 0755); e != nil {
+			t.Fatal(e)
+		}
+		// Deterministic incompressible data spans multiple payload objects.
+		payload := make([]byte, 4<<20)
+		for i := 0; i < len(payload); i += 32 {
+			sum := sha256.Sum256([]byte(fmt.Sprintf("kstqr-loop-block-%d", i)))
+			copy(payload[i:], sum[:])
+		}
+		if e = os.WriteFile(filepath.Join(squashRoot, "payload"), payload, 0644); e != nil {
+			t.Fatal(e)
+		}
+		loopDigest = fmt.Sprintf("%x", sha256.Sum256(payload))
+		imagePath := filepath.Join(t.TempDir(), "loop.snap")
+		run("mksquashfs", squashRoot, imagePath, "-noappend", "-no-progress", "-processors", "1", "-comp", "xz")
+		imageBytes, e := os.ReadFile(imagePath)
+		if e != nil {
+			t.Fatal(e)
+		}
+		loopFile, e := fs.Create(ctx, client.FilesystemRootID(), "loop.snap", 0644, 0, 0, false)
+		if e != nil {
+			t.Fatal(e)
+		}
+		for offset := 0; offset < len(imageBytes); offset += 1 << 20 {
+			end := min(offset+(1<<20), len(imageBytes))
+			if _, e = fs.WriteAt(ctx, loopFile.ID, imageBytes[offset:end], int64(offset)); e != nil {
+				t.Fatal(e)
+			}
+		}
+		t.Logf("seeded %d-byte squashfs with executable and 4 MiB payload", len(imageBytes))
+	}
 	subscriptionFS = fs
 	readBenchmark := os.Getenv("STQR_KERNEL_BENCHMARK") == "1"
 	writeBenchmark := os.Getenv("STQR_KERNEL_WRITE_BENCHMARK") == "1"
@@ -618,6 +805,7 @@ insmod /kstqr.ko
 test "$(cat /readonly/kernel.txt)" = 'written by kstqr'
 /mmap-test verify
 /cache-reopen
+/read-window @@URL@@
 umount /readonly
 rmmod kstqr
 if dmesg | grep -E 'BUG:|WARNING:|Oops:|KASAN:'; then exit 1; fi
@@ -651,6 +839,44 @@ rmmod kstqr
 		end := strings.Index(init, "if dmesg |")
 		script := `/mount.kstqr --uri ` + endpoint + ` --bucket ` + client.ID(b.ID()).String() + ` --credentials /readonly-credentials --readonly /readonly
 /cache-reopen
+cat /proc/self/mountstats
+umount /readonly
+rmmod kstqr
+`
+		init = init[:begin] + script + init[end:]
+	}
+
+	if os.Getenv("STQR_KERNEL_READ_WINDOW") == "1" {
+		begin := strings.Index(init, "for attempt in 1 2 3 4; do")
+		end := strings.Index(init, "if dmesg |")
+		script := `/mount.kstqr --uri ` + endpoint + ` --bucket ` + client.ID(b.ID()).String() + ` --credentials /readonly-credentials --readonly /readonly
+/read-window ` + endpoint + `
+cat /proc/self/mountstats
+umount /readonly
+rmmod kstqr
+`
+		init = init[:begin] + script + init[end:]
+	}
+
+	if os.Getenv("STQR_KERNEL_LOOP") == "1" {
+		begin := strings.Index(init, "for attempt in 1 2 3 4; do")
+		end := strings.Index(init, "if dmesg |")
+		script := `/mount.kstqr --uri ` + endpoint + ` --bucket ` + client.ID(b.ID()).String() + ` --credentials /readonly-credentials --readonly /readonly
+mkdir -p /squash
+for pass in 1 2; do
+    losetup -r /dev/loop0 /readonly/loop.snap
+    mount -t squashfs -o ro /dev/loop0 /squash
+    /squash/busybox echo KSTQR_SQUASHFS_EXEC_PASS
+    pids=""
+    for reader in 1 2 3 4; do
+        (sha256sum /squash/payload | grep '^` + loopDigest + ` ') &
+        pids="$pids $!"
+    done
+    for pid in $pids; do wait "$pid"; done
+    umount /squash
+    losetup -d /dev/loop0
+done
+echo KSTQR_SQUASHFS_PASS
 cat /proc/self/mountstats
 umount /readonly
 rmmod kstqr
@@ -1173,6 +1399,27 @@ poweroff -f
 
 		uc.Close()
 		t.Log("Native STOR/STOM kernel overlay, lazy range copy-up, whitelist, Go compatibility and boot lifetime passed")
+		return
+	}
+
+	if os.Getenv("STQR_KERNEL_LOOP") == "1" {
+		if !strings.Contains(string(output), "KSTQR_SQUASHFS_PASS") {
+			t.Fatal("loop/squashfs probe did not complete")
+		}
+		for _, line := range strings.Split(string(output), "\n") {
+			if strings.Contains(line, "KSTQR_SQUASHFS_") || strings.Contains(line, "stqr: cache_hits=") {
+				t.Log(strings.TrimSpace(line))
+			}
+		}
+		return
+	}
+
+	if os.Getenv("STQR_KERNEL_READ_WINDOW") == "1" {
+		for _, line := range strings.Split(string(output), "\n") {
+			if strings.Contains(line, "KSTQR_READ_") || strings.Contains(line, "stqr: cache_hits=") {
+				t.Log(strings.TrimSpace(line))
+			}
+		}
 		return
 	}
 

@@ -11,7 +11,9 @@ const (
 	BucketSync           uint16 = 0x0119
 	DurabilityNotice     uint16 = 0x011a
 	CapabilityDurability uint64 = 8192
-	DurabilityHeader     uint64 = 48
+	// Streaming accepted ACKs retain the ordinary chunk framing and require an explicit Sync.
+	CapabilityAcceptedStreams uint64 = 1 << 21
+	DurabilityHeader          uint64 = 48
 )
 
 type CommitMark struct {
@@ -141,4 +143,25 @@ func withAccepted(ctx context.Context, enabled bool) context.Context {
 		return context.WithValue(ctx, acceptedContextKey{}, true)
 	}
 	return ctx
+}
+
+// outgoingMutation never silently strengthens an accepted write into a durable
+// native operation. Legacy native requests keep their existing ACK contract;
+// requested acceptance requires negotiated support, including streaming bodies.
+func outgoingMutation(ctx context.Context, t *objectTransport, m Message, mutation bool, upload uploadFunc) (Message, bool, error) {
+	if mutation && ctx.Value(acceptedContextKey{}) == true {
+		if t.capabilities&CapabilityDurability == 0 || upload != nil && t.capabilities&CapabilityAcceptedStreams == 0 {
+			return m, false, &StatusError{Status: 426, Message: "peer cannot accept this write without an implicit durability fence"}
+		}
+		return acceptedMessage(m), false, nil
+	}
+	deferred, _ := ctx.Value(filesystemDeferredKey{}).(bool)
+	if deferred && m.Opcode == ObjectReference && len(m.Body) == 129 && m.Body[112] <= 5 {
+		const required = CapabilityAcceptedReferences | CapabilityObjectReferences | CapabilityDurability | CapabilityConnectionSync
+		if t.capabilities&required != required {
+			return m, false, &StatusError{Status: 426, Message: "peer cannot defer filesystem reference durability"}
+		}
+	}
+	outgoing, reference := acceptedReferenceMessage(ctx, t, m)
+	return outgoing, reference, nil
 }

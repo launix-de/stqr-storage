@@ -156,7 +156,7 @@ func (c *Catalog) Create(ctx context.Context, m Metadata) (Metadata, error) {
 	if e := c.CheckFormat(ctx); e != nil {
 		return m, e
 	}
-	_, e := c.store.CAS(ctx, MetadataID(m.Name), 0, nil, encodeMetadata(m), client.CASOptions{Scope: client.CASObject, MutationOptions: client.MutationOptions{Absent: true, RequestID: client.NewRequestID()}})
+	_, e := c.store.CAS(ctx, MetadataID(m.Name), 0, nil, encodeMetadata(m), client.CASOptions{Scope: client.CASObject, MutationOptions: client.MutationOptions{Accepted: true, Absent: true, RequestID: client.NewRequestID()}})
 	return m, e
 }
 func (c *Catalog) Lookup(ctx context.Context, name string) (Metadata, error) {
@@ -201,14 +201,11 @@ func (c *Catalog) Resize(ctx context.Context, device Metadata, size uint64) (Met
 	if size != oldSize {
 		_, err = c.store.CAS(ctx, MetadataID(m.Name), 0, raw, encodeMetadata(m), client.CASOptions{
 			Scope:           client.CASObject,
-			MutationOptions: client.MutationOptions{RequestID: client.NewRequestID()},
+			MutationOptions: client.MutationOptions{Accepted: true, RequestID: client.NewRequestID()},
 		})
 		if err != nil {
 			return Metadata{}, err
 		}
-	}
-	if err = c.store.Sync(ctx); err != nil {
-		return Metadata{}, err
 	}
 	return m, nil
 }
@@ -528,7 +525,7 @@ func (c *Catalog) Collect(ctx context.Context, opaque []client.ObjectID) (uint64
 				}
 			}
 			if !live {
-				if e := c.store.Delete(ctx, entry.ID, client.DeleteOptions{RequestID: client.NewRequestID()}); e != nil {
+				if e := c.store.Delete(ctx, entry.ID, client.DeleteOptions{Accepted: true, RequestID: client.NewRequestID()}); e != nil {
 					return deleted, e
 				}
 				deleted++

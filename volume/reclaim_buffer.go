@@ -13,33 +13,15 @@ func (v *Volume) bufferCleanup(run func() error) (uint64, error) {
 }
 
 func (v *Volume) bufferCleanupMode(run func() error, continuation bool) (uint64, error) {
-	if !continuation && v.deferred != nil && len(v.deferred.pages) > v.deferred.pageLimit/2 {
-		return 0, ErrBusy
-	}
 	if err := v.beginDeferred(); err != nil {
-		if !errors.Is(err, ErrFull) {
-			return 0, err
+		if errors.Is(err, ErrFull) {
+			return 0, ErrWritebackPressure
 		}
-		if v.checkpointing {
-			return 0, ErrBusy
-		}
-		// A full/tiny volume still has the existing fixed WAL scratch area.
-		// Its bounded durable fallback also releases v.mu during every fence.
-		err = run()
-		return v.sb.Generation, err
+		return 0, err
 	}
-	base := v.sb.Generation
-	v.staging = map[uint64][]byte{}
+	v.beginStaging()
+	defer v.endStaging()
 	err := run()
-	v.staging = nil
-	if errors.Is(err, errDeferredBudget) {
-		if len(v.deferred.pages) == 0 && v.sb.Generation == base && !v.checkpointing {
-			v.deferred = nil
-			err = run()
-		} else {
-			err = ErrBusy
-		}
-	}
 	return v.sb.Generation, err
 }
 

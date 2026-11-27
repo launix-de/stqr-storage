@@ -62,10 +62,10 @@ second connection or removes another process's socket.
 
 Sizes are absolute bytes, positive multiples of 512, at most `2^63-1`. Only
 growth is supported. Resize atomically compares/replaces the existing descriptor
-and flushes it before success. Device generation, serial, existing stripe IDs and
+without an implicit flush. Device generation, serial, existing stripe IDs and
 data remain unchanged; the extension stays sparse and reads as zeros. No disk
-format change or stripe rewrite is involved. After a lost response or flush
-error, inspect the size or retry the same size; the retry flushes again.
+format change or stripe rewrite is involved. Use an explicit FLUSH/Sync to make
+the new descriptor durable; retrying the same size does not imply a fence.
 
 An established NBD connection retains its negotiated size. Reconnect the NBD
 client to discover the extension; this does not restart the exporter or affect
@@ -121,9 +121,10 @@ reads go to STQR. Guest operating systems can use their normal caches.
 
 ## Durability and exclusion
 
-Writes use native accepted operations. NBD FLUSH, FUA and clean disconnect use
-explicit bucket Sync barriers. Ordinary writes need a later FLUSH/FUA for durable
-completion; force-killing an exporter does not substitute for a flush.
+Writes and catalog create/resize/cleanup use native accepted operations. Only
+NBD FLUSH and FUA request explicit bucket Sync barriers. Ordinary writes, resize,
+NBD DISC, connection close and exporter shutdown do not flush. A later FLUSH/FUA
+is required for durable completion; disconnecting is not a substitute for it.
 
 One exporter holds a socket-scoped generic exclusive object lease (`0x011c`), with
 READ+WRITE or READ-only authorization. It admits one writer per named device;

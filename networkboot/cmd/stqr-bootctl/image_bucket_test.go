@@ -15,7 +15,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -496,6 +498,20 @@ func TestNativeImageEditorAndRecursiveCOW(t *testing.T) {
 	}
 }
 
+// Execute the real CLI entry point in a disposable test child, so os.Exit(75)
+// and silent stderr are verified rather than inferred from the typed error.
+func TestBootctlCleanupProcess(t *testing.T) {
+	if os.Getenv("STQR_BOOTCTL_CLEANUP_TEST_CHILD") != "1" {
+		return
+	}
+	separator := slices.Index(os.Args, "--")
+	if separator < 0 {
+		t.Fatal("missing child arguments")
+	}
+	os.Args = append([]string{"stqr-bootctl"}, os.Args[separator+1:]...)
+	main()
+}
+
 func TestBootCleanupRetainsMountedUpperUntilStorageConnectionCloses(t *testing.T) {
 	cfg, _, _ := imageTestNode(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -514,8 +530,38 @@ func TestBootCleanupRetainsMountedUpperUntilStorageConnectionCloses(t *testing.T
 	if _, _, err = mounted.Get(ctx, client.FilesystemRootID()); err != nil {
 		t.Fatal(err)
 	}
-	if err = removeBootSession(ctx, cfg, session.User, session.Upper, session.Lower); err == nil {
-		t.Fatal("cleanup deleted a mounted upper")
+	other, err := newBootSession(ctx, cfg, "ubuntu", 8<<20, "", "ubuntu")
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherMount, err := client.Dial(ctx, other.URI, other.Username, other.Password, other.Upper, "fs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer otherMount.Close()
+
+	// Repeated failed collectors must release their own sockets and keep the
+	// mounted guest usable. Otherwise every later attempt would see a leak.
+	for attempt := 0; attempt < 8; attempt++ {
+		if err = removeBootSession(ctx, cfg, session.User, session.Upper, session.Lower); !errors.Is(err, errSessionActive) {
+			t.Fatalf("expected typed active deferral, got %v", err)
+		}
+	}
+	configPath := filepath.Join(t.TempDir(), "cleanup.json")
+	configBytes, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = os.WriteFile(configPath, configBytes, 0600); err != nil {
+		t.Fatal(err)
+	}
+	child := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestBootctlCleanupProcess$", "--",
+		"--config", configPath, "boot-session-delete", session.User.String(), session.Upper.String(), session.Lower.String())
+	child.Env = append(os.Environ(), "STQR_BOOTCTL_CLEANUP_TEST_CHILD=1")
+	output, childErr := child.CombinedOutput()
+	var exit *exec.ExitError
+	if !errors.As(childErr, &exit) || exit.ExitCode() != 75 || len(output) != 0 {
+		t.Fatalf("active cleanup CLI: error=%v output=%q", childErr, output)
 	}
 	// Failed collection must not revoke the currently active VM's identity.
 	if _, _, err = mounted.Get(ctx, client.FilesystemRootID()); err != nil {
@@ -531,6 +577,12 @@ func TestBootCleanupRetainsMountedUpperUntilStorageConnectionCloses(t *testing.T
 			t.Fatal(err)
 		}
 		time.Sleep(10 * time.Millisecond)
+	}
+
+	// A concurrent guest on the same lower has an independent identity/upper.
+	// Collecting one must neither block on nor revoke the other.
+	if _, _, err = otherMount.Get(ctx, client.FilesystemRootID()); err != nil {
+		t.Fatal("independent live guest was disrupted", err)
 	}
 	if conn, e := client.Dial(ctx, session.URI, session.Username, session.Password, session.Lower, "fs"); e == nil {
 		conn.Close()

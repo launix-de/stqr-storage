@@ -983,14 +983,17 @@ static int segment_add(struct segments *s, struct segment segment)
 	s->p[s->n++] = segment;
 	return 0;
 }
-static int index_segments_view(struct ks_fs *f, const struct ks_node *view, stqr_object_id id,
-			       u64 length, unsigned depth, struct segments *out)
+static int index_segments_range(struct ks_fs *f, const struct ks_node *view, stqr_object_id id,
+			        u64 length, unsigned depth, u64 start, u64 wanted,
+			        struct segments *out)
 {
 	struct buf b = {0};
 	stqr_info info;
 	unsigned version, count, i;
 	u64 total = 0;
 	int err;
+	if (start > length || wanted > length - start)
+		return -EUCLEAN;
 	err = view ? get_view_object(f, view, id, (void **)&b.p, &b.n, &info)
 		   : get_object(f, id, (void **)&b.p, &b.n, &info);
 	if (err)
@@ -1026,10 +1029,21 @@ static int index_segments_view(struct ks_fs *f, const struct ks_node *view, stqr
 		}
 		s.lower = lower;
 		total += s.length;
-		if (depth > 1 && !nullid(s.id))
-			err = index_segments_view(f, view, s.id, s.length, depth - 1, out);
-		else
-			err = segment_add(out, s);
+		/* Validate every entry of this visited node, but do not fetch unrelated
+		 * descendants. A small read must not walk the entire file's index. */
+		if (start < total && start + wanted > total - s.length) {
+			u64 skip = start > total - s.length ? start - (total - s.length) : 0;
+			u64 take = min(total, start + wanted) - (total - s.length) - skip;
+			if (depth > 1 && !nullid(s.id)) {
+				err = index_segments_range(f, view, s.id, s.length, depth - 1,
+						   skip, take, out);
+			} else {
+				if (!nullid(s.id))
+					s.offset += skip;
+				s.length = take;
+				err = segment_add(out, s);
+			}
+		}
 		if (err)
 			goto out;
 	}
@@ -1043,17 +1057,155 @@ out:
 static int index_segments(struct ks_fs *f, stqr_object_id id, u64 length, unsigned depth,
 			  struct segments *out)
 {
-	return index_segments_view(f, NULL, id, length, depth, out);
+	return index_segments_range(f, NULL, id, length, depth, 0, length, out);
+}
+/* A page-cache window is at most one MiB. Limit metadata callers too: many
+ * tiny extents must not allocate an unbounded set of callbacks/buffers. Each
+ * batch shares the existing routed connection and submits before waiting. */
+#define KS_RANGE_BATCH 32
+struct ks_range_read {
+	struct ks_fs *store;
+	struct ks_rpc *rpc;
+	stqr_object_id id;
+	u64 offset, epoch;
+	void *destination;
+	size_t length;
+	struct ks_async_result result;
+	bool pending, finished;
+};
+static int range_read_submit(struct ks_range_read *job)
+{
+	struct ks_rpc *rpc = ks_rpc_lock(job->store, job->id);
+	int err;
+	job->rpc = rpc;
+	job->epoch = rpc->reconnect_epoch;
+	job->pending = false;
+	memset(&job->result, 0, sizeof(job->result));
+	init_completion(&job->result.done);
+	if (rpc->receive_started) {
+		err = stqr_get_range_async(rpc->client, job->id, job->offset, job->length,
+					   ks_async_completed, &job->result);
+		job->pending = !err;
+		if (err)
+			job->result.error = err;
+	} else {
+		/* Bootstrap reads before the receive worker starts retain the ordinary
+		 * synchronous wrapper. This is visibility I/O, never a durability fence. */
+		err = stqr_get_range(rpc->client, job->id, job->offset, job->length,
+				     &job->result.data, &job->result.length, &job->result.info);
+		job->result.error = err;
+		job->result.status = stqr_status(rpc->client);
+	}
+	mutex_unlock(&rpc->lock);
+	return err;
+}
+static void range_read_drain(struct ks_range_read *jobs, unsigned count)
+{
+	for (unsigned i = 0; i < count; i++) {
+		if (jobs[i].pending) {
+			wait_for_completion(&jobs[i].result.done);
+			jobs[i].pending = false;
+		}
+	}
+}
+static void range_read_free(struct ks_range_read *jobs, unsigned count)
+{
+	range_read_drain(jobs, count);
+	for (unsigned i = 0; i < count; i++) {
+		sq_free(jobs[i].result.data);
+		jobs[i].result.data = NULL;
+	}
+}
+static bool range_read_retryable(const struct ks_async_result *result)
+{
+	return result->error == -EAGAIN ? result->status == 0 || result->status == 503 :
+		ks_transport_retryable(NULL, result->error);
+}
+static int range_read_finish(struct ks_range_read *jobs, unsigned count)
+{
+	int err = 0;
+	for (;;) {
+		struct ks_rpc *retried[KS_RANGE_BATCH];
+		unsigned retried_count = 0, unfinished = 0;
+		/* Drain the entire wave before reconnecting or releasing any callback
+		 * context. A lost socket can complete several independent requests. */
+		range_read_drain(jobs, count);
+		for (unsigned i = 0; i < count; i++) {
+			struct ks_range_read *job = &jobs[i];
+			if (job->finished)
+				continue;
+			if (job->result.error && !range_read_retryable(&job->result)) {
+				err = job->result.error;
+				goto out;
+			}
+			if (!job->result.error && job->result.length != job->length) {
+				err = -EUCLEAN;
+				goto out;
+			}
+		}
+		for (unsigned i = 0; i < count; i++) {
+			struct ks_range_read *job = &jobs[i];
+			if (job->finished)
+				continue;
+			if (!job->result.error) {
+				memcpy(job->destination, job->result.data, job->length);
+				sq_free(job->result.data);
+				job->result.data = NULL;
+				job->finished = true;
+				continue;
+			}
+			unfinished++;
+		}
+		if (!unfinished) {
+			err = 0;
+			break;
+		}
+		for (unsigned i = 0; i < count; i++) {
+			struct ks_range_read *job = &jobs[i];
+			bool retry_owner = true;
+			if (job->finished)
+				continue;
+			for (unsigned j = 0; j < retried_count; j++)
+				if (retried[j] == job->rpc)
+					retry_owner = false;
+			if (retry_owner) {
+				mutex_lock(&job->rpc->lock);
+				err = ks_rpc_retry(job->store, job->rpc, job->epoch, job->result.status);
+				mutex_unlock(&job->rpc->lock);
+				if (err)
+					goto out;
+				retried[retried_count++] = job->rpc;
+			}
+			sq_free(job->result.data);
+			job->result.data = NULL;
+			/* Retry submissions still form a wave; a delayed first reply never
+			 * prevents the other rejected ranges from being resubmitted. */
+			err = range_read_submit(job);
+			if (err && !range_read_retryable(&job->result))
+				goto out;
+		}
+	}
+out:
+	range_read_free(jobs, count);
+	return err;
 }
 static int index_read(struct ks_fs *f, const struct ks_node *view, stqr_object_id id, u64 length,
 		      unsigned depth, void *dst, size_t count, u64 offset)
 {
 	struct segments s = {0};
-	size_t i;
-	int err = index_segments_view(f, view, id, length, depth, &s);
+	struct ks_range_read *jobs = NULL;
+	unsigned pending = 0;
+	size_t pending_bytes = 0;
+	int err = index_segments_range(f, view, id, length, depth, offset, count, &s);
+	offset = 0;
 	if (err)
 		goto out;
-	for (i = 0; i < s.n && count; i++) {
+	jobs = sq_alloc(KS_RANGE_BATCH * sizeof(*jobs));
+	if (!jobs) {
+		err = -ENOMEM;
+		goto out;
+	}
+	for (size_t i = 0; i < s.n && count; i++) {
 		size_t n;
 		struct segment *p = &s.p[i];
 		if (offset >= p->length) {
@@ -1061,81 +1213,72 @@ static int index_read(struct ks_fs *f, const struct ks_node *view, stqr_object_i
 			continue;
 		}
 		n = min_t(u64, count, p->length - offset);
-		if (nullid(p->id))
+		if (nullid(p->id)) {
 			memset(dst, 0, n);
-
-		else {
+		} else if (!p->lower && view && view->view) {
+			/* Prepared/guarded views may overlay sparse bytes in the logical
+			 * object. Preserve that resolution rather than issuing raw ranges. */
 			void *data = NULL;
-			size_t actual;
+			size_t size;
 			stqr_info info;
-			struct ks_rpc *rpc;
+			err = get_view_object(f, view, p->id, &data, &size, &info);
+			if (!err) {
+				u64 at = p->offset + offset;
+				memset(dst, 0, n);
+				if (at < size)
+					memcpy(dst, (u8 *)data + at, min_t(u64, n, size - at));
+			}
+			sq_free(data);
+			if (err)
+				goto out;
+		} else {
 			struct ks_fs *store = p->lower ? f->lower : f;
+			struct ks_range_read *job;
 			if (!store) {
 				err = -EUCLEAN;
 				goto out;
 			}
-			if (!p->lower && view && view->view) {
-				size_t size;
-				err = get_view_object(f, view, p->id, &data, &size, &info);
-				if (!err) {
-					u64 at = p->offset + offset;
-					memset(dst, 0, n);
-					if (at < size)
-						memcpy(dst, (u8 *)data + at,
-						       min_t(u64, n, size - at));
-				}
-				sq_free(data);
+			if (pending && (pending == KS_RANGE_BATCH || pending_bytes + n > SQ_CHUNK)) {
+				err = range_read_finish(jobs, pending);
+				pending = 0;
+				pending_bytes = 0;
 				if (err)
 					goto out;
-				goto copied;
+				memset(jobs, 0, KS_RANGE_BATCH * sizeof(*jobs));
 			}
-			rpc = ks_rpc_lock(store, p->id);
+			job = &jobs[pending++];
+			job->store = store;
+			job->id = p->id;
+			job->offset = p->offset + offset;
+			job->destination = dst;
+			job->length = n;
+			pending_bytes += n;
 			atomic64_inc(&f->rpc_ranges);
-			for (;;) {
-                u64 epoch = rpc->reconnect_epoch;
-                int status = 0;
-				if (rpc->receive_started) {
-                    struct ks_async_result result = {0};
-                    init_completion(&result.done);
-                    err = stqr_get_range_async(rpc->client, p->id, p->offset + offset,
-                                              n, ks_async_completed, &result);
-                    mutex_unlock(&rpc->lock);
-                    if (!err) { wait_for_completion(&result.done); err = result.error; status = result.status; }
-                    data = result.data; actual = result.length; info = result.info;
-                    mutex_lock(&rpc->lock);
-                } else {
-                    err = stqr_get_range(rpc->client, p->id, p->offset + offset, n,
-                                         &data, &actual, &info);
-                    status = stqr_status(rpc->client);
-                }
-				if (!(err == -EAGAIN ? (status == 0 || status == 503) : ks_transport_retryable(NULL, err)))
-					break;
-				sq_free(data);
-				data = NULL;
-				err = ks_rpc_retry(store, rpc, epoch, status);
-				if (err)
-					break;
-			}
-			mutex_unlock(&rpc->lock);
-			if (!err && actual != n)
-				err = -EUCLEAN;
-			if (!err)
-				memcpy(dst, data, n);
-			sq_free(data);
-			if (err)
+			err = range_read_submit(job);
+			if (err && !range_read_retryable(&job->result))
 				goto out;
+			err = 0;
 		}
-	copied:
 		dst = (u8 *)dst + n;
 		count -= n;
 		offset = 0;
 	}
 	if (count)
 		err = -EUCLEAN;
+	if (!err && pending) {
+		err = range_read_finish(jobs, pending);
+		pending = 0;
+	}
 out:
+	/* Includes semantic/submission/guard errors: every submitted completion is
+	 * observed before its context or destination can disappear. */
+	if (pending)
+		range_read_free(jobs, pending);
+	sq_free(jobs);
 	sq_free(s.p);
 	return err;
 }
+
 static int read_node(struct ks_fs *f, const struct ks_node *n, void *dst, size_t count, u64 offset)
 {
 	if (n->lower) {
