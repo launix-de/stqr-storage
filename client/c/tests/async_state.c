@@ -15,7 +15,7 @@
 #undef sq_disconnect
 #include <assert.h>
 #include <stdio.h>
-struct stqr_socket { struct buf replies; unsigned calls[512]; stqr_u64 sequence,reply_length; unsigned boot;int closed; };
+struct stqr_socket { struct buf replies,held; unsigned calls[512]; stqr_u64 sequence,reply_length; unsigned boot;int closed,hold,redirect; };
 int policy_connect(struct stqr_socket **out,const char *host,unsigned port,unsigned ms) {
     (void)out;(void)host;(void)port;(void)ms;return -EOPNOTSUPP;
 }
@@ -32,14 +32,24 @@ int policy_send(struct stqr_socket *socket,const void *data,size_t size) {
     socket->calls[op]++;
     if(kind==0){assert(op==5 || op==6);drop(&input);return 0;}
     assert(kind==1);
-    number(&message,1,1);number(&message,2,1);number(&message,op,2);put(&message,id,16);varint(&message,200);
-    if(op==0x121 || op==0x118) {
+    int redirected=socket->redirect && op==0x118;
+    number(&message,1,1);number(&message,2,1);number(&message,op,2);put(&message,id,16);varint(&message,redirected?301:200);
+    if(redirected) {
+        struct buf patch={0};stqr_u8 zeroes[32]={0},node[16]={2},volume[16]={3},runtime[16]={9};
+        number(&patch,1,8);number(&patch,1,8);number(&patch,1,8);put(&patch,input.p+input.pos,16);
+        put(&patch,zeroes,32);number(&patch,1,1);put(&patch,zeroes,32);varint(&patch,1);
+        put(&patch,zeroes,32);number(&patch,0,2);number(&patch,1,8);number(&patch,1,8);number(&patch,0,1);put(&patch,runtime,16);
+        varint(&patch,1);put(&patch,node,16);put(&patch,volume,16);number(&patch,0,1);number(&patch,0,1);number(&patch,0,2);number(&patch,0,4);
+        varint(&patch,1);put(&patch,node,16);varint(&patch,1);blob(&patch,"http://owner-b:80",17);varint(&patch,0);
+        varint(&headers,1);varint(&headers,2);blob(&headers,patch.p,patch.n);drop(&patch);socket->redirect=0;
+    }else if(op==0x121 || op==0x118) {
         if(op==0x121)assert(input.p[input.n-1]==1); /* accepted reference trailer */
         stqr_u8 boot[16]={1};boot[0]=(stqr_u8)(socket->boot?socket->boot:1);put(&mark,boot,16);number(&mark,++socket->sequence,8);
         varint(&headers,1);varint(&headers,48);blob(&headers,mark.p,mark.n);
-    }else { assert(op==0x122);varint(&headers,0); }
+    }else { assert(op==0x122 || op==0x119);varint(&headers,0); }
     blob(&message,headers.p,headers.n);
-    if(op==0x121)number(&message,1,1);
+    if(redirected) { /* A rejected original owner publishes no object result. */ }
+    else if(op==0x121)number(&message,1,1);
     else if(op==0x118) {
         stqr_u8 runtime[16]={0};number(&message,socket->reply_length?socket->reply_length:4,8);number(&message,0,1);number(&message,0,4);
         put(&message,runtime,16);number(&message,0,1);number(&message,0,2);
@@ -47,7 +57,8 @@ int policy_send(struct stqr_socket *socket,const void *data,size_t size) {
     stqr_u8 frame[4]={0x82,0};size_t h=2;
     if(message.n<126)frame[1]=(stqr_u8)message.n;
     else{frame[1]=126;frame[2]=(stqr_u8)(message.n>>8);frame[3]=(stqr_u8)message.n;h=4;}
-    put(&socket->replies,frame,h);put(&socket->replies,message.p,message.n);
+    struct buf *output=socket->hold && op!=0x122 && op!=0x119?&socket->held:&socket->replies;
+    put(output,frame,h);put(output,message.p,message.n);
     drop(&input);drop(&message);drop(&headers);drop(&mark);return 0;
 }
 int policy_recv(struct stqr_socket *socket,void *out,size_t n) {
@@ -57,7 +68,7 @@ int policy_recv(struct stqr_socket *socket,void *out,size_t n) {
 int policy_wait(struct stqr_socket *socket,unsigned ms) {
     (void)ms;return socket->replies.pos<socket->replies.n;
 }
-void policy_disconnect(struct stqr_socket *socket) {if(socket){socket->closed=1;drop(&socket->replies);}}
+void policy_disconnect(struct stqr_socket *socket) {if(socket){socket->closed=1;drop(&socket->replies);drop(&socket->held);}}
 struct result {int called,error,status;};
 static void completed(void *arg,int error,int status,void *data,size_t n,const stqr_info *info) {
     struct result *r=arg;(void)n;(void)info;sq_free(data);
@@ -209,8 +220,101 @@ static void dirty_owner_pool_preserves_explicit_cut(void) {
     stqr_close(c);
     for(unsigned i=0;i<SQ_CHANNEL_LIMIT;i++)assert(sockets[i].closed && sockets[i].calls[0x122]==1);
 }
+static void release_held(struct stqr_socket *socket) {
+    put(&socket->replies,socket->held.p,socket->held.n);drop(&socket->held);
+}
+static void legacy_sync_joins_result(void) {
+    struct stqr_socket socket={0};stqr_client *c=sq_alloc(sizeof(*c));
+    struct result result={0};stqr_options options={.accepted=1};stqr_object_id object={{7}};
+    assert(c);c->socket=&socket;c->bucket.bytes[0]=1;c->capabilities=STQR_CAP_DURABILITY;options.request_id.bytes[0]=7;
+    assert(!stqr_cas_async(c,object,1,0,"old!",4,"new!",4,&options,completed,&result));
+    assert(!result.called && stqr_async_pending(c)==1);
+    assert(!stqr_sync(c));
+    assert(result.called==1 && !result.error && !stqr_async_pending(c));
+    assert(socket.calls[0x119]>=1 && !socket.calls[0x122]);
+    stqr_close(c);
+}
+static void redirected_result_precedes_fence(void) {
+    struct stqr_socket a={.redirect=1},b={.boot=2,.hold=1};
+    struct sq_channel *left=sq_alloc(sizeof(*left)),*right=sq_alloc(sizeof(*right));
+    stqr_client *c=sq_alloc(sizeof(*c));struct result first={0},later={0},fence={0},later_fence={0};
+    stqr_options options={.accepted=1};stqr_object_id object={{7}};
+    assert(c&&left&&right);c->bucket.bytes[0]=1;c->channels=left;left->next=right;c->channel_count=2;
+    left->socket=&a;right->socket=&b;left->capabilities=right->capabilities=STQR_CAP_DURABILITY|STQR_CAP_CONNECTION_SYNC;
+    strcpy(left->authority,"owner-a:80");strcpy(right->authority,"owner-b:80");load_channel(c,left);
+    options.request_id.bytes[0]=7;
+    assert(!stqr_cas_async(c,object,1,0,"old!",4,"new!",4,&options,completed,&first));
+    assert(!stqr_connection_sync_async(c,completed,&fence));
+    assert(!fence.called);
+    for(unsigned i=0;i<8;i++){int n=stqr_poll(c,0);assert(n>=0);if(!n)break;}
+    assert(b.calls[0x118]==1 && !first.called && !fence.called);
+    release_held(&b);
+    save_channel(c);load_channel(c,right);options.request_id.bytes[0]=8;object.bytes[0]=8;
+    assert(!stqr_cas_async(c,object,1,0,"old!",4,"new!",4,&options,completed,&later));
+    assert(!stqr_connection_sync_async(c,completed,&later_fence));
+    for(unsigned i=0;i<32&&!fence.called;i++)assert(stqr_poll(c,0)>=0);
+    assert(first.called==1&&!first.error && fence.called==1&&!fence.error);
+    assert(!later.called && !later_fence.called && a.calls[0x122]>=1 && b.calls[0x122]>=1);
+    unsigned left_fences=a.calls[0x122],right_fences=b.calls[0x122];
+    stqr_close(c);
+    assert(later.called==1&&later.error==-EINPROGRESS && fence.called==1);
+    assert(later_fence.called==1&&later_fence.error==-ECONNRESET);
+    assert(a.calls[0x122]==left_fences&&b.calls[0x122]==right_fences);
+}
+static void close_cancels_deferred_fence(int reconnect) {
+    struct stqr_socket socket={.hold=1};stqr_client *c=sq_alloc(sizeof(*c));
+    struct result result={0},fence={0};stqr_options options={.accepted=1};stqr_object_id object={{7}};
+    assert(c);c->socket=&socket;c->bucket.bytes[0]=1;c->capabilities=STQR_CAP_DURABILITY|STQR_CAP_CONNECTION_SYNC;options.request_id.bytes[0]=7;
+    assert(!stqr_cas_async(c,object,1,0,"old!",4,"new!",4,&options,completed,&result));
+    assert(!stqr_connection_sync_async(c,completed,&fence));
+    assert(!fence.called);
+    unsigned fences=socket.calls[0x122];
+    if(reconnect)assert(stqr_reconnect(c)==-EOPNOTSUPP);
+    else stqr_close(c);
+    assert(result.called==1&&result.error==-EINPROGRESS);
+    assert(fence.called==1&&fence.error==-ECONNRESET);
+    assert(socket.closed&&socket.calls[0x122]==fences);
+    if(reconnect){stqr_close(c);assert(fence.called==1&&result.called==1);}
+}
+static void clean_eviction_preserves_deferred_fence(void) {
+    struct stqr_socket sockets[SQ_CHANNEL_LIMIT]={0};struct sq_channel *owner[SQ_CHANNEL_LIMIT];
+    stqr_client *c=sq_alloc(sizeof(*c));struct result result={0},fence={0};
+    stqr_options options={.accepted=1};stqr_object_id object={{7}};
+    assert(c);c->bucket.bytes[0]=1;
+    for(unsigned i=0;i<SQ_CHANNEL_LIMIT;i++) {
+        owner[i]=sq_alloc(sizeof(*owner[i]));assert(owner[i]);
+        owner[i]->socket=&sockets[i];owner[i]->capabilities=STQR_CAP_DURABILITY|STQR_CAP_CONNECTION_SYNC;
+        snprintf(owner[i]->authority,sizeof(owner[i]->authority),"clean-%u:80",i);
+        owner[i]->next=c->channels;c->channels=owner[i];c->channel_count++;
+    }
+    load_channel(c,owner[0]);sockets[0].hold=1;options.request_id.bytes[0]=7;
+    assert(!stqr_cas_async(c,object,1,0,"old!",4,"new!",4,&options,completed,&result));
+    assert(!stqr_connection_sync_async(c,completed,&fence));
+    assert(select_endpoint(c,"http://one-more-owner:80")==-EOPNOTSUPP);
+    assert(!fence.called&&!result.called);
+    release_held(&sockets[0]);
+    for(unsigned i=0;i<32&&!fence.called;i++)assert(stqr_poll(c,0)>=0);
+    assert(result.called==1&&!result.error && fence.called==1&&!fence.error);
+    stqr_close(c);
+}
+static void overlapping_legacy_fences(void) {
+    struct stqr_socket socket={0};stqr_client *c=sq_alloc(sizeof(*c));
+    struct result first={0},later={0},one={0},two={0};
+    stqr_options options={.accepted=1};stqr_object_id object={{7}};
+    assert(c);c->socket=&socket;c->bucket.bytes[0]=1;c->capabilities=STQR_CAP_DURABILITY;options.request_id.bytes[0]=7;
+    assert(!stqr_cas_async(c,object,1,0,"old!",4,"new!",4,&options,completed,&first));
+    assert(!stqr_connection_sync_async(c,completed,&one));
+    options.request_id.bytes[0]=8;object.bytes[0]=8;
+    assert(!stqr_cas_async(c,object,1,0,"old!",4,"new!",4,&options,completed,&later));
+    assert(!stqr_connection_sync_async(c,completed,&two));
+    for(unsigned i=0;i<32&&(!one.called||!two.called);i++){int e=stqr_poll(c,0);if(e<0)break;}
+    assert(first.called==1&&!first.error&&later.called==1&&!later.error);
+    assert(one.called==1&&!one.error&&two.called==1&&!two.error);
+    stqr_close(c);
+}
 int main(void) {
     failed_fence(0);failed_fence(1);successful_fence();confirmed_and_legacy_marks();
     observation_and_capacity_never_sync();accepted_mode_never_downgrades();burst_has_only_explicit_fence();dirty_owner_pool_preserves_explicit_cut();
+    overlapping_legacy_fences();legacy_sync_joins_result();redirected_result_precedes_fence();close_cancels_deferred_fence(0);close_cancels_deferred_fence(1);clean_eviction_preserves_deferred_fence();
     puts("C fences are explicit; ordinary bursts and close never checkpoint");return 0;
 }

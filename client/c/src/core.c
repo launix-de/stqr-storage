@@ -22,8 +22,11 @@ struct sq_route {
     stqr_id runtime;
 };
 struct sq_async;
+struct async_sync_group;
 struct stqr_client {
     struct sq_async *async[64];
+    struct async_sync_group *sync_waiting;
+    unsigned sync_progressing;
     struct sq_route *routes;
     unsigned async_count;
     stqr_u64 async_sequence;
@@ -1220,31 +1223,21 @@ static void sync_async_complete(void *arg,int error,int status,void *data,size_t
     struct async_sync_wait *w=arg;(void)status;(void)n;(void)info;sq_free(data);w->error=error;w->done=1;
 }
 int stqr_sync(stqr_client *c) {
-    struct sq_channel *s,*original;
-    if(c) {
-        int modern=!!(c->capabilities&STQR_CAP_CONNECTION_SYNC);
-        for(s=c->channels;s;s=s->next)modern|=!!(s->capabilities&STQR_CAP_CONNECTION_SYNC);
-        if(modern) {
-            struct async_sync_wait wait={0};int result=stqr_connection_sync_async(c,sync_async_complete,&wait);
-            if(result)return result;
-            while(!wait.done) {
-                result=stqr_poll(c,c->timeout);
-                /* Broken channels complete their pending callbacks. Continue
-                 * draining other owners before this stack context expires. */
-                if(result<0 && !wait.done) broken(c);
-            }
-            return wait.error;
-        }
+    struct async_sync_wait wait={0};int result;
+    if(!c)return -EINVAL;
+    /* The asynchronous barrier joins prior logical completions on modern and
+     * legacy owners alike before taking their explicit persistence cut. */
+    result=stqr_connection_sync_async(c,sync_async_complete,&wait);
+    if(result)return result;
+    while(!wait.done) {
+        result=stqr_poll(c,c->timeout);
+        /* Broken channels cancel deferred joins and their pending callbacks.
+         * Drain other owners before this stack completion context expires. */
+        if(result<0 && !wait.done)broken(c);
     }
-    int err=0;
-    if (!c) return -EINVAL;
-    if (!c->channels) return sync_active(c);
-    save_channel(c); original=c->active;
-    for (s=c->channels;s;s=s->next) {
-        load_channel(c,s); err=sync_active(c); save_channel(c); if (err) break;
-    }
-    load_channel(c,original); return err;
+    return wait.error;
 }
+
 int stqr_bucket_space(stqr_client *c, stqr_space *space) {
     struct buf b = {0}, r = {0}; stqr_id rid; stqr_space out = {0}; int err;
     if (!c || !space) return -EINVAL;

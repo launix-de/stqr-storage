@@ -35,12 +35,15 @@ static void async_remove(stqr_client *c,struct sq_async *p) {
 static void async_free(struct sq_async *p) {
     drop(&p->body);drop(&p->stream.data);sq_free(p);
 }
+static void async_sync_progress(stqr_client *c);
+static void async_sync_cancel(stqr_client *c,struct sq_channel *channel,int error);
 static void async_finish(stqr_client *c,struct sq_async *p,int error,int status,
                          void *data,size_t n,const stqr_info *info) {
     stqr_completion cb=p->complete;void *arg=p->arg;
     async_remove(c,p);async_free(p);
     if (cb) cb(arg,error,status,data,n,info);
     else sq_free(data);
+    async_sync_progress(c);
 }
 static void async_fail(stqr_client *c,struct sq_channel *channel,int error) {
     unsigned i;
@@ -51,6 +54,7 @@ static void async_fail(stqr_client *c,struct sq_channel *channel,int error) {
         if ((c->capabilities&STQR_CAP_CONNECTION_SYNC) && c->pending_mark.sequence) c->durability_lost=1;
     } else if (channel && (channel->capabilities&STQR_CAP_CONNECTION_SYNC) && channel->pending.sequence) channel->lost=1;
     if (channel==c->active && channel && c->durability_lost) channel->lost=1;
+    async_sync_cancel(c,channel,error);
     for (i=0;i<64;i++) {
         struct sq_async *p=c->async[i],*next;
         while(p) {
@@ -317,36 +321,94 @@ int stqr_put_async(stqr_client *c,stqr_object_id id,const void *p,size_t n,const
 int stqr_put_range_async(stqr_client *c,stqr_object_id id,stqr_u64 off,const void *p,size_t n,const stqr_options *o){return async_put(c,id,off,p,n,o,1,NULL,NULL);}
 int stqr_put_result_async(stqr_client *c,stqr_object_id id,const void *p,size_t n,const stqr_options *o,stqr_completion cb,void *arg){if(!cb)return -EINVAL;return async_put(c,id,0,p,n,o,0,cb,arg);}
 int stqr_put_range_result_async(stqr_client *c,stqr_object_id id,stqr_u64 off,const void *p,size_t n,const stqr_options *o,stqr_completion cb,void *arg){if(!cb)return -EINVAL;return async_put(c,id,off,p,n,o,1,cb,arg);}
-struct async_sync_group { stqr_client *client;stqr_completion complete;void *arg;unsigned pending;int error,status; };
+struct async_sync_group {
+    struct async_sync_group *next;
+    stqr_client *client;stqr_completion complete;void *arg;
+    stqr_u64 cut;
+    unsigned pending;int error,status;
+};
+static int async_connection_sync_cut(stqr_client *,stqr_completion,void *,stqr_u64);
 static void async_sync_done(void *arg,int error,int status,void *data,size_t n,const stqr_info *info) {
     struct async_sync_group *g=arg;(void)n;(void)info;sq_free(data);
     if(error&&!g->error){g->error=error;g->status=status;}
     if(--g->pending==0 && (!g->error || g->status==301 || g->status==302)) {
         unsigned i;int retry=0;struct sq_async *p;
         for(i=0;i<64;i++)for(p=g->client->async[i];p;p=p->next)
-            if(p->fire&&!p->error&&p->redirects){retry=1;break;}
+            if(p->fire&&p->sequence<=g->cut&&!p->error&&p->redirects){retry=1;break;}
         if(retry) {
             int result;g->pending=1;g->error=0;g->status=0;
-            result=stqr_connection_sync_async(g->client,async_sync_done,g);
+            result=async_connection_sync_cut(g->client,async_sync_done,g,g->cut);
             if(!result)return;
             g->pending=0;g->error=result;
         }
     }
     if(g->pending==0){stqr_completion cb=g->complete;void *user=g->arg;int err=g->error,s=g->error?g->status:200;sq_free(g);cb(user,err,s,NULL,0,NULL);}
 }
-int stqr_connection_sync_async(stqr_client *c,stqr_completion cb,void *arg) {
-    struct async_sync_group *g;struct sq_channel *s,*original;int err=0;
-    if(!c||!cb)return -EINVAL;
-    if(any_lost(c))return -ESTALE;
-    err=ensure_channel(c);if(err)return err;
-    g=sq_alloc(sizeof(*g));if(!g)return -ENOMEM;g->client=c;g->complete=cb;g->arg=arg;g->pending=1;
+/* A result-bearing request can redirect after barrier submission. Join that
+ * finite logical prefix before fencing its eventual owners. Later result jobs
+ * are not prerequisites. The logical join is event driven; legacy checkpoint
+ * requests retain their existing synchronous fallback. */
+static int async_prior_results(stqr_client *c,stqr_u64 cut) {
+    for(unsigned i=0;i<64;i++)for(struct sq_async *p=c->async[i];p;p=p->next)
+        if(!p->fire && p->op!=0x122 && p->sequence<=cut)return 1;
+    return 0;
+}
+static void async_sync_start(struct async_sync_group *g) {
+    stqr_client *c=g->client;struct sq_channel *s,*original;int err=0;
+    if(any_lost(c)){async_sync_done(g,-ESTALE,0,NULL,0,NULL);return;}
     save_channel(c);original=c->active;
     for(s=c->channels;s;s=s->next) {
-        struct buf b={0};stqr_id rid={{0}};if(!s->socket)continue;
+        struct buf b={0};stqr_id rid={{0}};
+        if(!s->socket) {
+            if(s->pending.sequence&&!g->error)g->error=-ENOTCONN;
+            continue;
+        }
         load_channel(c,s);g->pending++;
         if(c->capabilities&STQR_CAP_CONNECTION_SYNC)err=async_submit(c,0x122,&b,rid,(stqr_object_id){{0}},0,0,0,0,async_sync_done,g);
         else {err=sync_active(c);async_sync_done(g,err,c->status,NULL,0,NULL);err=0;}
         save_channel(c);if(err){g->pending--;if(!g->error){g->error=err;g->status=0;}}
     }
-    load_channel(c,original);async_sync_done(g,0,200,NULL,0,NULL);return 0;
+    load_channel(c,original);async_sync_done(g,0,200,NULL,0,NULL);
+}
+static void async_sync_progress(stqr_client *c) {
+    struct async_sync_group **at=&c->sync_waiting;
+    /* A legacy synchronous fence can dispatch normal async completions. Those
+     * completions may release another group, but must not nest a reply loop. */
+    if(c->sync_progressing)return;
+    c->sync_progressing=1;
+    while(*at) {
+        struct async_sync_group *g=*at;
+        if(async_prior_results(c,g->cut)){at=&g->next;continue;}
+        *at=g->next;g->next=NULL;
+        async_sync_start(g);
+        /* Legacy barriers may dispatch other completed requests while waiting. */
+        at=&c->sync_waiting;
+    }
+    c->sync_progressing=0;
+}
+static void async_sync_cancel(stqr_client *c,struct sq_channel *channel,int error) {
+    struct async_sync_group **at=&c->sync_waiting;
+    while(*at) {
+        struct async_sync_group *g=*at;int affected=any_lost(c);
+        for(unsigned i=0;i<64&&!affected;i++)for(struct sq_async *p=c->async[i];p;p=p->next)
+            if(p->channel==channel && p->op!=0x122 && p->sequence<=g->cut){affected=1;break;}
+        /* Evicting a clean unrelated channel does not cancel this prefix. */
+        if(!affected){at=&g->next;continue;}
+        *at=g->next;
+        stqr_completion cb=g->complete;void *arg=g->arg;
+        sq_free(g);cb(arg,error,0,NULL,0,NULL);
+    }
+}
+static int async_connection_sync_cut(stqr_client *c,stqr_completion cb,void *arg,stqr_u64 cut) {
+    struct async_sync_group *g;int err;
+    if(!c||!cb)return -EINVAL;
+    if(any_lost(c))return -ESTALE;
+    err=ensure_channel(c);if(err)return err;
+    g=sq_alloc(sizeof(*g));if(!g)return -ENOMEM;
+    g->client=c;g->complete=cb;g->arg=arg;g->pending=1;g->cut=cut;
+    g->next=c->sync_waiting;c->sync_waiting=g;
+    async_sync_progress(c);return 0;
+}
+int stqr_connection_sync_async(stqr_client *c,stqr_completion cb,void *arg) {
+    return async_connection_sync_cut(c,cb,arg,c?c->async_sequence:0);
 }

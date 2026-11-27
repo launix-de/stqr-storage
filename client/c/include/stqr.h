@@ -82,7 +82,7 @@ void stqr_free(void *data);
 #define STQR_CAP_ACCEPTED_STREAMS (1U << 21)
 #define STQR_CAP_ACCEPTED_REFERENCES 1048576U
 /* Filesystem-only opt-in; defaults to durable references. Persists across
- * owner routing/reconnect, and falls back to durable on unsupported peers. */
+ * owner routing/reconnect; unsupported accepted-reference peers reject it. */
 void stqr_set_accepted_references(stqr_client *, int enabled);
 typedef void (*stqr_completion)(void *arg, int error, int status,
                                 void *data, size_t length, const stqr_info *info);
@@ -107,6 +107,8 @@ int stqr_delete_async(stqr_client *, stqr_object_id, const stqr_options *, stqr_
 int stqr_unsubscribe_async(stqr_client *, stqr_id subscription, stqr_completion, void *);
 int stqr_subscribe_async(stqr_client *, stqr_object_id, stqr_id subscription,
                          stqr_u64 *cursor, stqr_completion, void *);
+/* Captures preceding logical result completions, including redirects, before
+ * explicitly fencing their owners. Later submissions do not extend that join. */
 int stqr_connection_sync_async(stqr_client *, stqr_completion, void *);
 unsigned stqr_async_pending(const stqr_client *);
 /* A readiness notification never processes replies and must not sleep. Kernel
