@@ -2,12 +2,17 @@
 package server
 
 import (
+	"math"
+	"time"
+
 	"github.com/launix-de/stqr-storage/client"
 )
 
-type placementVolumeRate struct{ read, write float64 }
+type placementVolumeRate struct {
+	read, write float64
+}
 
-func placementVolumeRates(snapshots []client.StatsSnapshot, previous *pgRebuildCatalog) map[client.ID]placementVolumeRate {
+func placementVolumeRates(snapshots []client.StatsSnapshot, previous *pgRebuildCatalog, halfLife time.Duration) map[client.ID]placementVolumeRate {
 	out := make(map[client.ID]placementVolumeRate)
 	if previous == nil {
 		return out
@@ -23,11 +28,18 @@ func placementVolumeRates(snapshots []client.StatsSnapshot, previous *pgRebuildC
 		}
 		if prior.Sequence == snapshot.Sequence {
 			for _, v := range snapshot.Volumes {
-				out[v.ID] = previous.volumeRates[v.ID]
+				if rate, known := previous.volumeRates[v.ID]; known {
+					out[v.ID] = rate
+				}
 			}
 			continue
 		}
-		if snapshot.CapturedUnixNS <= prior.CapturedUnixNS {
+		if snapshot.Sequence < prior.Sequence || snapshot.CapturedUnixNS <= prior.CapturedUnixNS {
+			for _, v := range snapshot.Volumes {
+				if rate, known := previous.volumeRates[v.ID]; known {
+					out[v.ID] = rate
+				}
+			}
 			continue
 		}
 		seconds := float64(snapshot.CapturedUnixNS-prior.CapturedUnixNS) / 1e9
@@ -37,13 +49,20 @@ func placementVolumeRates(snapshots []client.StatsSnapshot, previous *pgRebuildC
 		}
 		for _, v := range snapshot.Volumes {
 			p, ok := volumes[v.ID]
-			if !ok {
+			if !ok || v.IO.PhysicalReadBytes < p.IO.PhysicalReadBytes || v.IO.PhysicalWriteBytes < p.IO.PhysicalWriteBytes {
 				continue
 			}
 			read := float64(subtractCapacity(v.IO.PhysicalReadBytes, p.IO.PhysicalReadBytes)) / seconds
 			write := float64(subtractCapacity(v.IO.PhysicalWriteBytes, p.IO.PhysicalWriteBytes)) / seconds
-			last := previous.volumeRates[v.ID]
-			out[v.ID] = placementVolumeRate{.75*last.read + .25*read, .75*last.write + .25*write}
+			last, known := previous.volumeRates[v.ID]
+			if !known {
+				// Seed with an actually observed interval, not a week-long ramp
+				// from an invented zero. A reboot/counter reset starts afresh.
+				out[v.ID] = placementVolumeRate{read, write}
+				continue
+			}
+			elapsed := time.Duration(min(snapshot.CapturedUnixNS-prior.CapturedUnixNS, uint64(math.MaxInt64)))
+			out[v.ID] = placementVolumeRate{statisticsRate(last.read, read, elapsed, halfLife), statisticsRate(last.write, write, elapsed, halfLife)}
 		}
 	}
 	return out

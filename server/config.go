@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/launix-de/stqr-storage/volume"
 	"gopkg.in/yaml.v3"
@@ -62,6 +63,7 @@ type VolumeConfig struct {
 	OperationID            string   `yaml:"operation_id,omitempty" json:"operation_id,omitempty"`
 }
 type Config struct {
+	PlacementStatsHalfLife time.Duration  `yaml:"placement_stats_half_life,omitempty" json:"placement_stats_half_life,omitempty"`
 	FormatPluginsDir       string         `yaml:"format_plugins_dir,omitempty" json:"format_plugins_dir,omitempty"`
 	BrowserOrigins         []string       `yaml:"browser_origins,omitempty" json:"browser_origins,omitempty"`
 	RecoveryVolumes        []VolumeConfig `yaml:"recovery_volumes,omitempty" json:"recovery_volumes,omitempty"`
@@ -289,6 +291,9 @@ func loadConfig(path string, o Options) (Config, error) {
 	return c, nil
 }
 func validateConfig(c Config) error {
+	if c.PlacementStatsHalfLife < 0 {
+		return errors.New("placement_stats_half_life must be positive")
+	}
 	if _, e := parseID(c.Node.ID); e != nil {
 		return e
 	}

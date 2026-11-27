@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"math/bits"
+	"slices"
 	"sort"
 )
 
@@ -52,7 +53,7 @@ func (v *Volume) SetAdmission(f Admission, observers ...func(StorageSnapshot)) e
 	v.admission = f
 	if len(observers) > 0 {
 		v.observer = observers[0]
-		v.observer(StorageSnapshot{All: v.usage(v.accounting, v.sb), Owned: v.ownedUsage(v.owned, v.accounting, v.sb)})
+		v.observer(v.storageSnapshot(v.accounting, v.owned, v.sb))
 	}
 	return nil
 }
@@ -471,7 +472,7 @@ func (v *Volume) SetOwnershipFilter(stamp any, include func(Key, bool) bool) err
 		v.accounting, v.owned = all, selected
 		v.ownerFilter, v.ownerStamp = include, stamp
 		if v.observer != nil {
-			v.observer(StorageSnapshot{All: v.usage(all, v.sb), Owned: v.ownedUsage(selected, all, v.sb)})
+			v.observer(v.storageSnapshot(all, selected, v.sb))
 		}
 		return nil
 	}
@@ -495,7 +496,7 @@ func (v *Volume) SetOwnershipFilter(stamp any, include func(Key, bool) bool) err
 			if complete {
 				v.owned, v.ownerFilter, v.ownerStamp = selected, include, stamp
 				if v.observer != nil {
-					v.observer(StorageSnapshot{All: v.usage(v.accounting, v.sb), Owned: v.ownedUsage(selected, v.accounting, v.sb)})
+					v.observer(v.storageSnapshot(v.accounting, selected, v.sb))
 				}
 				return nil
 			}
@@ -542,7 +543,7 @@ func (v *Volume) SetOwnershipFilter(stamp any, include func(Key, bool) bool) err
 					if complete {
 						v.owned, v.ownerFilter, v.ownerStamp = selected, include, stamp
 						if v.observer != nil {
-							v.observer(StorageSnapshot{All: v.usage(v.accounting, v.sb), Owned: v.ownedUsage(v.owned, v.accounting, v.sb)})
+							v.observer(v.storageSnapshot(v.accounting, v.owned, v.sb))
 						}
 						return nil
 					}
@@ -569,7 +570,7 @@ func (v *Volume) SetOwnershipFilter(stamp any, include func(Key, bool) bool) err
 	v.ownerFilter = include
 	v.ownerStamp = stamp
 	if v.observer != nil {
-		v.observer(StorageSnapshot{All: v.usage(v.accounting, v.sb), Owned: v.ownedUsage(v.owned, v.accounting, v.sb)})
+		v.observer(v.storageSnapshot(v.accounting, v.owned, v.sb))
 	}
 	return nil
 }
@@ -600,7 +601,12 @@ func (h *Handle) OwnedStorageUsage() ([]BucketStorage, error) {
 	})
 }
 func (v *Volume) ownedUsage(selected, all map[ID]bucketAllocation, sb Superblock) []BucketStorage {
-	full := v.usage(all, sb)
+	return ownedUsageFromFull(v.usage(all, sb), selected, all)
+}
+
+// Reuse the sorted all-bucket image: shared metadata apportionment must remain
+// exact, but does not need another full materialization for the owned subset.
+func ownedUsageFromFull(full []BucketStorage, selected, all map[ID]bucketAllocation) []BucketStorage {
 	if selected == nil {
 		return full
 	}
@@ -617,6 +623,16 @@ func (v *Volume) ownedUsage(selected, all map[ID]bucketAllocation, sb Superblock
 		out = append(out, BucketStorage{Bucket: u.Bucket, Logical: s.logical, Objects: s.objects, Physical: s.payload + s.metadata + q})
 	}
 	return out
+}
+
+func (v *Volume) storageSnapshot(all, owned map[ID]bucketAllocation, sb Superblock) StorageSnapshot {
+	full := v.usage(all, sb)
+	selected := ownedUsageFromFull(full, owned, all)
+	if owned == nil {
+		// Callbacks historically receive independent All/Owned slices.
+		selected = slices.Clone(full)
+	}
+	return StorageSnapshot{All: full, Owned: selected}
 }
 
 func (v *Volume) recordImported(key indexKey) (bool, error) {
