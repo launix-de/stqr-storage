@@ -25,7 +25,10 @@ func (s *Server) parallelMutationCandidate(b *Bucket, p principal, id volume.Obj
 		return false
 	}
 	d := b.storageDescription()
-	if d.DesiredPolicy != nil || d.State != BucketActive || d.Policy.PlacementMode == "everywhere" {
+	// Inherited logical bytes are not necessarily represented by a local
+	// RecordInfo. Until a dedicated COW delta proof exists, all linked buckets
+	// (including their internal coordination roots) retain exclusive admission.
+	if len(d.ClonePeers) != 0 || d.DesiredPolicy != nil || d.State != BucketActive || d.Policy.PlacementMode == "everywhere" {
 		return false
 	}
 	entry, ok := s.placement.Load().lookup(client.ID(b.ID()), client.ObjectID(id))

@@ -720,3 +720,33 @@ func TestParallelQuotaLogicalPublicationSurvivesLaterPhysicalCleanupFailure(t *t
 		t.Fatal("uncertain cleanup donated physical quota")
 	}
 }
+
+func TestParallelAdmissionLinkedCOWAlwaysUsesExclusiveFallback(t *testing.T) {
+	s, b, _, _, _ := parallelAdmissionFixture(t, true, "logical", 16<<30)
+	p := quotaPrincipal(t, s)
+	ids := []volume.ObjectID{{2}, volume.ObjectID(client.ObjectReferenceRootID())}
+	s.opMu.Lock()
+	for _, id := range ids {
+		if !s.parallelMutationCandidate(b, p, id) {
+			s.opMu.Unlock()
+			t.Fatal("missing positive eligibility control")
+		}
+	}
+	b.mu.Lock()
+	before := b.description
+	linked := before
+	linked.ClonePeers = []BucketClonePeer{{}}
+	b.setDescription(linked)
+	b.mu.Unlock()
+	eligible := false
+	for _, id := range ids {
+		eligible = eligible || s.parallelMutationCandidate(b, p, id)
+	}
+	b.mu.Lock()
+	b.setDescription(before)
+	b.mu.Unlock()
+	s.opMu.Unlock()
+	if eligible {
+		t.Fatal("linked COW bucket assumed local metadata equals inherited logical usage")
+	}
+}
