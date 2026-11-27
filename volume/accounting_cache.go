@@ -84,7 +84,7 @@ func (v *Volume) ConfigureAccounting(o AccountingOptions) (bool, error) {
 		}
 	}
 	if v.accountReady.Load() && v.observer != nil {
-		v.observer(StorageSnapshot{All: v.usage(v.accounting, v.sb), Owned: v.ownedUsage(v.owned, v.accounting, v.sb)})
+		v.observer(v.storageSnapshot(v.accounting, v.owned, v.sb))
 	}
 	return v.accountReady.Load(), nil
 }
@@ -157,7 +157,7 @@ func (v *Volume) WarmAccounting(ctx context.Context) error {
 		v.accounting, v.owned = all, owned
 		v.accountReady.Store(true)
 		if v.observer != nil {
-			v.observer(StorageSnapshot{All: v.usage(all, v.sb), Owned: v.ownedUsage(owned, all, v.sb)})
+			v.observer(v.storageSnapshot(all, owned, v.sb))
 		}
 		return nil
 	}()

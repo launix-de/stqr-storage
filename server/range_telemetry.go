@@ -22,6 +22,7 @@ type rangeMetric struct {
 	sampled             time.Time
 	lastRead, lastWrite uint64
 	readRate, writeRate float64
+	rateReady           bool
 }
 
 // Range telemetry is advisory. Keep snapshots comfortably below the existing
@@ -53,15 +54,18 @@ func (b *Bucket) recordRangeTraffic(p principal, id volume.ObjectID, read, write
 	m.active.Store(now.UnixNano())
 }
 
-func (r *rangeManager) rangeWorkload(key rangeMetricKey) (float64, float64) {
+func (r *rangeManager) rangeWorkload(key rangeMetricKey, halfLife time.Duration) (float64, float64) {
 	value, ok := r.metrics.Load(key)
 	if !ok {
 		return 0, 0
 	}
 	m := value.(*rangeMetric)
+	return m.workload(time.Now(), halfLife)
+}
+
+func (m *rangeMetric) workload(now time.Time, halfLife time.Duration) (float64, float64) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	now := time.Now()
 	read, write := m.read.Load(), m.write.Load()
 	if m.sampled.IsZero() {
 		m.sampled = now
@@ -70,8 +74,13 @@ func (r *rangeManager) rangeWorkload(key rangeMetricKey) (float64, float64) {
 	}
 	seconds := now.Sub(m.sampled).Seconds()
 	if seconds >= 1 {
-		m.readRate = float64(read-m.lastRead) / seconds
-		m.writeRate = float64(write-m.lastWrite) / seconds
+		readRate, writeRate := float64(read-m.lastRead)/seconds, float64(write-m.lastWrite)/seconds
+		if !m.rateReady {
+			m.readRate, m.writeRate, m.rateReady = readRate, writeRate, true
+		} else {
+			m.readRate = statisticsRate(m.readRate, readRate, now.Sub(m.sampled), halfLife)
+			m.writeRate = statisticsRate(m.writeRate, writeRate, now.Sub(m.sampled), halfLife)
+		}
 		m.sampled, m.lastRead, m.lastWrite = now, read, write
 	}
 	return m.readRate, m.writeRate

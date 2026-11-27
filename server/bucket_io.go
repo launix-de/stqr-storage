@@ -102,7 +102,10 @@ func (b *Bucket) recordTraffic(p principal, read, write uint64) {
 	if id == "" {
 		return
 	}
-	value, _ := b.server.userIO.LoadOrStore(id, &bucketIO{})
+	value, exists := b.server.userIO.Load(id)
+	if !exists {
+		value, _ = b.server.userIO.LoadOrStore(id, &bucketIO{})
+	}
 	counters := value.(*bucketIO)
 	counters.read.Add(read)
 	counters.write.Add(write)
