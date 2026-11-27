@@ -30,6 +30,7 @@ type kernelWritebackFault struct {
 	rejected    atomic.Uint64
 	connections atomic.Uint64
 	before      atomic.Uint64
+	unpin       kernelUnpinGate
 	ranges      kernelRangeGate
 }
 
@@ -191,6 +192,137 @@ func (g *kernelRangeGate) verify() error {
 	return nil
 }
 
+// kernelUnpinGate holds one retirement request before storage observes it.
+// The HTTP control channel remains independent, so close must return before
+// the test releases or drops this WebSocket incarnation.
+type kernelUnpinGate struct {
+	mu                            sync.Mutex
+	target                        client.ObjectID
+	pins                          map[client.ID]int
+	latestPin                     client.ID
+	metadata, metadataSeen        bool
+	release                       chan struct{}
+	enabled, seen, timedOut, drop bool
+}
+
+// Record real PIN envelopes, rather than inferring renewal from an entry that
+// could simply have survived the dropped socket. The shared test uses two token
+// generations and must renew the newer token before another file joins it.
+func (g *kernelUnpinGate) recordPin(raw []byte) {
+	m, err := client.DecodeMessage(raw)
+	if err != nil || m.Opcode != client.ObjectReference || len(m.Body) < 129 || m.Body[112] != 0 {
+		return
+	}
+	var object client.ObjectID
+	var token client.ID
+	copy(object[:], m.Body[80:112])
+	copy(token[:], m.Body[113:129])
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if object != g.target {
+		return
+	}
+	if g.pins == nil {
+		g.pins = make(map[client.ID]int)
+	}
+	g.pins[token]++
+	g.latestPin = token
+}
+
+func (g *kernelUnpinGate) verifyRenewal() (int, int, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	total := 0
+	for _, n := range g.pins {
+		total += n
+	}
+	if len(g.pins) != 2 || g.pins[g.latestPin] < 2 {
+		return total, len(g.pins), fmt.Errorf("new generation was not renewed with its original PIN token: requests=%d tokens=%d latest=%d", total, len(g.pins), g.pins[g.latestPin])
+	}
+	return total, len(g.pins), nil
+}
+
+func (g *kernelUnpinGate) verifyRestartRenewal() (int, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if len(g.pins) != 1 || g.pins[g.latestPin] < 2 {
+		return 0, fmt.Errorf("postrestart open did not renew its original PIN token: tokens=%d requests=%d", len(g.pins), g.pins[g.latestPin])
+	}
+	return g.pins[g.latestPin], nil
+}
+
+// Hold a warm inode owner GET before storage, after the open joined its group.
+// Closing the real backend cancels this held attempt and exercises GET recovery.
+func (g *kernelUnpinGate) beginMetadata() {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.metadata = true
+	g.metadataSeen = false
+	g.release = make(chan struct{})
+}
+func (g *kernelUnpinGate) sawMetadata() bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.metadataSeen
+}
+func (g *kernelUnpinGate) matchMetadata(raw []byte) <-chan struct{} {
+	m, err := client.DecodeMessage(raw)
+	if err != nil || m.Opcode != 0x100 || len(m.Body) < 48 {
+		return nil
+	}
+	var object client.ObjectID
+	copy(object[:], m.Body[16:48])
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if !g.metadata || g.metadataSeen || object != g.target {
+		return nil
+	}
+	g.metadataSeen = true
+	return g.release
+}
+
+func (g *kernelUnpinGate) begin() {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.release = make(chan struct{})
+	g.enabled = true
+	g.seen = false
+	g.timedOut = false
+	g.drop = false
+}
+func (g *kernelUnpinGate) match(raw []byte) <-chan struct{} {
+	m, e := client.DecodeMessage(raw)
+	if e != nil || m.Opcode != client.ObjectReference || len(m.Body) < 113 || m.Body[112] != 1 {
+		return nil
+	}
+	var id client.ObjectID
+	copy(id[:], m.Body[80:112])
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if !g.enabled || g.seen || id != g.target {
+		return nil
+	}
+	g.seen = true
+	return g.release
+}
+func (g *kernelUnpinGate) end(drop bool) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if !g.enabled || !g.seen || g.timedOut {
+		return errors.New("UNPIN gate was not observed before close returned")
+	}
+	g.drop = drop
+	g.enabled = false
+	close(g.release)
+	return nil
+}
+func (g *kernelUnpinGate) observed() bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.seen && !g.timedOut
+}
+func (g *kernelUnpinGate) shouldDrop() bool { g.mu.Lock(); defer g.mu.Unlock(); return g.drop }
+
 func (f *kernelWritebackFault) begin() {
 	f.rejected.Store(0)
 	f.before.Store(f.connections.Load())
@@ -252,6 +384,13 @@ func (f *kernelWritebackFault) proxy(w http.ResponseWriter, r *http.Request, ups
 	}
 	defer downstream.Close()
 	f.connections.Add(1)
+	var peerWriter sync.Mutex
+	forward := func(kind int, raw []byte) error {
+		peerWriter.Lock()
+		defer peerWriter.Unlock()
+		return peer.WriteMessage(kind, raw)
+	}
+	var held sync.WaitGroup
 	var writer sync.Mutex
 	write := func(kind int, raw []byte) error {
 		writer.Lock()
@@ -330,6 +469,7 @@ func (f *kernelWritebackFault) proxy(w http.ResponseWriter, r *http.Request, ups
 		downstream.Close()
 		<-done
 		replies.Wait()
+		held.Wait()
 	}()
 	for {
 		kind, raw, err := downstream.ReadMessage()
@@ -347,8 +487,52 @@ func (f *kernelWritebackFault) proxy(w http.ResponseWriter, r *http.Request, ups
 				continue
 			}
 		}
+		if release := f.unpin.matchMetadata(raw); release != nil {
+			held.Add(1)
+			go func() {
+				defer held.Done()
+				select {
+				case <-release:
+				case <-ctx.Done():
+					return
+				case <-time.After(4 * time.Second):
+					return
+				}
+				if forward(kind, raw) != nil {
+					peer.Close()
+					downstream.Close()
+				}
+			}()
+			continue
+		}
 		f.ranges.request(raw)
-		if peer.WriteMessage(kind, raw) != nil {
+		f.unpin.recordPin(raw)
+		if release := f.unpin.match(raw); release != nil {
+			held.Add(1)
+			go func() {
+				defer held.Done()
+				select {
+				case <-release:
+					if f.unpin.shouldDrop() {
+						peer.Close()
+						downstream.Close()
+						return
+					}
+				case <-time.After(2 * time.Second):
+					f.unpin.mu.Lock()
+					f.unpin.timedOut = true
+					f.unpin.mu.Unlock()
+				case <-ctx.Done():
+					return
+				}
+				if forward(kind, raw) != nil {
+					peer.Close()
+					downstream.Close()
+				}
+			}()
+			continue
+		}
+		if forward(kind, raw) != nil {
 			return
 		}
 	}
