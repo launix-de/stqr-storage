@@ -135,6 +135,24 @@ func (r *requestIDCoordination) acquire(ctx context.Context, id volume.ID) (func
 		return nil, ctx.Err()
 	}
 }
+
+// This unlocked preflight chooses an optimization, never routing authority.
+// Full-probe reads need no additional admission: introducing it would queue a
+// pinned read behind an unrelated exclusive writer waiting on another Volume.
+// If absence hints look useful, acquire guards and rebuild the actual proof.
+func (b *Bucket) membershipReadCouldSkip(key volume.Key) bool {
+	_, _, cohort := b.probeCohort(b.storageDescription(), key)
+	if len(cohort) < 2 {
+		return false
+	}
+	for _, v := range cohort {
+		if !v.MayContainObject(key) && !v.MayContainPending(key) {
+			return true
+		}
+	}
+	return false
+}
+
 func (s *Server) lockRequestID(ctx context.Context, id volume.ID) (func(), error) {
 	if id == (volume.ID{}) {
 		return func() {}, nil
@@ -155,7 +173,7 @@ func (b *Bucket) openSelectedRead(ctx context.Context, p principal, id volume.Ob
 	if err := ctx.Err(); err != nil {
 		return nil, nil, BucketDescription{}, volume.Info{}, err
 	}
-	guarded := membershipReadEnabled(ctx)
+	guarded := membershipReadEnabled(ctx) && b.membershipReadCouldSkip(key)
 	if guarded {
 		if s.replicas != nil {
 			release := s.replicas.lock(key)
