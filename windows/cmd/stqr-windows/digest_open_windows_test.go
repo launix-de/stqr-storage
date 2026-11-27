@@ -16,14 +16,20 @@ import (
 )
 
 func TestDigestReaderAllowsConcurrentAtomicReplacement(t *testing.T) {
-	for _, kind := range []string{"short", "long"} {
-		t.Run(kind, func(t *testing.T) { testDigestReaderReplacement(t, kind == "long") })
+	for _, kind := range []string{"short", "long", "unicode", "long-unicode"} {
+		t.Run(kind, func(t *testing.T) { testDigestReaderReplacement(t, kind) })
 	}
 }
 
-func testDigestReaderReplacement(t *testing.T, long bool) {
+func testDigestReaderReplacement(t *testing.T, kind string) {
 	t.Helper()
-	directory := digestReplacementDirectory(t, long)
+	directory := digestReplacementDirectory(t, strings.HasPrefix(kind, "long"))
+	if strings.Contains(kind, "unicode") {
+		directory = filepath.Join(directory, "Übergrößenträger-東京-📦")
+		if err := os.MkdirAll(directory, 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
 	testDigestReaderReplacementPaths(t, filepath.Join(directory, "cache.exe"), filepath.Join(directory, "replacement.exe"))
 }
 
