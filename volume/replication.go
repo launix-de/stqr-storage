@@ -305,7 +305,14 @@ func (h *Handle) PublishReplica(id ID, binding ReplicaBinding) (Result, error) {
 		defer t.close()
 		// Prepared payload remains durable until this redo transaction commits.
 		// Apply addressed bytes to existing allocations under the volume lock.
-		if reusableObject(old, o.Info.Compression) && (r.operation == opPut || r.operation == opPutRange || r.operation == opCAS) {
+		reusable := reusableObject(old, o.Info.Compression)
+		if r.operation == opPut || r.operation == opCAS && r.whole {
+			// A whole RAW replacement must stay packed after replication too.
+			// When reuse cannot preserve that layout, publish the already packed
+			// prepared object below instead of splitting growth onto the old tail.
+			reusable = reusableReplacement(old, o.Info.Compression, o.Info.Length)
+		}
+		if reusable && (r.operation == opPut || r.operation == opPutRange || r.operation == opCAS) {
 			staged := o
 			next := cloneObject(old)
 			next.Base, next.Size = 0, 0
