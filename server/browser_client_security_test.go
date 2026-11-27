@@ -4,10 +4,12 @@ package server
 import (
 	"context"
 	"encoding/base64"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gorilla/websocket"
 	"github.com/launix-de/stqr-storage/client"
@@ -105,5 +107,59 @@ func TestJSClientTunnelDelegationScope(t *testing.T) {
 	release()
 	if got := open(b.ID().String(), "opaque", name, password); got != 401 {
 		t.Fatal("released grant", got)
+	}
+}
+
+func TestJSClientTunnelRevocation(t *testing.T) {
+	for _, action := range []string{"grant", "disabled"} {
+		t.Run(action, func(t *testing.T) {
+			source, target := startAutomaticDaemonPair(t)
+			addTestVolume(t, target.node, "data", "hdd", 8<<20)
+			b, _ := createProtocolBucket(t, source.node, "browser-revoke")
+			user := bucketProtocolUser(t, source.node)
+			uid, _ := parseID(user.ID)
+			grant := client.Encoder{}
+			grant.ID(client.ID(b.ID()))
+			grant.ID(client.ID(uid))
+			grant.U32(uint32(BucketAllPermissions))
+			if _, status, _ := adminBucketMessage(t, source.node, client.BucketGrant, grant.B); status != 200 {
+				t.Fatal("grant", status)
+			}
+			headers := http.Header{}
+			headers.Set(client.BucketHeader, b.ID().String())
+			headers.Set(client.FormatHeader, "opaque")
+			headers.Set("Authorization", "Basic "+base64.StdEncoding.EncodeToString([]byte(user.Name+":bucket-test-password")))
+			ws, response, err := (&websocket.Dialer{Subprotocols: []string{"stqr.v2"}}).Dial("ws"+strings.TrimPrefix(source.node.cfg.Node.Advertise, "http")+"/api/bucket-tunnel?node="+target.node.cfg.Node.ID, headers)
+			if err != nil {
+				if response != nil {
+					t.Fatalf("open tunnel %d: %v", response.StatusCode, err)
+				}
+				t.Fatal(err)
+			}
+			defer ws.Close()
+			if action == "grant" {
+				revoke := client.Encoder{}
+				revoke.ID(client.ID(b.ID()))
+				revoke.ID(client.ID(uid))
+				if _, status, _ := adminBucketMessage(t, source.node, client.BucketRevoke, revoke.B); status != 200 {
+					t.Fatal("revoke", status)
+				}
+			} else {
+				update := client.Encoder{}
+				update.ID(client.ID(uid))
+				update.Text(user.Name)
+				update.U8(0)
+				update.Bool(true)
+				if _, status, _ := adminBucketMessage(t, source.node, client.UserUpdate, update.B); status != 200 {
+					t.Fatal("disable", status)
+				}
+			}
+			ws.SetReadDeadline(time.Now().Add(5 * time.Second))
+			if _, _, err = ws.ReadMessage(); err == nil {
+				t.Fatal("revoked tunnel remained live")
+			} else if timeout, ok := err.(net.Error); ok && timeout.Timeout() {
+				t.Fatal("revocation did not close tunnel")
+			}
+		})
 	}
 }
