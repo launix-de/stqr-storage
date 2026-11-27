@@ -1218,7 +1218,7 @@ static int ks_open_file(struct inode *inode, struct file *file)
 	struct ks_file_reference *ref;
 	struct ks_snapshot snapshot = {0};
 	stqr_object_id id = ki->id;
-	unsigned saved;
+	unsigned saved, attempt;
 	int err = generic_file_open(inode, file);
 	if (err)
 		return err;
@@ -1269,15 +1269,47 @@ static int ks_open_file(struct inode *inode, struct file *file)
 		ki->reference = ref;
 	}
 	mutex_unlock(&ki->reference_lock);
-	if (!err)
-		err = ks_validate_open_cache(f, id);
-	if (!err && f->lower)
-		err = ks_validate_open_cache(f->lower, id);
-	if (!err)
-		err = ks_snapshot(f, id, &snapshot);
-	if (!err && (snapshot.node.removed || !snapshot.node.links))
-		err = -ENOENT;
-	ks_snapshot_free(&snapshot);
+	/* Sharing lifetime protection does not reuse stale open permissions or
+	 * namespace/link state. A fresh GET can itself recover the connection after
+	 * the group was joined. Re-establish the PIN, then repeat the metadata
+	 * validation under that protection before completing this new open. */
+	for (attempt = 0; attempt < 128; attempt++) {
+		bool renewed;
+		u64 upper_epoch, lower_epoch;
+		/* Another opener may renew the shared group during our GET. Compare
+		 * against the protection under which this pass began, not its later
+		 * mutable epoch, so that renewal cannot certify pre-PIN metadata. */
+		mutex_lock(&ki->reference_lock);
+		upper_epoch = ref->upper_epoch;
+		lower_epoch = ref->lower_epoch;
+		mutex_unlock(&ki->reference_lock);
+		if (!err)
+			err = ks_validate_open_cache(f, id);
+		if (!err && f->lower)
+			err = ks_validate_open_cache(f->lower, id);
+		if (!err)
+			err = ks_snapshot(f, id, &snapshot);
+		if (!err && (snapshot.node.removed || !snapshot.node.links))
+			err = -ENOENT;
+		ks_snapshot_free(&snapshot);
+		if (err)
+			break;
+		mutex_lock(&ki->reference_lock);
+		renewed = (ref->upper_pinned && upper_epoch !=
+			   READ_ONCE(f->rpc[0].reconnect_epoch)) ||
+			  (ref->lower_pinned && lower_epoch !=
+			   READ_ONCE(f->lower->rpc[0].reconnect_epoch));
+		if (renewed)
+			err = ks_refresh_reference(ref);
+		mutex_unlock(&ki->reference_lock);
+		if (err || !renewed)
+			break;
+		/* Match snapshot's bounded consistency retries, without bounding any
+		 * individual RPC's existing transport recovery. Never accept metadata
+		 * from before the last renewal when incarnations keep changing. */
+		if (attempt == 127)
+			err = -EAGAIN;
+	}
 	if (err)
 		ks_put_reference(inode, ref, false);
 	else

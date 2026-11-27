@@ -37,7 +37,7 @@ func TestKSTQRVirtualMachine(t *testing.T) {
 	// Focused scripts replace the same init section; combining them cannot
 	// represent a valid test and must fail before starting a guest.
 	selectedMode := ""
-	for _, mode := range []string{"ASYNC_UNPIN", "SHARED_PINS", "CACHE_REOPEN", "BENCHMARK", "WRITE_BENCHMARK", "READ_WINDOW", "LOOP", "RESTART_ONLY", "OVERLAY", "OVERLAY_PROOF", "OUTAGE", "CACHE_RETENTION", "REFERENCE_LIMIT"} {
+	for _, mode := range []string{"POSTRESTART_PIN", "ASYNC_UNPIN", "SHARED_PINS", "CACHE_REOPEN", "BENCHMARK", "WRITE_BENCHMARK", "READ_WINDOW", "LOOP", "RESTART_ONLY", "OVERLAY", "OVERLAY_PROOF", "OUTAGE", "CACHE_RETENTION", "REFERENCE_LIMIT"} {
 		if os.Getenv("STQR_KERNEL_"+mode) == "1" {
 			if selectedMode != "" {
 				t.Fatalf("incompatible kernel fixture modes %s and %s; run them separately", selectedMode, mode)
@@ -110,6 +110,7 @@ func TestKSTQRVirtualMachine(t *testing.T) {
 	run("cc", "-static", "-std=c11", "-Wall", "-Wextra", "-Werror", "-O2", "-o", filepath.Join(initrdRoot, "read-window"), filepath.Join(root, "tests/read_window.c"))
 	run("cc", "-static", "-std=c11", "-Wall", "-Wextra", "-Werror", "-O2", "-o", filepath.Join(initrdRoot, "async-unpin"), filepath.Join(root, "tests/async_unpin.c"))
 	run("cc", "-static", "-std=c11", "-Wall", "-Wextra", "-Werror", "-O2", "-o", filepath.Join(initrdRoot, "shared-pins"), filepath.Join(root, "tests/shared_pins.c"))
+	run("cc", "-static", "-std=c11", "-Wall", "-Wextra", "-Werror", "-O2", "-o", filepath.Join(initrdRoot, "postrestart-pin"), filepath.Join(root, "tests/postrestart_pin.c"))
 	run("cc", "-static", "-std=c11", "-Wall", "-Wextra", "-Werror", "-O2", "-o", filepath.Join(initrdRoot, "writeback"), filepath.Join(root, "tests/writeback.c"))
 	run("cc", "-static", "-std=c11", "-Wall", "-Wextra", "-Werror", "-O2", "-o", filepath.Join(initrdRoot, "crash-reconnect"), filepath.Join(root, "tests/crash_reconnect.c"))
 	run("cc", "-static", "-std=c11", "-Wall", "-Wextra", "-Werror", "-O2", "-o", filepath.Join(initrdRoot, "mmap-test"), filepath.Join(root, "tests/mmap.c"), "-lsqlite3", "-lm", "-ldl", "-lpthread")
@@ -165,6 +166,29 @@ func TestKSTQRVirtualMachine(t *testing.T) {
 		if strings.HasPrefix(r.URL.Path, "/__kstqr_test/unpin-") {
 			var e error
 			switch strings.TrimPrefix(r.URL.Path, "/__kstqr_test/unpin-") {
+			case "metadata-begin":
+				writebackFault.unpin.beginMetadata()
+			case "metadata-seen":
+				if !writebackFault.unpin.sawMetadata() {
+					e = errors.New("metadata GET not held")
+				}
+			case "restart-renewed":
+				n, err := writebackFault.unpin.verifyRestartRenewal()
+				if err != nil {
+					http.Error(w, err.Error(), 409)
+				} else {
+					fmt.Fprintf(w, "KSTQR_POSTRESTART_PIN_RENEW_PASS requests=%d tokens=1\n", n)
+				}
+				return
+			case "print-count":
+				n, err := countReferences(r.Context())
+				if err != nil {
+					http.Error(w, err.Error(), 500)
+				} else {
+					t.Logf("POSTRESTART_OPEN_REAL_PIN_COUNT=%d", n)
+					fmt.Fprintf(w, "POSTRESTART_OPEN_REAL_PIN_COUNT=%d\n", n)
+				}
+				return
 			case "begin":
 				writebackFault.unpin.begin()
 			case "seen":
@@ -177,6 +201,14 @@ func TestKSTQRVirtualMachine(t *testing.T) {
 				e = writebackFault.unpin.end(true)
 			case "release":
 				e = writebackFault.unpin.end(false)
+			case "renewed":
+				n, tokens, err := writebackFault.unpin.verifyRenewal()
+				if err != nil {
+					http.Error(w, err.Error(), 409)
+				} else {
+					fmt.Fprintf(w, "KSTQR_SHARED_PIN_RENEW_PASS requests=%d tokens=%d\n", n, tokens)
+				}
+				return
 			case "one", "two":
 				n, err := countReferences(r.Context())
 				e = err
@@ -186,6 +218,7 @@ func TestKSTQRVirtualMachine(t *testing.T) {
 				}
 				if e == nil && n != want {
 					e = fmt.Errorf("wanted %d reference tokens, got %d", want, n)
+					t.Logf("POSTRESTART_COUNT_ORACLE: %v", e)
 				}
 			case "retired":
 				e = checkReference(r.Context(), false)
@@ -738,6 +771,12 @@ func TestKSTQRVirtualMachine(t *testing.T) {
 		return nil
 	}
 
+	// Confirm file metadata before the restart oracle deliberately loses its unfenced PIN.
+	if os.Getenv("STQR_KERNEL_POSTRESTART_PIN") == "1" {
+		if err = conn.Sync(ctx); err != nil {
+			t.Fatal("explicit pre-PIN metadata fence", err)
+		}
+	}
 	subscriptionFS = fs
 	readBenchmark := os.Getenv("STQR_KERNEL_BENCHMARK") == "1"
 	writeBenchmark := os.Getenv("STQR_KERNEL_WRITE_BENCHMARK") == "1"
@@ -1009,6 +1048,18 @@ rmmod kstqr
 		end := strings.Index(init, "if dmesg |")
 		script := `/mount.kstqr --uri ` + endpoint + ` --bucket ` + client.ID(b.ID()).String() + ` --credentials /readonly-credentials --readonly /readonly
 /cache-reopen
+cat /proc/self/mountstats
+umount /readonly
+rmmod kstqr
+`
+		init = init[:begin] + script + init[end:]
+	}
+
+	if os.Getenv("STQR_KERNEL_POSTRESTART_PIN") == "1" {
+		begin := strings.Index(init, "for attempt in 1 2 3 4; do")
+		end := strings.Index(init, "if dmesg |")
+		script := `/mount.kstqr --uri ` + endpoint + ` --bucket ` + client.ID(b.ID()).String() + ` --credentials /readonly-credentials --readonly /readonly
+/postrestart-pin ` + endpoint + `
 cat /proc/self/mountstats
 umount /readonly
 rmmod kstqr
@@ -1553,6 +1604,18 @@ poweroff -f
 	if err != nil || !strings.Contains(string(output), "KSTQR_VM_PASS") || strings.Contains(string(output), "KSTQR_VM_FAIL") {
 		t.Fatalf("kernel VM: %v\n%s", err, output)
 	}
+	if os.Getenv("STQR_KERNEL_POSTRESTART_PIN") == "1" {
+		if !strings.Contains(string(output), "KSTQR_POSTRESTART_PIN_PASS") {
+			t.Fatal("postrestart PIN fixture did not complete")
+		}
+		for _, line := range strings.Split(string(output), "\n") {
+			if strings.Contains(line, "POSTRESTART_") {
+				t.Log(strings.TrimSpace(line))
+			}
+		}
+		return
+	}
+
 	if os.Getenv("STQR_KERNEL_ASYNC_UNPIN") == "1" {
 		if !strings.Contains(string(output), "KSTQR_ASYNC_UNPIN_PASS") {
 			t.Fatal("async UNPIN fixture did not complete")
