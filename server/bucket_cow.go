@@ -32,6 +32,9 @@ type cowSnapshot struct {
 	Data           io.ReaderAt
 	Extents        []volume.Extent
 	Close          func() error
+	// Local-only finite publication cut, not an object version.
+	store      *volume.Volume
+	generation uint64
 }
 
 func (s *cowSnapshot) close() {
@@ -117,6 +120,12 @@ func (g cowGraph) prepareWrite(ctx context.Context, store cowObjects, bucket vol
 			}
 			if !present {
 				missing = append(missing, peer)
+			} else if proof, ok := store.(interface {
+				preserveExisting(context.Context, volume.ID, volume.ObjectID) error
+			}); ok {
+				if err := proof.preserveExisting(ctx, peer, object); err != nil {
+					return err
+				}
 			}
 		}
 		if ownPresent && len(missing) == 0 {

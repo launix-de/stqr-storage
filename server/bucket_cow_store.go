@@ -115,6 +115,14 @@ func (store cowServerObjects) present(ctx context.Context, bucket volume.ID, obj
 	snapshot.close()
 	return present, nil
 }
+
+// Confirm an already visible preservation record through the same owner RPC.
+// The tombstone is only a create-if-ABSENT fallback; an existing record is never
+// replaced. Unlike a new leaf write, this source mutation depends on that
+// independent namespace retaining a materialization boundary after a crash.
+func (store cowServerObjects) preserveExisting(ctx context.Context, bucket volume.ID, object volume.ObjectID) error {
+	return store.materialize(ctx, bucket, object, &cowSnapshot{Info: volume.Info{Deleted: true}})
+}
 func (store cowServerObjects) materialize(ctx context.Context, bucket volume.ID, object volume.ObjectID, snapshot *cowSnapshot) error {
 	s := store.server
 	owner, err := s.cowOwner(bucket, object)
@@ -327,7 +335,21 @@ func (s *Server) cowPeerMutation(ctx context.Context, m client.Message, bucket v
 	}
 	if existing != nil {
 		existing.close()
-		return nil, nil
+		acceptedBucket, accepted := ctx.Value(cowAcceptedBucketKey{}).(volume.ID)
+		if accepted && acceptedBucket == bucket {
+			return nil, nil
+		}
+		// The record may have come from an accepted mutation which subsequently
+		// failed its CAS. Presence is still volatile. Confirm this finite local
+		// generation before allowing a different namespace to destroy its preimage.
+		// No Volume handle or node/range lock is retained across this barrier.
+		if err := s.cowValidateRestore(bucket, cowRestore{info: info, source: source, proof: proof, lease: lease}); err != nil {
+			return nil, err
+		}
+		if existing.store == nil {
+			return nil, volume.ErrRecovery
+		}
+		return nil, existing.store.CheckpointThrough(existing.generation)
 	}
 	snapshot := &cowSnapshot{Info: info, Extents: extents, Data: &cowRemoteReader{ctx: ctx, server: s, node: node, transfer: transfer, length: info.Length}}
 	stream, err := newCowStream(snapshot)
