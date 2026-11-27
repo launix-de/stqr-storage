@@ -13,6 +13,7 @@ struct sq_channel {
     stqr_u64 capabilities, used, submitted;
     stqr_commit_mark pending, synced;
     int lost;
+    unsigned reply_waiters;
 };
 struct sq_binding { struct sq_binding *next; stqr_id id; struct sq_channel *channel; };
 struct sq_route {
@@ -321,7 +322,7 @@ static int select_endpoint(stqr_client *c,const char *endpoint) {
         if (c->channel_count>=SQ_CHANNEL_LIMIT) {
             struct sq_channel *candidate;
             for (candidate=c->channels;candidate;candidate=candidate->next)
-                if (candidate!=original && candidate!=c->lease_owner && !candidate->pending.sequence && !candidate->lost && !async_channel_pending(c,candidate) && (!s || candidate->used<s->used)) s=candidate;
+                if (candidate!=original && candidate!=c->lease_owner && !candidate->reply_waiters && !candidate->pending.sequence && !candidate->lost && !async_channel_pending(c,candidate) && (!s || candidate->used<s->used)) s=candidate;
             if (!s) { err=-ENOSPC; goto out; }
             /* A channel limit is backpressure, never permission to request
              * persistence. Retain dirty owners until an explicit caller fence. */
@@ -641,11 +642,17 @@ static int redirect_patch(stqr_client *c, const stqr_u8 *raw, size_t size) {
 }
 static int async_dispatch(stqr_client *, unsigned, unsigned, const stqr_u8 *, struct buf *);
 static void async_fail(stqr_client *, struct sq_channel *, int);
-static int reply(stqr_client *c, unsigned op, stqr_id id, struct buf *result, struct download *stream) {
+static int reply_active(stqr_client *c, unsigned op, stqr_id id, struct buf *result, struct download *stream) {
     unsigned skipped = 0;
+    struct sq_channel *owner=c->active;
     for (;;) {
         struct buf m = {0}, headers = {0};
         const stqr_u8 *p; size_t n; unsigned kind, opcode;
+        /* Dispatching an unrelated asynchronous completion may redirect it to
+         * another owner. Our response still belongs to the socket on which
+         * this synchronous request was sent. Never wait for it on that other
+         * owner's socket while holding the caller's shared framing mutex. */
+        if (owner && c->active!=owner) { save_channel(c);load_channel(c,owner); }
         int err = frame_recv(c, &m, 0);
         if (err) { drop(&m); return err; }
         if (readnum(&m, 1) != 1) m.err = -EPROTO;
@@ -705,6 +712,21 @@ static int reply(stqr_client *c, unsigned op, stqr_id id, struct buf *result, st
         if (c->status >= 300) { err = status_errno(c->status); drop(&m); return err; }
         put(result, m.p+m.pos, m.n-m.pos); drop(&m); return result->err;
     }
+}
+static int reply(stqr_client *c, unsigned op, stqr_id id, struct buf *result, struct download *stream) {
+    struct sq_channel *owner=c->active;
+    int err;
+    /* Synchronous requests are not in the async registry. Protect their
+     * owner from LRU reuse during nested asynchronous redirects, including
+     * error returns. Dial/handshake may precede channel creation; no async
+     * request can already be pending in that case. */
+    if (owner) owner->reply_waiters++;
+    err=reply_active(c,op,id,result,stream);
+    if (owner) {
+        if (c->active!=owner) { save_channel(c);load_channel(c,owner); }
+        owner->reply_waiters--;
+    }
+    return err;
 }
 static void broken(stqr_client *c) {
     int notify=c->socket!=NULL;
