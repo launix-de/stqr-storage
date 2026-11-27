@@ -26,8 +26,13 @@ func (s *Server) quotaReserve(device client.ID, usage []volume.BucketStorage) ui
 func (s *Server) quotaAdmission(store *volume.Volume, device client.ID) volume.Admission {
 	return func(change volume.StorageChange) (uint64, error) {
 		before, after := change.BeforeOwned, change.AfterOwned
-		// Metadata-only preview servers never attach these hooks. The current local
-		// mutation/import path holds opMu across all affected volumes.
+		// Exact cross-volume budget admission: callbacks hold their Volume lock,
+		// then this short reservation mutex. No storage/node lock is acquired here.
+		q := &s.parallelQuota
+		q.mu.Lock()
+		defer q.mu.Unlock()
+		ticket := q.slots[volume.ID(device)]
+		var planned map[volume.ID]uint64
 		policies := s.quotaPolicies.Load()
 		if policies == nil {
 			return s.quotaReserve(device, change.After), nil
@@ -60,12 +65,33 @@ func (s *Server) quotaAdmission(store *volume.Volume, device client.ID) volume.A
 					return 0, err
 				}
 			}
+			pending := q.physical[bid]
+			if ticket != nil {
+				pending = subtractCapacity(pending, ticket.physical[bid])
+			}
+			others = addCapacity(others, pending)
 			if others > limit || next > limit-others {
 				waiting := false
 				if s.quotas != nil && addCapacity(others, next) <= p.Limits.Absolute {
 					waiting = s.quotas.requestActivation(bid, volume.ObjectID{0xff, 0x51}, addCapacity(others, next))
 				}
 				return 0, &physicalQuotaFull{Bucket: bid, Growth: next - prior, Waiting: waiting}
+			}
+			if ticket != nil {
+				if planned == nil {
+					planned = make(map[volume.ID]uint64)
+				}
+				planned[bid] = next - prior
+			}
+		}
+		if ticket != nil {
+			q.releasePhysicalLocked(ticket)
+			if len(planned) > 0 && q.physical == nil {
+				q.physical = make(map[volume.ID]uint64)
+			}
+			ticket.physical = planned
+			for id, n := range planned {
+				q.physical[id] = addCapacity(q.physical[id], n)
 			}
 		}
 		return s.quotaReserve(device, change.After), nil

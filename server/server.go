@@ -25,7 +25,8 @@ type managedVolume struct {
 }
 
 // Server currently owns one node. opMu serializes local administrative commits;
-// it is not a distributed lock or a substitute for placement authority.
+// its shared side pins their lifetime for independently admitted object writes.
+// It is not a distributed lock or a substitute for placement/Volume authority.
 type Server struct {
 	joinHosted      bool
 	joinRequested   atomic.Bool
@@ -42,6 +43,7 @@ type Server struct {
 	authority              *volumeAuthorityState
 	mu                     sync.RWMutex
 	opMu                   sync.RWMutex
+	parallelQuota          parallelQuotaState
 	cfg, running           Config
 	configPath, volumesDir string
 	volumes                map[string]*managedVolume
