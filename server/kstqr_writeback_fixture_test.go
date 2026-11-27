@@ -410,6 +410,7 @@ func (f *kernelWritebackFault) proxy(w http.ResponseWriter, r *http.Request, ups
 			if err != nil {
 				return
 			}
+			f.editRetry.holdFatalReply(raw)
 			if f.editRetry.response(raw) {
 				peer.Close()
 				downstream.Close()
