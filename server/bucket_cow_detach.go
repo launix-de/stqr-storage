@@ -72,6 +72,13 @@ func (s *Server) cowDetachStep(ctx context.Context, bucket volume.ID) (bool, err
 		ctx = context.WithValue(ctx, cowProofKey{}, proof)
 		for _, object := range ids {
 			for _, endpoint := range endpoints {
+				// Reference holders are local to each namespace. Skipping only
+				// the endpoint work preserves the outer inventory cursor, including
+				// a page whose final candidate is this reserved root. Existing local
+				// or legacy physical roots remain untouched, with all tokens intact.
+				if bucketLocalReferenceRoot(object) {
+					continue
+				}
 				if endpoint == bucket && description.State == BucketDeleting {
 					continue
 				}

@@ -344,7 +344,7 @@ func (s *Server) cowPeerMutation(ctx context.Context, m client.Message, bucket v
 }
 
 func (s *Server) cowPrepareWrite(ctx context.Context, b *Bucket, id volume.ObjectID, p principal) ([32]byte, bool, error) {
-	if p.cowInternal || len(b.storageDescription().ClonePeers) == 0 {
+	if p.cowInternal || bucketLocalReferenceRoot(id) || len(b.storageDescription().ClonePeers) == 0 {
 		return [32]byte{}, false, nil
 	}
 	g, err := s.cowGraph()
