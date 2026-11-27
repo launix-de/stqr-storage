@@ -778,22 +778,27 @@ fail:
 	return err;
 }
 static int ov_inode_match(struct inode *, void *);
+/* The VFS already indexes every live inode by the complete stable object ID.
+ * Do not walk the mount list under inode_lock: an invalidation of N cached
+ * inodes would otherwise perform N full list searches and block unrelated
+ * inode insertion/eviction for the duration of each search. ilookup5 also
+ * retains the inode and waits for I_NEW before its metadata is inspected. */
+static struct inode *ov_inode_get(struct ks_fs *f, stqr_object_id id)
+{
+	unsigned long hash = 0;
+	if (!f->sb)
+		return NULL;
+	for (unsigned k = 0; k < 32; k++)
+		hash = hash * 31 + id.bytes[k];
+	return ilookup5(f->sb, hash, ov_inode_match, id.bytes);
+}
 static bool ov_absent(struct ks_fs *f, stqr_object_id id, stqr_proof proof)
 {
-	struct ks_inode *entry;
-	struct inode *inode = NULL;
+	struct inode *inode;
 	bool absent = false;
 	if (!proof.cursor || zero(proof.subscription.bytes, 16))
 		return false;
-	spin_lock(&f->inode_lock);
-	list_for_each_entry(entry, &f->inodes, mount_list)
-	{
-		if (eqid(entry->id, id)) {
-			inode = igrab(&entry->inode);
-			break;
-		}
-	}
-	spin_unlock(&f->inode_lock);
+	inode = ov_inode_get(f, id);
 	if (inode) {
 		mutex_lock(&KS_I(inode)->metadata_lock);
 		absent = !memcmp(&KS_I(inode)->upper_absent, &proof, sizeof(proof));
@@ -1006,15 +1011,10 @@ static int ov_inode_match(struct inode *i, void *id)
 }
 static char *ov_vfs_path(struct ks_fs *f, stqr_object_id id)
 {
-	unsigned long hash = 0;
 	struct inode *i;
 	struct dentry *d;
 	char *buf, *name, *out = NULL;
-	if (!f->sb)
-		return NULL;
-	for (unsigned k = 0; k < 32; k++)
-		hash = hash * 31 + id.bytes[k];
-	i = ilookup5(f->sb, hash, ov_inode_match, id.bytes);
+	i = ov_inode_get(f, id);
 	if (!i)
 		return NULL;
 	d = d_find_alias(i);
