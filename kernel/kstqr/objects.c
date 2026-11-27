@@ -1012,7 +1012,7 @@ static int index_segments_range(struct ks_fs *f, const struct ks_node *view, stq
 	take(&b, 4);
 	version = readnum(&b, 2);
 	count = readnum(&b, 4);
-	if ((version != 1 && version != 3) || !count || count > 1024) {
+	if ((version != 1 && version != 2 && version != 3) || !count || count > 1024) {
 		err = -EUCLEAN;
 		goto out;
 	}
@@ -1027,6 +1027,13 @@ static int index_segments_range(struct ks_fs *f, const struct ks_node *view, stq
 		s.offset = readnum(&b, version == 1 ? 4 : 8);
 		if (version == 3)
 			lower = boolean(&b);
+		else if (version == 2 && readnum(&b, 8)) {
+			/* Decode old local indexes without reviving historical object
+			 * versions. A nonzero legacy lower reference needs explicit
+			 * materialization; never reinterpret it as local data. */
+			err = -EOPNOTSUPP;
+			goto out;
+		}
 		if (b.err || !s.length || total > length || s.length > length - total ||
 		    s.offset > S64_MAX || s.length > S64_MAX - s.offset ||
 		    (depth > 1 && (s.offset || lower)) || (nullid(s.id) && (s.offset || lower)) ||
