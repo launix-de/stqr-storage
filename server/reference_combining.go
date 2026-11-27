@@ -189,8 +189,8 @@ func (s *Server) validateCombinedReference(q *combinedReferenceRequest) (combine
 	if err = s.checkObjectOwner(op.bucket.ID(), op.object); err != nil {
 		return c, err
 	}
-	account, err := s.findAccount(q.principal.User.Name)
-	if err != nil || account.ID != q.principal.User.ID {
+	account, stamp, err := s.referenceAccountSnapshot(q.principal)
+	if err != nil {
 		return c, ErrBucketForbidden
 	}
 	c.uid, err = bucketID(account.ID)
@@ -201,6 +201,7 @@ func (s *Server) validateCombinedReference(q *combinedReferenceRequest) (combine
 	c.internal.internalCoordination = true
 	c.internal.User = account
 	c.internal.frontendPermission = BucketRead
+	c.internal.referenceAuth = stamp
 	c.proof = sha256.Sum256(token[:])
 	c.unpin = action == 1
 	return c, nil
@@ -259,6 +260,7 @@ func (s *Server) executeCombinedReferences(requests []*combinedReferenceRequest)
 	// no selected job may retire before its known observations are retained.
 	defer fanoutCombinedReferenceTouches(ws, collector, requests)
 	ctx := context.WithValue(s.ctx, connectionWorkKey{}, collector)
+referenceBatchRetry:
 	for retry := 0; retry < 128; retry++ {
 		active := make([]combinedReference, 0, len(requests))
 		for _, q := range requests {
@@ -290,14 +292,36 @@ func (s *Server) executeCombinedReferences(requests []*combinedReferenceRequest)
 			return
 		}
 		changed := false
+		casCtx := ctx
 		for _, c := range active {
 			before := len(entries)
 			entries, c.q.result.err = applyCombinedReference(entries, c)
+			if !c.unpin && len(entries) >= maxObjectReferences && c.q.result.err != nil && objectStatus(c.q.result.err) == 429 && referenceAccountHasRoom(entries, c.uid) {
+				filtered, nextCtx, e := s.pruneAbsentPlainReferencePins(casCtx, entries)
+				if e != nil {
+					if errors.Is(e, volume.ErrPrecondition) && !errors.Is(e, volume.ErrRecovery) {
+						continue referenceBatchRetry
+					}
+					c.q.result.err = e
+					for _, other := range active {
+						if other.q.result.err == nil {
+							other.q.result.err = e
+						}
+					}
+					return
+				}
+				casCtx = nextCtx
+				if len(filtered) < len(entries) {
+					entries = filtered
+					changed = true // Removed PINs must publish even if add restores length.
+					entries, c.q.result.err = applyCombinedReference(entries, c)
+				}
+			}
 			changed = changed || len(entries) != before
 		}
 		if changed {
 			next := encodeObjectReferences(entries, first.op.bucket.ID())
-			_, err = first.op.bucket.CAS(ctx, first.internal, first.op.object, 0, raw, next, volume.Options{RequestID: volume.ID(client.NewRequestID()), CreateOnly: absent, WholeObject: true, Accepted: true})
+			_, err = first.op.bucket.CAS(casCtx, first.internal, first.op.object, 0, raw, next, volume.Options{RequestID: volume.ID(client.NewRequestID()), CreateOnly: absent, WholeObject: true, Accepted: true})
 			if errors.Is(err, volume.ErrPrecondition) && !errors.Is(err, volume.ErrRecovery) {
 				continue
 			}
@@ -356,3 +380,18 @@ type prepublicationQuotaFull struct{}
 
 func (*prepublicationQuotaFull) Error() string { return volume.ErrFull.Error() }
 func (*prepublicationQuotaFull) Unwrap() error { return volume.ErrFull }
+
+// A full per-account budget cannot be repaired by discarding another account's
+// stale PINs. This scan is used only after a full-root429, never on the hot path.
+func referenceAccountHasRoom(entries []objectReferenceEntry, uid volume.ID) bool {
+	count := 0
+	for _, entry := range entries {
+		if entry.account == uid {
+			count++
+			if count >= maxAccountReferences {
+				return false
+			}
+		}
+	}
+	return true
+}

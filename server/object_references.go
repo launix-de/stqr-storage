@@ -211,8 +211,8 @@ func (s *Server) executeObjectReferenceHeld(ctx context.Context, m client.Messag
 	if err = s.checkObjectOwner(op.bucket.ID(), op.object); err != nil {
 		return nil, err
 	}
-	account, err := s.findAccount(p.User.Name)
-	if err != nil || account.ID != p.User.ID {
+	account, stamp, err := s.referenceAccountSnapshot(p)
+	if err != nil {
 		return nil, ErrBucketForbidden
 	}
 	uid, err := bucketID(account.ID)
@@ -225,6 +225,7 @@ func (s *Server) executeObjectReferenceHeld(ctx context.Context, m client.Messag
 	internal.internalCoordination = true
 	internal.User = account
 	internal.frontendPermission = BucketRead
+	internal.referenceAuth = stamp
 	if action == 8 {
 		s.opMu.Lock()
 		safe := s.canReclaimDependencyAnchors(op.bucket.ID())
@@ -241,6 +242,7 @@ func (s *Server) executeObjectReferenceHeld(ctx context.Context, m client.Messag
 		return []byte{1}, nil
 	}
 	proof := sha256.Sum256(token[:])
+referenceRetry:
 	for retry := 0; retry < 128; retry++ {
 		if err := ctx.Err(); err != nil {
 			return nil, err
@@ -256,24 +258,49 @@ func (s *Server) executeObjectReferenceHeld(ctx context.Context, m client.Messag
 		if err != nil {
 			return nil, err
 		}
-		own := -1
-		count := 0
-		busy := false
-		for i, r := range entries {
-			if r.account == uid {
-				count++
-			}
-			if action != 6 && r.proof == proof {
-				ownerOK := r.account == uid || account.Role == "ADMIN" && (action == 1 || action == 3 || action == 5)
-				if !ownerOK || r.object != target || r.claim != (action == 2 || action == 3) || r.dependency != (action == 4 || action == 5) {
-					return nil, ErrBucketForbidden
+		casCtx := ctx
+		var own, count int
+		var busy bool
+		for {
+			own = -1
+			count = 0
+			busy = false
+			for i, r := range entries {
+				if r.account == uid {
+					count++
 				}
-				own = i
+				if action != 6 && r.proof == proof {
+					ownerOK := r.account == uid || account.Role == "ADMIN" && (action == 1 || action == 3 || action == 5)
+					if !ownerOK || r.object != target || r.claim != (action == 2 || action == 3) || r.dependency != (action == 4 || action == 5) {
+						return nil, ErrBucketForbidden
+					}
+					own = i
+				}
+				if r.object == target && (action == 2 || (action == 0 || action == 4) && r.claim) {
+					busy = true
+				}
 			}
-			if r.object == target && (action == 2 || (action == 0 || action == 4) && r.claim) {
-				busy = true
+			// Reclaim only when a genuinely new operation needs a full-root
+			// slot. Own-limit, proof and claim conflicts retain their existing
+			// outcomes; disabled/present users are never considered absent.
+			if own < 0 && count < maxAccountReferences && len(entries) >= maxObjectReferences &&
+				(action == 0 || action == 2 || action == 4) && (!busy || action == 2) {
+				filtered, nextCtx, e := s.pruneAbsentPlainReferencePins(casCtx, entries)
+				if e != nil {
+					if errors.Is(e, volume.ErrPrecondition) && !errors.Is(e, volume.ErrRecovery) {
+						continue referenceRetry
+					}
+					return nil, e
+				}
+				casCtx = nextCtx
+				if len(filtered) < len(entries) {
+					entries = filtered
+					continue
+				}
 			}
+			break
 		}
+
 		if action == 6 {
 			kept := entries[:0]
 			for _, entry := range entries {
@@ -303,8 +330,8 @@ func (s *Server) executeObjectReferenceHeld(ctx context.Context, m client.Messag
 			entries = append(entries, objectReferenceEntry{target, proof, uid, action == 2, action == 4})
 		}
 		next := encodeObjectReferences(entries, op.bucket.ID())
-		_, err = op.bucket.CAS(ctx, internal, op.object, 0, raw, next, volume.Options{RequestID: volume.ID(client.NewRequestID()), CreateOnly: absent, WholeObject: true, Accepted: accepted})
-		if errors.Is(err, volume.ErrPrecondition) {
+		_, err = op.bucket.CAS(casCtx, internal, op.object, 0, raw, next, volume.Options{RequestID: volume.ID(client.NewRequestID()), CreateOnly: absent, WholeObject: true, Accepted: accepted})
+		if errors.Is(err, volume.ErrPrecondition) && !errors.Is(err, volume.ErrRecovery) {
 			continue
 		}
 		if err != nil {
