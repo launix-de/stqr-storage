@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-only
+import {installDialogDismissal} from './dialogs.js';
 import {bindSearch} from './endless.js';
 import {FormatPlugins} from './format-plugins.js';
 import {capacityKnown,capacityAdmissionKnown,renderCapacitySummary} from './capacity.js';
@@ -15,6 +16,7 @@ import {setupPlacementGroups} from './placement-groups.js';
 import {entityRate,nodeRate,throughputHTML,bucketTotals,recordRateSnapshot} from './throughput.js';
 import {setupBucketViews} from './buckets.js';
 import {MIN_VOLUME_SIZE,parseSize,sizeSteps,sizeLimit,formatSize,sizeLabel} from './size.js';
+installDialogDismissal();
 const $=id=>document.getElementById(id),escape=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 let node,configView,snapshot,source=0,candidates=[],volumeNode,drainID,drainVolume,addRetry,addPending=false;
 const nodeStates=new Map,fetchingConfigs=new Set;
@@ -137,7 +139,7 @@ function renderVolumes(){
  for(const [attr,fn]of [['detail',openDetail],['grow',openGrow],['drain',openDrain]])for(const b of $('volume-rows').querySelectorAll(`[data-${attr}]`))b.onclick=()=>fn(b.dataset[attr],b.dataset.node);
 }
 bindSearch($('volume-search'),renderVolumes,{delay:0});$('refresh').onclick=async()=>{try{onStats(await node.getStats());toast('Statistik aktualisiert.')}catch(e){toast(e.message,true)}};
-for(const b of document.querySelectorAll('[data-close]'))b.addEventListener('click',()=>$(b.dataset.close).close());
+for(const [dialog,submit] of [['node-action-dialog','node-action-submit'],['drain-dialog',null],['detail-dialog','rescan-volume']])$(dialog).addEventListener('cancel',e=>{const button=submit?$(submit):$('drain-form').querySelector('button[type=submit]');if(button?.disabled)e.preventDefault()});
 function openDetail(id,target=localNode()){volumeNode=target;const v=nodeStates.get(target)?.snapshot?.volumes.find(v=>v.id===id),c=volumeConfig()?.config.volumes.find(v=>v.id===id);if(!v)return;$('detail-title').textContent=c?.name??v.path;const details=[['Volume-ID',id,true],['Pfad / Device',v.path,true],['Klasse',classes[v.class].toUpperCase()],['Zustand',stateNames[v.state]],['Kapazität',bytes(v.capacity)],['Belegt',bytes(v.allocated)],['Metadaten',bytes(v.metadata)],['Betriebsreserve',bytes(v.operating)],['Für neue Daten nutzbar',bytes(v.admission)]];let html='<dl class="detail-grid">'+details.map(([k,value,mono])=>`<div><dt>${escape(k)}</dt><dd class="${mono?'mono':''}">${escape(value)}</dd></div>`).join('')+'</dl>';if(c?.system)html+='<div class="notice">Admin-Dateivolume: wächst bei Platzbedarf automatisch. Die Startgröße ist keine Obergrenze.</div>';if(v.class<2)html+='<button id="rescan-volume" class="secondary">↻ Größe neu einlesen</button><p class="field-note">Nach einer externen Vergrößerung, z. B. mit LVM, wird zusätzlicher Platz crashsicher ins Layout übernommen.</p>';$('detail-body').innerHTML=html;if($('rescan-volume'))$('rescan-volume').onclick=async e=>{e.currentTarget.disabled=true;try{await volumeConnection().rescanVolume(id);toast('Volume-Größe neu eingelesen.');$('detail-dialog').close();await refreshConfig(volumeNode)}catch(e){toast(e.message,true);$('rescan-volume').disabled=false}};$('detail-dialog').showModal()}
 const volumeGrowth=setupVolumeGrowth({connection:target=>target&&target!==localNode()?node.forNode(target):node,describe:(id,target)=>{const view=nodeStates.get(target)?.config?.config??configView?.config;return {volume:view?.volumes.find(v=>v.id===id),node:view?.node.name??target}},toast,refresh:async target=>{await refreshConfig(target);onStats(await node.getStats())}});
 function openGrow(id,target=localNode()){return volumeGrowth.open(id,target)}

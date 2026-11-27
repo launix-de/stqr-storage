@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-only
+import {requestDialogClose} from './dialogs.js';
 import {newID} from './protocol.js';
 import {parseSize,formatSize,sizeLabel,sizeSteps} from './size.js';
 
@@ -52,7 +53,7 @@ export function setupVolumeGrowth({connection,describe,toast,refresh}){
  for(const b of dialog.querySelectorAll('[data-grow-add]'))b.onclick=()=>{if(info){$('grow-size').value=formatSize(info.current+BigInt(b.dataset.growAdd));validate()}};
  $('grow-double').onclick=()=>{if(info){$('grow-size').value=formatSize(info.current*2n);validate()}};
  $('grow-maximum').onclick=()=>{if(info){$('grow-size').value=formatSize(info.maximum);validate()}};
- for(const b of dialog.querySelectorAll('[data-grow-close]'))b.onclick=()=>{if(!pending)dialog.close()};
+ for(const b of dialog.querySelectorAll('[data-grow-close]'))b.onclick=()=>{if(!pending)requestDialogClose(dialog,'button')};
  dialog.addEventListener('cancel',e=>{if(pending)e.preventDefault()});
  dialog.addEventListener('close',()=>{epoch++;selection=null;info=null;retry=null});
  $('grow-form').onsubmit=async event=>{

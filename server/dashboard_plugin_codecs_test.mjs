@@ -268,3 +268,14 @@ test("FS validates directory ordering by UTF-8 bytes like the Go codec", () => {
       .bytes();
   assert.equal(decodeDirectory(dir).length, 2);
 });
+
+test("FS bootstrap encodes a v7 directory root with an empty v1 directory", async () => {
+  const { Writer } = await import("../client/js/codec.mjs");
+  const { encodeEmptyRoot } = await import("./format-plugins/fs.mjs");
+  const node = decodeNode(encodeEmptyRoot(123456789n, Writer));
+  assert.equal(node.kind, 2);
+  assert.equal(node.links, 2);
+  assert.equal(node.mode, 0o755);
+  assert.equal(node.mtime, 123456789n);
+  assert.deepEqual(decodeDirectory(node.inline), []);
+});

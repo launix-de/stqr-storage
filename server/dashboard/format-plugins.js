@@ -31,6 +31,9 @@ export class FormatPlugins {
     this.entries = new Map(plugins.map((p) => [p.format, p.url]));
     this.onChange();
   }
+  formats() {
+    return [...this.entries.keys()].sort((a, b) => a.localeCompare(b));
+  }
   has(format) {
     return this.entries.has(format);
   }
@@ -46,6 +49,11 @@ export class FormatPlugins {
       const pending = this.importModule(url).then((plugin) => {
         if (plugin.apiVersion !== 1 || typeof plugin.open !== "function")
           throw Error("Nicht unterstützte Plugin-API.");
+        if (
+          plugin.initialize !== undefined &&
+          typeof plugin.initialize !== "function"
+        )
+          throw Error("Ungültiger Plugin-Initializer.");
         return plugin;
       });
       this.modules.set(format, pending);
@@ -54,6 +62,48 @@ export class FormatPlugins {
       });
     }
     return this.modules.get(format);
+  }
+  async initialize(bucket, { signal, initializationID, state = {} } = {}) {
+    if (!bucket.format) return;
+    const generation = this.generation,
+      parent = this.controller.signal;
+    const plugin = await this.module(bucket.format),
+      controller = new AbortController();
+    if (generation !== this.generation || parent.aborted)
+      throw new DOMException("Sitzung beendet.", "AbortError");
+    const combined = AbortSignal.any([
+      controller.signal,
+      parent,
+      ...(signal ? [signal] : []),
+    ]);
+    let client, clientPromise;
+    const connect = () =>
+      (clientPromise ??= this.connect(bucket, { signal: combined }).then(
+        (value) => (client = value),
+      ));
+    try {
+      combined.throwIfAborted();
+      await connect(); // Opening the native client binds the opaque format.
+      if (plugin.initialize)
+        await plugin.initialize({
+          bucket: Object.freeze(structuredClone(bucket)),
+          connect,
+          ui,
+          signal: combined,
+          initializationID,
+          state,
+          escape,
+          toast: this.toast,
+        });
+      combined.throwIfAborted();
+      await client.sync({ signal: combined });
+    } finally {
+      try {
+        await client?.close();
+      } finally {
+        controller.abort();
+      }
+    }
   }
   style(format, css) {
     if (!css || this.styles.has(format)) return;

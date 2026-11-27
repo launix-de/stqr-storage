@@ -71,6 +71,10 @@ static void mounted(const char *uri, const char *upper, const char *lower,
 #include "login-uri.h"
 
 int main(int argc, char **argv) {
+  if (argc == 2 && !strcmp(argv[1], "--capabilities")) {
+    puts("mount-overlay\nmount-edit\nlogin-uri");
+    return 0;
+  }
   if (argc == 4 && !strcmp(argv[1], "--login-uri"))
     return login_uri(argv[2], argv[3]);
   if (argc != 5) {

@@ -311,6 +311,7 @@ export async function open({ bucket, connect, windows, ui, signal }) {
     "Änderungen benötigen exklusiven Bucket-Zugriff. Angeschlossene NBD-/Blockdevice-Clients vorher trennen. Größen können nur vergrößert werden.";
   window.root.append(toolbar, note);
   const form = (kind, device) => {
+    let busy = false;
     const dialog = windows.open({
         title: {
           create: "Volume erstellen",
@@ -319,6 +320,7 @@ export async function open({ bucket, connect, windows, ui, signal }) {
           delete: "Volume löschen",
         }[kind],
         signal: window.signal,
+        canClose: async () => !busy,
       }),
       root = dialog.root;
     root.innerHTML =
@@ -341,7 +343,6 @@ export async function open({ bucket, connect, windows, ui, signal }) {
         `„${device.name}“ und seine Payload werden gelöscht.`;
     }
     const id = hex(crypto.getRandomValues(new Uint8Array(16)));
-    let busy = false;
     f.onsubmit = async (event) => {
       event.preventDefault();
       if (busy) return;

@@ -25,6 +25,7 @@ export function setupForceDisconnect({connection,config,states,toast,refresh,new
   await refresh();
  }
  $('force-dialog').addEventListener('close',stop);
+ $('force-dialog').addEventListener('cancel',event=>{if(action?.busy)event.preventDefault()});
  for(const id of ['force-fenced','force-loss'])$(id).addEventListener('change',enable);
  $('force-form').addEventListener('submit',async event=>{
   event.preventDefault();

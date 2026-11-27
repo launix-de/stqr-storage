@@ -1064,7 +1064,10 @@ static int poll_active(stqr_client *c, unsigned ms) {
     err = sq_wait(c->socket, ms);
     if (err <= 0) return err;
     err = frame_recv(c, &m, 1);
-    if (err == 1) { drop(&m); return 0; }
+    /* A consumed Ping/Pong is progress too. Event-driven callers drain until
+     * poll returns zero; reporting idle here strands any reply already queued
+     * behind the control frame until some unrelated socket event arrives. */
+    if (err == 1) { drop(&m); return 1; }
     if (!err) {
         if (readnum(&m, 1) != 1) m.err = -EPROTO;
         kind = (unsigned)readnum(&m, 1); opcode = (unsigned)readnum(&m, 2);
