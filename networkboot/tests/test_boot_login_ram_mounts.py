@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-only
 """Real ephemeral mount/chroot proof, confined to a disposable user namespace."""
 import hashlib
+import json
 import os
 import shutil
 from pathlib import Path
@@ -28,6 +29,16 @@ class RuntimePayloadMounts(unittest.TestCase):
             shutil.move(tree/'lib/modules', tree/'usr/lib/modules')
             (tree/'lib').rmdir()
             (tree/'lib').symlink_to('usr/lib')
+        # A private acceptance initrd appends an identity to BOTH snapshots.
+        # The real installer must replace its template atomically, not try to
+        # rename over a readonly bind mount (which fails EBUSY on Linux).
+        plan = json.loads((payload/'usr/lib/stqr-networkboot/login.json').read_text())
+        plan['accounts'].append({'name': 'other', 'id': '22345678'+'00'*12,
+                                 'uid': 0x62345678, 'bucket': 'cd'*16})
+        (payload/'usr/lib/stqr-networkboot/login.json').write_text(json.dumps(plan))
+        template = {'uri': 'http://@STQR_BOOT_SERVER@:7419', 'accounts': {
+            a['name']: {'id': a['id'], 'bucket': a['bucket']} for a in plan['accounts']}}
+        (payload/'usr/lib/stqr-networkboot/home-template.json').write_text(json.dumps(template))
         (root/fastpath.MARKER).unlink()
         (root/'run').mkdir()
         (work/'run').mkdir()
@@ -64,6 +75,15 @@ fi
 stqr_login_install() { python3 "$work/install.py" "$1" "$2"; }
 stqr_prepare_login "$root" 192.0.2.8 7.0-test "$payload" "$work/run"
 [ ! -e "$root/usr/lib/stqr-networkboot/prepared.sha256" ]
+grep -q '^other:x:1647597176:' "$root/etc/passwd"
+python3 - "$root" <<'VERIFY_TEMPLATE'
+import json,sys
+from pathlib import Path
+root=Path(sys.argv[1]);p=root/'usr/lib/stqr-networkboot/home-template.json'
+x=json.loads(p.read_text())
+assert x['accounts']['other']=={'id':'22345678'+'00'*12,'bucket':'cd'*16}
+assert p.stat().st_mode & 0o777 == 0o600
+VERIFY_TEMPLATE
 [ "$(sha256sum /proc/self/fd/8 | cut -d ' ' -f 1)" = "$ORIGINAL_SHA" ]
 if (printf mutation > "$root/usr/libexec/stqr-bootctl") 2>/dev/null; then
     echo 'readonly runtime binary unexpectedly writable' >&2; exit 1
@@ -88,7 +108,7 @@ umount "$root/lib/modules/7.0-test/extra/kstqr.ko"
 ''')
         result = subprocess.run(['unshare', '--user', '--map-root-user', '--mount', '--fork',
                                  'sh', script, root, payload, work,
-                                 fastpath.ROOT/'initramfs/prepare-login'],
+                                 Path(os.environ.get('STQR_TEST_PREPARE_HELPER', str(fastpath.ROOT/'initramfs/prepare-login')))],
                                 env={**os.environ, 'ORIGINAL_SHA': hashlib.sha256(original).hexdigest()},
                                 capture_output=True, text=True, timeout=30)
         self.assertEqual(result.returncode, 0, result.stdout+'\n'+result.stderr)

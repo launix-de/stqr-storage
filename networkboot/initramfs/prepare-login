@@ -68,10 +68,17 @@ stqr_prepare_login() {
             case "$stqr_login_line" in '# '*) continue;; esac
             stqr_login_asset=${stqr_login_line#*  }
             if ! grep -Fqx "$stqr_login_line" "$stqr_login_root/$stqr_login_marker" 2>/dev/null; then
-                printf '%s\n' "$stqr_login_asset" >> "$stqr_login_changes"
                 case "$stqr_login_asset" in
-                    */login.json|*/install-login|*/home-template.json) stqr_login_reinstall=1;;
+                    */home-template.json)
+                        # install-login regenerates this OUTPUT atomically.
+                        # A readonly file bind here makes os.replace fail EBUSY
+                        # when the login/home plan changes. Keep its tiny
+                        # generated metadata on the writable guest upper.
+                        stqr_login_reinstall=1
+                        continue;;
+                    */login.json|*/install-login) stqr_login_reinstall=1;;
                 esac
+                printf '%s\n' "$stqr_login_asset" >> "$stqr_login_changes"
             fi
         done < "$stqr_login_current"
         stqr_login_bind_changes "$stqr_login_root" "$stqr_login_payload" "$stqr_login_changes" "$stqr_login_run" || { rm -f "$stqr_login_current" "$stqr_login_changes"; return 1; }

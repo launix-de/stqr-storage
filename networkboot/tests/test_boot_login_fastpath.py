@@ -127,10 +127,10 @@ stqr_prepare_login "$@"
         (self.root/MARKER).unlink()
         self.checked_prepare()
         self.assertEqual((self.work/'installs').read_text(), 'install\n')
-        self.assertEqual(len((self.work/'copies').read_text().splitlines()), len(ASSETS))
+        self.assertEqual(len((self.work/'copies').read_text().splitlines()), len(ASSETS)-1)
         (self.work/'copies').unlink(); (self.work/'installs').unlink()
         self.checked_prepare()
-        self.assertEqual(len((self.work/'copies').read_text().splitlines()), len(ASSETS))
+        self.assertEqual(len((self.work/'copies').read_text().splitlines()), len(ASSETS)-1)
         self.assertEqual((self.work/'installs').read_text(), 'install\n')
         self.assertFalse((self.root/MARKER).exists())
         for line in (self.work/'copies').read_text().splitlines():
@@ -148,6 +148,10 @@ stqr_prepare_login "$@"
         self.assertIn('other', json.loads((self.root/'etc/security/stqr-home.json').read_text())['accounts'])
         self.assertNotIn('stqr-bootctl', (self.work/'copies').read_text())
         self.assertEqual((self.work/'installs').read_text(), 'install\n')
+        self.assertNotIn('home-template.json', (self.work/'mounts').read_text())
+        regenerated = json.loads((self.root/'usr/lib/stqr-networkboot/home-template.json').read_text())
+        self.assertEqual(regenerated['accounts'], template['accounts'])
+        self.assertEqual((self.root/'usr/lib/stqr-networkboot/home-template.json').stat().st_mode & 0o777, 0o600)
 
     def test_failed_installer_does_not_advance_completion_marker(self):
         before = (self.root/MARKER).read_bytes()
