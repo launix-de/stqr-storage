@@ -59,7 +59,9 @@ func (r *referenceCoordination) join(ctx context.Context, bucket volume.ID, requ
 		if !w.selected && !w.granted {
 			for i, p := range g.pending {
 				if p == w {
-					g.pending = append(g.pending[:i], g.pending[i+1:]...)
+					copy(g.pending[i:], g.pending[i+1:])
+					g.pending[len(g.pending)-1] = nil
+					g.pending = g.pending[:len(g.pending)-1]
 					break
 				}
 			}
@@ -89,6 +91,7 @@ func (r *referenceCoordination) grantNext(g *referenceGate) {
 		return
 	}
 	w := g.pending[0]
+	g.pending[0] = nil
 	g.pending = g.pending[1:]
 	g.held = true
 	w.granted = true
@@ -117,6 +120,7 @@ func (r *referenceCoordination) take(bucket volume.ID, leader *combinedReference
 		if q == nil || q.ws != leader.ws || q.principal.User.ID != leader.principal.User.ID || seen[q.token] {
 			break
 		}
+		g.pending[0] = nil
 		g.pending = g.pending[1:]
 		w.selected = true
 		seen[q.token] = true
@@ -251,6 +255,9 @@ func (s *Server) executeCombinedReferences(requests []*combinedReferenceRequest)
 	}
 	ws.fenceMu.Unlock()
 	collector := &connectionWork{session: ws, touches: map[*volume.Volume]uint64{}}
+	// This also runs for failed reads, retry exhaustion and individual fallback:
+	// no selected job may retire before its known observations are retained.
+	defer fanoutCombinedReferenceTouches(ws, collector, requests)
 	ctx := context.WithValue(s.ctx, connectionWorkKey{}, collector)
 	for retry := 0; retry < 128; retry++ {
 		active := make([]combinedReference, 0, len(requests))
@@ -309,11 +316,9 @@ func (s *Server) executeCombinedReferences(requests []*combinedReferenceRequest)
 						c.q.result.err = err
 					}
 				}
-				fanoutCombinedReferenceTouches(ws, collector, active)
 				return
 			}
 		}
-		fanoutCombinedReferenceTouches(ws, collector, active)
 		for _, c := range active {
 			if c.q.result.err == nil {
 				c.q.result.body = []byte{1}
@@ -323,20 +328,22 @@ func (s *Server) executeCombinedReferences(requests []*combinedReferenceRequest)
 		return
 	}
 	for _, q := range requests {
-		q.result.err = fail(503, "object references changed concurrently")
+		if q.result.err == nil {
+			q.result.err = fail(503, "object references changed concurrently")
+		}
 	}
 }
 
-func fanoutCombinedReferenceTouches(ws *wsSession, collector *connectionWork, active []combinedReference) {
+func fanoutCombinedReferenceTouches(ws *wsSession, collector *connectionWork, requests []*combinedReferenceRequest) {
 	ws.fenceMu.Lock()
 	touches := make(map[*volume.Volume]uint64, len(collector.touches))
 	for v, g := range collector.touches {
 		touches[v] = g
 	}
 	ws.fenceMu.Unlock()
-	for _, c := range active {
+	for _, q := range requests {
 		for v, g := range touches {
-			touchConnectionVolume(c.q.ctx, v, g)
+			touchConnectionVolume(q.ctx, v, g)
 		}
 	}
 }

@@ -262,7 +262,20 @@ func TestReferenceCombiningFullAndRecovery(t *testing.T) {
 				t.Fatal(e)
 			}
 			ms := []client.Message{f.message(1, token, 1), f.message(0, client.NewRequestID(), 2)}
-			es := f.burst(t, ms, false, nil)
+			contexts := make([]context.Context, len(ms))
+			for i, m := range ms {
+				f.ws.admitConnectionMessage(m)
+				contexts[i] = f.ws.connectionContext(context.Background(), m.ID)
+			}
+			es := f.burst(t, ms, false, contexts)
+			f.ws.fenceMu.Lock()
+			for _, m := range ms {
+				if f.ws.connectionJobs[m.ID].touches[f.v] == 0 {
+					f.ws.fenceMu.Unlock()
+					t.Fatal("failed request lost its observed generation")
+				}
+			}
+			f.ws.fenceMu.Unlock()
 			if kind == "known" {
 				for _, e := range es {
 					if e != nil {
@@ -595,5 +608,136 @@ func TestReferenceCombiningExternalCASRetryRecomputesResults(t *testing.T) {
 	entries, e := decodeObjectReferences(f.root(t), f.b.ID())
 	if e != nil || len(entries) != 3220 {
 		t.Fatal("retry lost external claim or independent PIN", len(entries), e)
+	}
+}
+
+func TestReferenceCombiningRetryExhaustionKeepsIndividualErrors(t *testing.T) {
+	f := newCombiningFixture(t)
+	root := volume.ObjectID(client.ObjectReferenceRootID())
+	raw := f.root(t)
+	entries, e := decodeObjectReferences(raw, f.b.ID())
+	if e != nil {
+		t.Fatal(e)
+	}
+	entries = append(entries, objectReferenceEntry{object: volume.ObjectID{0xfa, 1}, account: volume.ID{9}, proof: [32]byte{8}, claim: true})
+	if _, e = f.b.Put(context.Background(), f.p, root, encodeObjectReferences(entries, f.b.ID()), volume.Options{Accepted: true, RequestID: volume.ID(client.NewRequestID())}); e != nil {
+		t.Fatal(e)
+	}
+	var attempts atomic.Int32
+	if e = f.v.SetAdmission(func(volume.StorageChange) (uint64, error) { attempts.Add(1); return 0, volume.ErrPrecondition }); e != nil {
+		t.Fatal(e)
+	}
+	ms := []client.Message{f.message(0, client.NewRequestID(), 1), f.message(0, client.NewRequestID(), 2)}
+	contexts := make([]context.Context, len(ms))
+	for i, m := range ms {
+		f.ws.admitConnectionMessage(m)
+		contexts[i] = f.ws.connectionContext(context.Background(), m.ID)
+	}
+	es := f.burst(t, ms, false, contexts)
+	f.ws.fenceMu.Lock()
+	for _, m := range ms {
+		if f.ws.connectionJobs[m.ID].touches[f.v] == 0 {
+			f.ws.fenceMu.Unlock()
+			t.Fatal("exhausted request lost its observed generation")
+		}
+	}
+	f.ws.fenceMu.Unlock()
+	if objectStatus(es[0]) != 409 || objectStatus(es[1]) != 503 {
+		t.Fatal("retry exhaustion overwrote independent result", es)
+	}
+	if attempts.Load() != 128 {
+		t.Fatal("retry bound changed", attempts.Load())
+	}
+}
+func TestReferenceCombiningPendingStorageCleared(t *testing.T) {
+	r := referenceCoordination{}
+	q := &combinedReferenceRequest{token: client.ID{1}}
+	a := &referenceWaiter{request: q, ready: make(chan struct{})}
+	b := &referenceWaiter{request: &combinedReferenceRequest{token: client.ID{2}}, ready: make(chan struct{})}
+	backing := []*referenceWaiter{a, b}
+	g := &referenceGate{refs: 2, pending: backing}
+	r.grantNext(g)
+	if backing[0] != nil || g.pending[0] != b {
+		t.Fatal("grant retained request backing slot")
+	}
+	bucket := volume.ID{1}
+	r.gates = map[volume.ID]*referenceGate{bucket: g}
+	got := r.take(bucket, q)
+	if len(got) != 1 || got[0] != b || backing[1] != nil {
+		t.Fatal("selection retained request backing slot")
+	}
+	r = referenceCoordination{}
+	release, e := r.acquire(context.Background(), bucket)
+	if e != nil {
+		t.Fatal(e)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, unlock, e := r.join(ctx, bucket, nil)
+		if unlock != nil {
+			unlock()
+		}
+		done <- e
+	}()
+	referenceGateWaiters(t, &r, bucket, 2)
+	r.mu.Lock()
+	pending := r.gates[bucket].pending
+	r.mu.Unlock()
+	cancel()
+	if e := <-done; !errors.Is(e, context.Canceled) {
+		t.Fatal(e)
+	}
+	if pending[0] != nil {
+		t.Fatal("cancellation retained request backing slot")
+	}
+	release()
+}
+
+type referenceCanceledRetryContext struct {
+	context.Context
+	armed  *atomic.Bool
+	cancel context.CancelFunc
+}
+
+func (c referenceCanceledRetryContext) Err() error {
+	if c.armed.CompareAndSwap(true, false) {
+		c.cancel()
+	}
+	return c.Context.Err()
+}
+func TestReferenceCombiningCanceledRetryRetainsEarlierObservation(t *testing.T) {
+	f := newCombiningFixture(t)
+	base, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var armed, once atomic.Bool
+	conditional := referenceCanceledRetryContext{Context: base, armed: &armed, cancel: cancel}
+	if e := f.v.SetAdmission(func(volume.StorageChange) (uint64, error) {
+		if once.CompareAndSwap(false, true) {
+			armed.Store(true)
+			return 0, volume.ErrPrecondition
+		}
+		return 0, nil
+	}); e != nil {
+		t.Fatal(e)
+	}
+	ms := []client.Message{f.message(0, client.NewRequestID(), 1), f.message(0, client.NewRequestID(), 2)}
+	contexts := make([]context.Context, 2)
+	for i, m := range ms {
+		f.ws.admitConnectionMessage(m)
+		ctx := context.Context(context.Background())
+		if i == 0 {
+			ctx = conditional
+		}
+		contexts[i] = f.ws.connectionContext(ctx, m.ID)
+	}
+	es := f.burst(t, ms, false, contexts)
+	if !errors.Is(es[0], context.Canceled) || es[1] != nil {
+		t.Fatal("canceled retry damaged independent PIN", es)
+	}
+	f.ws.fenceMu.Lock()
+	defer f.ws.fenceMu.Unlock()
+	if f.ws.connectionJobs[ms[0].ID].touches[f.v] == 0 {
+		t.Fatal("participant excluded from final retry lost earlier root observation")
 	}
 }
