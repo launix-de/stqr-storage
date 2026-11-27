@@ -35,9 +35,16 @@ func TestKSTQRVirtualMachine(t *testing.T) {
 		t.Skip("set STQR_TEST_KERNEL=1 and STQR_KERNEL_IMAGE to run isolated kernel tests")
 	}
 	if os.Getenv("STQR_KERNEL_ASYNC_UNPIN") == "1" {
-		for _, mode := range []string{"BENCHMARK", "WRITE_BENCHMARK", "READ_WINDOW", "LOOP", "RESTART_ONLY", "OVERLAY", "OUTAGE", "CACHE_RETENTION", "CACHE_REOPEN"} {
+		for _, mode := range []string{"BENCHMARK", "WRITE_BENCHMARK", "READ_WINDOW", "LOOP", "RESTART_ONLY", "OVERLAY", "OUTAGE", "CACHE_RETENTION", "CACHE_REOPEN", "SHARED_PINS"} {
 			if os.Getenv("STQR_KERNEL_"+mode) == "1" {
 				t.Fatalf("incompatible kernel fixture modes ASYNC_UNPIN and %s; run them separately", mode)
+			}
+		}
+	}
+	if os.Getenv("STQR_KERNEL_SHARED_PINS") == "1" {
+		for _, mode := range []string{"BENCHMARK", "WRITE_BENCHMARK", "READ_WINDOW", "LOOP", "RESTART_ONLY", "OVERLAY", "OUTAGE", "CACHE_RETENTION", "CACHE_REOPEN", "ASYNC_UNPIN"} {
+			if os.Getenv("STQR_KERNEL_"+mode) == "1" {
+				t.Fatalf("incompatible kernel fixture modes SHARED_PINS and %s; run them separately", mode)
 			}
 		}
 	}
@@ -102,6 +109,7 @@ func TestKSTQRVirtualMachine(t *testing.T) {
 	run("cc", "-static", "-std=c11", "-Wall", "-Wextra", "-Werror", "-O2", "-o", filepath.Join(initrdRoot, "cache-capacity"), filepath.Join(root, "tests/cache_capacity.c"))
 	run("cc", "-static", "-std=c11", "-Wall", "-Wextra", "-Werror", "-O2", "-o", filepath.Join(initrdRoot, "throughput"), filepath.Join(root, "tests/throughput.c"))
 	run("cc", "-static", "-std=c11", "-Wall", "-Wextra", "-Werror", "-O2", "-o", filepath.Join(initrdRoot, "async-unpin"), filepath.Join(root, "tests/async_unpin.c"))
+	run("cc", "-static", "-std=c11", "-Wall", "-Wextra", "-Werror", "-O2", "-o", filepath.Join(initrdRoot, "shared-pins"), filepath.Join(root, "tests/shared_pins.c"))
 	run("cc", "-static", "-std=c11", "-Wall", "-Wextra", "-Werror", "-O2", "-o", filepath.Join(initrdRoot, "writeback"), filepath.Join(root, "tests/writeback.c"))
 	run("cc", "-static", "-std=c11", "-Wall", "-Wextra", "-Werror", "-O2", "-o", filepath.Join(initrdRoot, "crash-reconnect"), filepath.Join(root, "tests/crash_reconnect.c"))
 	run("cc", "-static", "-std=c11", "-Wall", "-Wextra", "-Werror", "-O2", "-o", filepath.Join(initrdRoot, "mmap-test"), filepath.Join(root, "tests/mmap.c"), "-lsqlite3", "-lm", "-ldl", "-lpthread")
@@ -129,6 +137,7 @@ func TestKSTQRVirtualMachine(t *testing.T) {
 	var onlineObjects []client.ObjectID
 	var onlineGet func(context.Context, client.ObjectID) error
 	var checkReference func(context.Context, bool) error
+	var countReferences func(context.Context) (int, error)
 	var nativeOverlay atomic.Pointer[client.OverlayFilesystem]
 	writebackFault := &kernelWritebackFault{}
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -153,6 +162,18 @@ func TestKSTQRVirtualMachine(t *testing.T) {
 				}
 			case "drop":
 				e = writebackFault.unpin.end(true)
+			case "release":
+				e = writebackFault.unpin.end(false)
+			case "one", "two":
+				n, err := countReferences(r.Context())
+				e = err
+				want := 1
+				if strings.HasSuffix(r.URL.Path, "two") {
+					want = 2
+				}
+				if e == nil && n != want {
+					e = fmt.Errorf("wanted %d reference tokens, got %d", want, n)
+				}
 			case "retired":
 				e = checkReference(r.Context(), false)
 			default:
@@ -457,26 +478,34 @@ func TestKSTQRVirtualMachine(t *testing.T) {
 		t.Fatal(e)
 	}
 	writebackFault.unpin.target = unpinFile.ID
-	checkReference = func(ctx context.Context, want bool) error {
+	countReferences = func(ctx context.Context) (int, error) {
 		raw, _, e := conn.Get(ctx, client.ObjectReferenceRootID())
 		if e != nil {
-			return e
+			return 0, e
 		}
 		entries, e := decodeObjectReferences(raw, b.ID())
 		if e != nil {
-			return e
+			return 0, e
 		}
-		found := false
+		n := 0
 		for _, entry := range entries {
 			if entry.object == volume.ObjectID(unpinFile.ID) && !entry.claim && !entry.dependency {
-				found = true
+				n++
 			}
 		}
-		if found != want {
+		return n, nil
+	}
+	checkReference = func(ctx context.Context, want bool) error {
+		n, e := countReferences(ctx)
+		if e != nil {
+			return e
+		}
+		if (n > 0) != want {
 			return errors.New("open-reference lifetime mismatch")
 		}
 		return nil
 	}
+
 	subscriptionFS = fs
 	readBenchmark := os.Getenv("STQR_KERNEL_BENCHMARK") == "1"
 	writeBenchmark := os.Getenv("STQR_KERNEL_WRITE_BENCHMARK") == "1"
@@ -698,6 +727,18 @@ rmmod kstqr
 		end := strings.Index(init, "if dmesg |")
 		script := `/mount.kstqr --uri ` + endpoint + ` --bucket ` + client.ID(b.ID()).String() + ` --credentials /readonly-credentials --readonly /readonly
 /async-unpin ` + endpoint + `
+cat /proc/self/mountstats
+umount /readonly
+rmmod kstqr
+`
+		init = init[:begin] + script + init[end:]
+	}
+
+	if os.Getenv("STQR_KERNEL_SHARED_PINS") == "1" {
+		begin := strings.Index(init, "for attempt in 1 2 3 4; do")
+		end := strings.Index(init, "if dmesg |")
+		script := `/mount.kstqr --uri ` + endpoint + ` --bucket ` + client.ID(b.ID()).String() + ` --credentials /readonly-credentials --readonly /readonly
+/shared-pins ` + endpoint + `
 cat /proc/self/mountstats
 umount /readonly
 rmmod kstqr
@@ -1142,6 +1183,18 @@ poweroff -f
 	if err != nil || !strings.Contains(string(output), "KSTQR_VM_PASS") || strings.Contains(string(output), "KSTQR_VM_FAIL") {
 		t.Fatalf("kernel VM: %v\n%s", err, output)
 	}
+	if os.Getenv("STQR_KERNEL_SHARED_PINS") == "1" {
+		if !strings.Contains(string(output), "KSTQR_SHARED_PINS_PASS") {
+			t.Fatal("shared PIN fixture did not complete")
+		}
+		for _, line := range strings.Split(string(output), "\n") {
+			if strings.Contains(line, "KSTQR_SHARED_PINS") {
+				t.Log(strings.TrimSpace(line))
+			}
+		}
+		return
+	}
+
 	if os.Getenv("STQR_KERNEL_ASYNC_UNPIN") == "1" {
 		if !strings.Contains(string(output), "KSTQR_ASYNC_UNPIN_PASS") {
 			t.Fatal("async UNPIN fixture did not complete")

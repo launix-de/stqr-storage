@@ -1127,7 +1127,9 @@ struct ks_file_reference {
 	struct ks_fs *fs;
 	stqr_object_id id;
 	stqr_id upper, lower;
-	bool upper_pinned, lower_pinned;
+	bool upper_pinned, lower_pinned, retained;
+	unsigned users;
+	u64 upper_epoch, lower_epoch;
 };
 /* A final fput may run while a generator is exiting. Waiting there for a
  * remote UNPIN ACK can prevent the entire process group from exiting. Retain
@@ -1151,36 +1153,117 @@ static void ks_release_reference(struct work_struct *work)
 	leave_fs(f, saved);
 	kfree(ref);
 }
+static void ks_retire_reference(struct ks_file_reference *ref)
+{
+	if (ref->retained || (!ref->lower_pinned && !ref->upper_pinned))
+		kfree(ref);
+	else
+		queue_work(ref->fs->reference_queue, &ref->cleanup);
+}
+static void ks_put_reference(struct inode *inode, struct ks_file_reference *ref, bool retain)
+{
+	struct ks_inode *ki = KS_I(inode);
+	bool last;
+	mutex_lock(&ki->reference_lock);
+	ref->retained |= retain;
+	last = --ref->users == 0;
+	if (last) {
+		WARN_ON_ONCE(ki->reference != ref);
+		/* A new open gets fresh token identities even while this detached
+		 * group's asynchronous UNPIN is still awaiting its owner. */
+		ki->reference = NULL;
+	}
+	mutex_unlock(&ki->reference_lock);
+	if (last)
+		ks_retire_reference(ref);
+}
+/* Sharing is valid within an acknowledged transport incarnation. A reused
+ * group after reconnect re-establishes its original idempotent tokens before a
+ * new file joins it; it never assumes an accepted PIN survived a node restart.
+ * Capture the epoch before submitting: a disconnect after the ACK must not
+ * certify an older PIN as belonging to its replacement connection. A retry
+ * may conservatively require one extra renewal on the next open.
+ * Caller owns the inode reference lock, not the RPC framing lock. */
+static int ks_refresh_reference(struct ks_file_reference *ref)
+{
+	struct ks_fs *f = ref->fs;
+	u64 epoch = READ_ONCE(f->rpc[0].reconnect_epoch);
+	int err;
+	if (ref->upper_pinned && ref->upper_epoch != epoch) {
+		err = ks_object_reference(f, ref->id, ref->upper, 0);
+		if (err)
+			return err;
+		ref->upper_epoch = epoch;
+	}
+	epoch = f->lower ? READ_ONCE(f->lower->rpc[0].reconnect_epoch) : 0;
+	if (ref->lower_pinned && ref->lower_epoch != epoch) {
+		err = ks_object_reference(f->lower, ref->id, ref->lower, 0);
+		if (err)
+			return err;
+		ref->lower_epoch = epoch;
+	}
+	return 0;
+}
 static int ks_open_file(struct inode *inode, struct file *file)
 {
 	struct ks_fs *f = inode->i_sb->s_fs_info;
+	struct ks_inode *ki = KS_I(inode);
 	struct ks_file_reference *ref;
 	struct ks_snapshot snapshot = {0};
-	stqr_object_id id = KS_I(inode)->id;
+	stqr_object_id id = ki->id;
 	unsigned saved;
 	int err = generic_file_open(inode, file);
 	if (err)
 		return err;
-	ref = kzalloc(sizeof(*ref), GFP_NOFS);
-	if (!ref)
-		return -ENOMEM;
-	ref->fs = f;
-	ref->id = id;
-	INIT_WORK(&ref->cleanup, ks_release_reference);
 	saved = enter_fs(f);
-	err = 0;
-	if (f->references) {
-		err = stqr_request_id(&ref->upper);
-		if (!err)
-			err = ks_object_reference(f, id, ref->upper, 0);
-		ref->upper_pinned = !err;
+	mutex_lock(&ki->reference_lock);
+	ref = ki->reference;
+	if (ref) {
+		if (ref->users == UINT_MAX) {
+			err = -EMFILE;
+			goto unlock;
+		}
+		err = ks_refresh_reference(ref);
+		if (err)
+			goto unlock;
+		ref->users++;
+	} else {
+		ref = kzalloc(sizeof(*ref), GFP_NOFS);
+		if (!ref) {
+			err = -ENOMEM;
+			goto unlock;
+		}
+		ref->fs = f;
+		ref->id = id;
+		INIT_WORK(&ref->cleanup, ks_release_reference);
+		if (f->references) {
+			ref->upper_epoch = READ_ONCE(f->rpc[0].reconnect_epoch);
+			err = stqr_request_id(&ref->upper);
+			if (!err)
+				err = ks_object_reference(f, id, ref->upper, 0);
+			ref->upper_pinned = !err;
+		}
+		if (!err && f->lower && f->lower->references) {
+			ref->lower_epoch = READ_ONCE(f->lower->rpc[0].reconnect_epoch);
+			err = stqr_request_id(&ref->lower);
+			if (!err)
+				err = ks_object_reference(f->lower, id, ref->lower, 0);
+			ref->lower_pinned = !err;
+		}
+		if (err) {
+			/* Never publish a group until every required PIN is acknowledged.
+			 * A partial acquisition is retired using its own original tokens. */
+			mutex_unlock(&ki->reference_lock);
+			ks_retire_reference(ref);
+			leave_fs(f, saved);
+			return err;
+		}
+		ref->users = 1;
+		ki->reference = ref;
 	}
-	if (!err && f->lower && f->lower->references) {
-		err = stqr_request_id(&ref->lower);
-		if (!err)
-			err = ks_object_reference(f->lower, id, ref->lower, 0);
-		ref->lower_pinned = !err;
-	}
+	mutex_unlock(&ki->reference_lock);
+	/* Sharing lifetime protection does not reuse stale open permissions or
+	 * namespace/link state. Every open keeps the existing fresh validation. */
 	if (!err) {
 		ks_cache_forget(f, id);
 		if (f->lower)
@@ -1190,20 +1273,20 @@ static int ks_open_file(struct inode *inode, struct file *file)
 	if (!err && (snapshot.node.removed || !snapshot.node.links))
 		err = -ENOENT;
 	ks_snapshot_free(&snapshot);
-	if (err) {
-		if (ref->lower_pinned)
-			ks_object_reference(f->lower, id, ref->lower, 1);
-		if (ref->upper_pinned)
-			ks_object_reference(f, id, ref->upper, 1);
-		kfree(ref);
-	} else
+	if (err)
+		ks_put_reference(inode, ref, false);
+	else
 		file->private_data = ref;
 	leave_fs(f, saved);
 	return err;
+unlock:
+	mutex_unlock(&ki->reference_lock);
+	leave_fs(f, saved);
+	return err;
 }
+
 static int ks_release_file(struct inode *inode, struct file *file)
 {
-	struct ks_fs *f = inode->i_sb->s_fs_info;
 	struct ks_file_reference *ref = file->private_data;
 	int err;
 	if (!ref)
@@ -1213,14 +1296,9 @@ static int ks_release_file(struct inode *inode, struct file *file)
 	 * lifetime protection; this adds no persistence fence. */
 	err = file_write_and_wait_range(file, 0, LLONG_MAX);
 	file->private_data = NULL;
-	if (err) {
+	if (err)
 		pr_warn_ratelimited("kstqr: retaining open reference after writeback close error: %d\n", err);
-		kfree(ref);
-	} else if (ref->lower_pinned || ref->upper_pinned) {
-		queue_work(f->reference_queue, &ref->cleanup);
-	} else {
-		kfree(ref);
-	}
+	ks_put_reference(inode, ref, !!err);
 	return err;
 }
 
@@ -1508,6 +1586,7 @@ static struct inode *ks_alloc_inode(struct super_block *sb)
 	if (!i)
 		return NULL;
 	mutex_init(&i->metadata_lock);
+	mutex_init(&i->reference_lock);
     mutex_init(&i->writeback_publish_lock);
 	INIT_LIST_HEAD(&i->mount_list);
 	inode_init_once(&i->inode);

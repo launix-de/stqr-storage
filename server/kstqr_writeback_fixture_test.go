@@ -145,27 +145,41 @@ func (f *kernelWritebackFault) proxy(w http.ResponseWriter, r *http.Request, ups
 	}
 	defer downstream.Close()
 	f.connections.Add(1)
+	var peerWriter sync.Mutex
+	forward := func(kind int, raw []byte) error {
+		peerWriter.Lock()
+		defer peerWriter.Unlock()
+		return peer.WriteMessage(kind, raw)
+	}
+	var held sync.WaitGroup
 	var writer sync.Mutex
 	write := func(kind int, raw []byte) error {
 		writer.Lock()
 		defer writer.Unlock()
 		return downstream.WriteMessage(kind, raw)
 	}
+	ctx, cancel := context.WithCancel(r.Context())
+	defer cancel()
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
 		defer downstream.Close()
 		for {
 			kind, raw, err := peer.ReadMessage()
-			if err != nil || write(kind, raw) != nil {
+			if err != nil {
+				return
+			}
+			if write(kind, raw) != nil {
 				return
 			}
 		}
 	}()
 	defer func() {
+		cancel()
 		peer.Close()
 		downstream.Close()
 		<-done
+		held.Wait()
 	}()
 	for {
 		kind, raw, err := downstream.ReadMessage()
@@ -184,20 +198,31 @@ func (f *kernelWritebackFault) proxy(w http.ResponseWriter, r *http.Request, ups
 			}
 		}
 		if release := f.unpin.match(raw); release != nil {
-			select {
-			case <-release:
-				if f.unpin.shouldDrop() {
+			held.Add(1)
+			go func() {
+				defer held.Done()
+				select {
+				case <-release:
+					if f.unpin.shouldDrop() {
+						peer.Close()
+						downstream.Close()
+						return
+					}
+				case <-time.After(2 * time.Second):
+					f.unpin.mu.Lock()
+					f.unpin.timedOut = true
+					f.unpin.mu.Unlock()
+				case <-ctx.Done():
 					return
 				}
-			case <-time.After(2 * time.Second):
-				f.unpin.mu.Lock()
-				f.unpin.timedOut = true
-				f.unpin.mu.Unlock()
-			case <-r.Context().Done():
-				return
-			}
+				if forward(kind, raw) != nil {
+					peer.Close()
+					downstream.Close()
+				}
+			}()
+			continue
 		}
-		if peer.WriteMessage(kind, raw) != nil {
+		if forward(kind, raw) != nil {
 			return
 		}
 	}
