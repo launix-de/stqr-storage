@@ -593,3 +593,94 @@ func TestParallelInvalidUsageNeverScansUnderActiveVolumeHandle(t *testing.T) {
 	}
 	assertParallelReservationsEmpty(t, s, b)
 }
+
+func TestParallelAmbiguousPhysicalPlanRemainsConservativeUntilExactObserver(t *testing.T) {
+	s, b, _, va, _ := parallelAdmissionFixture(t, true, "physical", 128<<10)
+	p := quotaPrincipal(t, s)
+	actual := s.quotaAdmission(va, client.ID(va.Identity().VolumeID))
+	if err := va.SetAdmission(func(change volume.StorageChange) (uint64, error) {
+		protected, err := actual(change)
+		if err == nil {
+			return 0, errors.New("injected ambiguous publication failure")
+		}
+		return protected, err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := b.Put(context.Background(), p, volume.ObjectID{2}, bytes.Repeat([]byte{'x'}, 80<<10), parallelOpts()); err == nil {
+		t.Fatal("ambiguous failure ignored")
+	}
+	b.usage.mu.Lock()
+	active, reserved := b.usage.activeAdmissions, b.usage.reservedGrowth
+	b.usage.mu.Unlock()
+	s.parallelQuota.mu.Lock()
+	slots, held, quarantined := len(s.parallelQuota.slots), s.parallelQuota.physical[b.ID()], len(s.parallelQuota.quarantine)
+	s.parallelQuota.mu.Unlock()
+	if active != 0 || reserved != 0 || slots != 0 || held < 80<<10 || quarantined != 1 {
+		t.Fatal("ambiguous state was treated as free capacity", active, reserved, slots, held, quarantined)
+	}
+	// A verified accounting publication replaces the uncertain charge. In real
+	// backend failures SetAdmission itself is fenced until storage is recovered.
+	id := va.Identity().VolumeID
+	if err := va.SetAdmission(actual, func(usage volume.StorageSnapshot) { s.publishQuotaUsage(id, usage.Owned, usage.All) }); err != nil {
+		t.Fatal(err)
+	}
+	assertParallelReservationsEmpty(t, s, b)
+	if _, err := b.Put(context.Background(), p, volume.ObjectID{2}, bytes.Repeat([]byte{'x'}, 80<<10), parallelOpts()); err != nil {
+		t.Fatal("verified recovery kept stale reservation", err)
+	}
+	assertParallelReservationsEmpty(t, s, b)
+}
+
+func TestParallelAdmissionUnpinnedMultipleVolumeCohortUsesExclusiveFallback(t *testing.T) {
+	s, b, _, _, _ := parallelAdmissionFixture(t, true, "logical", 16<<30)
+	p := quotaPrincipal(t, s)
+	s.opMu.Lock()
+	patches := append([]client.MapPatch{}, s.currentSystem.Load().patches...)
+	for i := range patches {
+		if patches[i].Bucket == client.ID(b.ID()) {
+			entries := append([]client.RangeEntry{}, s.placement.Load().bucketEntries(client.ID(b.ID()))...)
+			for j := range entries {
+				entries[j].Locations = append([]client.Location{}, entries[j].Locations...)
+				entries[j].Locations[0].Volume = client.ID{}
+			}
+			patches[i].Entries = entries
+		}
+	}
+	image, err := buildPlacement(patches)
+	if err == nil {
+		s.placement.Store(image)
+		s.dirtyVolumeAuthority()
+	}
+	s.opMu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = s.ensureVolumeAuthority(); err != nil {
+		t.Fatal(err)
+	}
+	if s.parallelMutationCandidate(b, p, volume.ObjectID{2}) {
+		t.Fatal("ambiguous physical lookup admitted parallel fast path")
+	}
+	gate := &parallelPayloadGate{Reader: bytes.NewReader([]byte("first")), entered: make(chan struct{}), release: make(chan struct{})}
+	var once sync.Once
+	release := func() { once.Do(func() { close(gate.release) }) }
+	defer release()
+	done := make(chan error, 1)
+	go func() {
+		_, err := b.mutateUnmetered(context.Background(), p, volume.ObjectID{2}, 0x0102, 0, 5, gate, nil, parallelOpts())
+		done <- err
+	}()
+	select {
+	case <-gate.entered:
+	case <-time.After(3 * time.Second):
+		t.Fatal("fallback never reached payload")
+	}
+	if s.opMu.TryRLock() {
+		s.opMu.RUnlock()
+		t.Fatal("cold/multi-cohort path did not retain exclusive admission")
+	}
+	release()
+	awaitParallel(t, done)
+	assertParallelReservationsEmpty(t, s, b)
+}
