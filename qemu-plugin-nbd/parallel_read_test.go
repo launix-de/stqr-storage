@@ -64,7 +64,8 @@ func TestNBDParallelReadOverlapAndSparseEdges(t *testing.T) {
 		}
 		return nil
 	}
-	dst := make([]byte, StripeSize+8)
+	backing := bytes.Repeat([]byte{0xa5}, int(StripeSize)+24)
+	dst := backing[8 : len(backing)-8]
 	done := make(chan error, 1)
 	go func() { done <- c.ReadAt(context.Background(), m, dst, StripeSize-4) }()
 	select {
@@ -83,6 +84,9 @@ func TestNBDParallelReadOverlapAndSparseEdges(t *testing.T) {
 	}
 	want := make([]byte, len(dst))
 	copy(want, []byte{7, 7, 7, 7, 8, 9})
+	if !bytes.Equal(backing[:8], bytes.Repeat([]byte{0xa5}, 8)) || !bytes.Equal(backing[len(backing)-8:], bytes.Repeat([]byte{0xa5}, 8)) {
+		t.Fatal("read modified bytes outside destination window")
+	}
 	if !bytes.Equal(dst, want) {
 		t.Fatal("sparse stripe assembly")
 	}
@@ -143,5 +147,131 @@ func TestNBDReadScatterErrorCancelsSiblings(t *testing.T) {
 	}
 	if s.active.Load() != 0 || s.syncs != 0 {
 		t.Fatal("unfinished sibling or implicit sync")
+	}
+}
+
+// An admitted overlapping write cannot outlive a canceled read's callbacks.
+// Hold a callback after cancellation to prove the operation guard drains too.
+func TestNBDReadErrorDrainsBeforeReleasingGuard(t *testing.T) {
+	s := &parallelStripeStore{testStore: newTestStore()}
+	c := NewCatalog(s)
+	m := Metadata{ID: client.ID{1}, Size: 2 * StripeSize}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	started, canceled, release := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	defer close(release)
+	sentinel := errors.New("selected stripe failed")
+	s.before = func(ctx context.Context, id client.ObjectID) error {
+		if id == StripeID(m.ID, 0) {
+			close(started)
+			<-ctx.Done()
+			close(canceled)
+			<-release
+			return ctx.Err()
+		}
+		select {
+		case <-started:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+		return sentinel
+	}
+	done := make(chan error, 1)
+	go func() { done <- c.ReadAt(ctx, m, make([]byte, m.Size), 0) }()
+	select {
+	case <-canceled:
+	case err := <-done:
+		t.Fatal("read returned before callback release", err)
+	case <-ctx.Done():
+		t.Fatal("sibling did not observe cancellation")
+	}
+	select {
+	case err := <-done:
+		t.Fatal("read returned before callback release", err)
+	default:
+	}
+	writeDone := make(chan error, 1)
+	go func() { writeDone <- c.WriteAt(ctx, m, []byte("next"), 0) }()
+	waitBlockOperations(t, c, 2)
+	select {
+	case err := <-done:
+		t.Fatal("read returned before callback release", err)
+	case err := <-writeDone:
+		t.Fatal("write passed undrained read guard", err)
+	case <-time.After(25 * time.Millisecond):
+	}
+	release <- struct{}{}
+	select {
+	case err := <-done:
+		if !errors.Is(err, sentinel) {
+			t.Fatal(err)
+		}
+	case <-ctx.Done():
+		t.Fatal("read did not join")
+	}
+	select {
+	case err := <-writeDone:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-ctx.Done():
+		t.Fatal("operation guard not released")
+	}
+	if s.active.Load() != 0 || s.syncs != 0 {
+		t.Fatal("callback leak or implicit sync")
+	}
+}
+
+type serialStripeReadStore struct{ Store }
+
+func TestNBDCustomStoreReadsRemainSerial(t *testing.T) {
+	s := &parallelStripeStore{testStore: newTestStore()}
+	c := NewCatalog(serialStripeReadStore{s})
+	m := Metadata{ID: client.ID{1}, Size: 2 * StripeSize}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	started, second, release := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	defer close(release)
+	s.before = func(ctx context.Context, id client.ObjectID) error {
+		if id == StripeID(m.ID, 0) {
+			close(started)
+			select {
+			case <-release:
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		} else {
+			close(second)
+		}
+		return nil
+	}
+	done := make(chan error, 1)
+	go func() { done <- c.ReadAt(ctx, m, make([]byte, m.Size), 0) }()
+	select {
+	case <-started:
+	case <-ctx.Done():
+		t.Fatal("first serial callback did not start")
+	}
+	select {
+	case <-second:
+		t.Fatal("custom store called concurrently")
+	case <-time.After(25 * time.Millisecond):
+	}
+	release <- struct{}{}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-ctx.Done():
+		t.Fatal("serial read did not complete")
+	}
+	select {
+	case <-second:
+	default:
+		t.Fatal("positive control: second callback never ran")
+	}
+	if s.peak.Load() != 1 {
+		t.Fatal("custom store concurrency", s.peak.Load())
 	}
 }
