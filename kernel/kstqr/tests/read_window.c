@@ -34,5 +34,27 @@ int main(int argc,char **argv) {
     if(!child) { execl("/bin/busybox","wget","-qO-",address,NULL);_exit(127); }
     CHECK(waitpid(child,&status,0)==child && WIFEXITED(status) && !WEXITSTATUS(status));
 
+    CHECK(snprintf(address,sizeof(address),"%s/__kstqr_test/read-failure/start",argv[1])<(int)sizeof(address));
+    child=fork();CHECK(child>=0);
+    if(!child) { execl("/bin/busybox","wget","-qO-",address,NULL);_exit(127); }
+    CHECK(waitpid(child,&status,0)==child && WIFEXITED(status) && !WEXITSTATUS(status));
+    data=malloc(1U<<20);CHECK(data);
+    fd=open("/readonly/read-failure-window",O_RDONLY);CHECK(fd>=0);
+    start=now();
+    ssize_t failureRead=read(fd,data,1U<<20);
+    printf("KSTQR_READ_FAILURE_RESULT bytes=%zd errno=%d seconds=%.9f\n",failureRead,errno,now()-start);
+    /* VFS can retry a failed readahead through read_folio before returning.
+     * The proxy verifies the actual failed range and its delayed siblings. */
+    CHECK(failureRead >= -1 && failureRead <= (1<<20));
+    CHECK(snprintf(address,sizeof(address),"%s/__kstqr_test/read-failure/verify",argv[1])<(int)sizeof(address));
+    child=fork();CHECK(child>=0);
+    if(!child) { execl("/bin/busybox","wget","-qO-",address,NULL);_exit(127); }
+    CHECK(waitpid(child,&status,0)==child && WIFEXITED(status) && !WEXITSTATUS(status));
+    CHECK(lseek(fd,0,SEEK_SET)==0);at=0;
+    while(at<(1U<<20)) { ssize_t got=read(fd,data+at,(1U<<20)-at);CHECK(got>0);at+=(size_t)got; }
+    for(unsigned i=0;i<(1U<<20);i++) CHECK(data[i]==(i/16384%8==7?0:(unsigned char)(i/16384+1)));
+    CHECK(!close(fd));free(data);
+    puts("KSTQR_READ_FAILURE_RETRY_PASS");
+
     return 0;
 }

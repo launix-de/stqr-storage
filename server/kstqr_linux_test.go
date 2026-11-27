@@ -139,6 +139,18 @@ func TestKSTQRVirtualMachine(t *testing.T) {
 	}))
 	defer upstream.Close()
 	host := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/__kstqr_test/read-failure/start" {
+			writebackFault.ranges.beginFailure()
+			return
+		}
+		if r.URL.Path == "/__kstqr_test/read-failure/verify" {
+			if n, err := writebackFault.ranges.verifyFailure(); err != nil {
+				http.Error(w, err.Error(), 500)
+			} else {
+				fmt.Fprintf(w, "KSTQR_READ_FAILURE_DRAIN_PASS replies=%d\n", n)
+			}
+			return
+		}
 		if r.URL.Path == "/api/ws" {
 			writebackFault.proxy(w, r, upstream.URL)
 			return
@@ -490,6 +502,32 @@ func TestKSTQRVirtualMachine(t *testing.T) {
 	if _, e = conn.Put(ctx, windowFile.ID, node.B, client.PutOptions{}); e != nil {
 		t.Fatal(e)
 	}
+	failureFile, e := fs.Create(ctx, client.FilesystemRootID(), "read-failure-window", 0644, 0, 0, false)
+	if e != nil {
+		t.Fatal(e)
+	}
+	failureIndex := append([]byte(nil), index.B...)
+	var failureLeaves []client.ObjectID
+	for i := 0; i < 64; i++ {
+		if i%8 == 7 {
+			continue
+		}
+		leaf := client.ObjectID(sha256.Sum256([]byte(fmt.Sprintf("native-failure-leaf-%d", i))))
+		if _, e = conn.Put(ctx, leaf, bytes.Repeat([]byte{byte(i + 1)}, 16384+13), client.PutOptions{}); e != nil {
+			t.Fatal(e)
+		}
+		copy(failureIndex[10+i*44+8:], leaf[:])
+		failureLeaves = append(failureLeaves, leaf)
+	}
+	failureIndexID := client.ObjectID(sha256.Sum256(failureIndex))
+	if _, e = conn.Put(ctx, failureIndexID, failureIndex, client.PutOptions{}); e != nil {
+		t.Fatal(e)
+	}
+	failureNode := append([]byte(nil), node.B...)
+	copy(failureNode[len(failureNode)-32:], failureIndexID[:])
+	if _, e = conn.Put(ctx, failureFile.ID, failureNode, client.PutOptions{}); e != nil {
+		t.Fatal(e)
+	}
 	// A two-level 64 MiB file shares payload bytes but has 64 distinct
 	// valid child-index objects. Tiny reads should fetch only intersecting
 	// branches; this is checked by the proxy, not by a timing assumption.
@@ -531,6 +569,7 @@ func TestKSTQRVirtualMachine(t *testing.T) {
 	}
 	writebackFault.ranges.configureIndexes(branchIDs)
 	writebackFault.ranges.configure(windowLeaves)
+	writebackFault.ranges.configureFailure(failureLeaves)
 	var loopDigest string
 	if os.Getenv("STQR_KERNEL_LOOP") == "1" {
 		squashRoot := t.TempDir()

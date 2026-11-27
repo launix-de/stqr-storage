@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -46,6 +47,63 @@ type kernelRangeGate struct {
 	seen               uint64
 	indexes            map[client.ObjectID]bool
 	visited            map[client.ObjectID]bool
+	failureLeaves      map[client.ObjectID]bool
+	failure            bool
+	failureFirst       client.ID
+	failurePending     map[client.ID]bool
+	failureRelease     chan struct{}
+	failureDelivered   int
+	failureOverlap     int
+}
+
+func (g *kernelRangeGate) configureFailure(ids []client.ObjectID) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.failureLeaves = make(map[client.ObjectID]bool)
+	for _, id := range ids {
+		g.failureLeaves[id] = true
+		g.leaves[id] = true
+	}
+}
+
+func (g *kernelRangeGate) beginFailure() {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.failure = true
+	g.failurePending = make(map[client.ID]bool)
+	g.failureRelease = make(chan struct{})
+}
+
+func (g *kernelRangeGate) failureReply(raw []byte) (bool, bool, <-chan struct{}) {
+	m, err := client.DecodeMessage(raw)
+	if err != nil {
+		return false, false, nil
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.failure && g.failurePending[m.ID], m.ID == g.failureFirst, g.failureRelease
+}
+
+func (g *kernelRangeGate) deliveredFailure(raw []byte, first bool) {
+	m, _ := client.DecodeMessage(raw)
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	delete(g.failurePending, m.ID)
+	g.failureDelivered++
+	if first {
+		g.failureOverlap = len(g.failurePending)
+		close(g.failureRelease)
+	}
+}
+
+func (g *kernelRangeGate) verifyFailure() (int, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if !g.failure || g.failureDelivered < 2 || g.failureOverlap == 0 || len(g.failurePending) != 0 {
+		return g.failureDelivered, fmt.Errorf("failed read returned without draining its overlapping ranges: delivered=%d overlapping=%d pending=%d", g.failureDelivered, g.failureOverlap, len(g.failurePending))
+	}
+	g.failure = false
+	return g.failureDelivered, nil
 }
 
 func (g *kernelRangeGate) configure(ids []client.ObjectID) {
@@ -93,6 +151,12 @@ func (g *kernelRangeGate) request(raw []byte) {
 	}
 	if !g.leaves[leaf] {
 		return
+	}
+	if g.failure && g.failureLeaves[leaf] {
+		if g.failureFirst == (client.ID{}) {
+			g.failureFirst = m.ID
+		}
+		g.failurePending[m.ID] = true
 	}
 	g.seen++
 	if g.seen == 1 {
@@ -211,6 +275,30 @@ func (f *kernelWritebackFault) proxy(w http.ResponseWriter, r *http.Request, ups
 				replies.Add(1)
 				go func() {
 					defer replies.Done()
+					if failed, failFirst, failureRelease := f.ranges.failureReply(raw); failed {
+						if failFirst {
+							m, _ := client.DecodeMessage(raw)
+							m.Body = client.ResponseBody(403, nil, "injected selected-range rejection")
+							raw = client.EncodeMessage(m)
+						} else {
+							select {
+							case <-failureRelease:
+							case <-ctx.Done():
+								return
+							}
+							select {
+							case <-time.After(100 * time.Millisecond):
+							case <-ctx.Done():
+								return
+							}
+						}
+						if write(kind, raw) != nil {
+							downstream.Close()
+							return
+						}
+						f.ranges.deliveredFailure(raw, failFirst)
+						return
+					}
 					if first {
 						select {
 						case <-release:
