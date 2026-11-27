@@ -150,28 +150,38 @@ func (t *transaction) node(off uint64) (treeNode, error) {
 	return t.loadNode(off, true)
 }
 
-func (t *transaction) loadNode(off uint64, mutable bool) (treeNode, error) {
+// nodePage selects only transaction-local overlays; committed pages retain the
+// existing bounded decoded-node cache. Readers and editors share this ordering.
+func (t *transaction) nodePage(off uint64) ([]byte, bool, error) {
 	_, spilled := t.spilled[off]
 	if t.acceptedPages != nil {
 		flag, err := t.acceptedPages.flag(off)
 		if err != nil {
-			return treeNode{}, err
+			return nil, false, err
 		}
 		spilled = spilled || flag != 0
 	}
 	if t.pages[off] != nil || spilled {
-		b, e := t.page(off)
-		if e != nil {
-			return treeNode{}, e
-		}
+		b, err := t.page(off)
+		return b, true, err
+	}
+	return nil, false, nil
+}
+func (t *transaction) loadNode(off uint64, mutable bool) (treeNode, error) {
+	b, overlay, err := t.nodePage(off)
+	if err != nil {
+		return treeNode{}, err
+	}
+	if overlay {
 		return decodeNode(b, t.sb.Identity.VolumeID)
 	}
-	n, e := t.v.node(off)
-	if e == nil && mutable {
+	n, err := t.v.node(off)
+	if err == nil && mutable {
 		n.entries = append([]treeEntry(nil), n.entries...)
 	}
-	return n, e
+	return n, err
 }
+
 func (t *transaction) putNode(off uint64, n treeNode) {
 	t.pages[off] = encodeNode(n, t.sb.Identity.VolumeID, t.sb.Generation+1)
 }

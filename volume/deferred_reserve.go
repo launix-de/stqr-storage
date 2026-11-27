@@ -69,7 +69,7 @@ func (g *deferredGroup) reserveRedo(t *transaction, protected uint64) error {
 			candidates = append(candidates, (g.journal.off+g.journal.n-n)/PageSize*PageSize)
 		}
 		for _, off := range candidates {
-			current, err := freeContains(t.readNode, t.sb.FreeRoot, off, n)
+			current, err := t.freeContains(t.sb.FreeRoot, off, n)
 			if err != nil {
 				return err
 			}
