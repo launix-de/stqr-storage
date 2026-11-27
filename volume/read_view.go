@@ -133,9 +133,22 @@ func (v *Volume) visibleRegion(off uint64, n int) ([]byte, int, bool, error) {
 	}
 	if v.staging != nil || v.deferred != nil || v.fence != nil {
 		n = min(n, PageSize-at)
-		data := v.staging[page]
+		var data []byte
+		if v.stageStore != nil {
+			var err error
+			data, _, err = v.stageStore.get(page)
+			if err != nil {
+				return nil, 0, false, err
+			}
+		} else {
+			data = v.staging[page]
+		}
 		if data == nil && v.deferred != nil {
-			data = v.deferred.pages[page]
+			var err error
+			data, _, err = v.deferred.store.get(page)
+			if err != nil {
+				return nil, 0, false, err
+			}
 		}
 		if data == nil && v.fence != nil {
 			var err error

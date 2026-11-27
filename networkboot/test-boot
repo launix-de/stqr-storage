@@ -4,6 +4,8 @@
 import argparse
 import ipaddress
 import shutil
+import re
+import secrets
 import time
 import urllib.error
 import urllib.request
@@ -28,11 +30,27 @@ def wait_for_gateway(url, timeout=900):
         time.sleep(min(1, max(0, deadline-time.monotonic())))
 
 
+def mac_address(value):
+    if not re.fullmatch(r'(?:[0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}', value):
+        raise argparse.ArgumentTypeError('MAC must contain six colon-separated hex bytes')
+    raw = bytes.fromhex(value.replace(':', ''))
+    if raw[0] & 1 or not any(raw):
+        raise argparse.ArgumentTypeError('MAC must be a nonzero unicast address')
+    return value.lower()
+
+
+def default_mac():
+    raw = bytearray(secrets.token_bytes(6))
+    raw[0] = (raw[0] | 2) & 0xfe  # Locally administered, unicast.
+    return ':'.join(f'{value:02x}' for value in raw)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--server', help='gateway IPv4 address (default: this host on its default-route interface)')
     parser.add_argument('--http-port', type=int, default=8088)
     parser.add_argument('--memory', type=int, default=4096, help='VM memory in MiB')
+    parser.add_argument('--mac', type=mac_address, help='stable client MAC (default: unique locally administered address)')
     parser.add_argument('--cpus', type=int, default=2)
     args = parser.parse_args()
     if args.memory < 512 or args.cpus < 1 or not 1 <= args.http_port <= 65535:
@@ -43,12 +61,13 @@ def main():
         parser.error(str(error))
     if not shutil.which('qemu-system-x86_64'):
         raise RuntimeError('Missing dependency: qemu-system-x86_64')
+    mac = args.mac or default_mac()
     url = f'http://{server}:{args.http_port}/boot.ipxe'
     wait_for_gateway(url)
     print(f'PXE boot from {url}; the gateway selects the published base bucket.', flush=True)
     run('qemu-system-x86_64', '-name', 'STQR PXE test', '-machine', 'accel=kvm:tcg',
         '-m', args.memory, '-smp', args.cpus, '-boot', 'n',
-        '-nic', f'user,model=virtio-net-pci,bootfile={url}')
+        '-nic', f'user,model=virtio-net-pci,mac={mac},bootfile={url}')
 
 
 if __name__ == '__main__':

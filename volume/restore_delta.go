@@ -19,7 +19,7 @@ type RestorePatch struct {
 // requires the exact previously imported bytes and unchanged logical length.
 // Ordinary client mutations must use PUT_RANGE rather than this trusted import operation.
 func (h *Handle) RestoreDelta(k Key, base [32]byte, info Info, patches []RestorePatch, opts Options) error {
-	return h.do(true, func(v *Volume) error {
+	return h.doAcceptedOptions(opts, func(v *Volume) error {
 		if opts.RequestID != (ID{}) || opts.Compression != nil && *opts.Compression != Raw {
 			return ErrRange
 		}

@@ -443,10 +443,24 @@ class Workflows(unittest.TestCase):
             script.main()
         ready.assert_called_once_with('http://192.0.2.10:8088/boot.ipxe')
         args = run.call_args.args
-        self.assertIn('user,model=virtio-net-pci,bootfile=http://192.0.2.10:8088/boot.ipxe', args)
+        self.assertRegex(args[args.index('-nic')+1], r'^user,model=virtio-net-pci,mac=(?:[0-9a-f]{2}:){5}[0-9a-f]{2},bootfile=http://192.0.2.10:8088/boot.ipxe$')
         self.assertIn('n', args)
         self.assertNotIn('-drive', args)
         self.assertNotIn('-blockdev', args)
+
+    def test_parallel_pxe_launches_have_distinct_mac_and_explicit_mac_validates(self):
+        script=load('test-boot')
+        macs=[script.default_mac() for _ in range(20)]
+        self.assertEqual(len(set(macs)),20)
+        for mac in macs:
+            self.assertEqual(script.mac_address(mac),mac)
+            self.assertEqual(int(mac[:2],16)&3,2)
+        self.assertEqual(script.mac_address('52:54:00:12:AB:CD'),'52:54:00:12:ab:cd')
+        for mac in ('invalid','52:54:00:12:34','ff:ff:ff:ff:ff:ff','00:00:00:00:00:00'):
+            with self.assertRaises(script.argparse.ArgumentTypeError):script.mac_address(mac)
+        with patch.object(sys,'argv',['test-boot','--server','192.0.2.10','--mac','52:54:00:12:AB:CD']), patch.object(script.shutil,'which',return_value='/qemu'), patch.object(script,'wait_for_gateway'), patch.object(script,'run') as run, contextlib.redirect_stdout(io.StringIO()):
+            script.main()
+        self.assertIn('mac=52:54:00:12:ab:cd',run.call_args.args[-1])
 
     def test_pxe_waits_for_gateway_before_launch(self):
         script = load('test-boot')

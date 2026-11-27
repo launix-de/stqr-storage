@@ -23,17 +23,9 @@ func (s *Server) prepareShortShutdown(ctx context.Context) error {
 	}
 	s.mu.Lock()
 	s.cfg = cfg
-	stores := make([]*managedVolume, 0, len(s.volumes))
-	for _, v := range s.volumes {
-		stores = append(stores, v)
-	}
 	s.mu.Unlock()
-	for _, v := range stores {
-		if err := v.store.Sync(); err != nil {
-			s.opMu.Unlock()
-			return err
-		}
-	}
+	// A process restart is not a client durability request. Accepted tails keep
+	// their unconfirmed status; Close waits for existing fences but starts none.
 	s.opMu.Unlock()
 	s.publishStats()
 	return s.sendGoAway(ctx, 1)

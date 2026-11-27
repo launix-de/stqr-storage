@@ -302,8 +302,8 @@ func (s *Server) executeObjects(m client.Message, ws *wsSession, p principal) ([
 			return nil, 0, fail(400, "invalid mutation transfer")
 		}
 		if op.stream {
-			if accepted {
-				return nil, 0, fail(400, "accepted wrapper requires inline payload")
+			if accepted && (ws == nil || !ws.acceptedStreamsCap.Load()) {
+				return nil, 0, fail(501, "accepted streaming capability was not negotiated")
 			}
 			if len(op.inline) != 0 || ws == nil {
 				return nil, 0, fail(400, "streaming upload requires WebSocket")

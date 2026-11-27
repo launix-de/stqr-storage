@@ -338,10 +338,15 @@ int main(void) {
             o=fresh();o.accepted=1;CHECK(!stqr_put(c,left,"routed",6,&o,&info));
             CHECK(!stqr_pending_mark(c,&a) && a.sequence);
             o=fresh();o.accepted=1;CHECK(!stqr_put(c,right,"routed",6,&o,&info));
-            CHECK(!stqr_pending_mark(c,&b) && b.sequence);
-            CHECK(memcmp(a.boot.bytes,b.boot.bytes,16));
+            /* A scalar observation must not silently fence the other owner. */
+            CHECK(stqr_pending_mark(c,&b)==-EOPNOTSUPP);
+            stqr_fence *both=NULL;
+            CHECK(!stqr_fence_capture(c,&both) && stqr_fence_count(both)==2);
+            stqr_fence_close(both);
             CHECK(!stqr_sync_through(c,&a,&durable));
             CHECK(!memcmp(durable.boot.bytes,a.boot.bytes,16) && durable.sequence>=a.sequence);
+            CHECK(!stqr_pending_mark(c,&b) && b.sequence);
+            CHECK(memcmp(a.boot.bytes,b.boot.bytes,16));
             CHECK(!stqr_sync(c));
         }
         {

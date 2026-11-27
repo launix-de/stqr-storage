@@ -412,7 +412,7 @@ func (o *OverlayFilesystem) subscribed(id ObjectID, proof SnapshotProof) bool {
 }
 
 // EnableAcceptedWrites opts this filesystem wrapper into weaker write ACKs.
-// Unsupported nodes retain the durable path. Call Sync at filesystem barriers.
+// Unsupported accepted writes fail explicitly. Call Sync at filesystem barriers.
 func (c *SubscriptionStore) EnableAcceptedWrites()          { c.mu.Lock(); c.accepted = true; c.mu.Unlock() }
 func (c *SubscriptionStore) Sync(ctx context.Context) error { return c.client.Sync(ctx) }
 

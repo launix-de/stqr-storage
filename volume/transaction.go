@@ -22,6 +22,7 @@ type transaction struct {
 	pages                            map[uint64][]byte
 	spilled                          map[uint64]int64
 	spool                            *encodedSpool
+	acceptedPages                    *dirtyStore
 	busy, pending, retired           []allocation
 	reusable                         allocation
 	// Split free-tree siblings remain searchable until their parent is published.
@@ -39,12 +40,24 @@ func (v *Volume) transaction() *transaction {
 // Large in-place writes retain dirty page images in a bounded temporary spool,
 // rather than keeping a second object-sized payload in the Go heap.
 func (t *transaction) close() {
+	if t.acceptedPages != nil {
+		t.acceptedPages.close()
+		t.acceptedPages = nil
+	}
 	if t.spool != nil {
 		t.spool.Close()
 		t.spool = nil
 	}
 }
 func (t *transaction) page(off uint64) ([]byte, error) {
+	if t.acceptedPages != nil {
+		if p, ok, err := t.acceptedPages.get(off); err != nil || ok {
+			if hot := t.pages[off]; hot != nil {
+				return hot, nil
+			}
+			return p, err
+		}
+	}
 	if b := t.pages[off]; b != nil {
 		return b, nil
 	}
@@ -59,8 +72,23 @@ func (t *transaction) spillPages() error {
 	if len(t.pages) <= 1024 {
 		return nil
 	}
+	if t.v.staging != nil {
+		if t.acceptedPages == nil {
+			t.acceptedPages = newDirtyStore(deferredPageLimit, t.sb.Identity.Class == RAM || t.sb.Identity.Class == RAMCache)
+		}
+		for off, page := range t.pages {
+			if err := t.acceptedPages.put(off, page, 1); err != nil {
+				if errors.Is(err, ErrBusy) {
+					return ErrWritebackPressure
+				}
+				return err
+			}
+			delete(t.pages, off)
+		}
+		return nil
+	}
 	if t.spool == nil {
-		t.spool = &encodedSpool{noSpill: t.sb.Identity.Class == RAM}
+		t.spool = &encodedSpool{noSpill: t.sb.Identity.Class == RAM || t.sb.Identity.Class == RAMCache}
 		t.spilled = map[uint64]int64{}
 	}
 	for off, b := range t.pages {
@@ -416,7 +444,7 @@ func (t *transaction) writeBytes(off uint64, b []byte) error {
 		off += uint64(n)
 		b = b[n:]
 	}
-	return nil
+	return t.spillPages()
 }
 func (t *transaction) patch(off uint64, b []byte) error {
 	for len(b) > 0 {
@@ -501,6 +529,11 @@ func (t *transaction) commitReserved(useGuaranteed bool, allowance, guaranteedAl
 		return e
 	}
 	if t.v.staging != nil {
+		if t.acceptedPages != nil {
+			if err := t.acceptedPages.each(func(off uint64, _ byte, p []byte) error { return t.v.stageWrite(p, off) }); err != nil {
+				return err
+			}
+		}
 		for off := range t.pages {
 			if err := t.v.stageWrite(t.pages[off], off); err != nil {
 				return err
@@ -515,17 +548,9 @@ func (t *transaction) commitReserved(useGuaranteed bool, allowance, guaranteedAl
 				return err
 			}
 		}
-		count := len(t.v.deferred.pages)
-		for off := range t.v.staging {
-			if t.v.deferred.pages[off] == nil {
-				count++
-			}
-		}
-		if count > t.v.deferred.pageLimit {
-			return errDeferredBudget
-		}
-		for off, page := range t.v.staging {
-			t.v.deferred.pages[off] = page
+
+		if err := t.v.deferred.publishStaging(t); err != nil {
+			return err
 		}
 		t.v.sb = t.sb
 		t.v.publishIdentity()
@@ -541,13 +566,10 @@ func (t *transaction) commitReserved(useGuaranteed bool, allowance, guaranteedAl
 		if t.v.admission != nil {
 			t.v.guaranteed = dynamicReserve
 		}
-		for off, page := range t.v.staging {
-			if string(page[:4]) == "BPT2" {
-				if node, err := decodeNode(page, t.sb.Identity.VolumeID); err == nil {
-					t.v.nodes.put(off, node)
-				}
-			}
-		}
+		// A bounded cache is cheaper and safer to invalidate than walking an
+		// unbounded spill to update every decoded metadata entry.
+		t.v.nodes.clear()
+
 		return nil
 	}
 	all := make(map[uint64]bool, len(t.pages)+len(t.spilled))
@@ -579,7 +601,7 @@ func (t *transaction) commitReserved(useGuaranteed bool, allowance, guaranteedAl
 		offsets = append(offsets, off)
 	}
 	sort.Slice(offsets, func(i, j int) bool { return offsets[i] < offsets[j] })
-	payload := &encodedSpool{noSpill: t.sb.Identity.Class == RAM}
+	payload := &encodedSpool{noSpill: t.sb.Identity.Class == RAM || t.sb.Identity.Class == RAMCache}
 	defer payload.Close()
 	digest := sha256.New()
 	writer := io.MultiWriter(payload, digest)
