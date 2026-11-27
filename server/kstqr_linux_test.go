@@ -37,7 +37,7 @@ func TestKSTQRVirtualMachine(t *testing.T) {
 	// Focused scripts replace the same init section; combining them cannot
 	// represent a valid test and must fail before starting a guest.
 	selectedMode := ""
-	for _, mode := range []string{"CACHE_REOPEN", "BENCHMARK", "WRITE_BENCHMARK", "READ_WINDOW", "LOOP", "RESTART_ONLY", "OVERLAY", "OUTAGE", "CACHE_RETENTION"} {
+	for _, mode := range []string{"CACHE_REOPEN", "BENCHMARK", "WRITE_BENCHMARK", "READ_WINDOW", "LOOP", "RESTART_ONLY", "OVERLAY", "OVERLAY_PROOF", "OUTAGE", "CACHE_RETENTION"} {
 		if os.Getenv("STQR_KERNEL_"+mode) == "1" {
 			if selectedMode != "" {
 				t.Fatalf("incompatible kernel fixture modes %s and %s; run them separately", selectedMode, mode)
@@ -134,6 +134,7 @@ func TestKSTQRVirtualMachine(t *testing.T) {
 	var onlineObjects []client.ObjectID
 	var onlineGet func(context.Context, client.ObjectID) error
 	var nativeOverlay atomic.Pointer[client.OverlayFilesystem]
+	var overlayProofClient atomic.Pointer[client.Client]
 	writebackFault := &kernelWritebackFault{}
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		current.Load().Handler().ServeHTTP(w, r)
@@ -222,6 +223,48 @@ func TestKSTQRVirtualMachine(t *testing.T) {
 				}
 				time.Sleep(20 * time.Millisecond)
 			}
+		}
+		if r.URL.Path == "/__kstqr_test/overlay-proof/replace" {
+			c := overlayProofClient.Load()
+			if c == nil {
+				http.Error(w, "proof fixture not ready", 503)
+				return
+			}
+			raw, _, err := c.Get(r.Context(), client.FilesystemRootID())
+			if err == nil {
+				_, err = c.Put(r.Context(), client.FilesystemRootID(), raw, client.PutOptions{})
+			}
+			if err == nil {
+				err = c.Sync(r.Context())
+			}
+			if err != nil {
+				http.Error(w, err.Error(), 500)
+			} else {
+				fmt.Fprintln(w, "identical overlay root replaced")
+			}
+			return
+		}
+		if r.URL.Path == "/__kstqr_test/overlay-proof/reconnect" {
+			c := overlayProofClient.Load()
+			if c == nil {
+				http.Error(w, "proof fixture not ready", 503)
+				return
+			}
+			closed := 0
+			s.wsMu.Lock()
+			for ws := range s.sockets {
+				if ws.principal.User.ID == user.ID && ws.authorization != nil && ws.authorization.bucket != nil && ws.authorization.bucket.ID() == volume.ID(c.BucketID()) {
+					ws.close()
+					closed++
+				}
+			}
+			s.wsMu.Unlock()
+			if closed == 0 {
+				http.Error(w, "no guest subscription connection closed", 500)
+				return
+			}
+			fmt.Fprintf(w, "disconnected %d guest sessions\n", closed)
+			return
 		}
 		if r.URL.Path == "/__kstqr_test/native-directory" {
 			dir, err := subscriptionFS.Lookup(r.Context(), client.FilesystemRootID(), "live-directory")
@@ -899,7 +942,7 @@ rmmod kstqr
 
 	var nativeUpperID client.ID
 	var watcher *client.Client
-	if os.Getenv("STQR_KERNEL_OVERLAY") == "1" {
+	if os.Getenv("STQR_KERNEL_OVERLAY") == "1" || os.Getenv("STQR_KERNEL_OVERLAY_PROOF") == "1" {
 		// Keep mapped lower files larger than the deliberately tiny cache used
 		// by overlay-cache-quiet. Eviction must not refill that same cache from
 		// an all-inode invalidation worker while the guest is otherwise idle.
@@ -971,6 +1014,7 @@ rmmod kstqr
 			t.Fatal(e)
 		}
 		defer watcher.Close()
+		overlayProofClient.Store(watcher)
 		watchOverlay, e := client.OpenOverlayFilesystem(ctx, conn, watcher, client.OverlayOptions{LowerBucketID: client.ID(b.ID())})
 		if e != nil {
 			t.Fatal(e)
@@ -1122,6 +1166,51 @@ echo KSTQR_VM_PASS
 trap - EXIT
 poweroff -f
 `, endpoint, nativeUpperID.String(), client.ID(b.ID()).String(), policyID.String(), controlURL.Port(), strings.Repeat("a", 64), client.ID(empty.ID()).String())
+	}
+
+	if os.Getenv("STQR_KERNEL_OVERLAY_PROOF") == "1" {
+		run("cc", "-static", "-O2", "-Wall", "-Wextra", "-Werror", "-o", filepath.Join(initrdRoot, "overlay-proof"), filepath.Join(root, "tests/overlay_proof.c"))
+		init = fmt.Sprintf(`#!/bin/sh
+set -eu
+export PATH=/bin
+/bin/busybox --install -s /bin
+trap 'echo KSTQR_VM_FAIL; poweroff -f' EXIT
+mount -t proc proc /proc
+mount -t sysfs sys /sys
+mount -t devtmpfs dev /dev
+ip link set lo up
+ip link set eth0 up
+ip addr add 10.0.2.15/24 dev eth0
+ip route add default via 10.0.2.2
+insmod /kstqr.ko
+/mount.kstqr --uri %[1]s --bucket %[2]s --readonly-bucket %[3]s --credentials /credentials /mnt
+/overlay-proof warm
+/overlay-proof quiet
+wget -qO- %[1]s/__kstqr_test/overlay-proof/replace
+sleep 1
+/overlay-proof recover
+wget -qO- %[1]s/__kstqr_test/overlay-proof/reconnect
+sleep 1
+/overlay-proof recover
+umount /mnt
+rmmod kstqr
+if dmesg | grep -E 'BUG:|WARNING:|Oops:|KASAN:'; then exit 1; fi
+echo KSTQR_OVERLAY_PROOF_PASS
+echo KSTQR_VM_PASS
+trap - EXIT
+poweroff -f
+`, endpoint, nativeUpperID.String(), client.ID(b.ID()).String())
+		// Individual cases let the original predicate serve as an independent
+		// failing control for cursor changes and subscription replacement.
+		switch os.Getenv("STQR_KERNEL_OVERLAY_PROOF_CASE") {
+		case "", "all":
+		case "replace":
+			init = strings.Replace(init, fmt.Sprintf("wget -qO- %s/__kstqr_test/overlay-proof/reconnect\nsleep 1\n/overlay-proof recover\n", endpoint), "", 1)
+		case "reconnect":
+			init = strings.Replace(init, fmt.Sprintf("wget -qO- %s/__kstqr_test/overlay-proof/replace\nsleep 1\n/overlay-proof recover\n", endpoint), "", 1)
+		default:
+			t.Fatal("unknown overlay proof case")
+		}
 	}
 
 	if os.Getenv("STQR_KERNEL_CACHE_RETENTION") == "1" {
@@ -1294,7 +1383,13 @@ poweroff -f
 	if err != nil {
 		t.Fatalf("cpio: %v %s", err, packErr.String())
 	}
-	args := []string{"-machine", "q35", "-m", "512M", "-smp", "2", "-display", "none", "-serial", "stdio", "-monitor", "none", "-no-reboot", "-kernel", image, "-initrd", archive, "-append", "console=ttyS0 panic=1 oops=panic panic_on_warn=1 rdinit=/init loglevel=6", "-nic", "user,model=virtio-net-pci"}
+	guestMemory := "512M"
+	if os.Getenv("STQR_KERNEL_OVERLAY_PROOF") == "1" {
+		// The 7.0 Ubuntu kernel plus the complete static fixture initrd can fail
+		// unpacking before /init at 512 MiB; this isolated proof uses 1 GiB.
+		guestMemory = "1024M"
+	}
+	args := []string{"-machine", "q35", "-m", guestMemory, "-smp", "2", "-display", "none", "-serial", "stdio", "-monitor", "none", "-no-reboot", "-kernel", image, "-initrd", archive, "-append", "console=ttyS0 panic=1 oops=panic panic_on_warn=1 rdinit=/init loglevel=6", "-nic", "user,model=virtio-net-pci"}
 	if os.Getenv("STQR_KERNEL_TCG") != "1" {
 		args = append(args, "-enable-kvm", "-cpu", "host")
 	}
@@ -1320,6 +1415,17 @@ poweroff -f
 	}
 	if err != nil || !strings.Contains(string(output), "KSTQR_VM_PASS") || strings.Contains(string(output), "KSTQR_VM_FAIL") {
 		t.Fatalf("kernel VM: %v\n%s", err, output)
+	}
+	if os.Getenv("STQR_KERNEL_OVERLAY_PROOF") == "1" {
+		if !strings.Contains(string(output), "KSTQR_OVERLAY_PROOF_PASS") {
+			t.Fatal("overlay proof regression did not finish")
+		}
+		for _, line := range strings.Split(string(output), "\n") {
+			if strings.Contains(line, "overlay-proof:") {
+				t.Log(strings.TrimSpace(line))
+			}
+		}
+		return
 	}
 	if os.Getenv("STQR_KERNEL_CACHE_REOPEN") == "1" {
 		if !strings.Contains(string(output), "KSTQR_CACHE_REOPEN_PASS") {

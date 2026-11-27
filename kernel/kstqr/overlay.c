@@ -317,8 +317,15 @@ static int ov_state_once(struct ks_fs *f, struct ks_overlay_state **out)
 	info = root.info;
 	mutex_lock(&f->overlay_cache_lock);
 	s = f->overlay_state;
+	/* Cached state includes the exact observation used to certify directory
+	 * proofs, not merely decoded bytes. Equal content after replacement or
+	 * re-subscription must rebuild an immutable state with the new stamp;
+	 * reusing the old info would make every subsequent proof uncertifiable.
+	 * Never refresh shared s->info in place while readers retain this state. */
 	if (s && s->root_head.n == raw.n && !memcmp(s->root_head.p, raw.p, raw.n) &&
-	    !memcmp(s->info.runtime.bytes, info.runtime.bytes, 16)) {
+	    !memcmp(s->info.runtime.bytes, info.runtime.bytes, 16) &&
+	    s->info.proof.cursor == info.proof.cursor &&
+	    !memcmp(s->info.proof.subscription.bytes, info.proof.subscription.bytes, 16)) {
 		refcount_inc(&s->refs);
 		mutex_unlock(&f->overlay_cache_lock);
 		ks_snapshot_free(&root);
