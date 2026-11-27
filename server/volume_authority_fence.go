@@ -54,7 +54,17 @@ func (*authorityWait) Error() string { return "range authority checkpoint is pen
 func (*authorityWait) Unwrap() error { return fail(503, "range authority checkpoint is pending") }
 func (w *authorityWait) wait(ctx context.Context) error {
 	if w.store != nil {
-		return w.store.CheckpointThrough(0)
+		// Wait only outside node admission. Neither operation starts Sync:
+		// generation zero waits for an existing fence; Open/Close wait for
+		// current readers/private staging and release the mutex immediately.
+		if err := w.store.CheckpointThrough(0); err != nil {
+			return err
+		}
+		h, err := w.store.Open(true)
+		if err == nil {
+			h.Close()
+		}
+		return err
 	}
 	select {
 	case <-ctx.Done():
@@ -198,7 +208,10 @@ func (s *Server) ensureVolumeAuthorityLocked(allowances ...map[volume.ID]uint64)
 		if target.generation != 0 {
 			continue
 		}
-		h, err := target.store.Open(true)
+		h, acquired, err := target.store.TryOpenBuffered()
+		if errors.Is(err, volume.ErrBusy) || err == nil && !acquired {
+			return &authorityWait{store: target.store}
+		}
 		if err != nil {
 			return &authorityStageError{err: err}
 		}

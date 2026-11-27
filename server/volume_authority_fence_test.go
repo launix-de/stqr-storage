@@ -656,3 +656,45 @@ func TestAuthorityFenceConcurrentStartAndClose(t *testing.T) {
 		}
 	}
 }
+
+func TestAuthorityFenceReaderAdmissionWaitDropsNodeLock(t *testing.T) {
+	s, v, _, a, _ := authorityFenceFixture(t)
+	changeAuthorityEpoch(t, s, a)
+	reader, err := v.Open(false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var once sync.Once
+	release := func() { once.Do(func() { reader.Close() }) }
+	defer release()
+	// Stage under admission once, deterministically forcing the busy reader path.
+	staged := make(chan error, 1)
+	go func() { s.opMu.Lock(); err := s.ensureVolumeAuthorityLocked(); s.opMu.Unlock(); staged <- err }()
+	select {
+	case err = <-staged:
+	case <-time.After(time.Second):
+		t.Fatal("header admission waited on a reader under node lock")
+	}
+	var wait *authorityWait
+	if !errors.As(err, &wait) || wait.store != v {
+		t.Fatal("header stage queued behind a reader under admission", err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- s.ensureVolumeAuthority() }()
+	admitted := make(chan struct{})
+	go func() { s.opMu.Lock(); s.opMu.Unlock(); close(admitted) }()
+	select {
+	case <-admitted:
+	case <-time.After(time.Second):
+		t.Fatal("reader wait held node admission")
+	}
+	release()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("reader release did not resume authority persistence")
+	}
+}
