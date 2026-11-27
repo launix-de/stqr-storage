@@ -1440,7 +1440,7 @@ umount /mnt
 	}
 
 	if os.Getenv("STQR_KERNEL_EDIT_RETRY") == "1" {
-		probe := fmt.Sprintf("/mount.kstqr --uri %s --bucket %s --credentials /credentials /mnt\n/edit-retry %s\numount /mnt\n", endpoint, editRetryID.String(), endpoint)
+		probe := fmt.Sprintf("echo KSTQR_EDIT_RETRY_MOUNT_BEGIN\n/mount.kstqr --uri %s --bucket %s --credentials /credentials /mnt\necho KSTQR_EDIT_RETRY_WRITE_BEGIN\n/edit-retry %s\necho KSTQR_EDIT_RETRY_UNMOUNT_BEGIN\numount /mnt\n", endpoint, editRetryID.String(), endpoint)
 		init = strings.Replace(init, "insmod /kstqr.ko\n", "insmod /kstqr.ko\n"+probe, 1)
 	}
 

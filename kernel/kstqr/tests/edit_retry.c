@@ -17,6 +17,7 @@ static void control(const char *base,const char *mode,const char *action) {
  CHECK(waitpid(child,&status,0)==child&&WIFEXITED(status)&&WEXITSTATUS(status)==0);
 }
 int main(int argc,char **argv) {
+ setvbuf(stdout,NULL,_IONBF,0);
  CHECK(argc==2);
  const char *modes[]={"503","disconnect-before","disconnect-after"};
  char initial[8192],replacement[211],observed[sizeof(initial)+sizeof(replacement)];
@@ -25,6 +26,7 @@ int main(int argc,char **argv) {
   char path[128];CHECK(snprintf(path,sizeof(path),"/mnt/edit-outage-%u",i)<(int)sizeof(path));
   int fd=open(path,O_CREAT|O_RDWR|O_APPEND,0600);CHECK(fd>=0);
   CHECK(write(fd,initial,sizeof(initial))==(ssize_t)sizeof(initial));
+  printf("KSTQR_EDIT_RETRY mode=%s begin\n",modes[i]);
   control(argv[1],modes[i],"begin");
   /* Retry the selected stable payload edit, never this whole append again. */
   CHECK(write(fd,replacement,sizeof(replacement))==(ssize_t)sizeof(replacement));
@@ -33,6 +35,7 @@ int main(int argc,char **argv) {
   CHECK(!memcmp(observed,initial,sizeof(initial)));
   CHECK(!memcmp(observed+sizeof(initial),replacement,sizeof(replacement)));
   control(argv[1],modes[i],"verify");
+  printf("KSTQR_EDIT_RETRY mode=%s verified\n",modes[i]);
   CHECK(!close(fd));
  }
  /* Visibility retries cannot certify the accepted prefix from a lost socket.
