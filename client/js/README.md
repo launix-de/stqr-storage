@@ -125,6 +125,9 @@ cancellation/network loss cannot prove a mutation absent; retry identical input
 with that ID rather than inventing a new append. A lost lease coordinator is never
 silently reacquired. Acquire/release use a dedicated pinned coordinator and drain
 the client's own auxiliary connections; unrelated clients still block exclusivity.
+Cancellation sends native CANCEL. If acquisition has an unknown outcome, its
+coordinator is closed so a granted lease cannot remain hidden behind a lost reply;
+create a new Client after losing that coordinator.
 
 Buffered reads are limited to 16 MiB. Sink methods consume native frames with an
 incremental SHA-256 and await the sink; delivered bytes are tentative until the
