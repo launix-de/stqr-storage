@@ -232,12 +232,66 @@ static bool edits_independent(const struct buf *encoded,bool legacy)
 }
 struct ks_edit_completion {
  struct ks_async_result result;
+ struct ks_rpc *rpc;
+ stqr_options options;
  stqr_object_id id;
  const void *data;
  size_t size;
- u64 offset;
+ u64 offset, epoch;
  bool full, submitted;
 };
+/* Independent REDO edits keep their request identity and exact bytes while a
+ * node is temporarily unavailable. Re-entering the whole filesystem append
+ * against a newer inode would instead apply the user's operation twice.
+ * Submission and reply waiting release framing; other owners remain usable.
+ */
+static int edit_submit(struct ks_fs *f, struct ks_edit_completion *job)
+{
+ struct ks_rpc *rpc = ks_rpc_lock(f, job->id);
+ int err;
+ memset(&job->result, 0, sizeof(job->result));
+ init_completion(&job->result.done);
+ job->rpc = rpc;
+ job->submitted = false;
+ for (;;) {
+  job->epoch = rpc->reconnect_epoch;
+  if (job->options.absent && job->full)
+   err = stqr_cas_async(rpc->client, job->id, 1, 0, NULL, 0,
+                        job->data, job->size, &job->options,
+                        ks_async_completed, &job->result);
+  else if (job->full)
+   err = stqr_put_result_async(rpc->client, job->id, job->data, job->size,
+                               &job->options, ks_async_completed, &job->result);
+  else
+   err = stqr_put_range_result_async(rpc->client, job->id, job->offset,
+                                     job->data, job->size, &job->options,
+                                     ks_async_completed, &job->result);
+  if (!err) { job->submitted = true; break; }
+  if (!ks_transport_retryable(NULL, err)) break;
+  err = ks_rpc_retry(f, rpc, job->epoch, 0);
+  if (err) break;
+ }
+ mutex_unlock(&rpc->lock);
+ return err;
+}
+static int edit_wait(struct ks_fs *f, struct ks_edit_completion *job)
+{
+ int err;
+ for (;;) {
+  wait_for_completion(&job->result.done);
+  err = job->result.error;
+  if (!(err == -EAGAIN ? job->result.status == 0 || job->result.status == 503 :
+          ks_transport_retryable(NULL, err))) return err;
+  mutex_lock(&job->rpc->lock);
+  err = ks_rpc_retry(f, job->rpc, job->epoch, job->result.status);
+  mutex_unlock(&job->rpc->lock);
+  if (err) return err;
+  sq_free(job->result.data);
+  job->result.data = NULL;
+  err = edit_submit(f, job);
+  if (err) return err;
+ }
+}
 static int apply_edits(struct ks_fs *f, stqr_object_id tx, const struct buf *encoded, bool legacy,
 		       u64 *index)
 {
@@ -278,17 +332,12 @@ static int apply_edits(struct ks_fs *f, stqr_object_id tx, const struct buf *enc
         if(results && !remove &&
            (stqr_capabilities(rpc->client)&STQR_CAP_CONNECTION_SYNC)) {
             struct ks_edit_completion *job=&results[i];
-            init_completion(&job->result.done);job->id=id;job->data=data;job->size=n;
-            job->offset=off;job->full=full;
-            if(opt.absent&&full)
-                err=stqr_cas_async(rpc->client,id,1,0,NULL,0,data,n,&opt,ks_async_completed,&job->result);
-            else if(full)
-                err=stqr_put_result_async(rpc->client,id,data,n,&opt,ks_async_completed,&job->result);
-            else
-                err=stqr_put_range_result_async(rpc->client,id,off,data,n,&opt,ks_async_completed,&job->result);
+            job->id=id;job->data=data;job->size=n;
+            job->offset=off;job->full=full;job->options=opt;
             mutex_unlock(&rpc->lock);
+            err=edit_submit(f,job);
             if(err)goto complete;
-            job->submitted=true;continue;
+            continue;
         }
 		bool auth_retry = false;
 		for (;;) {
@@ -336,7 +385,7 @@ static int apply_edits(struct ks_fs *f, stqr_object_id tx, const struct buf *enc
 complete:
     if(results)for(unsigned j=0;j<count;j++)if(results[j].submitted) {
         struct ks_edit_completion *job=&results[j];int result;
-        wait_for_completion(&job->result.done);result=job->result.error;
+        result=edit_wait(f,job);
         if(result==-EAGAIN && job->result.status==412 && f->references) {
             void *observed=NULL;size_t size=0;stqr_info info;
             int check=get_object(f,job->id,&observed,&size,&info);

@@ -32,6 +32,7 @@ type kernelWritebackFault struct {
 	before      atomic.Uint64
 	unpin       kernelUnpinGate
 	ranges      kernelRangeGate
+	editRetry   kernelEditRetryFault
 }
 
 // kernelRangeGate holds the first selected leaf reply until another distinct
@@ -409,6 +410,11 @@ func (f *kernelWritebackFault) proxy(w http.ResponseWriter, r *http.Request, ups
 			if err != nil {
 				return
 			}
+			if f.editRetry.response(raw) {
+				peer.Close()
+				downstream.Close()
+				return
+			}
 			selected, first, release := f.ranges.reply(raw)
 			if selected {
 				replies.Add(1)
@@ -475,6 +481,17 @@ func (f *kernelWritebackFault) proxy(w http.ResponseWriter, r *http.Request, ups
 		kind, raw, err := downstream.ReadMessage()
 		if err != nil {
 			return
+		}
+		if reject, disconnect := f.editRetry.request(raw); reject || disconnect {
+			if disconnect {
+				return
+			}
+			m, _ := client.DecodeMessage(raw)
+			reply := client.Message{Kind: client.Response, Opcode: m.Opcode, ID: m.ID, Body: client.ResponseBody(503, nil, "node temporarily restarting")}
+			if write(kind, client.EncodeMessage(reply)) != nil {
+				return
+			}
+			continue
 		}
 		if kind == websocket.BinaryMessage && f.deny.Load() {
 			m, err := client.DecodeMessage(raw)
