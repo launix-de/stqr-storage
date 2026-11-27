@@ -60,7 +60,7 @@ func unpackWinUI(root string, payload []byte, expected string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if err = os.Rename(tmp.Name(), target); err != nil && !valid() {
+	if err = replaceExecutable(tmp.Name(), target); err != nil && !valid() {
 		return "", err
 	}
 	return target, nil
