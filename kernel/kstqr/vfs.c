@@ -564,9 +564,16 @@ static int ks_setattr_vfs(struct mnt_idmap *idmap, struct dentry *d, struct iatt
 		return err;
 	if (resize) {
 		filemap_invalidate_lock(i->i_mapping);
-		err = filemap_write_and_wait(i->i_mapping);
-		if (err)
-			goto out_resize;
+		/* Only shrink can discard bytes from an outstanding mmap writeback.
+		 * Growth keeps every queued batch inside the new EOF; ks_write merges
+		 * against the current inode head and never reduces its size. Forcing
+		 * dirty pages out on every allocation growth makes append/mmap users
+		 * such as journald repeatedly write their entire dirty working set. */
+		if (attr->ia_size < i_size_read(i)) {
+			err = filemap_write_and_wait(i->i_mapping);
+			if (err)
+				goto out_resize;
+		}
 	}
 	saved = enter_fs(f);
 	err = ks_setattr(f, KS_I(i)->id, attr);
