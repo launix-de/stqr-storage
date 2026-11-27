@@ -37,7 +37,12 @@ func TestCleanupLargeAcceptedGroupIntegration(t *testing.T) {
 						t.Fatal(err)
 					}
 				}
+				h.Close()
 				before := v.IOStats().SyncOps
+				h, err = v.Open(true)
+				if err != nil {
+					t.Fatal(err)
+				}
 				keep := volume.Key{Bucket: volume.ID{250}, Object: volume.ObjectID{1}}
 				payload := bytes.Repeat([]byte("k"), 1<<20)
 				for i := byte(1); i <= 2; i++ {
