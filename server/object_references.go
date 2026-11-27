@@ -288,7 +288,7 @@ referenceRetry:
 			// outcomes; disabled/present users are never considered absent.
 			if own < 0 && count < maxAccountReferences && len(entries) >= maxObjectReferences &&
 				(action == 0 || action == 2 || action == 4) && (!busy || action == 2) {
-				filtered, nextCtx, e := s.pruneAbsentPlainReferencePins(casCtx, entries)
+				filtered, nextCtx, e := s.pruneAbsentPlainReferencePins(casCtx, op.bucket, entries)
 				if e != nil {
 					if errors.Is(e, volume.ErrPrecondition) && !errors.Is(e, volume.ErrRecovery) {
 						continue referenceRetry

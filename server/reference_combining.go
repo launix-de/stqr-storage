@@ -300,7 +300,7 @@ referenceBatchRetry:
 			before := len(entries)
 			entries, c.q.result.err = applyCombinedReference(entries, c)
 			if !c.unpin && len(entries) >= maxObjectReferences && c.q.result.err != nil && objectStatus(c.q.result.err) == 429 && referenceAccountHasRoom(entries, c.uid) {
-				filtered, nextCtx, e := s.pruneAbsentPlainReferencePins(casCtx, entries)
+				filtered, nextCtx, e := s.pruneAbsentPlainReferencePins(casCtx, first.op.bucket, entries)
 				if e != nil {
 					if errors.Is(e, volume.ErrPrecondition) && !errors.Is(e, volume.ErrRecovery) {
 						continue referenceBatchRetry
