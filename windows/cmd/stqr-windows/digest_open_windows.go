@@ -11,10 +11,10 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-func openExecutableForDigest(path string) (*os.File, error) {
+func executableWindowsPath(path string) (string, error) {
 	absolute, err := filepath.Abs(path)
 	if err != nil {
-		return nil, err
+		return "", err
 	}
 	// Preserve os.Open's long-path support when calling CreateFile directly.
 	if !strings.HasPrefix(absolute, `\\?\`) && !strings.HasPrefix(absolute, `\\.\`) {
@@ -23,6 +23,14 @@ func openExecutableForDigest(path string) (*os.File, error) {
 		} else {
 			absolute = `\\?\` + absolute
 		}
+	}
+	return absolute, nil
+}
+
+func openExecutableForDigest(path string) (*os.File, error) {
+	absolute, err := executableWindowsPath(path)
+	if err != nil {
+		return nil, err
 	}
 	name, err := windows.UTF16PtrFromString(absolute)
 	if err != nil {
