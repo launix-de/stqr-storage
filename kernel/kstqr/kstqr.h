@@ -40,6 +40,10 @@ struct ks_directory_proof {
 	struct ks_cache_stamp root, lower;
 	stqr_object_id lower_id;
 	bool valid, has_lower;
+	/* Attribute-only certification of this directory's exact STOM row. Name
+	 * bindings still depend on the complete root proof above. */
+	bool attrs_valid, row_present;
+	u8 row_digest[32];
 };
 struct ks_node {
 	const struct ks_directory_proof *directory_proof;
@@ -140,6 +144,8 @@ int ks_plain_snapshot(struct ks_fs *, stqr_object_id, struct ks_snapshot *);
 int ks_overlay_lookup(struct ks_fs *, stqr_object_id, const char *, stqr_object_id *,
 		      struct ks_directory_proof *);
 int ks_overlay_snapshot(struct ks_fs *, stqr_object_id, struct ks_snapshot *);
+int ks_overlay_refresh_directory_attrs(struct ks_fs *, stqr_object_id,
+	const struct ks_directory_proof *, struct ks_directory_proof *);
 int ks_overlay_initialize(struct ks_fs *, const char *);
 int ks_overlay_validate_policy(struct ks_fs *, const char *);
 int ks_overlay_check_write(struct ks_fs *, stqr_object_id);
