@@ -3,7 +3,6 @@ package server
 
 import (
 	"context"
-	"crypto/sha256"
 	"encoding/binary"
 	"errors"
 	"io"
@@ -68,7 +67,6 @@ func (r *cowPackedReader) ReadAt(p []byte, off int64) (int, error) {
 	}
 	return n, nil
 }
-func (s *Server) cowGraph() (cowGraph, error) { return cowGraphDescriptions(s.bucketSnapshots()) }
 func cowGraphDescriptions(descriptions []BucketDescription) (cowGraph, error) {
 	g := cowGraph{}
 	links := map[volume.ID]map[volume.ID]string{}
@@ -500,46 +498,6 @@ func cowExtentSource(src io.Reader) volume.ExtentSource {
 			}
 		}
 	}
-}
-
-func (s *Server) cowGraphDigest(g cowGraph, bucket volume.ID) ([32]byte, error) {
-	e := client.Encoder{}
-	for _, id := range g.component(bucket) {
-		b, err := s.Bucket(id)
-		if err != nil {
-			return [32]byte{}, err
-		}
-		e.ID(client.ID(id))
-		for _, edge := range b.storageDescription().ClonePeers {
-			peer, err := bucketID(edge.Bucket)
-			if err != nil {
-				return [32]byte{}, err
-			}
-			link, err := bucketID(edge.Link)
-			if err != nil {
-				return [32]byte{}, err
-			}
-			other, err := s.Bucket(peer)
-			if err != nil {
-				return [32]byte{}, err
-			}
-			symmetric := false
-			for _, back := range other.storageDescription().ClonePeers {
-				if back.Bucket == id.String() && back.Link == edge.Link && cowDirectionsMatch(edge.Direction, back.Direction) {
-					symmetric = true
-					break
-				}
-			}
-			if !symmetric {
-				return [32]byte{}, fail(503, "clone connection is being published")
-			}
-			e.ID(client.ID(peer))
-			e.ID(client.ID(link))
-			e.Text(edge.Direction)
-		}
-		e.ID(client.ID{})
-	}
-	return sha256.Sum256(e.B), nil
 }
 
 // cowReadExtents clips the snapshot to a read and its optional byte condition.

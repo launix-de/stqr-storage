@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -374,10 +375,14 @@ func (b *Bucket) Info(user volume.ID, admin bool) (BucketInfo, error) {
 // Called while holding b.mu (or before publication). The description and ACL
 // index are replaced together, so readers never combine different revisions.
 func (b *Bucket) setDescription(d BucketDescription) {
+	changed := b.description.ID != d.ID || b.description.DeletionComplete != d.DeletionComplete || !slices.Equal(b.description.ClonePeers, d.ClonePeers)
 	b.description = cloneBucketDescription(d)
 	b.grants = make(map[string]BucketPermissions, len(d.Grants))
 	for _, grant := range d.Grants {
 		b.grants[grant.UserID] = grant.Permissions
+	}
+	if changed && b.server != nil {
+		b.server.cowTopologyCache.revision.Add(1)
 	}
 }
 

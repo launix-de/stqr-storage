@@ -123,6 +123,7 @@ func (s *Server) publishBucket(d BucketDescription) {
 		b = bucketSnapshot(d)
 		b.server = s
 		s.bucketsByID[id] = b
+		s.cowTopologyCache.revision.Add(1)
 	} else {
 		b.mu.Lock()
 		old := b.description

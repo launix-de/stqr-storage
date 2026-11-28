@@ -12,24 +12,24 @@ import (
 
 func (s *Server) cowLogicalSnapshot(ctx context.Context, bucket volume.ID, object volume.ObjectID, metadata bool) (*cowSnapshot, error) {
 	for range 8 {
-		g, err := s.cowGraph()
+		g, err := s.cowTopology()
 		if err != nil {
 			return nil, err
 		}
-		proof, err := s.cowGraphDigest(g, bucket)
+		proof, err := g.proof(bucket)
 		if err != nil {
 			return nil, err
 		}
-		snapshot, err := g.resolve(ctx, cowServerObjects{server: s, metadata: metadata, readReplica: true}, bucket, object, map[volume.ID]bool{})
+		snapshot, err := g.graph.resolve(ctx, cowServerObjects{server: s, metadata: metadata, readReplica: true, topology: g}, bucket, object, map[volume.ID]bool{})
 		if err != nil {
 			return nil, cowStorageError(err)
 		}
-		current, err := s.cowGraph()
+		current, err := s.cowTopology()
 		if err != nil {
 			snapshot.close()
 			return nil, err
 		}
-		after, err := s.cowGraphDigest(current, bucket)
+		after, err := current.proof(bucket)
 		if err != nil {
 			snapshot.close()
 			return nil, err
@@ -91,23 +91,23 @@ func (s *Server) cowLogicalPage(ctx context.Context, bucket volume.ID, after *vo
 	if limit < 1 || limit > 1000 {
 		return nil, volume.ObjectID{}, false, volume.ErrRange
 	}
-	g, err := s.cowGraph()
+	g, err := s.cowTopology()
 	if err != nil {
 		return nil, volume.ObjectID{}, false, err
 	}
-	proof, err := s.cowGraphDigest(g, bucket)
+	proof, err := g.proof(bucket)
 	if err != nil {
 		return nil, volume.ObjectID{}, false, err
 	}
-	out, next, more, err := s.cowGraphPage(ctx, bucket, after, limit, local, g, s.placement.Load())
+	out, next, more, err := s.cowTopologyPage(ctx, bucket, after, limit, local, g, s.placement.Load())
 	if err != nil {
 		return nil, next, false, err
 	}
-	current, err := s.cowGraph()
+	current, err := s.cowTopology()
 	if err != nil {
 		return nil, next, false, err
 	}
-	now, err := s.cowGraphDigest(current, bucket)
+	now, err := current.proof(bucket)
 	if err != nil {
 		return nil, next, false, err
 	}
@@ -154,6 +154,12 @@ func (s *Server) cowGraphPage(ctx context.Context, bucket volume.ID, after *volu
 			store.graphDescriptions[id] = d
 		}
 	}
+	return s.cowReadGraphPage(ctx, bucket, after, limit, local, g, placement, store)
+}
+func (s *Server) cowTopologyPage(ctx context.Context, bucket volume.ID, after *volume.ObjectID, limit int, local bool, g *cowTopologySnapshot, placement *placementImage) ([]volume.ObjectRecord, volume.ObjectID, bool, error) {
+	return s.cowReadGraphPage(ctx, bucket, after, limit, local, g.graph, placement, cowServerObjects{server: s, metadata: true, readReplica: true, topology: g})
+}
+func (s *Server) cowReadGraphPage(ctx context.Context, bucket volume.ID, after *volume.ObjectID, limit int, local bool, g cowGraph, placement *placementImage, store cowServerObjects) ([]volume.ObjectRecord, volume.ObjectID, bool, error) {
 	seen := map[volume.ObjectID]bool{}
 	more := false
 	for _, peer := range g.component(bucket) {
