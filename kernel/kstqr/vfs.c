@@ -1516,11 +1516,7 @@ void ks_queue_invalidation(struct ks_fs *f, const stqr_object_id *id)
 	if (READ_ONCE(f->stopping))
 		return;
 	spin_lock(&f->inode_lock);
-	if (!id || f->invalidation_count == ARRAY_SIZE(f->invalidations)) {
-		f->invalidate_all = true;
-		f->invalidation_count = 0;
-	} else if (!f->invalidate_all)
-		f->invalidations[f->invalidation_count++] = *id;
+	ks_invalidation_add(&f->invalidations, id);
 	spin_unlock(&f->inode_lock);
 	/* Cache-pressure invalidation can scan many inodes and wait for folios.
 	 * Keep it off the CPU-bound shared queue used by unrelated kernel work. */
@@ -1581,22 +1577,21 @@ static void ks_invalidate_one(struct inode *i)
 static void ks_invalidation_worker(struct work_struct *work)
 {
 	struct ks_fs *f = container_of(work, struct ks_fs, invalidation_work);
-	stqr_object_id *ids = kmalloc_array(128, sizeof(*ids), GFP_NOFS);
+	stqr_object_id *ids = kmalloc_array(KS_INVALIDATION_CAPACITY, sizeof(*ids), GFP_NOFS);
 	for (;;) {
 		unsigned count;
 		bool all;
 		u64 generation;
 		spin_lock(&f->inode_lock);
-		count = f->invalidation_count;
-		all = f->invalidate_all;
+		count = f->invalidations.count;
+		all = f->invalidations.all;
 		if (count && ids)
-			memcpy(ids, f->invalidations, count * sizeof(*ids));
+			memcpy(ids, f->invalidations.ids, count * sizeof(*ids));
 		if (count && !ids) {
 			all = true;
 			count = 0;
 		}
-		f->invalidation_count = 0;
-		f->invalidate_all = false;
+		ks_invalidation_clear(&f->invalidations);
 		generation = ++f->invalidation_generation;
 		spin_unlock(&f->inode_lock);
 		if (!count && !all) {
