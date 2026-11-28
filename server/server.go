@@ -106,6 +106,7 @@ type Server struct {
 	placementGroups        atomic.Pointer[placementGroupImage]
 	accounts               atomic.Pointer[accountsIndex]
 	control                *controlRuntime // initialized before accepting control RPCs
+	lineageCreationProof   bool            // private draft: creator verified receipt semantics on every member
 	metadataPreview        bool            // isolated metadata draft; never owns data volumes
 	controller             *clusterController
 	currentSystem          atomic.Pointer[systemView]

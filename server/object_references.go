@@ -171,18 +171,21 @@ func (s *Server) executeObjectReferenceHeld(ctx context.Context, m client.Messag
 			return nil, fail(501, "accepted reference capability was not negotiated")
 		}
 	}
-	if d.Done() != nil || action > 9 || token == (client.ID{}) || target == op.object {
+	if d.Done() != nil || action > 10 || token == (client.ID{}) || target == op.object {
 		return nil, fail(400, "invalid object reference")
 	}
 	// Administrative repair is deliberately rejected before reading the root.
 	// It may remove only absent-account plain PINs, never abandoned claims or
 	// dependencies; it does not confer offline maintenance on the caller.
-	if action == 9 {
-		if target != (volume.ObjectID{}) {
+	if action == 9 || action == 10 {
+		if action == 9 && target != (volume.ObjectID{}) {
 			return nil, fail(400, "reference repair requires an empty target")
 		}
 		if err := s.requireAdmin(p); err != nil {
 			return nil, err
+		}
+		if action == 10 && (target == (volume.ObjectID{}) || !bytes.Equal(target[16:], make([]byte, 16)) || accepted) {
+			return nil, fail(400, "deleted dependency proof requires a bucket target and a request reply")
 		}
 	}
 	if !held && accepted && (action == 0 || action == 1) {
@@ -262,6 +265,18 @@ func (s *Server) executeObjectReferenceHeld(ctx context.Context, m client.Messag
 			return nil, err
 		}
 		return []byte{1}, nil
+	}
+	if action == 10 {
+		var subject volume.ID
+		copy(subject[:], target[:16])
+		safe, err := s.canRetireDeletedBucketDependencies(ctx, subject)
+		if err != nil {
+			return nil, err
+		}
+		if safe {
+			return []byte{1}, nil
+		}
+		return []byte{0}, nil
 	}
 	if action == 9 {
 		return s.pruneAbsentAccountPins(ctx, op.bucket, internal, accepted)
@@ -347,6 +362,17 @@ func (s *Server) canReclaimDependencyAnchors(bucket volume.ID) bool {
 }
 
 func validateNewCloneReferenceEvidence(before, after []BucketDescription) error {
+	prior := make(map[string]BucketDescription, len(before))
+	for _, d := range before {
+		prior[d.ID] = d
+	}
+	for _, d := range after {
+		if old, exists := prior[d.ID]; exists {
+			if err := validateReferenceLineageEdit(old, d); err != nil {
+				return err
+			}
+		}
+	}
 	old := map[string]bool{}
 	for _, d := range before {
 		for _, edge := range d.ClonePeers {

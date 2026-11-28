@@ -98,7 +98,7 @@ func (s *Server) newAdminPreview() (_ *Server, err error) {
 		return nil, err
 	}
 	ctx, cancel := context.WithCancel(s.ctx)
-	preview := &Server{metadataPreview: true, system: root, ctx: ctx, cancel: cancel, volumes: make(map[string]*managedVolume), sessions: make(map[string]session), sockets: make(map[*wsSession]struct{})}
+	preview := &Server{metadataPreview: true, lineageCreationProof: s.referenceLineageCreationAllowed(), system: root, ctx: ctx, cancel: cancel, volumes: make(map[string]*managedVolume), sessions: make(map[string]session), sockets: make(map[*wsSession]struct{})}
 	defer func() {
 		if err != nil {
 			cancel()

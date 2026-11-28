@@ -246,6 +246,9 @@ func (s *Server) executeBuckets(m client.Message, p principal) ([]byte, int, err
 		}
 		description = b.Describe()
 		description.Policy = policy
+		// A metadata draft carries the actual creator's ALL-member admission
+		// proof; an isolated preview cannot certify a cluster by itself.
+		description.ReferenceLineageComplete = s.referenceLineageCreationAllowed()
 		if _, e := s.Bucket(id); !errors.Is(e, ErrBucketNotFound) {
 			return nil, 0, ErrBucketConflict
 		}

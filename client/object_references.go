@@ -161,3 +161,21 @@ func (c *Client) objectReference(ctx context.Context, id ObjectID, token ID, act
 	}
 	return nil
 }
+
+// CanRetireDeletedBucketDependencies proves a deleted namespace and its entire
+// clone lineage no longer have surviving users of external dependency tokens.
+// The caller must be an administrator connected to the dependency-owning bucket.
+// It does not unpin anything. Missing/legacy evidence returns false; old servers
+// reject the unsupported action, and callers must retain their cleanup journal.
+func (c *Client) CanRetireDeletedBucketDependencies(ctx context.Context, subject BucketID) (bool, error) {
+	if subject == (BucketID{}) {
+		return false, ErrRange
+	}
+	var target ObjectID
+	copy(target[:16], subject[:])
+	err := c.objectReference(ctx, target, NewRequestID(), 10)
+	if errors.Is(err, ErrWouldBlock) {
+		return false, nil
+	}
+	return err == nil, err
+}

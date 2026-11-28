@@ -114,3 +114,22 @@ func TestReadObjectDependenciesRejectsMalformedCountBeforeAllocation(t *testing.
 		})
 	}
 }
+
+func TestDeletedBucketDependencyProofOldServerFailsClosed(t *testing.T) {
+	peer, host := newWirePeer(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	c, err := Dial(ctx, host.URL, "user", "credential", peer.bucket, "fs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	safe, err := c.CanRetireDeletedBucketDependencies(ctx, BucketID{8})
+	var status *StatusError
+	if safe || !errors.As(err, &status) || status.Status != 501 {
+		t.Fatal("old server was treated as a proof", safe, err)
+	}
+	if safe, err = c.CanRetireDeletedBucketDependencies(ctx, BucketID{}); safe || !errors.Is(err, ErrRange) {
+		t.Fatal("empty subject accepted", safe, err)
+	}
+}

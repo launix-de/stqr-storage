@@ -374,5 +374,11 @@ func currentOperationSemantics() map[string]operationSemantics {
 	for op := peerCowCapture; op <= peerCowSync; op++ {
 		result[fmt.Sprintf("%04x", op)] = operationSemantics{Emit: 3, Min: 3, Max: 3}
 	}
+	// Optional provenance parser contract: info revision 4 retains the same
+	// core fields and guarantees support for reference_lineage_complete in
+	// installed catalogs. Keep emitting revision 3 so ordinary mixed-cluster
+	// requests continue unchanged; fresh provenance requires every Max >= 4.
+	result[fmt.Sprintf("%04x", peerControlInfo)] = operationSemantics{Emit: 3, Min: 3, Max: 4}
+
 	return result
 }
