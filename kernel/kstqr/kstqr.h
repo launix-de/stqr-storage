@@ -7,6 +7,7 @@
 #include <linux/mutex.h>
 #include <linux/spinlock.h>
 #include <linux/workqueue.h>
+#include "invalidation_queue.h"
 int ks_transport_start(void);
 void ks_transport_stop(void);
 void ks_queue_fence_work(struct work_struct *);
@@ -97,9 +98,7 @@ struct ks_fs {
 	spinlock_t inode_lock;
 	struct list_head inodes;
 	struct work_struct invalidation_work;
-	stqr_object_id invalidations[128];
-	unsigned invalidation_count;
-	bool invalidate_all;
+	struct ks_invalidation_queue invalidations;
 	u64 invalidation_generation;
 	char *url;
 	stqr_id bucket;
@@ -164,6 +163,8 @@ int ks_snapshot_cached(struct ks_fs *, stqr_object_id, struct ks_snapshot *);
 int ks_cache_get(struct ks_fs *, stqr_object_id, void **, size_t *, stqr_info *);
 bool ks_cache_proof(struct ks_fs *, stqr_object_id, stqr_proof *);
 void ks_cache_forget(struct ks_fs *, stqr_object_id);
+int ks_cache_directory_get(struct ks_fs *, const struct ks_node *, struct ks_entry **, size_t *);
+void ks_cache_directory_put(struct ks_fs *, const struct ks_node *, const struct ks_entry *, size_t);
 void ks_queue_invalidation(struct ks_fs *, const stqr_object_id *);
 extern const stqr_object_id ks_root_id;
 void ks_snapshot_free(struct ks_snapshot *s);
@@ -184,6 +185,7 @@ int ks_remove(struct ks_fs *, stqr_object_id, const char *, bool);
 int ks_rename(struct ks_fs *, stqr_object_id, const char *, stqr_object_id, const char *, unsigned,
 	      const stqr_object_id *, size_t, const stqr_object_id *, size_t);
 int ks_write(struct ks_fs *, stqr_object_id, u64 *, const void *, size_t, bool);
+int ks_bucket_space(struct ks_fs *, stqr_space *);
 int ks_object_reference(struct ks_fs *, stqr_object_id, stqr_id, unsigned);
 int ks_collect_orphans(struct ks_fs *, bool *);
 void ks_schedule_orphans(struct ks_fs *);

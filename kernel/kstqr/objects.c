@@ -181,6 +181,40 @@ int ks_rpc_retry(struct ks_fs *f, struct ks_rpc *rpc, u64 epoch, int status)
     rpc->reconnect_epoch++;
     return ks_reconnect_wait(f, rpc->client);
 }
+/* STATFS is read-only but can wait for cluster capacity information. A mounted
+ * filesystem already has its normal receiver: only submit holds framing. Keep
+ * the stack output/completion alive with the same uninterruptible join as GET;
+ * a caller's fatal signal must never run receive/broken() for shared requests. */
+int ks_bucket_space(struct ks_fs *f, stqr_space *space)
+{
+	struct ks_rpc *rpc = &f->rpc[0];
+	int err;
+	mutex_lock(&rpc->lock);
+	for (;;) {
+		struct ks_async_result result = {0};
+		u64 epoch = rpc->reconnect_epoch;
+		int status = 0;
+		init_completion(&result.done);
+		err = stqr_bucket_space_async(rpc->client, space, ks_async_completed, &result);
+		mutex_unlock(&rpc->lock);
+		if (!err) {
+			wait_for_completion(&result.done);
+			err = result.error;
+			status = result.status;
+		}
+		sq_free(result.data);
+		mutex_lock(&rpc->lock);
+		if (!(err == -EAGAIN ? (status == 0 || status == 503) :
+					ks_transport_retryable(NULL, err)))
+			break;
+		err = ks_rpc_retry(f, rpc, epoch, status);
+		if (err)
+			break;
+	}
+	mutex_unlock(&rpc->lock);
+	return err;
+}
+
 int ks_object_reference(struct ks_fs *f, stqr_object_id id, stqr_id token, unsigned action)
 {
 	struct ks_rpc *rpc = ks_rpc_lock(f, id);
@@ -818,6 +852,7 @@ static int help_tx_legacy(struct ks_fs *f, stqr_object_id first)
 	sq_free(stack);
 	return err ? err : first_result;
 }
+#include "reference_cleanup.c"
 #include "reference_redo.c"
 static int help_tx(struct ks_fs *f, stqr_object_id first)
 {
@@ -1354,7 +1389,8 @@ static int read_node(struct ks_fs *f, const struct ks_node *n, void *dst, size_t
 	}
 	return index_read(f, n, n->root, n->size, n->depth, dst, count, offset);
 }
-int ks_read(struct ks_fs *f, const struct ks_node *node, void *dst, size_t count, u64 offset)
+static int ks_read_observed(struct ks_fs *f, const struct ks_node *node, void *dst,
+			    size_t count, u64 offset, u8 observed_head[32])
 {
 	/* Inherited inode identities and their read guards belong to the lower
 	 * bucket. Switch stores before both the payload read and guard checks. */
@@ -1363,7 +1399,7 @@ int ks_read(struct ks_fs *f, const struct ks_node *node, void *dst, size_t count
 		if (!f->lower)
 			return -EUCLEAN;
 		local.inherited = false;
-		return ks_read(f->lower, &local, dst, count, offset);
+		return ks_read_observed(f->lower, &local, dst, count, offset, observed_head);
 	}
 	const struct ks_node *n = node;
 	struct ks_snapshot fresh = {0};
@@ -1377,6 +1413,8 @@ int ks_read(struct ks_fs *f, const struct ks_node *node, void *dst, size_t count
 		if (!readerr)
 			readerr = check_lower_anchor(f, n);
 		if (!n->depth || nullid(n->identity)) {
+			if (!readerr && observed_head)
+				memcpy(observed_head, n->head_digest, 32);
 			err = readerr;
 			break;
 		}
@@ -1392,6 +1430,8 @@ int ks_read(struct ks_fs *f, const struct ks_node *node, void *dst, size_t count
 			if (!err &&
 			    !memcmp(digest, nullid(n->guard) ? n->head_digest : n->guard_digest,
 				    32)) {
+				if (!readerr && observed_head)
+					memcpy(observed_head, n->head_digest, 32);
 				err = readerr;
 				break;
 			}
@@ -1413,6 +1453,10 @@ int ks_read(struct ks_fs *f, const struct ks_node *node, void *dst, size_t count
 		err = -EAGAIN;
 	ks_snapshot_free(&fresh);
 	return err;
+}
+int ks_read(struct ks_fs *f, const struct ks_node *node, void *dst, size_t count, u64 offset)
+{
+	return ks_read_observed(f, node, dst, count, offset, NULL);
 }
 static int build_segments(struct ks_fs *f, struct ks_node *node, struct segments *s)
 {
@@ -1753,10 +1797,34 @@ static bool valid_name(const char *s)
 	}
 	return true;
 }
+/* Mutable data blocks keep stable IDs. Cached names therefore require an exact
+ * owner-side head comparison on EVERY hit; a subscription alone cannot order a
+ * payload read against a writer on another owner. Guarded/virtual views retain
+ * their existing full resolver. */
+static bool directory_cacheable(const struct ks_node *node)
+{
+	return node->depth && !node->inherited && !node->lower && !node->view &&
+	       nullid(node->guard) && !nullid(node->identity) && !zero(node->head_digest, 32);
+}
+static int directory_cache_guard(struct ks_fs *f, const struct ks_node *node)
+{
+	void *raw = NULL;
+	size_t size = 0;
+	stqr_info info;
+	u8 digest[32];
+	int err = get_object(f, node->identity, &raw, &size, &info);
+	if (!err)
+		err = sq_hash(256, raw, size, digest);
+	sq_free(raw);
+	if (err)
+		return err;
+	return memcmp(digest, node->head_digest, 32) ? -EAGAIN : 0;
+}
 int ks_directory(struct ks_fs *f, const struct ks_node *node, struct ks_entry **out, size_t *count)
 {
 	struct buf b = {0};
 	struct ks_entry *entries = NULL;
+	u8 observed_head[32] = {0};
 	u64 total;
 	unsigned i;
 	int err;
@@ -1768,11 +1836,27 @@ int ks_directory(struct ks_fs *f, const struct ks_node *node, struct ks_entry **
 		return -ENOENT;
 	if (node->size > KS_DIR_LIMIT || node->size < 14)
 		return -E2BIG;
+	if (directory_cacheable(node)) {
+		err = ks_cache_directory_get(f, node, &entries, count);
+		if (!err) {
+			err = directory_cache_guard(f, node);
+			if (!err) {
+				*out = entries;
+				return 0;
+			}
+			sq_free(entries);
+			entries = NULL;
+			*count = 0;
+			if (err != -EAGAIN)
+				return err;
+		} else if (err != -ENODATA)
+			return err;
+	}
 	b.p = sq_alloc(node->size);
 	b.n = node->size;
 	if (!b.p)
 		return -ENOMEM;
-	err = ks_read(f, node, b.p, b.n, 0);
+	err = ks_read_observed(f, node, b.p, b.n, 0, observed_head);
 	if (err)
 		goto out;
 	if (memcmp(b.p, "STDR\1\0", 6)) {
@@ -1811,6 +1895,10 @@ int ks_directory(struct ks_fs *f, const struct ks_node *node, struct ks_entry **
 	}
 	err = done(&b);
 	if (!err) {
+		/* ks_read may retry against a newer same-size inode. Never certify
+		 * that newer body using the caller's older head/cache identity. */
+		if (directory_cacheable(node) && !memcmp(observed_head, node->head_digest, 32))
+			ks_cache_directory_put(f, node, entries, total);
 		*out = entries;
 		*count = total;
 		entries = NULL;
@@ -2024,7 +2112,7 @@ static int transact(struct ks_fs *f, struct member *m, unsigned count)
 	if (!err)
 		err = f->references ? help_tx_pinned(f, id, &origin) : help_tx(f, id);
 	if (!zero(origin.bytes, 16)) {
-		int released = ks_object_reference(f, id, origin, 1);
+		int released = ks_retire_pin(f, id, origin);
 		if (!err)
 			err = released;
 	}

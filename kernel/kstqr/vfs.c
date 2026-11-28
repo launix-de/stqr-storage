@@ -1516,11 +1516,7 @@ void ks_queue_invalidation(struct ks_fs *f, const stqr_object_id *id)
 	if (READ_ONCE(f->stopping))
 		return;
 	spin_lock(&f->inode_lock);
-	if (!id || f->invalidation_count == ARRAY_SIZE(f->invalidations)) {
-		f->invalidate_all = true;
-		f->invalidation_count = 0;
-	} else if (!f->invalidate_all)
-		f->invalidations[f->invalidation_count++] = *id;
+	ks_invalidation_add(&f->invalidations, id);
 	spin_unlock(&f->inode_lock);
 	/* Cache-pressure invalidation can scan many inodes and wait for folios.
 	 * Keep it off the CPU-bound shared queue used by unrelated kernel work. */
@@ -1581,22 +1577,21 @@ static void ks_invalidate_one(struct inode *i)
 static void ks_invalidation_worker(struct work_struct *work)
 {
 	struct ks_fs *f = container_of(work, struct ks_fs, invalidation_work);
-	stqr_object_id *ids = kmalloc_array(128, sizeof(*ids), GFP_NOFS);
+	stqr_object_id *ids = kmalloc_array(KS_INVALIDATION_CAPACITY, sizeof(*ids), GFP_NOFS);
 	for (;;) {
 		unsigned count;
 		bool all;
 		u64 generation;
 		spin_lock(&f->inode_lock);
-		count = f->invalidation_count;
-		all = f->invalidate_all;
+		count = f->invalidations.count;
+		all = f->invalidations.all;
 		if (count && ids)
-			memcpy(ids, f->invalidations, count * sizeof(*ids));
+			memcpy(ids, f->invalidations.ids, count * sizeof(*ids));
 		if (count && !ids) {
 			all = true;
 			count = 0;
 		}
-		f->invalidation_count = 0;
-		f->invalidate_all = false;
+		ks_invalidation_clear(&f->invalidations);
 		generation = ++f->invalidation_generation;
 		spin_unlock(&f->inode_lock);
 		if (!count && !all) {
@@ -1699,16 +1694,19 @@ static void ks_put_super(struct super_block *sb)
 	cancel_delayed_work_sync(&f->orphan_work);
 	if (f->lower)
 		WRITE_ONCE(f->lower->stopping, true);
+	/* Read/writeback jobs can finish by retiring a PIN or completing an
+	 * interrupted intent. Keep the mount-owned retirement queue and both
+	 * connections alive until all of those producers have exited. */
+	if (f->read_queue) {
+		destroy_workqueue(f->read_queue);
+		f->read_queue = NULL;
+	}
 	/* No cleanup callback may outlive its mount or owner connection. Normal
 	 * close never waits for this queue; explicit teardown owns the drain. */
 	if (f->reference_queue) {
 		destroy_workqueue(f->reference_queue);
 		f->reference_queue = NULL;
 	}
- if (f->read_queue) {
-  destroy_workqueue(f->read_queue);
-  f->read_queue = NULL;
- }
 	/* Teardown cancels connection-local touches. Persistence is requested only
 	 * through the VFS sync callbacks; closing a connection adds no fence. */
 	WRITE_ONCE(f->stopping, true);
@@ -1774,18 +1772,7 @@ static int ks_statfs(struct dentry *d, struct kstatfs *s)
 {
 	struct ks_fs *f = d->d_sb->s_fs_info;
 	stqr_space space;
-	int err;
-	mutex_lock(&f->rpc[0].lock);
-	for (;;) {
-        u64 epoch = f->rpc[0].reconnect_epoch;
-		err = stqr_bucket_space(f->rpc[0].client, &space);
-		if (!ks_transport_retryable(f->rpc[0].client, err))
-			break;
-		err = ks_rpc_retry(f, &f->rpc[0], epoch, stqr_status(f->rpc[0].client));
-		if (err)
-			break;
-	}
-	mutex_unlock(&f->rpc[0].lock);
+	int err = ks_bucket_space(f, &space);
 	if (err)
 		return err;
 	memset(s, 0, sizeof(*s));

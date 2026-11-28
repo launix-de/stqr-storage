@@ -2,24 +2,33 @@
 /* Deterministic protocol-state regressions: no live socket or fault timing. */
 /* A deterministic WebSocket peer counts actual emitted protocol fences.
  * Crypto/allocation/time remain the normal userspace port implementation. */
+#define sq_alloc policy_alloc
 #define sq_send policy_send
 #define sq_recv policy_recv
 #define sq_wait policy_wait
 #define sq_connect policy_connect
 #define sq_disconnect policy_disconnect
 #include "../src/core.c"
+#undef sq_alloc
 #undef sq_send
 #undef sq_recv
 #undef sq_wait
 #undef sq_connect
 #undef sq_disconnect
 #include <assert.h>
+#include <stdbool.h>
 #include <stdio.h>
-struct stqr_socket { struct buf replies,held; unsigned calls[512],pongs; stqr_u64 sequence,reply_length; unsigned boot;int closed,hold,redirect; };
+void *sq_alloc(size_t n);
+static int reject_allocation;
+void *policy_alloc(size_t n) {return reject_allocation?NULL:sq_alloc(n);}
+struct stqr_socket { struct buf replies,held,space_held; unsigned calls[512],pongs; stqr_u64 sequence,reply_length; unsigned boot,read_mark_tag,through_boots;int closed,hold,redirect,hold_through,through_status,hold_space,fail_space_send,fail_send,send_error,fail_call;unsigned sends; };
 int policy_connect(struct stqr_socket **out,const char *host,unsigned port,unsigned ms) {
     (void)out;(void)host;(void)port;(void)ms;return -EOPNOTSUPP;
 }
 int policy_send(struct stqr_socket *socket,const void *data,size_t size) {
+    if(socket->fail_send)return -EIO;
+    socket->sends++;
+    if(socket->send_error&&(!socket->fail_call||socket->sends==(unsigned)socket->fail_call))return socket->send_error;
     const stqr_u8 *wire=data;size_t at=2,n;struct buf input={0},message={0},headers={0},mark={0};
     if(size==6 && wire[0]==0x8a && wire[1]==0x80) { socket->pongs++; return 0; }
     assert(size>=6 && (wire[0]&15)==2 && (wire[1]&128));
@@ -31,10 +40,15 @@ int policy_send(struct stqr_socket *socket,const void *data,size_t size) {
     assert(readnum(&input,1)==1);unsigned kind=(unsigned)readnum(&input,1);
     unsigned op=(unsigned)readnum(&input,2);const stqr_u8 *id=take(&input,16);assert(op<512 && id);
     socket->calls[op]++;
-    if(kind==0){assert(op==5 || op==6);drop(&input);return 0;}
+    if(op==0x11b && socket->fail_space_send){drop(&input);return -EINTR;}
+    if(kind==0){
+        assert(op==5 || op==6 || op==0x118 || op==0x111 || op==0x114);
+        if(op==0x111){assert(!zero(id,16));assert(input.n-input.pos==16);}
+        drop(&input);return 0;
+    }
     assert(kind==1);
     int redirected=socket->redirect && op==0x118;
-    number(&message,1,1);number(&message,2,1);number(&message,op,2);put(&message,id,16);varint(&message,redirected?301:200);
+    number(&message,1,1);number(&message,2,1);number(&message,op,2);put(&message,id,16);varint(&message,redirected?301:(op==0x119 && socket->through_status?socket->through_status:200));
     if(redirected) {
         struct buf patch={0};stqr_u8 zeroes[32]={0},node[16]={2},volume[16]={3},runtime[16]={9};
         number(&patch,1,8);number(&patch,1,8);number(&patch,1,8);put(&patch,input.p+input.pos,16);
@@ -43,22 +57,42 @@ int policy_send(struct stqr_socket *socket,const void *data,size_t size) {
         varint(&patch,1);put(&patch,node,16);put(&patch,volume,16);number(&patch,0,1);number(&patch,0,1);number(&patch,0,2);number(&patch,0,4);
         varint(&patch,1);put(&patch,node,16);varint(&patch,1);blob(&patch,"http://owner-b:80",17);varint(&patch,0);
         varint(&headers,1);varint(&headers,2);blob(&headers,patch.p,patch.n);drop(&patch);socket->redirect=0;
-    }else if(op==0x121 || op==0x118) {
+    }else if(op==0x121 || op==0x118 || (op==0x100 && socket->read_mark_tag)) {
         if(op==0x121)assert(input.p[input.n-1]==1); /* accepted reference trailer */
         stqr_u8 boot[16]={1};boot[0]=(stqr_u8)(socket->boot?socket->boot:1);put(&mark,boot,16);number(&mark,++socket->sequence,8);
-        varint(&headers,1);varint(&headers,48);blob(&headers,mark.p,mark.n);
-    }else { assert(op==0x122 || op==0x119);varint(&headers,0); }
+    varint(&headers,1);varint(&headers,op==0x100?socket->read_mark_tag:48);blob(&headers,mark.p,mark.n);
+    }else { assert(op==0x122 || op==0x119 || op==0x11b || op==0x100);varint(&headers,0); }
     blob(&message,headers.p,headers.n);
     if(redirected) { /* A rejected original owner publishes no object result. */ }
     else if(op==0x121)number(&message,1,1);
     else if(op==0x118) {
         stqr_u8 runtime[16]={0};number(&message,socket->reply_length?socket->reply_length:4,8);number(&message,0,1);number(&message,0,4);
         put(&message,runtime,16);number(&message,0,1);number(&message,0,2);
-    }else {stqr_u8 boot[16]={1};boot[0]=(stqr_u8)(socket->boot?socket->boot:1);put(&message,boot,16);number(&message,socket->sequence,8);}
+    }else if(op==0x100) {
+        const char *payload=socket->read_mark_tag?NULL:"new!";size_t length=socket->read_mark_tag?0:4;
+        stqr_u8 runtime[16]={0},hash[32];assert(!sq_hash(256,payload,length,hash));
+        number(&message,length,8);number(&message,0,1);number(&message,0,4);
+        put(&message,runtime,16);number(&message,0,1);number(&message,0,2);
+        number(&message,0,1);number(&message,length,8);put(&message,hash,32);blob(&message,payload,length);
+    }else if(op==0x11b) {
+        number(&message,1024,8);number(&message,4096,8);
+        number(&message,3072,8);number(&message,2048,8);
+        number(&message,4096,8);number(&message,1,1);
+    }else {
+        stqr_u8 boot[16]={1};stqr_u64 sequence=socket->sequence;
+        boot[0]=(stqr_u8)(socket->boot?socket->boot:1);
+        if(op==0x119){
+            struct buf target={.p=input.p+input.pos+16,.n=24};stqr_commit_mark requested;
+            assert(!decode_mark(&target,&requested));
+            if(memcmp(requested.boot.bytes,boot,16)||sequence<requested.sequence)sequence=requested.sequence;
+            memcpy(boot,requested.boot.bytes,16);if(boot[0]<32)socket->through_boots|=1U<<boot[0];
+        }
+        put(&message,boot,16);number(&message,sequence,8);
+    }
     stqr_u8 frame[4]={0x82,0};size_t h=2;
     if(message.n<126)frame[1]=(stqr_u8)message.n;
     else{frame[1]=126;frame[2]=(stqr_u8)(message.n>>8);frame[3]=(stqr_u8)message.n;h=4;}
-    struct buf *output=socket->hold && op!=0x122 && op!=0x119?&socket->held:&socket->replies;
+    struct buf *output=op==0x11b&&socket->hold_space?&socket->space_held:((socket->hold && op!=0x122 && op!=0x119) || (socket->hold_through && op==0x119)?&socket->held:&socket->replies);
     put(output,frame,h);put(output,message.p,message.n);
     drop(&input);drop(&message);drop(&headers);drop(&mark);return 0;
 }
@@ -69,7 +103,7 @@ int policy_recv(struct stqr_socket *socket,void *out,size_t n) {
 int policy_wait(struct stqr_socket *socket,unsigned ms) {
     (void)ms;return socket->replies.pos<socket->replies.n;
 }
-void policy_disconnect(struct stqr_socket *socket) {if(socket){socket->closed=1;drop(&socket->replies);drop(&socket->held);}}
+void policy_disconnect(struct stqr_socket *socket) {if(socket){socket->closed=1;drop(&socket->replies);drop(&socket->held);drop(&socket->space_held);}}
 struct result {int called,error,status;};
 static void completed(void *arg,int error,int status,void *data,size_t n,const stqr_info *info) {
     struct result *r=arg;(void)n;(void)info;sq_free(data);
@@ -114,8 +148,8 @@ static void confirmed_and_legacy_marks(void) {
     async_fail(&c,&channel,-ECONNRESET);assert(!c.durability_lost&&!channel.lost);
     drop(&mark);put(&mark,boot,16);number(&mark,8,8);
     assert(!observe_mark(&c,&mark));async_fail(&c,&channel,-ECONNRESET);
-    assert(c.durability_lost&&channel.lost);
-    mark.pos=0;assert(!confirm_mark(&c,&mark)&&c.durability_lost&&c.pending_mark.sequence==8);
+    assert(!c.durability_lost&&!channel.lost&&c.detached_mark.sequence==8);
+    mark.pos=0;assert(!confirm_mark(&c,&mark)&&!c.detached_mark.sequence&&!c.pending_mark.sequence&&c.synced_mark.sequence==8);
     memset(&c,0,sizeof(c));memset(&channel,0,sizeof(channel));
     c.active=&channel;c.capabilities=STQR_CAP_DURABILITY;
     mark.pos=0;assert(!observe_mark(&c,&mark));
@@ -262,6 +296,206 @@ static void redirected_result_precedes_fence(void) {
     assert(later_fence.called==1&&later_fence.error==-ECONNRESET);
     assert(a.calls[0x122]==left_fences&&b.calls[0x122]==right_fences);
 }
+/* A real browser's STATFS used the synchronous wrapper on the shared client.
+ * Its read loop can receive an older asynchronous CAS redirect first. That
+ * redirect must not move the STATFS receive to the CAS's new owner socket. */
+static void synchronous_space_keeps_reply_owner(void) {
+    struct stqr_socket a={.redirect=1},b={.boot=2};
+    struct sq_channel *left=sq_alloc(sizeof(*left)),*right=sq_alloc(sizeof(*right));
+    stqr_client *c=sq_alloc(sizeof(*c));struct result result={0};
+    stqr_options options={.accepted=1};stqr_object_id object={{7}};stqr_space space={0};
+    assert(c&&left&&right);c->bucket.bytes[0]=1;c->channels=left;left->next=right;c->channel_count=2;
+    left->socket=&a;right->socket=&b;left->capabilities=right->capabilities=STQR_CAP_DURABILITY|STQR_CAP_CONNECTION_SYNC;
+    strcpy(left->authority,"owner-a:80");strcpy(right->authority,"owner-b:80");load_channel(c,left);
+    options.request_id.bytes[0]=7;
+    assert(!stqr_cas_async(c,object,1,0,"old!",4,"new!",4,&options,completed,&result));
+    assert(!stqr_bucket_space(c,&space));
+    assert(space.used==1024&&space.total==4096&&space.free==3072&&space.available==2048&&space.quota_limited);
+    assert(c->active==left&&a.calls[0x11b]==1&&!b.calls[0x11b]&&b.calls[0x118]==1);
+    for(unsigned i=0;i<8&&!result.called;i++)assert(stqr_poll(c,0)>=0);
+    assert(result.called==1&&!result.error&&!stqr_async_pending(c));
+    assert(!a.calls[0x122]&&!b.calls[0x122]&&!a.calls[0x119]&&!b.calls[0x119]);
+    stqr_close(c);
+}
+/* Same-boot accepted ACKs survive a dropped socket. A replacement socket's
+ * empty ConnectionSync cannot certify them: explicit sync also joins their
+ * boot-qualified SyncThrough, without forcing anything during reconnect. */
+static void acknowledged_prefix_recovers(int failure,int through_first) {
+    struct stqr_socket old={0},replacement={.sequence=8,.hold_through=1};
+    struct sq_channel *owner=sq_alloc(sizeof(*owner));
+    stqr_client *c=sq_alloc(sizeof(*c));struct result fence={0};
+    assert(c&&owner);c->bucket.bytes[0]=1;c->channels=owner;c->channel_count=1;
+    owner->socket=&old;owner->capabilities=STQR_CAP_DURABILITY|STQR_CAP_CONNECTION_SYNC;
+    strcpy(owner->authority,"owner-a:80");load_channel(c,owner);
+    c->pending_mark.boot.bytes[0]=1;c->pending_mark.sequence=7;
+    broken(c);save_channel(c);
+    assert(!c->durability_lost&&!owner->lost&&owner->detached.sequence==7);
+    assert(!old.calls[0x119]&&!old.calls[0x122]);
+    /* The transport has reconnected without requesting durability. */
+    c->socket=&replacement;save_channel(c);
+    assert(!replacement.calls[0x119]&&!replacement.calls[0x122]);
+    if(failure)replacement.through_status=failure;
+    if(through_first)replacement.hold_through=0;
+    assert(!stqr_connection_sync_async(c,completed,&fence));
+    assert(replacement.calls[0x119]==1&&replacement.calls[0x122]==1);
+    if(!through_first) {
+        assert(stqr_poll(c,0)>0); /* Only the new socket's fence replied. */
+        assert(!fence.called&&!c->pending_mark.sequence&&c->detached_mark.sequence==7);
+        release_held(&replacement);
+    }
+    for(unsigned i=0;i<8&&!fence.called;i++)assert(stqr_poll(c,0)>=0);
+    assert(fence.called==1);
+    if(failure) {
+        assert(fence.error==status_errno(failure));
+        assert(!c->pending_mark.sequence&&c->detached_mark.sequence==7);
+        if(failure==410) {
+            /* New server incarnation cannot certify an old mark. */
+            struct buf mark={0};stqr_u8 boot[16]={2};put(&mark,boot,16);number(&mark,9,8);
+            assert(!observe_mark(c,&mark)&&!c->durability_lost&&c->pending_mark.sequence==9&&c->detached_mark.sequence==7);drop(&mark);
+        } else {
+            struct result retry={0};replacement.hold_through=0;replacement.through_status=0;
+            assert(!stqr_connection_sync_async(c,completed,&retry));
+            for(unsigned i=0;i<8&&!retry.called;i++)assert(stqr_poll(c,0)>=0);
+            assert(retry.called==1&&!retry.error&&!c->pending_mark.sequence&&!c->detached_mark.sequence);
+        }
+    } else assert(!fence.error&&!c->pending_mark.sequence&&!c->detached_mark.sequence&&c->synced_mark.sequence==8);
+    stqr_close(c);
+}
+static void recovered_prefix_preserves_later_writes(void) {
+    struct stqr_socket old={0},replacement={.sequence=8,.hold_through=1};
+    struct sq_channel *owner=sq_alloc(sizeof(*owner));stqr_client *c=sq_alloc(sizeof(*c));
+    struct result fence={0},later={0},next={0};stqr_options options={.accepted=1};stqr_object_id object={{7}};
+    assert(c&&owner);c->bucket.bytes[0]=1;c->channels=owner;c->channel_count=1;
+    owner->socket=&old;owner->capabilities=STQR_CAP_DURABILITY|STQR_CAP_CONNECTION_SYNC;
+    load_channel(c,owner);c->pending_mark.boot.bytes[0]=1;c->pending_mark.sequence=7;
+    broken(c);c->socket=&replacement;save_channel(c);
+    assert(!stqr_connection_sync_async(c,completed,&fence));
+    assert(stqr_poll(c,0)>0&&!fence.called);
+    options.request_id.bytes[0]=7;
+    assert(!stqr_cas_async(c,object,1,0,"old!",4,"new!",4,&options,completed,&later));
+    for(unsigned i=0;i<8&&!later.called;i++)assert(stqr_poll(c,0)>=0);
+    assert(later.called==1&&!later.error&&c->pending_mark.sequence==9);
+    release_held(&replacement);
+    for(unsigned i=0;i<8&&!fence.called;i++)assert(stqr_poll(c,0)>=0);
+    assert(fence.called==1&&!fence.error&&!c->detached_mark.sequence&&c->pending_mark.sequence==9);
+    replacement.hold_through=0;
+    assert(!stqr_connection_sync_async(c,completed,&next));
+    for(unsigned i=0;i<8&&!next.called;i++)assert(stqr_poll(c,0)>=0);
+    assert(next.called==1&&!next.error&&!c->pending_mark.sequence&&replacement.calls[0x119]==1);
+    stqr_close(c);
+}
+static void recovery_joins_independent_owners(void) {
+    struct stqr_socket old={0},a={.sequence=8,.hold_through=1},b={.boot=2};
+    struct sq_channel *left=sq_alloc(sizeof(*left)),*right=sq_alloc(sizeof(*right));
+    stqr_client *c=sq_alloc(sizeof(*c));struct result write={0},fence={0};
+    stqr_options options={.accepted=1};stqr_object_id object={{7}};
+    assert(c&&left&&right);c->bucket.bytes[0]=1;c->channels=left;left->next=right;c->channel_count=2;
+    left->socket=&old;right->socket=&b;left->capabilities=right->capabilities=STQR_CAP_DURABILITY|STQR_CAP_CONNECTION_SYNC;
+    strcpy(left->authority,"owner-a:80");strcpy(right->authority,"owner-b:80");load_channel(c,left);
+    c->pending_mark.boot.bytes[0]=1;c->pending_mark.sequence=7;
+    broken(c);c->socket=&a;save_channel(c);load_channel(c,right);
+    options.request_id.bytes[0]=7;
+    assert(!stqr_cas_async(c,object,1,0,"old!",4,"new!",4,&options,completed,&write));
+    for(unsigned i=0;i<8&&!write.called;i++)assert(stqr_poll(c,0)>=0);
+    assert(write.called==1&&!write.error);
+    assert(!stqr_connection_sync_async(c,completed,&fence));
+    for(unsigned i=0;i<8;i++){int n=stqr_poll(c,0);assert(n>=0);if(!n)break;}
+    assert(!fence.called&&left->detached.sequence==7&&!left->pending.sequence&&!right->pending.sequence);
+    assert(a.calls[0x119]==1&&a.calls[0x122]==1&&!b.calls[0x119]&&b.calls[0x122]==1);
+    release_held(&a);
+    for(unsigned i=0;i<8&&!fence.called;i++)assert(stqr_poll(c,0)>=0);
+    assert(fence.called==1&&!fence.error&&!left->detached.sequence&&!left->pending.sequence&&!right->pending.sequence);
+    stqr_close(c);
+}
+/* A later explicit fence need not await an older fence's response, but it
+ * must obtain its OWN old-prefix proof. Both failures remain observable. */
+static void overlapping_recovery_fences(int second_failure) {
+    struct stqr_socket old={0},socket={.sequence=8,.hold_through=1,.through_status=503};
+    struct sq_channel *owner=sq_alloc(sizeof(*owner));stqr_client *c=sq_alloc(sizeof(*c));
+    struct result first={0},second={0};
+    assert(c&&owner);c->bucket.bytes[0]=1;c->channels=owner;c->channel_count=1;
+    owner->socket=&old;owner->capabilities=STQR_CAP_DURABILITY|STQR_CAP_CONNECTION_SYNC;
+    load_channel(c,owner);c->pending_mark.boot.bytes[0]=1;c->pending_mark.sequence=7;
+    broken(c);c->socket=&socket;save_channel(c);
+    assert(!stqr_connection_sync_async(c,completed,&first));
+    socket.hold_through=0;socket.through_status=second_failure;
+    assert(!stqr_connection_sync_async(c,completed,&second));
+    assert(socket.calls[0x119]==2&&socket.calls[0x122]==2);
+    for(unsigned i=0;i<8&&!second.called;i++)assert(stqr_poll(c,0)>=0);
+    assert(!first.called&&second.called==1&&second.error==(second_failure?status_errno(second_failure):0));
+    if(second_failure)assert(c->detached_mark.sequence==7&&!c->pending_mark.sequence);
+    else assert(!c->detached_mark.sequence&&!c->pending_mark.sequence&&c->synced_mark.sequence==8);
+    release_held(&socket);
+    for(unsigned i=0;i<8&&!first.called;i++)assert(stqr_poll(c,0)>=0);
+    assert(first.called==1&&first.error==status_errno(503)&&!c->durability_lost);
+    if(second_failure)assert(c->detached_mark.sequence==7&&!c->pending_mark.sequence);
+    else assert(!c->detached_mark.sequence&&!c->pending_mark.sequence&&c->synced_mark.sequence==8);
+    stqr_close(c);
+}
+/* A known ACK does not become an unknown mutation merely because ordinary
+ * reads or accepted writes arrive from the replacement server before Sync. */
+static void new_boot_activity_preserves_known_prefixes(unsigned read_tag,int through_first,int restarts) {
+    struct stqr_socket sockets[3]={0};
+    struct sq_channel *owner=sq_alloc(sizeof(*owner));stqr_client *c=sq_alloc(sizeof(*c));
+    stqr_object_id object={{7}};stqr_options options={.accepted=1};
+    assert(c&&owner);c->bucket.bytes[0]=1;c->channels=c->active=owner;c->channel_count=1;
+    owner->socket=&sockets[0];owner->capabilities=STQR_CAP_DURABILITY|STQR_CAP_CONNECTION_SYNC;
+    load_channel(c,owner);c->pending_mark.boot.bytes[0]=1;c->pending_mark.sequence=7;
+    for(int boot=2;boot<=restarts+1;boot++){
+        struct result get={0},write={0};struct stqr_socket *socket=&sockets[boot-1];
+        broken(c);assert(!c->durability_lost&&!c->pending_mark.sequence);
+        socket->boot=(unsigned)boot;socket->read_mark_tag=read_tag;c->socket=socket;save_channel(c);
+        assert(!stqr_get_async(c,object,completed,&get));
+        for(unsigned n=0;n<8&&!get.called;n++)assert(stqr_poll(c,0)>=0);
+        assert(get.called==1&&!get.error&&!c->durability_lost);
+        options.request_id.bytes[0]=(stqr_u8)boot;
+        assert(!stqr_cas_async(c,object,1,0,"old!",4,"new!",4,&options,completed,&write));
+        for(unsigned n=0;n<8&&!write.called;n++)assert(stqr_poll(c,0)>=0);
+        assert(write.called==1&&!write.error&&!c->durability_lost&&c->pending_mark.boot.bytes[0]==boot);
+        assert(!socket->calls[0x119]&&!socket->calls[0x122]);
+    }
+    stqr_commit_mark scalar;assert(stqr_pending_mark(c,&scalar)==-EOPNOTSUPP&&!scalar.sequence);
+    stqr_fence *captured=NULL;assert(!stqr_fence_capture(c,&captured));
+    assert(stqr_fence_count(captured)==(unsigned)restarts+1);stqr_fence_close(captured);
+    struct stqr_socket *current_socket=&sockets[restarts];current_socket->hold_through=!through_first;
+    struct result fence={0};assert(!stqr_connection_sync_async(c,completed,&fence));
+    assert(current_socket->calls[0x119]==(unsigned)restarts&&current_socket->calls[0x122]==1);
+    if(!through_first){
+        for(unsigned n=0;n<8;n++)assert(stqr_poll(c,0)>=0);
+        assert(!fence.called&&c->detached_mark.sequence&&!c->pending_mark.sequence&&!c->durability_lost);
+        release_held(current_socket);
+    }
+    for(unsigned n=0;n<16&&!fence.called;n++)assert(stqr_poll(c,0)>=0);
+    assert(fence.called==1&&!fence.error&&!c->durability_lost&&!c->pending_mark.sequence&&!c->detached_mark.sequence&&!c->detached_extra);
+    assert(current_socket->through_boots&(1U<<1));
+    if(restarts==2)assert(current_socket->through_boots&(1U<<2));
+    stqr_close(c);
+}
+static void known_prefix_bound_fails_closed(void) {
+    stqr_client c={0};struct sq_channel owner={0};struct buf mark={0};stqr_u8 boot[16]={1};
+    c.active=&owner;c.capabilities=STQR_CAP_CONNECTION_SYNC|STQR_CAP_DURABILITY;
+    for(unsigned n=1;n<=SQ_PREFIX_LIMIT+2;n++){
+        boot[0]=(stqr_u8)n;put(&mark,boot,16);number(&mark,1,8);assert(!observe_mark(&c,&mark));drop(&mark);
+    }
+    assert(c.durability_lost&&c.detached_count==SQ_PREFIX_LIMIT-1);
+    struct result fence={0};assert(stqr_connection_sync_async(&c,completed,&fence)==-ESTALE);
+    prefix_drop(c.detached_extra);
+}
+static void unknown_mutation_stays_uncertain(int fire) {
+    struct stqr_socket socket={.hold=1};stqr_client *c=sq_alloc(sizeof(*c));
+    struct result result={0},fence={0};stqr_options options={.accepted=1};stqr_object_id object={{7}};
+    assert(c);c->socket=&socket;c->bucket.bytes[0]=1;c->capabilities=STQR_CAP_DURABILITY|STQR_CAP_CONNECTION_SYNC;
+    options.request_id.bytes[0]=7;
+    if(fire) {
+        /* Suppress the synthetic response; fire-and-forget has no receipt. */
+        assert(!stqr_put_async(c,object,"new!",4,&options));
+    } else assert(!stqr_cas_async(c,object,1,0,"old!",4,"new!",4,&options,completed,&result));
+    broken(c);
+    assert(c->durability_lost&&(!fire?result.called==1&&result.error==-EINPROGRESS:!result.called));
+    assert(stqr_connection_sync_async(c,completed,&fence)==-ESTALE&&!fence.called);
+    assert(!socket.calls[0x119]&&!socket.calls[0x122]);
+    stqr_close(c);
+}
 static void close_cancels_deferred_fence(int reconnect) {
     struct stqr_socket socket={.hold=1};stqr_client *c=sq_alloc(sizeof(*c));
     struct result result={0},fence={0};stqr_options options={.accepted=1};stqr_object_id object={{7}};
@@ -343,12 +577,155 @@ static void control_without_reply(unsigned opcode,int expected) {
     if(expected>0) assert(!stqr_poll(c,0));
     stqr_close(c);
 }
+static void discarded_coverage(void *arg,const stqr_update *update) {
+ unsigned *lost=arg;assert(!update);(*lost)++;
+}
+static void discard_has_no_pending_or_fence(void) {
+ struct stqr_socket socket={0};stqr_client *c=sq_alloc(sizeof(*c));unsigned lost=0;
+ assert(c);c->socket=&socket;
+ assert(stqr_unsubscribe_discard(c,(stqr_id){{1}})==-EOPNOTSUPP && !socket.calls[0x111]);
+ c->capabilities=STQR_CAP_SUBSCRIPTIONS;assert(!ensure_channel(c));
+ stqr_set_update_handler(c,discarded_coverage,&lost);
+ for(unsigned i=0;i<10000;i++) {
+  stqr_id sid={{0}};memcpy(sid.bytes,&i,sizeof(i));sid.bytes[15]=1;
+  struct sq_binding *binding=sq_alloc(sizeof(*binding));assert(binding);
+  binding->id=sid;binding->channel=c->active;unsigned slot=binding_bucket(sid);
+  binding->next=c->bindings[slot];c->bindings[slot]=binding;
+  assert(!stqr_unsubscribe_discard(c,sid));
+  assert(!*binding_slot(c,sid) && !stqr_async_pending(c));
+ }
+ assert(socket.calls[0x111]==10000 && !socket.replies.n && !socket.held.n && !lost);
+ assert(!socket.calls[0x122] && !socket.calls[0x119]);
+ stqr_id sid={{1}};struct sq_binding *binding=sq_alloc(sizeof(*binding));assert(binding);
+ binding->id=sid;binding->channel=c->active;c->bindings[binding_bucket(sid)]=binding;
+ socket.fail_send=1;assert(stqr_unsubscribe_discard(c,sid)==-EIO);
+ assert(!*binding_slot(c,sid) && !c->socket && socket.closed && lost==1);
+ assert(!stqr_async_pending(c));stqr_close(c);
+ puts("C discarded subscription retirement: 10000no-ACK/no-pending events; failed send loses coverage");
+}
+/* Fatal cancellation before the transport worker is dispatched must not make
+ * unrelated accepted or in-flight operations permanently uncertain. A generic
+ * EINTR cannot prove zero bytes, so that separate case stays conservative. */
+static void rejected_before_transport(int synchronous, int send_error) {
+    struct stqr_socket socket={0};stqr_client *c=sq_alloc(sizeof(*c));
+    struct sq_channel *owner=sq_alloc(sizeof(*owner));struct result first={0},second={0};
+    stqr_options options={.accepted=1};stqr_object_id object={{7}};
+    assert(c&&owner);c->bucket.bytes[0]=1;c->channels=owner;c->channel_count=1;
+    owner->socket=&socket;owner->capabilities=STQR_CAP_DURABILITY|STQR_CAP_CONNECTION_SYNC;
+    load_channel(c,owner);options.request_id.bytes[0]=21;
+    assert(!stqr_cas_async(c,object,1,0,"old!",4,"new!",4,&options,completed,&first));
+    assert(c->async_count==1&&socket.calls[0x118]==1);
+    socket.send_error=send_error;options.request_id.bytes[0]=22;
+    int error;
+    if(synchronous) {
+        struct buf body={0},result={0};stqr_id id={{22}};stqr_u8 zeroes[80]={0};put(&body,zeroes,sizeof(zeroes));
+        error=request(c,0x102,&body,id,1,&result,NULL);drop(&body);drop(&result);
+    } else error=stqr_cas_async(c,object,1,0,"old!",4,"next",4,&options,completed,&second);
+    assert(error==(send_error==SQ_SEND_NOT_SUBMITTED?-EINTR:-EINPROGRESS));
+    assert(socket.calls[0x118]==1&&!second.called);
+    if(send_error==SQ_SEND_NOT_SUBMITTED) {
+        assert(c->socket==&socket&&!socket.closed&&!c->durability_lost&&!owner->lost);
+        assert(c->async_count==1&&!first.called);
+        socket.send_error=0;
+        assert(stqr_poll(c,0)>0&&first.called==1&&!first.error);
+        stqr_space space;assert(!stqr_bucket_space(c,&space));
+        void *data=NULL;size_t size=0;stqr_info info;
+        assert(!stqr_get(c,object,&data,&size,&info));
+        assert(size==4&&!memcmp(data,"new!",4));stqr_free(data);
+        struct result fence={0};assert(!stqr_connection_sync_async(c,completed,&fence));
+        for(unsigned i=0;i<8&&!fence.called;i++)assert(stqr_poll(c,0)>=0);
+        assert(fence.called&&!fence.error);
+        assert(!c->durability_lost&&!owner->lost&&!c->async_count);
+    } else assert(c->durability_lost);
+    stqr_close(c);
+}
+static void rejected_later_stream_frame(unsigned fail_call) {
+    struct stqr_socket socket={.send_error=SQ_SEND_NOT_SUBMITTED,.fail_call=(int)fail_call};
+    stqr_client *c=sq_alloc(sizeof(*c));struct sq_channel *owner=sq_alloc(sizeof(*owner));
+    struct buf body={0},result={0};stqr_id id={{25}};stqr_u8 zeroes[80]={0},hash[32]={0};
+    assert(c&&owner);c->channels=owner;c->channel_count=1;c->bucket.bytes[0]=1;
+    owner->socket=&socket;owner->capabilities=STQR_CAP_DURABILITY|STQR_CAP_ACCEPTED_STREAMS;
+    load_channel(c,owner);put(&body,zeroes,sizeof(zeroes));
+    assert(request_payload(c,0x102,&body,id,2,&result,NULL,"abc",3,hash)==-EINPROGRESS);
+    assert(c->durability_lost&&socket.closed&&socket.sends==fail_call);
+    drop(&body);drop(&result);stqr_close(c);
+}
+static void allocation_before_transport(void) {
+    struct stqr_socket socket={0};stqr_client c={0};struct sq_channel owner={0};
+    struct sq_async pending={0};struct buf body={0},result={0};stqr_id id={{23}};
+    c.socket=&socket;c.active=&owner;owner.socket=&socket;
+    pending.mutation=1;pending.id=id;pending.op=0x102;
+    stqr_u8 zeroes[80]={0};put(&pending.body,zeroes,sizeof(zeroes));put(&body,zeroes,sizeof(zeroes));
+    reject_allocation=1;
+    assert(async_send(&c,&pending)==-ENOMEM);
+    assert(request(&c,0x102,&body,id,1,&result,NULL)==-ENOMEM);
+    reject_allocation=0;
+    assert(!c.durability_lost&&!owner.lost&&!socket.closed&&!socket.calls[0x102]);
+    drop(&pending.body);drop(&body);drop(&result);
+}
+static void rejected_handshake(void) {
+    struct stqr_socket socket={.send_error=SQ_SEND_NOT_SUBMITTED};stqr_client c={0};
+    c.socket=&socket;c.authorization="";c.bucket.bytes[0]=1;
+    assert(handshake(&c)==-EINTR&&!c.durability_lost&&!socket.closed);
+}
+static stqr_client *space_client(struct stqr_socket *socket) {
+ stqr_client *c=sq_alloc(sizeof(*c));assert(c);c->socket=socket;c->bucket.bytes[0]=1;
+ c->capabilities=STQR_CAP_DURABILITY|STQR_CAP_CONNECTION_SYNC;return c;
+}
+static void space_wait_does_not_hold_other_results(void) {
+ struct stqr_socket socket={.hold_space=1};stqr_client *c=space_client(&socket);
+ struct result capacity={0},read={0},write={0};stqr_space space={.total=99};
+ stqr_object_id object={{7}};stqr_options options={.accepted=1};options.request_id.bytes[0]=1;
+ assert(!stqr_bucket_space_async(c,&space,completed,&capacity));
+ assert(!capacity.called && space.total==99 && stqr_async_pending(c)==1);
+ assert(!stqr_get_async(c,object,completed,&read));
+ assert(!stqr_cas_async(c,object,1,0,"old!",4,"new!",4,&options,completed,&write));
+ while(!read.called || !write.called)assert(stqr_poll(c,0)>0);
+ assert(!capacity.called && !read.error && !write.error && space.total==99);
+ assert(stqr_async_pending(c)==1 && !c->durability_lost && !socket.calls[0x122] && !socket.calls[0x119]);
+ put(&socket.replies,socket.space_held.p,socket.space_held.n);drop(&socket.space_held);
+ while(!capacity.called)assert(stqr_poll(c,0)>0);
+ assert(!capacity.error && space.used==1024 && space.total==4096 && space.free==3072 && space.available==2048 && space.quota==4096 && space.quota_limited);
+ assert(!stqr_async_pending(c));stqr_close(c);
+ puts("C delayed STATFS allows independent GET and CAS completions without fences");
+}
+static void space_send_cancellation(bool asynchronous) {
+ struct stqr_socket socket={.hold=1};stqr_client *c=space_client(&socket);
+ struct result capacity={0},write={0};stqr_space space={.total=99};
+ stqr_object_id object={{7}};stqr_options options={.accepted=1};options.request_id.bytes[0]=1;
+ assert(!stqr_cas_async(c,object,1,0,"old!",4,"new!",4,&options,completed,&write));
+ socket.fail_space_send=1;
+ int err=asynchronous?stqr_bucket_space_async(c,&space,completed,&capacity):stqr_bucket_space(c,&space);
+ assert(err==-EINTR && space.total==99 && !capacity.called);
+ if(asynchronous) {
+  assert(!write.called && !c->durability_lost && c->socket && stqr_async_pending(c)==1);
+  put(&socket.replies,socket.held.p,socket.held.n);drop(&socket.held);
+  while(!write.called)assert(stqr_poll(c,0)>0);
+  assert(!write.error && !c->durability_lost && !stqr_async_pending(c));
+ } else {
+  assert(write.called && write.error==-EINPROGRESS && c->durability_lost && !c->socket);
+ }
+ stqr_close(c);
+ printf("C STATFS cancellation async=%d preserves_pending_mutation=%d\n",asynchronous,asynchronous);
+}
 int main(void) {
+    discard_has_no_pending_or_fence();
+    rejected_handshake();rejected_later_stream_frame(2);rejected_later_stream_frame(3);
+    rejected_before_transport(0,SQ_SEND_NOT_SUBMITTED);rejected_before_transport(1,SQ_SEND_NOT_SUBMITTED);
+    rejected_before_transport(0,-EINTR);rejected_before_transport(1,-EINTR);allocation_before_transport();
+    space_wait_does_not_hold_other_results();space_send_cancellation(false);space_send_cancellation(true);
     control_before_cas_reply(9);control_before_cas_reply(10);
     control_without_reply(0x89,1);control_without_reply(0x8a,1);
     control_without_reply(0x88,-ECONNRESET);control_without_reply(0x09,-EPROTO);
     failed_fence(0);failed_fence(1);successful_fence();confirmed_and_legacy_marks();
+    acknowledged_prefix_recovers(0,0);acknowledged_prefix_recovers(0,1);acknowledged_prefix_recovers(503,0);acknowledged_prefix_recovers(410,0);
+    unknown_mutation_stays_uncertain(0);unknown_mutation_stays_uncertain(1);
+    new_boot_activity_preserves_known_prefixes(48,0,1);new_boot_activity_preserves_known_prefixes(48,1,1);
+    new_boot_activity_preserves_known_prefixes(49,0,2);new_boot_activity_preserves_known_prefixes(49,1,2);
+    known_prefix_bound_fails_closed();
+    recovered_prefix_preserves_later_writes();recovery_joins_independent_owners();
+    overlapping_recovery_fences(0);overlapping_recovery_fences(503);
     observation_and_capacity_never_sync();accepted_mode_never_downgrades();burst_has_only_explicit_fence();dirty_owner_pool_preserves_explicit_cut();
-    overlapping_legacy_fences();legacy_sync_joins_result();redirected_result_precedes_fence();close_cancels_deferred_fence(0);close_cancels_deferred_fence(1);clean_eviction_preserves_deferred_fence();
+    overlapping_legacy_fences();legacy_sync_joins_result();redirected_result_precedes_fence();synchronous_space_keeps_reply_owner();close_cancels_deferred_fence(0);close_cancels_deferred_fence(1);clean_eviction_preserves_deferred_fence();
     puts("C fences are explicit; ordinary bursts and close never checkpoint");return 0;
 }

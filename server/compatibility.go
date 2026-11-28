@@ -90,13 +90,20 @@ type versionObservations struct {
 func legacyProfile() protocolProfile {
 	return protocolProfile{Version: "legacy/unknown", WireMin: 1, WireMax: 1}
 }
+
+// The default operations table is immutable after package initialization. Returned
+// profiles borrow it; callers constructing a different profile must replace or
+// clone Operations before editing entries. Test/negotiated overrides remain local
+// to each Server through compatibility.
+var defaultOperationSemantics = currentOperationSemantics()
+
 func (s *Server) protocolVersion() protocolProfile {
 	if p := s.compatibility.Load(); p != nil {
 		return *p
 	}
 	// Release is retained only as a wire alias for older readers. It is no
 	// longer a software release or a timestamp and never drives our comparison.
-	return protocolProfile{ProtocolVersion: ProtocolVersion, Version: SoftwareVersion, Revision: SoftwareRevision, Release: ProtocolVersion, WireMin: 1, WireMax: 1, Operations: currentOperationSemantics()}
+	return protocolProfile{ProtocolVersion: ProtocolVersion, Version: SoftwareVersion, Revision: SoftwareRevision, Release: ProtocolVersion, WireMin: 1, WireMax: 1, Operations: defaultOperationSemantics}
 }
 func profileHeader(p protocolProfile) string { b, _ := json.Marshal(p); return string(b) }
 func decodeProfile(h http.Header) (protocolProfile, error) {
@@ -132,9 +139,17 @@ func wireCompatible(a, b protocolProfile) bool {
 	a, b = normalizeProfile(a), normalizeProfile(b)
 	return a.WireMin <= b.WireMax && b.WireMin <= a.WireMax
 }
+
+// A fixed-width stack key avoids formatting and allocation on every peer RPC.
+func operationKey(op uint16) string {
+	const digits = "0123456789abcdef"
+	key := [4]byte{digits[op>>12], digits[op>>8&15], digits[op>>4&15], digits[op&15]}
+	return string(key[:])
+}
+
 func (p protocolProfile) semantics(op uint16) operationSemantics {
 	if len(p.Operations) > 0 {
-		if v, ok := p.Operations[fmt.Sprintf("%04x", op)]; ok {
+		if v, ok := p.Operations[operationKey(op)]; ok {
 			return v
 		}
 	}

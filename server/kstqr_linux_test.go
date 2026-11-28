@@ -37,7 +37,7 @@ func TestKSTQRVirtualMachine(t *testing.T) {
 	// Focused scripts replace the same init section; combining them cannot
 	// represent a valid test and must fail before starting a guest.
 	selectedMode := ""
-	for _, mode := range []string{"EDIT_RETRY", "PLAIN_BIND", "CACHE_NEGATIVE", "POSTRESTART_PIN", "ASYNC_UNPIN", "SHARED_PINS", "CACHE_REOPEN", "BENCHMARK", "WRITE_BENCHMARK", "READ_WINDOW", "LOOP", "RESTART_ONLY", "OVERLAY", "OVERLAY_PROOF", "OUTAGE", "CACHE_RETENTION", "REFERENCE_LIMIT"} {
+	for _, mode := range []string{"EDIT_RETRY", "PLAIN_BIND", "CACHE_NEGATIVE", "POSTRESTART_PIN", "ASYNC_UNPIN", "SHARED_PINS", "CACHE_REOPEN", "DIRECTORY_CACHE", "BENCHMARK", "WRITE_BENCHMARK", "READ_WINDOW", "LOOP", "RESTART_ONLY", "OVERLAY", "OVERLAY_PROOF", "OUTAGE", "CACHE_RETENTION", "REFERENCE_LIMIT"} {
 		if os.Getenv("STQR_KERNEL_"+mode) == "1" {
 			if selectedMode != "" {
 				t.Fatalf("incompatible kernel fixture modes %s and %s; run them separately", selectedMode, mode)
@@ -107,10 +107,12 @@ func TestKSTQRVirtualMachine(t *testing.T) {
 	run("cc", "-static", "-std=c11", "-Wall", "-Wextra", "-Werror", "-O2", "-o", filepath.Join(initrdRoot, "reference-limit"), filepath.Join(root, "tests/reference_limit.c"))
 	run("cc", "-static", "-std=c11", "-Wall", "-Wextra", "-Werror", "-O2", "-o", filepath.Join(initrdRoot, "sandbox"), filepath.Join(root, "tests/sandbox.c"))
 	run("cc", "-static", "-std=c11", "-Wall", "-Wextra", "-Werror", "-O2", "-o", filepath.Join(initrdRoot, "signal-rpc"), filepath.Join(root, "tests/signals.c"))
+	run("cc", "-static", "-std=c11", "-Wall", "-Wextra", "-Werror", "-O2", "-o", filepath.Join(initrdRoot, "statfs-async"), filepath.Join(root, "tests/statfs_async.c"))
 	run("cc", "-static", "-std=c11", "-Wall", "-Wextra", "-Werror", "-O2", "-o", filepath.Join(initrdRoot, "coherence"), filepath.Join(root, "tests/coherence.c"))
 	run("cc", "-static", "-std=c11", "-Wall", "-Wextra", "-Werror", "-O2", "-o", filepath.Join(initrdRoot, "cache-capacity"), filepath.Join(root, "tests/cache_capacity.c"))
 	run("cc", "-static", "-std=c11", "-Wall", "-Wextra", "-Werror", "-O2", "-o", filepath.Join(initrdRoot, "throughput"), filepath.Join(root, "tests/throughput.c"))
 	run("cc", "-static", "-std=c11", "-Wall", "-Wextra", "-Werror", "-O2", "-o", filepath.Join(initrdRoot, "cache-reopen"), filepath.Join(root, "tests/cache_reopen.c"))
+	run("cc", "-static", "-std=c11", "-Wall", "-Wextra", "-Werror", "-O2", "-o", filepath.Join(initrdRoot, "directory-cache"), filepath.Join(root, "tests/directory_cache.c"))
 	run("cc", "-static", "-std=c11", "-Wall", "-Wextra", "-Werror", "-O2", "-o", filepath.Join(initrdRoot, "read-window"), filepath.Join(root, "tests/read_window.c"))
 	run("cc", "-static", "-std=c11", "-Wall", "-Wextra", "-Werror", "-O2", "-o", filepath.Join(initrdRoot, "async-unpin"), filepath.Join(root, "tests/async_unpin.c"))
 	run("cc", "-static", "-std=c11", "-Wall", "-Wextra", "-Werror", "-O2", "-o", filepath.Join(initrdRoot, "shared-pins"), filepath.Join(root, "tests/shared_pins.c"))
@@ -152,16 +154,33 @@ func TestKSTQRVirtualMachine(t *testing.T) {
 	}))
 	defer upstream.Close()
 	host := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/__kstqr_test/statfs/") {
+			writebackFault.statfs.control(w, r)
+			return
+		}
 		if strings.HasPrefix(r.URL.Path, "/__kstqr_test/edit-retry/") {
 			parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/__kstqr_test/edit-retry/"), "/")
 			if len(parts) != 2 {
 				http.NotFound(w, r)
 				return
 			}
-			if parts[1] == "begin" {
+			switch parts[1] {
+			case "begin":
 				writebackFault.editRetry.begin(parts[0])
-			} else if err := writebackFault.editRetry.verify(parts[0]); err != nil {
-				http.Error(w, err.Error(), 500)
+			case "seen":
+				if !writebackFault.editRetry.fatalSeen() {
+					http.Error(w, "payload reply not held", 409)
+				}
+			case "release":
+				if err := writebackFault.editRetry.releaseFatal(); err != nil {
+					http.Error(w, err.Error(), 500)
+				}
+			case "verify":
+				if err := writebackFault.editRetry.verify(parts[0]); err != nil {
+					http.Error(w, err.Error(), 500)
+				}
+			default:
+				http.NotFound(w, r)
 			}
 			return
 		}
@@ -1011,7 +1030,12 @@ umount /readonly
 echo initialized-by-kernel > /fresh/new.txt
 umount /fresh
 if pidof mount.kstqr; then exit 1; fi
+
 /signal-rpc
+mkdir /statfs
+/mount.kstqr --uri @@URL@@ --bucket @@BUCKET@@ --credentials /credentials --metadata-cache-bytes 0 /statfs
+/statfs-async @@URL@@
+umount /statfs
 /smoke
 /mmap-test @@URL@@
 /writeback
@@ -1108,6 +1132,24 @@ rmmod kstqr
 /cache-reopen
 cat /proc/self/mountstats
 umount /readonly
+rmmod kstqr
+`
+		init = init[:begin] + script + init[end:]
+	}
+
+	if os.Getenv("STQR_KERNEL_DIRECTORY_CACHE") == "1" {
+		begin := strings.Index(init, "for attempt in 1 2 3 4; do")
+		end := strings.Index(init, "if dmesg |")
+		script := `/mount.kstqr --uri ` + endpoint + ` --bucket ` + client.ID(b.ID()).String() + ` --credentials /credentials /mnt
+/directory-cache setup
+/mount.kstqr --uri ` + endpoint + ` --bucket ` + client.ID(b.ID()).String() + ` --credentials /readonly-credentials --readonly /readonly
+mkdir /tiny
+/mount.kstqr --uri ` + endpoint + ` --bucket ` + client.ID(b.ID()).String() + ` --credentials /readonly-credentials --readonly --metadata-cache-bytes 4096 /tiny
+/directory-cache check
+cat /proc/self/mountstats
+umount /tiny
+umount /readonly
+umount /mnt
 rmmod kstqr
 `
 		init = init[:begin] + script + init[end:]
@@ -1803,6 +1845,18 @@ poweroff -f
 		}
 		for _, line := range strings.Split(string(output), "\n") {
 			if strings.Contains(line, "negative-cache:") || strings.Contains(line, "KSTQR_NEGATIVE_INVALIDATION_PASS") {
+				t.Log(strings.TrimSpace(line))
+			}
+		}
+		return
+	}
+
+	if os.Getenv("STQR_KERNEL_DIRECTORY_CACHE") == "1" {
+		if !strings.Contains(string(output), "KSTQR_DIRECTORY_CACHE_PASS") {
+			t.Fatalf("guarded directory cache regression failed: %s", output)
+		}
+		for _, line := range strings.Split(string(output), "\n") {
+			if strings.Contains(line, "KSTQR_DIRECTORY_CACHE") {
 				t.Log(strings.TrimSpace(line))
 			}
 		}
