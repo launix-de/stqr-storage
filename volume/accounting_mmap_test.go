@@ -110,7 +110,9 @@ func TestWarmAccountingBorrowsMappedMetadataWithoutPageCopies(t *testing.T) {
 	// A positive fallback control proves that the ReadAt probe is effective and
 	// that copying versus borrowing has identical accounting semantics.
 	v.dev.(*meteredIO).VolumeIO = struct{ VolumeIO }{p}
-	if _, err = v.ConfigureAccounting(AccountingOptions{}); err != nil {
+	// Deliberately use an unkeyed equivalent predicate to force a fresh census;
+	// an unchanged known predicate now correctly reuses maintained counters.
+	if _, err = v.ConfigureAccounting(AccountingOptions{Include: func(Key, bool) bool { return true }}); err != nil {
 		t.Fatal(err)
 	}
 	if err = v.WarmAccounting(context.Background()); err != nil {
@@ -159,7 +161,7 @@ func BenchmarkWarmAccountingMapped(b *testing.B) {
 			}
 			b.ReportAllocs()
 			for i := 0; i < b.N; i++ {
-				if _, err = v.ConfigureAccounting(AccountingOptions{}); err != nil {
+				if _, err = v.ConfigureAccounting(AccountingOptions{Include: func(Key, bool) bool { return true }}); err != nil {
 					b.Fatal(err)
 				}
 				if err = v.WarmAccounting(context.Background()); err != nil {
