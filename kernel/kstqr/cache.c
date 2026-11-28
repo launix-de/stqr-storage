@@ -19,6 +19,9 @@ struct cached_inode {
 	u64 cursor;
 	void *raw;
 	size_t size;
+	struct ks_entry *directory;
+	size_t directory_count;
+	u8 directory_head[32];
 	bool valid, ready, early, loading;
 };
 struct ks_cache {
@@ -66,8 +69,18 @@ static struct cached_inode *find(struct ks_cache *c, stqr_object_id id)
 			       object_hash(id)) if (!memcmp(e->id.bytes, id.bytes, 32)) return e;
 	return NULL;
 }
+static void discard_directory(struct ks_cache *c, struct cached_inode *e)
+{
+	if (!e->directory)
+		return;
+	c->bytes -= (e->directory_count + 1) * sizeof(*e->directory);
+	kfree(e->directory);
+	e->directory = NULL;
+	e->directory_count = 0;
+}
 static void discard_data(struct ks_cache *c, struct cached_inode *e)
 {
+	discard_directory(c, e);
 	c->bytes -= e->size;
 	sq_free(e->raw);
 	e->raw = NULL;
@@ -117,8 +130,9 @@ static void update(void *arg, const stqr_update *u)
 out:
 	mutex_unlock(&c->lock);
 }
-/* Caller holds wire; remove the entry before waiting for the unsubscribe
- * barrier, because that wait itself may dispatch a final update. */
+/* Caller holds wire. Forget the unique ID locally before submitting the
+ * no-reply retirement. Late updates find no entry, so cache eviction needs no
+ * unsubscribe barrier and must not wait for a round trip under VFS locks. */
 static void remove_entry(struct ks_cache *c, struct cached_inode *e, bool known_absent)
 {
 	stqr_id sid = e->subscription;
@@ -140,14 +154,9 @@ static void remove_entry(struct ks_cache *c, struct cached_inode *e, bool known_
 	kfree(e);
 	if (invalidate)
 		ks_queue_invalidation(c->fs, &id);
-	if(c->shared) {
-        struct ks_subscribe_result r={0};int err;init_completion(&r.done);
-        err=stqr_unsubscribe_async(c->client,sid,subscribe_completed,&r);
-        mutex_unlock(cache_wire(c));
-        if(!err)wait_for_completion(&r.done);
-        sq_free(r.data);mutex_lock(cache_wire(c));
-    }else stqr_unsubscribe(c->client, sid);
+	(void)stqr_unsubscribe_discard(c->client, sid);
 }
+
 void ks_cache_forget(struct ks_fs *f, stqr_object_id id)
 {
 	struct ks_cache *c = f->cache;
@@ -251,6 +260,64 @@ bool ks_cache_proof(struct ks_fs *f, stqr_object_id id, stqr_proof *proof)
 	}
 	mutex_unlock(&c->lock);
 	return found;
+}
+/* Decoded directories share the inode subscription's lifetime and existing
+ * metadata budget. A hit is only a candidate: the filesystem still validates
+ * the exact head at its owner before exposing these names. No extra object
+ * subscriptions or object-count-sized cache is introduced. */
+int ks_cache_directory_get(struct ks_fs *f, const struct ks_node *node,
+			   struct ks_entry **out, size_t *count)
+{
+	struct ks_cache *c = f->cache;
+	struct cached_inode *e;
+	int err = -ENODATA;
+	if (!c)
+		return err;
+	mutex_lock(&c->lock);
+	e = find(c, node->identity);
+	if (c->available && e && e->valid && e->ready && !e->loading && e->directory &&
+	    !memcmp(e->directory_head, node->head_digest, 32)) {
+		*out = kmemdup(e->directory,
+			       (e->directory_count + 1) * sizeof(*e->directory), GFP_NOFS);
+		if (*out) {
+			*count = e->directory_count;
+			list_move_tail(&e->lru, &c->lru);
+			err = 0;
+		} else
+			err = -ENOMEM;
+	}
+	mutex_unlock(&c->lock);
+	return err;
+}
+void ks_cache_directory_put(struct ks_fs *f, const struct ks_node *node,
+			    const struct ks_entry *entries, size_t count)
+{
+	struct ks_cache *c = f->cache;
+	struct cached_inode *e;
+	struct ks_entry *copy;
+	u8 digest[32];
+	size_t cost = (count + 1) * sizeof(*entries);
+	/* One directory cannot displace most inode coverage. If space is tight,
+	 * keep the ordinary guarded read instead of growing the configured cache. */
+	if (!c || cost > f->cache_budget / 4)
+		return;
+	copy = kmemdup(entries, cost, GFP_NOFS);
+	if (!copy)
+		return;
+	mutex_lock(&c->lock);
+	e = find(c, node->identity);
+	if (c->available && e && e->valid && e->ready && !e->loading && !e->directory &&
+	    c->bytes <= f->cache_budget && cost <= f->cache_budget - c->bytes &&
+	    !sq_hash(256, e->raw, e->size, digest) &&
+	    !memcmp(digest, node->head_digest, 32)) {
+		e->directory = copy;
+		e->directory_count = count;
+		memcpy(e->directory_head, node->head_digest, 32);
+		c->bytes += cost;
+		copy = NULL;
+	}
+	mutex_unlock(&c->lock);
+	kfree(copy);
 }
 int ks_cache_get(struct ks_fs *f, stqr_object_id id, void **p, size_t *n, stqr_info *info)
 {

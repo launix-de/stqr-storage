@@ -3,6 +3,9 @@
 #define SQ_CHUNK (1U << 20)
 #define SQ_WIRE (16U << 20)
 #define SQ_CHANNEL_LIMIT 32
+#define SQ_PREFIX_LIMIT 32
+#define SQ_FENCE_LIMIT (SQ_CHANNEL_LIMIT * (SQ_PREFIX_LIMIT + 1))
+struct sq_prefix { struct sq_prefix *next; stqr_commit_mark mark; };
 #define SQ_BINDING_BUCKETS 256
 struct sq_channel {
     struct sq_channel *next;
@@ -11,7 +14,8 @@ struct sq_channel {
     unsigned port;
     stqr_id runtime;
     stqr_u64 capabilities, used, submitted;
-    stqr_commit_mark pending, synced;
+    stqr_commit_mark pending, synced, detached;
+    struct sq_prefix *detached_extra; unsigned detached_count;
     int lost;
     unsigned reply_waiters;
 };
@@ -46,7 +50,8 @@ struct stqr_client {
     stqr_u64 capabilities;
     stqr_update_handler update;
     void *update_arg;
-    stqr_commit_mark pending_mark, synced_mark;
+    stqr_commit_mark pending_mark, synced_mark, detached_mark;
+    struct sq_prefix *detached_extra; unsigned detached_count;
     int durability_lost;
     char redirect[512];
     stqr_object_id query;
@@ -86,6 +91,41 @@ static int zero(const void *v, size_t n) {
     while (n--) if (*p++) return 0;
     return 1;
 }
+/* Known ACK prefixes are boot-qualified facts, not unknown writes. Retain a
+ * bounded set per owner across repeated reconnects; only an explicit sync may
+ * request proof. Exceeding RAM bounds fails closed instead of losing a prefix.
+ * The scalar first entry keeps the common one-incarnation path allocation-free.
+ */
+static int prefix_contains(stqr_commit_mark first,struct sq_prefix *extra,const stqr_u8 boot[16]) {
+    if(first.sequence&&!memcmp(first.boot.bytes,boot,16))return 1;
+    for(;extra;extra=extra->next)if(!memcmp(extra->mark.boot.bytes,boot,16))return 1;
+    return 0;
+}
+static int prefix_retain(stqr_commit_mark *first,struct sq_prefix **extra,unsigned *count,const stqr_commit_mark *mark) {
+    struct sq_prefix *p;
+    if(!mark->sequence)return 0;
+    if(!first->sequence){*first=*mark;return 0;}
+    if(!memcmp(first->boot.bytes,mark->boot.bytes,16)){if(first->sequence<mark->sequence)*first=*mark;return 0;}
+    for(p=*extra;p;p=p->next)if(!memcmp(p->mark.boot.bytes,mark->boot.bytes,16)){
+        if(p->mark.sequence<mark->sequence)p->mark=*mark;
+        return 0;
+    }
+    if(*count>=SQ_PREFIX_LIMIT-1)return -ENOSPC;
+    p=sq_alloc(sizeof(*p));if(!p)return -ENOMEM;
+    p->mark=*mark;p->next=*extra;*extra=p;(*count)++;return 0;
+}
+static void prefix_retire(stqr_commit_mark *first,struct sq_prefix **extra,unsigned *count,const stqr_commit_mark *mark) {
+    if(first->sequence&&!memcmp(first->boot.bytes,mark->boot.bytes,16)&&first->sequence<=mark->sequence){
+        if(*extra){struct sq_prefix *p=*extra;*first=p->mark;*extra=p->next;(*count)--;sq_free(p);}
+        else memset(first,0,sizeof(*first));
+    }
+    struct sq_prefix **at=extra;
+    while(*at){struct sq_prefix *p=*at;
+        if(!memcmp(p->mark.boot.bytes,mark->boot.bytes,16)&&p->mark.sequence<=mark->sequence){*at=p->next;(*count)--;sq_free(p);}
+        else at=&p->next;
+    }
+}
+static void prefix_drop(struct sq_prefix *p) {while(p){struct sq_prefix *next=p->next;sq_free(p);p=next;}}
 static void drop(struct buf *b) { sq_free(b->p); memset(b, 0, sizeof(*b)); }
 static void put(struct buf *b, const void *p, size_t n) {
     size_t cap;
@@ -266,13 +306,13 @@ static void save_channel(stqr_client *c) {
     s->socket=c->socket; memcpy(s->host,c->host,sizeof(s->host));
     memcpy(s->authority,c->authority,sizeof(s->authority)); s->port=c->port;
     s->runtime=c->runtime; s->capabilities=c->capabilities;
-    s->pending=c->pending_mark; s->synced=c->synced_mark; s->lost=c->durability_lost;
+    s->pending=c->pending_mark; s->synced=c->synced_mark; s->detached=c->detached_mark; s->detached_extra=c->detached_extra; s->detached_count=c->detached_count; s->lost=c->durability_lost;
 }
 static void load_channel(stqr_client *c,struct sq_channel *s) {
     c->active=s; c->socket=s->socket; memcpy(c->host,s->host,sizeof(c->host));
     memcpy(c->authority,s->authority,sizeof(c->authority)); c->port=s->port;
     c->runtime=s->runtime; c->capabilities=s->capabilities;
-    c->pending_mark=s->pending; c->synced_mark=s->synced; c->durability_lost=s->lost;
+    c->pending_mark=s->pending; c->synced_mark=s->synced; c->detached_mark=s->detached; c->detached_extra=s->detached_extra; c->detached_count=s->detached_count; c->durability_lost=s->lost;
     s->used=++c->channel_clock;
 }
 static int ensure_channel(stqr_client *c) {
@@ -323,7 +363,7 @@ static int select_endpoint(stqr_client *c,const char *endpoint) {
         if (c->channel_count>=SQ_CHANNEL_LIMIT) {
             struct sq_channel *candidate;
             for (candidate=c->channels;candidate;candidate=candidate->next)
-                if (candidate!=original && candidate!=c->lease_owner && !candidate->reply_waiters && !candidate->pending.sequence && !candidate->lost && !async_channel_pending(c,candidate) && (!s || candidate->used<s->used)) s=candidate;
+                if (candidate!=original && candidate!=c->lease_owner && !candidate->reply_waiters && !candidate->pending.sequence && !candidate->detached.sequence && !candidate->lost && !async_channel_pending(c,candidate) && (!s || candidate->used<s->used)) s=candidate;
             if (!s) { err=-ENOSPC; goto out; }
             /* A channel limit is backpressure, never permission to request
              * persistence. Retain dirty owners until an explicit caller fence. */
@@ -348,7 +388,7 @@ static void disconnect_channels(stqr_client *c) {
     if (!c->channels) { broken(c); return; }
     save_channel(c);
     for (s=c->channels;s;s=s->next) {
-        notify|=s->socket!=NULL; async_fail(c,s,-ECONNRESET); sq_disconnect(s->socket); s->socket=NULL;
+        notify|=s->socket!=NULL; async_fail(c,s,-ECONNRESET); if(s==c->active)save_channel(c); sq_disconnect(s->socket); s->socket=NULL;
     }
     c->socket=NULL; forget_bindings(c,NULL);
     if (notify && c->update) c->update(c->update_arg,NULL);
@@ -377,7 +417,10 @@ static int handshake(stqr_client *c) {
         "GET /api/ws HTTP/1.1\r\nHost: %s\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: %s\r\nSec-WebSocket-Protocol: stqr.v2\r\nAuthorization: Basic %s\r\nX-STQR-Bucket: %s\r\nX-STQR-Format: %s\r\nX-STQR-Reader: %s\r\n%s\r\n",
         c->authority, key, c->authorization, bucket, c->format, reader, lease);
     if (n >= capacity) { err = -E2BIG; goto out; }
-    if ((err = sq_send(c->socket, request, n))) goto out;
+    if ((err = sq_send(c->socket, request, n))) {
+        if(err==SQ_SEND_NOT_SUBMITTED)err=-EINTR;
+        goto out;
+    }
     for (n = 0; n < 16384; n++) {
         if ((err = sq_recv(c->socket, headers+n, 1))) goto out;
         if (n >= 3 && !memcmp(headers+n-3, "\r\n\r\n", 4)) { n++; break; }
@@ -411,10 +454,11 @@ static int handshake(stqr_client *c) {
 out:
     sq_secret_free(request, capacity); sq_free(headers); return err;
 }
-static int frame_send(stqr_client *c, unsigned opcode, const void *data, size_t n) {
+static int frame_send_tracked(stqr_client *c, unsigned opcode, const void *data, size_t n, int *submitted) {
     stqr_u8 header[14], mask[4], *masked;
     const stqr_u8 *p = data;
     size_t h = 2, i; int err;
+    *submitted=0;
     if (n > SQ_WIRE) return -E2BIG;
     if (!c->socket) return -ENOTCONN;
     if ((err = sq_random(mask, 4))) return err;
@@ -428,14 +472,25 @@ static int frame_send(stqr_client *c, unsigned opcode, const void *data, size_t 
     masked = sq_alloc(h+n); if (!masked) return -ENOMEM;
     memcpy(masked, header, h);
     for (i = 0; i < n; i++) masked[h+i] = p[i] ^ mask[i%4];
+    *submitted=1;
     err = sq_send(c->socket, masked, h+n);
+    if(err==SQ_SEND_NOT_SUBMITTED) {*submitted=0;err=-EINTR;}
     sq_free(masked); return err;
 }
-static int message_send(stqr_client *c, unsigned kind, unsigned op, stqr_id id, struct buf *body) {
+static int frame_send(stqr_client *c, unsigned opcode, const void *data, size_t n) {
+    int submitted;
+    return frame_send_tracked(c,opcode,data,n,&submitted);
+}
+static int message_send_tracked(stqr_client *c, unsigned kind, unsigned op, stqr_id id, struct buf *body, int *submitted) {
     struct buf m = {0}; int err;
+    *submitted=0;
     if (body->err) return body->err;
     number(&m, 1, 1); number(&m, kind, 1); number(&m, op, 2); put(&m, id.bytes, 16); put(&m, body->p, body->n);
-    err = m.err ? m.err : frame_send(c, 2, m.p, m.n); drop(&m); return err;
+    err = m.err ? m.err : frame_send_tracked(c, 2, m.p, m.n,submitted); drop(&m); return err;
+}
+static int message_send(stqr_client *c, unsigned kind, unsigned op, stqr_id id, struct buf *body) {
+    int submitted;
+    return message_send_tracked(c,kind,op,id,body,&submitted);
 }
 static int frame_recv(stqr_client *c, struct buf *m, int polling) {
     int fragmented = 0, err; unsigned controls = 0;
@@ -533,10 +588,11 @@ static void note_active(stqr_client *, const stqr_commit_mark *);
 static int observe_mark(stqr_client *c, struct buf *b) {
     stqr_commit_mark m; int err = decode_mark(b, &m);
     if (err) return err;
-    if (c->pending_mark.sequence && memcmp(c->pending_mark.boot.bytes, m.boot.bytes, 16)) {
-        c->durability_lost = 1; return 0;
-    }
     if (!memcmp(c->synced_mark.boot.bytes, m.boot.bytes, 16) && m.sequence <= c->synced_mark.sequence) return 0;
+    if (c->pending_mark.sequence && memcmp(c->pending_mark.boot.bytes, m.boot.bytes, 16)) {
+        if(prefix_retain(&c->detached_mark,&c->detached_extra,&c->detached_count,&c->pending_mark))c->durability_lost=1;
+        memset(&c->pending_mark,0,sizeof(c->pending_mark));
+    }
     if (!c->pending_mark.sequence || m.sequence > c->pending_mark.sequence) c->pending_mark = m;
     return 0;
 }
@@ -544,7 +600,6 @@ static int observe_mark(stqr_client *c, struct buf *b) {
  * A generic accepted mark (48) alone never proves that checkpoint completed. */
 static int confirm_mark(stqr_client *c, struct buf *b) {
     stqr_commit_mark m;int err=decode_mark(b,&m);if(err)return err;
-    if(c->pending_mark.sequence&&memcmp(c->pending_mark.boot.bytes,m.boot.bytes,16))c->durability_lost=1;
     note_active(c,&m);return 0;
 }
 static int dispatch_update(stqr_client *c, unsigned opcode, struct buf *m) {
@@ -734,7 +789,7 @@ static void broken(stqr_client *c) {
     int notify=c->socket!=NULL;
     async_fail(c,c->active,-ECONNRESET);
     sq_disconnect(c->socket); c->socket = NULL;
-    forget_bindings(c,c->active);
+    forget_bindings(c,c->active);save_channel(c);
     if (notify && c->update) c->update(c->update_arg, NULL);
 }
 static int send_payload(stqr_client *c, stqr_id id, const void *data, size_t n, const stqr_u8 hash[32]) {
@@ -766,7 +821,7 @@ static int request_payload(stqr_client *c, unsigned op, struct buf *body, stqr_i
     if (body->err) return body->err;
     if (zero(id.bytes,16)) { if (mutation) return -EINVAL; if ((err=stqr_request_id(&id))) return err; }
     for (unsigned redirects=0;redirects<16;) {
-        struct buf wrapped={0}; unsigned wire_op=op; struct buf *wire_body=body;
+        struct buf wrapped={0}; unsigned wire_op=op; struct buf *wire_body=body; int submitted=0;
         /* Redirect/reconnect can change the peer's accepted capabilities. */
         if(mutation && any_lost(c) && !accepted_visibility_after_loss(c,op,mutation))return -ESTALE;
         if (mutation>1 && !(c->capabilities&STQR_CAP_DURABILITY)) return -EOPNOTSUPP;
@@ -784,10 +839,14 @@ static int request_payload(stqr_client *c, unsigned op, struct buf *body, stqr_i
             wire_op=0x118; wire_body=&wrapped;
         }
         if(c->active)c->active->submitted=++c->async_sequence;
-        err=message_send(c,1,wire_op,id,wire_body);
+        err=message_send_tracked(c,1,wire_op,id,wire_body,&submitted);
         if (!err && payload) err=send_payload(c,id,payload,size,hash);
         if (!err) err=reply(c,wire_op,id,result,s);
         drop(&wrapped);
+        /* Definite local rejection leaves this socket and unrelated requests
+         * intact. Once the first frame was submitted, every later error can
+         * have an unknown outcome (including streaming payload failures). */
+        if(err && !submitted)return err;
         /* 503 denotes temporary cluster backpressure, including quota-credit
          * transfer and maintenance. It is not a permanent filesystem failure.
          * Retry the identical operation/ID on this connection; never reissue an
@@ -816,8 +875,8 @@ static int request_payload(stqr_client *c, unsigned op, struct buf *body, stqr_i
             if (s) { drop(&s->data); memset(s,0,sizeof(*s)); }
             continue;
         }
-        if (err && !c->status) { broken(c); return mutation ? -EINPROGRESS : err; }
-        if (err==-EPROTO || err==-EBADMSG) broken(c);
+        if (err && !c->status) { if (mutation) c->durability_lost=1; broken(c); return mutation ? -EINPROGRESS : err; }
+        if (err==-EPROTO || err==-EBADMSG) { if (mutation) c->durability_lost=1; broken(c); }
         return err;
     }
     return -ELOOP;
@@ -932,7 +991,8 @@ int stqr_bucket_id(const stqr_client *c,stqr_id *out) {
 void stqr_close(stqr_client *c) {
     if (!c) return;
     disconnect_channels(c);
-    while (c->channels) { struct sq_channel *next=c->channels->next; sq_free(c->channels); c->channels=next; }
+    if(!c->channels)prefix_drop(c->detached_extra);
+    while (c->channels) { struct sq_channel *next=c->channels->next; prefix_drop(c->channels->detached_extra); sq_free(c->channels); c->channels=next; }
     route_free(c->routes);
     sq_secret_free(c->authorization, c->authorization_len); sq_secret_free(c, sizeof(*c));
 }
@@ -1219,29 +1279,53 @@ int stqr_unsubscribe(stqr_client *c, stqr_id sid) {
     drop(&b); drop(&r); return err;
 }
 
+
+int stqr_unsubscribe_discard(stqr_client *c, stqr_id sid) {
+    struct buf body={0}; stqr_id rid={{0}}; int err;
+    if (!c || zero(sid.bytes,16)) return -EINVAL;
+    struct sq_binding *binding=*binding_slot(c,sid);
+    if (binding) { save_channel(c); load_channel(c,binding->channel); }
+    if (!(c->capabilities&STQR_CAP_SUBSCRIPTIONS)) return -EOPNOTSUPP;
+    /* Older nodes account FF controls by message ID. Keep that ID unique
+     * without retaining a response waiter or persistence dependency here. */
+    err=stqr_request_id(&rid);
+    if (err) { broken(c); return err; }
+    put(&body,sid.bytes,16);
+    err=message_send(c,0,0x111,rid,&body); drop(&body);
+    if (err) { broken(c); return err; }
+    struct sq_binding **at=binding_slot(c,sid);
+    if (*at) { binding=*at; *at=binding->next; sq_free(binding); }
+    save_channel(c);
+    return 0;
+}
+
+static int merge_pending(stqr_commit_mark *out,const stqr_commit_mark *mark) {
+    if(!mark->sequence)return 0;
+    if(out->sequence&&memcmp(out->boot.bytes,mark->boot.bytes,16)){memset(out,0,sizeof(*out));return -EOPNOTSUPP;}
+    if(out->sequence<mark->sequence)*out=*mark;
+    return 0;
+}
 static int pending_active(stqr_client *c, stqr_commit_mark *out) {
+    int err;
     if (!c || !out) return -EINVAL;
     if (c->durability_lost) return -ESTALE;
-    *out = c->pending_mark; return 0;
+    memset(out,0,sizeof(*out));err=merge_pending(out,&c->pending_mark);
+    if(!err)err=merge_pending(out,&c->detached_mark);
+    for(struct sq_prefix *p=c->detached_extra;p&&!err;p=p->next)err=merge_pending(out,&p->mark);
+    return err;
 }
 int stqr_pending_mark(stqr_client *c,stqr_commit_mark *out) {
-    struct sq_channel *s;
+    struct sq_channel *s;int err=0;
     if (!c || !out) return -EINVAL;
     if (!c->channels) return pending_active(c,out);
-    save_channel(c);
-    memset(out,0,sizeof(*out));
-    for (s=c->channels;s;s=s->next) {
-        if (s->lost) return -ESTALE;
-        if (!s->pending.sequence) continue;
-        /* A scalar mark cannot represent independent server incarnations.
-         * Observing marks never performs I/O; capture a multi-owner fence. */
-        if (out->sequence && memcmp(out->boot.bytes,s->pending.boot.bytes,16)) {
-            memset(out,0,sizeof(*out));
-            return -EOPNOTSUPP;
-        }
-        if (s->pending.sequence>out->sequence) *out=s->pending;
+    save_channel(c);memset(out,0,sizeof(*out));
+    for (s=c->channels;s&&!err;s=s->next) {
+        if(s->lost)return -ESTALE;
+        err=merge_pending(out,&s->pending);
+        if(!err)err=merge_pending(out,&s->detached);
+        for(struct sq_prefix *p=s->detached_extra;p&&!err;p=p->next)err=merge_pending(out,&p->mark);
     }
-    return 0;
+    return err;
 }
 
 static int sync_through_active(stqr_client *c, const stqr_commit_mark *mark, stqr_commit_mark *durable) {
@@ -1252,11 +1336,7 @@ static int sync_through_active(stqr_client *c, const stqr_commit_mark *mark, stq
     err = request(c,0x119,&b,rid,0,&r,NULL);
     if (!err) err = decode_mark(&r,durable);
     if (!err && (memcmp(durable->boot.bytes,mark->boot.bytes,16) || durable->sequence < mark->sequence)) err = -EPROTO;
-    if (!err) {
-        c->synced_mark = *durable;
-        if (!memcmp(c->pending_mark.boot.bytes,durable->boot.bytes,16) && c->pending_mark.sequence <= durable->sequence)
-            memset(&c->pending_mark,0,sizeof(c->pending_mark));
-    }
+    if (!err) note_active(c,durable);
     drop(&b); drop(&r); return err;
 }
 int stqr_sync_through(stqr_client *c,const stqr_commit_mark *mark,stqr_commit_mark *durable) {
@@ -1266,13 +1346,15 @@ int stqr_sync_through(stqr_client *c,const stqr_commit_mark *mark,stqr_commit_ma
     if (!c->channels) return sync_through_active(c,mark,durable);
     save_channel(c); original=c->active;
     for (s=c->channels;s;s=s->next)
-        if (!memcmp(s->pending.boot.bytes,mark->boot.bytes,16) || !memcmp(s->synced.boot.bytes,mark->boot.bytes,16)) { load_channel(c,s); break; }
+        if (!memcmp(s->pending.boot.bytes,mark->boot.bytes,16) || !memcmp(s->synced.boot.bytes,mark->boot.bytes,16) || prefix_contains(s->detached,s->detached_extra,mark->boot.bytes)) { load_channel(c,s); break; }
     err=sync_through_active(c,mark,durable); save_channel(c); load_channel(c,original);
     return err;
 }
 static int sync_active(stqr_client *c) {
-    stqr_commit_mark mark, durable; int err = pending_active(c,&mark);
-    if (err || !mark.sequence) return err;
+    stqr_commit_mark mark,durable;int err;
+    if(c->durability_lost)return -ESTALE;
+    while(c->detached_mark.sequence){mark=c->detached_mark;err=sync_through_active(c,&mark,&durable);if(err)return err;}
+    mark=c->pending_mark;if(!mark.sequence)return 0;
     return sync_through_active(c,&mark,&durable);
 }
 
@@ -1296,25 +1378,29 @@ int stqr_sync(stqr_client *c) {
     return wait.error;
 }
 
-int stqr_bucket_space(stqr_client *c, stqr_space *space) {
-    struct buf b = {0}, r = {0}; stqr_id rid; stqr_space out = {0}; int err;
-    if (!c || !space) return -EINVAL;
-    err = stqr_request_id(&rid); if (err) return err;
-    put(&b, c->bucket.bytes, 16);
-    err = request(c, 0x11b, &b, rid, 0, &r, NULL);
-    if (!err) {
-        out.used = readnum(&r, 8); out.total = readnum(&r, 8);
-        out.free = readnum(&r, 8); out.available = readnum(&r, 8);
-        out.quota = readnum(&r, 8); out.quota_limited = boolean(&r);
-        err = done(&r);
-        if (!err && (out.free > out.total || out.used != out.total-out.free || out.available > out.free)) err = -EPROTO;
-    }
-    drop(&b); drop(&r);
-    if (!err) *space = out;
+static int decode_space(struct buf *r, stqr_space *space) {
+    stqr_space out={0};int err;
+    out.used=readnum(r,8);out.total=readnum(r,8);
+    out.free=readnum(r,8);out.available=readnum(r,8);
+    out.quota=readnum(r,8);out.quota_limited=boolean(r);
+    err=done(r);
+    if(!err && (out.free>out.total || out.used!=out.total-out.free || out.available>out.free))err=-EPROTO;
+    if(!err)*space=out;
     return err;
 }
+int stqr_bucket_space(stqr_client *c, stqr_space *space) {
+    struct buf b={0},r={0};stqr_id rid;int err;
+    if(!c || !space)return -EINVAL;
+    err=stqr_request_id(&rid);if(err)return err;
+    put(&b,c->bucket.bytes,16);
+    err=request(c,0x11b,&b,rid,0,&r,NULL);
+    if(!err)err=decode_space(&r,space);
+    drop(&b);drop(&r);return err;
+}
+
 static void note_active(stqr_client *c, const stqr_commit_mark *mark) {
     if (!c || !mark || c->durability_lost) return;
+    prefix_retire(&c->detached_mark,&c->detached_extra,&c->detached_count,mark);
     if (!memcmp(c->pending_mark.boot.bytes,mark->boot.bytes,16) && c->pending_mark.sequence <= mark->sequence)
         memset(&c->pending_mark,0,sizeof(c->pending_mark));
     if (!memcmp(c->synced_mark.boot.bytes,mark->boot.bytes,16) && c->synced_mark.sequence > mark->sequence) return;
@@ -1327,7 +1413,7 @@ void stqr_note_durable(stqr_client *c,const stqr_commit_mark *mark) {
     if (!c->channels) { note_active(c,mark); return; }
     save_channel(c); original=c->active;
     for (s=c->channels;s;s=s->next)
-        if (!memcmp(s->pending.boot.bytes,mark->boot.bytes,16) || !memcmp(s->synced.boot.bytes,mark->boot.bytes,16)) {
+        if (!memcmp(s->pending.boot.bytes,mark->boot.bytes,16) || !memcmp(s->synced.boot.bytes,mark->boot.bytes,16) || prefix_contains(s->detached,s->detached_extra,mark->boot.bytes)) {
             load_channel(c,s); note_active(c,mark); save_channel(c);
         }
     load_channel(c,original);
@@ -1342,8 +1428,8 @@ struct sq_fence_entry {
     int active, confirmed;
 };
 struct stqr_fence {
- struct sq_fence_entry entries[SQ_CHANNEL_LIMIT];
- unsigned count, targets, active[SQ_CHANNEL_LIMIT];
+ struct sq_fence_entry entries[SQ_FENCE_LIMIT];
+ unsigned count, targets, active[SQ_FENCE_LIMIT];
 };
 static int fence_capture_owner(stqr_fence *f, const stqr_client *source,
                                const char *host, const char *authority, unsigned port,
@@ -1354,13 +1440,14 @@ static int fence_capture_owner(stqr_fence *f, const stqr_client *source,
     if (!target.sequence) return 0;
     for (i=0;i<f->count;i++)
         if (!strcmp(f->entries[i].client->authority,authority) &&
+            (!f->entries[i].active || !memcmp(f->entries[i].target.boot.bytes,target.boot.bytes,16)) &&
             !memcmp(f->entries[i].client->bucket.bytes,source->bucket.bytes,16) &&
             f->entries[i].client->authorization_len==source->authorization_len &&
-            !memcmp(f->entries[i].client->authorization,source->authorization,source->authorization_len)) {
+            (!source->authorization_len || !memcmp(f->entries[i].client->authorization,source->authorization,source->authorization_len))) {
             e=&f->entries[i]; break;
         }
     if (!e) {
-        if (f->count<SQ_CHANNEL_LIMIT) e=&f->entries[f->count++];
+        if (f->count<SQ_FENCE_LIMIT) e=&f->entries[f->count++];
         else {
             for (i=0;i<f->count;i++) if (!f->entries[i].active) { e=&f->entries[i]; break; }
             if (!e) return -ENOSPC;
@@ -1381,7 +1468,7 @@ static int fence_capture_owner(stqr_fence *f, const stqr_client *source,
             unsigned index=(unsigned)(e-f->entries); stqr_close(e->client);
             memmove(e,e+1,(f->count-index-1)*sizeof(*e)); f->count--; return -ENOMEM;
         }
-        memcpy(e->client->authorization,source->authorization,source->authorization_len);
+        if(source->authorization_len)memcpy(e->client->authorization,source->authorization,source->authorization_len);
         e->client->authorization_len=source->authorization_len;
     }
     if (e->active) {
@@ -1400,16 +1487,23 @@ int stqr_fence_reset(stqr_fence **out) {
     for (i=0;i<f->count;i++) { f->entries[i].active=0; f->entries[i].confirmed=0; }
     return 0;
 }
+static int fence_capture_prefixes(stqr_fence *f,const stqr_client *c,const char *host,const char *authority,unsigned port,stqr_commit_mark pending,stqr_commit_mark detached,struct sq_prefix *extra,int lost) {
+    int err=fence_capture_owner(f,c,host,authority,port,pending,lost);
+    if(!err)err=fence_capture_owner(f,c,host,authority,port,detached,lost);
+    for(;extra&&!err;extra=extra->next)err=fence_capture_owner(f,c,host,authority,port,extra->mark,lost);
+    return err;
+}
 int stqr_fence_add(stqr_client *c, stqr_fence *f) {
     struct sq_channel *s; int err=0;
     if (!c || !f) return -EINVAL;
     if (!c->channels)
-        return fence_capture_owner(f,c,c->host,c->authority,c->port,c->pending_mark,c->durability_lost);
+        return fence_capture_prefixes(f,c,c->host,c->authority,c->port,c->pending_mark,c->detached_mark,c->detached_extra,c->durability_lost);
     save_channel(c);
-    for (s=c->channels;s && !err;s=s->next)
-        err=fence_capture_owner(f,c,s->host,s->authority,s->port,s->pending,s->lost);
+    for(s=c->channels;s&&!err;s=s->next)
+        err=fence_capture_prefixes(f,c,s->host,s->authority,s->port,s->pending,s->detached,s->detached_extra,s->lost);
     return err;
 }
+
 int stqr_fence_capture(stqr_client *c, stqr_fence **out) {
     int err;
     if (!c || !out) return -EINVAL;

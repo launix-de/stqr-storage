@@ -470,8 +470,16 @@ or gateway crashes leave password-free, private JSON recovery markers in
 `CACHE/uppers`. To retry a recorded cleanup:
 
 ```sh
-networkboot/bin/stqr-bootctl boot-session-delete USER_ID UPPER_ID LOWER_ID
+networkboot/bin/stqr-bootctl --session-record /path/to/private-session.json boot-session-delete USER_ID UPPER_ID LOWER_ID
 ```
+
+Overlay cleanup requires the session record. Before deleting the upper, the
+helper adds its exact lower dependency tokens to that private record. It releases
+them only after the server proves that the upper is durably deleted and no live
+or detached COW descendant can still use them. Confirmed batches advance a durable
+cursor, so interrupted cleanup resumes with the same tokens. Unsupported servers,
+incomplete lineage evidence and missing historical ledgers retain the record for
+repair; user absence alone never permits dropping dependencies.
 
 Inspect that the recorded client is stopped before manual recovery. MAC addresses
 are selectors, not authentication; claim tokens and boot credentials travel over

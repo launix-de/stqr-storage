@@ -7,11 +7,27 @@ import (
 )
 
 // prepareShortShutdown retains membership, range ownership and any explicit
-// drain intent. The durable paused marker is written before GOAWAY. Operation
-// deadlines never certify a lost peer or authorize another primary.
+// drain intent. Transport notification is best effort, never a client ACK or
+// permission to discard accepted state. Persistence policy is separate.
+// Operation deadlines never certify a lost peer or authorize another primary.
 func (s *Server) prepareShortShutdown(ctx context.Context) error {
 	s.shortStopping.Store(true)
-	// Drain in-flight local mutations; queued/new mutations see shortStopping.
+	// Stop admission and network waits BEFORE draining node admission. A slow
+	// download can hold a shared admission/read view while its socket blocks;
+	// waiting for opMu first would let that client prevent daemon shutdown.
+	_ = s.sendGoAway(ctx, 1)
+	s.cancel()
+	s.wsMu.Lock()
+	sockets := make([]*wsSession, 0, len(s.sockets))
+	for ws := range s.sockets {
+		sockets = append(sockets, ws)
+	}
+	s.wsMu.Unlock()
+	for _, ws := range sockets {
+		ws.close()
+	}
+	// Already-published requests retain their outcome; cancelled/unpublished
+	// requests remain uncertain. No client reconnect or fence is awaited here.
 	s.opMu.Lock()
 	s.mu.RLock()
 	cfg := copyConfig(s.cfg)
@@ -27,8 +43,7 @@ func (s *Server) prepareShortShutdown(ctx context.Context) error {
 	// A process restart is not a client durability request. Accepted tails keep
 	// their unconfirmed status; Close waits for existing fences but starts none.
 	s.opMu.Unlock()
-	s.publishStats()
-	return s.sendGoAway(ctx, 1)
+	return nil
 }
 
 func (s *Server) sendGoAway(ctx context.Context, reason uint8) error {
@@ -69,32 +84,18 @@ func (s *Server) sendGoAway(ctx context.Context, reason uint8) error {
 		sockets = append(sockets, ws)
 	}
 	s.wsMu.Unlock()
-	var pending []struct {
-		frame terminalFrame
-		ws    *wsSession
-	}
 	for _, ws := range sockets {
-		frame := terminalFrame{wire: wire, done: make(chan struct{})}
 		if ws.terminal == nil {
 			continue
 		}
+		frame := terminalFrame{wire: wire, done: make(chan struct{})}
+		// The writer owns frame completion. Shutdown never waits for it: a
+		// stalled or non-reading client learns departure through socket close.
 		select {
 		case ws.terminal <- frame:
-			pending = append(pending, struct {
-				frame terminalFrame
-				ws    *wsSession
-			}{frame, ws})
 		case <-ws.done:
-		case <-ctx.Done():
-			return ctx.Err()
-		}
-	}
-	for _, frame := range pending {
-		select {
-		case <-frame.frame.done:
-		case <-frame.ws.done:
-		case <-ctx.Done():
-			return ctx.Err()
+		default:
+			ws.close()
 		}
 	}
 	return nil

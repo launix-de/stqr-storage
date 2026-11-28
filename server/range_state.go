@@ -223,7 +223,7 @@ func (r *rangeManager) replay(record controlRecord) error {
 		return nil
 	}
 	if record.Kind >= rangePGPrepared && record.Kind <= rangePGSourceCancelled {
-		return r.replayPG(record.Kind, event.PG)
+		return r.replayPG(record.Kind, event.PG, record.Proof)
 	}
 	if record.Kind == rangeGenesis {
 		if r.initialized || record.Proof.RecordSequence != 1 {

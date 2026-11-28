@@ -44,9 +44,9 @@ type connectionFence struct {
 type connectionWorkKey struct{}
 
 func (ws *wsSession) admitConnectionMessage(m client.Message) bool {
-	// ACKs only release subscription RAM credits; they have no storage work or
-	// terminal reply. Native clients legitimately use the zero ID repeatedly.
-	if m.Kind == client.FireAndForget && m.Opcode == client.SubscriptionAck {
+	// Subscription controls release only connection-local RAM. They have no
+	// storage work or terminal reply; native clients may repeat the zero ID.
+	if isObjectSubscriptionControl(m.Opcode) {
 		return true
 	}
 	ws.fenceMu.Lock()
@@ -122,7 +122,7 @@ func (ws *wsSession) connectionHeaderReady(id client.ID) {
 	}
 }
 func (ws *wsSession) completeConnectionMessage(m client.Message, status int, body []byte) {
-	if m.Kind == client.FireAndForget && m.Opcode == client.SubscriptionAck {
+	if isObjectSubscriptionControl(m.Opcode) {
 		return
 	}
 	ws.fenceMu.Lock()

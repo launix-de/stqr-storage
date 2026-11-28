@@ -108,14 +108,19 @@ func (s *Server) referenceAccountsStable() bool {
 	return true
 }
 
-// Lazy bounded cleanup only when a root is full. Account IDs in byID are
+// Explicit, guarded cleanup of one reference image. Account IDs in byID are
 // present even when disabled. Claims and dependency anchors are never removed.
 // The returned context derives from ctx, preserving the collector's original
 // connectionWork/fence linkage. CAS must validate this guard under admission.
 func (s *Server) pruneAbsentPlainReferencePins(ctx context.Context, b *Bucket, entries []objectReferenceEntry) ([]objectReferenceEntry, context.Context, error) {
-	if len(entries) < maxObjectReferences {
-		return entries, ctx, nil
-	}
+	return s.pruneAbsentPlainReferencePinsExact(ctx, b, entries)
+}
+
+// Explicit administrative repair may inspect one bounded reference root before
+// it reaches capacity. It uses the identical admission guard as capacity cleanup;
+// absence never substitutes for a known cluster/account authority or a single
+// copy. There is no volume inventory; live PINs, claims and dependencies stay.
+func (s *Server) pruneAbsentPlainReferencePinsExact(ctx context.Context, b *Bucket, entries []objectReferenceEntry) ([]objectReferenceEntry, context.Context, error) {
 	if !s.referenceAccountsStable() {
 		return nil, ctx, fail(503, "reference cleanup awaits stable account authority")
 	}

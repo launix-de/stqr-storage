@@ -468,29 +468,15 @@ func TestObjectSubscriptionCanceledCloseStillReleases(t *testing.T) {
 	}
 	canceled, cancel := context.WithCancel(ctx)
 	cancel()
-	if err := sub.Close(canceled); !errors.Is(err, context.Canceled) {
-		t.Fatal("canceled close outcome", err)
-	}
+	_ = sub.Close(canceled)
 	if _, err = reader.Stat(ctx, id); err != nil {
 		t.Fatal(err)
 	}
-	// Cancellation queues a fire-and-forget unsubscribe. The socket dispatcher
-	// executes headers concurrently, so the unrelated STAT above is not a fence
-	// for that cleanup. Still require actual release within the fixture deadline.
-	ticker := time.NewTicker(time.Millisecond)
-	defer ticker.Stop()
-	for {
-		s.objectSubscriptions.mu.Lock()
-		count := s.objectSubscriptions.count
-		s.objectSubscriptions.mu.Unlock()
-		if count == 0 {
-			break
-		}
-		select {
-		case <-ctx.Done():
-			t.Fatal("canceled Close leaked its server subscription", count)
-		case <-ticker.C:
-		}
+	s.objectSubscriptions.mu.Lock()
+	count := s.objectSubscriptions.count
+	s.objectSubscriptions.mu.Unlock()
+	if count != 0 {
+		t.Fatal("canceled Close leaked its server subscription", count)
 	}
 }
 

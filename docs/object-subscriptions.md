@@ -92,6 +92,23 @@ local snapshot and awaits the server's unsubscribe barrier. If its context
 cannot complete that barrier, FF cleanup still releases the descriptor. Late
 frames are ignored after local removal.
 
+The native C client also exposes `stqr_unsubscribe_discard` for cache eviction.
+It sends the existing fire-and-forget UNSUBSCRIBE to the subscription owner and
+immediately removes its local binding. The discarded ID must never be reused;
+late pushes for it are ignored by the cache. No callback or outstanding request
+is retained, and no round trip or persistence fence is required. Framing failure
+invalidates the owner connection's coverage. The ordinary synchronous and async
+unsubscribe APIs keep their confirmed-barrier behavior.
+
+The node processes these RAM-only controls before admitting subsequent frames.
+Thus a cache at the unchanged 2,048-subscription socket limit can retire one
+entry and request its replacement without awaiting an ACK. Publication captures
+payload outside the subscription registry mutex, with bounded RAM reservations;
+it rechecks descriptor identity, cursor, placement and journal credits before
+sending. A competing publication requires resnapshot rather than delivering an
+older replacement after a newer cursor. Unsubscribe and migration cannot be
+followed by a late publication from an in-flight capture.
+
 Filesystem caches use an LRU with an explicit byte budget and a hard limit of
 1,024 entries. Eviction and close release subscriptions proactively; GC cleanup
 is the fallback for abandoned handles. There are no immortal goroutines or
