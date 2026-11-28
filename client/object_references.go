@@ -78,6 +78,15 @@ func (c *Client) CanReclaimDependencies(ctx context.Context) (bool, error) {
 	return err == nil, err
 }
 
+// PruneAbsentAccountPins is an explicit administrative repair of this bucket's
+// bounded reference root. It removes only plain PINs whose account no longer
+// exists in authoritative cluster state. Live/disabled accounts, claims and
+// durable dependencies remain protected. Uncertain or replicated authority is
+// rejected; older servers reject the unsupported action without changing data.
+func (c *Client) PruneAbsentAccountPins(ctx context.Context) error {
+	return c.objectReference(ctx, ObjectID{}, NewRequestID(), 9)
+}
+
 // ReadObjectDependencies names durable application roots, not abandoned open
 // handles. An offline collector must keep these targets until their owning
 // application graph explicitly retires them.

@@ -172,13 +172,24 @@ func (s *Server) executeObjectReferenceHeld(ctx context.Context, m client.Messag
 			return nil, fail(501, "accepted reference capability was not negotiated")
 		}
 	}
-	if d.Done() != nil || action > 8 || token == (client.ID{}) || target == op.object {
+	if d.Done() != nil || action > 9 || token == (client.ID{}) || target == op.object {
 		return nil, fail(400, "invalid object reference")
+	}
+	// Administrative repair is deliberately rejected before reading the root.
+	// It may remove only absent-account plain PINs, never abandoned claims or
+	// dependencies; it does not confer offline maintenance on the caller.
+	if action == 9 {
+		if target != (volume.ObjectID{}) {
+			return nil, fail(400, "reference repair requires an empty target")
+		}
+		if err := s.requireAdmin(p); err != nil {
+			return nil, err
+		}
 	}
 	if !held && accepted && (action == 0 || action == 1) {
 		return s.combineObjectReference(ctx, m, ws, p, op.bucket.ID(), token)
 	}
-	if action <= 8 && !held {
+	if !held {
 		release, err := s.referenceCoordination.acquire(ctx, op.bucket.ID())
 		if err != nil {
 			return nil, err
@@ -252,6 +263,9 @@ func (s *Server) executeObjectReferenceHeld(ctx context.Context, m client.Messag
 			return nil, err
 		}
 		return []byte{1}, nil
+	}
+	if action == 9 {
+		return s.pruneAbsentAccountPins(ctx, op.bucket, internal, accepted)
 	}
 	proof := sha256.Sum256(token[:])
 referenceRetry:

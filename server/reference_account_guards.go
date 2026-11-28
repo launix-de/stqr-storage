@@ -116,6 +116,14 @@ func (s *Server) pruneAbsentPlainReferencePins(ctx context.Context, b *Bucket, e
 	if len(entries) < maxObjectReferences {
 		return entries, ctx, nil
 	}
+	return s.pruneAbsentPlainReferencePinsExact(ctx, b, entries)
+}
+
+// Explicit administrative repair may inspect one bounded reference root before
+// it reaches capacity. It uses the identical admission guard as capacity cleanup;
+// absence never substitutes for a known cluster/account authority or a single
+// copy. There is no volume inventory; live PINs, claims and dependencies stay.
+func (s *Server) pruneAbsentPlainReferencePinsExact(ctx context.Context, b *Bucket, entries []objectReferenceEntry) ([]objectReferenceEntry, context.Context, error) {
 	if !s.referenceAccountsStable() {
 		return nil, ctx, fail(503, "reference cleanup awaits stable account authority")
 	}
