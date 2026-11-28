@@ -87,6 +87,10 @@ func (ws *wsSession) writeMappedObject(ctx context.Context, m client.Message, p 
 	if err != nil {
 		return false, 0, err
 	}
+	// Preserve CopyTo RPC semantics: EOF itself is empty, offsets past it fail.
+	if op.offset > info.Length {
+		return false, 0, volume.ErrRange
+	}
 	n := uint64(0)
 	if op.offset < info.Length {
 		n = min(length, info.Length-op.offset)
