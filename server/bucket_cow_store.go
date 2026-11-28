@@ -31,6 +31,7 @@ type cowServerObjects struct {
 	server      *Server
 	metadata    bool
 	readReplica bool
+	topology    *cowTopologySnapshot
 	// Prospective quota evaluation must use its fenced future catalog snapshot.
 	graphDescriptions map[volume.ID]BucketDescription
 }
@@ -382,11 +383,11 @@ func (s *Server) cowPrepareWrite(ctx context.Context, b *Bucket, id volume.Objec
 	if p.cowInternal || bucketLocalReferenceRoot(id) || len(b.storageDescription().ClonePeers) == 0 {
 		return [32]byte{}, false, nil
 	}
-	g, err := s.cowGraph()
+	g, err := s.cowTopology()
 	if err != nil {
 		return [32]byte{}, false, err
 	}
-	proof, err := s.cowGraphDigest(g, b.ID())
+	proof, err := g.proof(b.ID())
 	if err != nil {
 		return proof, false, err
 	}
@@ -400,15 +401,15 @@ func (s *Server) cowPrepareWrite(ctx context.Context, b *Bucket, id volume.Objec
 			ctx = context.WithValue(ctx, cowLeaseKey{}, lease.Token)
 		}
 	}
-	err = g.prepareWrite(ctx, cowServerObjects{server: s}, b.ID(), id)
+	err = g.graph.prepareWrite(ctx, cowServerObjects{server: s, topology: g}, b.ID(), id)
 	return proof, true, cowStorageError(err)
 }
 func (s *Server) cowValidateRestore(bucket volume.ID, restore cowRestore) error {
-	g, err := s.cowGraph()
+	g, err := s.cowTopology()
 	if err != nil {
 		return err
 	}
-	proof, err := s.cowGraphDigest(g, bucket)
+	proof, err := g.proof(bucket)
 	if err != nil {
 		return err
 	}
@@ -418,7 +419,7 @@ func (s *Server) cowValidateRestore(bucket volume.ID, restore cowRestore) error 
 	if restore.source == (volume.ID{}) && restore.info.Deleted {
 		return nil
 	}
-	for _, peer := range g.component(bucket) {
+	for _, peer := range g.graph.component(bucket) {
 		if peer == restore.source {
 			return nil
 		}
@@ -487,6 +488,15 @@ func (b *Bucket) cowMaterializationRequest(object volume.ObjectID, proof [32]byt
 }
 
 func (store cowServerObjects) cloneNeighbors(bucket volume.ID, preserve bool) ([]volume.ID, error) {
+	if store.topology != nil {
+		if _, err := store.topology.proof(bucket); err != nil {
+			return nil, fail(503, "clone namespace metadata is unavailable")
+		}
+		if preserve {
+			return store.topology.writePeers[bucket], nil
+		}
+		return store.topology.readPeers[bucket], nil
+	}
 	var d BucketDescription
 	if store.graphDescriptions != nil {
 		var ok bool

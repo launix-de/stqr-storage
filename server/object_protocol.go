@@ -192,7 +192,7 @@ func (s *Server) executeObjects(m client.Message, ws *wsSession, p principal) ([
 		ctx = bindObjectRequest(ctx, m)
 	}
 	runtime := client.ID{}
-	if op.bucket.Describe().Policy.StorageStrategy == "ram" {
+	if op.bucket.storageDescription().Policy.StorageStrategy == "ram" {
 		runtime = s.boot
 		if s.controller != nil {
 			patch, known := s.routingPatch(op.bucket.ID(), op.object)
