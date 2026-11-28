@@ -34,6 +34,13 @@ type acceptedCheckpoint struct {
 
 func (*acceptedCheckpoint) Error() string { return "waiting for local write fence" }
 
+// metadataAdmissionWait leaves node admission before waiting for a contended
+// Volume metadata lock. A buffered writer must not wait for an unrelated
+// physical checkpoint simply because TryOpenBuffered lost the lock race.
+type metadataAdmissionWait struct{ volume *volume.Volume }
+
+func (*metadataAdmissionWait) Error() string { return "waiting for volume metadata admission" }
+
 // A completed logical mutation waiting only for its durability ACK. Its payload
 // must never be consumed again, nor its APPEND/CAS applied a second time.
 type publishedCheckpoint struct {
