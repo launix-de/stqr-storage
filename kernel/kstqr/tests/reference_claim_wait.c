@@ -177,7 +177,7 @@ static void test(unsigned n,unsigned state,bool dependency,bool reread_error) {
 static void test_cancelled_pin(bool origin,unsigned stage) {
  workers=1;cancel_after_pin=stage==3?0:stage;cancel_on_unpin=stage==3;fatal_current=false;pins=claim_owner=unpins=0;intent_exists=true;decision=1;
  memset(pin_calls,0,sizeof(pin_calls));memset(unpin_calls,0,sizeof(unpin_calls));
- struct ks_fs fs={.worker=1};stqr_id token={{42}};
+ struct ks_fs fs={.worker=1,.reference_queue=&reference_queue};stqr_id token={{42}};
  if(origin)REQUIRE(!ks_object_reference(&fs,intent,token,0));
  int err=help_tx_pinned(&fs,intent,origin?&token:NULL);
  REQUIRE(err==-EINTR);
