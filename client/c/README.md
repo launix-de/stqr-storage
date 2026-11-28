@@ -103,7 +103,8 @@ object I/O. Apply results with `stqr_fence_apply` under the original client lock
 close the fence with `stqr_fence_close`. A fence can be reused after completion.
 
 For several clients, use `stqr_fence_reset` followed by serialized
-`stqr_fence_add` calls. Same-owner, same-bucket marks are merged to the maximum.
+`stqr_fence_add` calls. Same-owner, same-bucket, same-boot marks are merged to
+the maximum; distinct boots remain separate proof targets.
 After capture, distinct `stqr_fence_wait_one` targets may run in parallel; join
 all of them before applying, resetting or closing the fence. Confirmations are
 bucket-scoped and never erase later, unconfirmed writes. The existing `stqr_sync`
@@ -168,12 +169,24 @@ all observed pending writes on the connection. `stqr_pending_mark()` and
 `stqr_sync_through()` support a shared barrier across a mount's connections;
 `stqr_note_durable()` propagates only a real successful response for that same
 bucket. Receipt observation also covers reads and subscription notices. Marks
-survive reconnect; an unconfirmed lost incarnation yields `-ESTALE`. Close alone
-is not a sync. See [the complete contract](../../docs/durability.md).
+survive reconnect. Known acknowledged prefixes remain separate from unknown
+in-flight mutation outcomes, which retain `-ESTALE`. Close alone is not a sync. See [the complete contract](../../docs/durability.md).
 
-Sync covers all retained sessions. A public pending mark first confirms inactive
-sessions and then describes the remaining active-node prefix. Sync-through and
-durable notifications are routed to the known origin of the mark.
+Sync covers all retained sessions and server incarnations. Reads, ordinary
+writes, reconnect and close never request persistence. The scalar pending-mark
+getter performs no I/O and returns `-EOPNOTSUPP` if multiple boot IDs are needed;
+use a captured fence or explicit connection sync for that set. Sync-through and
+durable notifications remain bound to the mark's known owner and bucket.
+
+Each owner retains up to 32 detached, boot-qualified ACK prefixes in RAM, plus
+its current connection prefix.
+Repeated disconnects coalesce marks only within the same boot. A new boot's read
+or write reply does not erase an older prefix or turn it into an unknown outcome.
+Explicit sync requests `SyncThrough` for every old prefix and a connection fence
+for new work. A new connection's ACK cannot certify another socket's old work,
+even within the same boot. A failed old-prefix proof is returned to the caller
+and retained for a later explicit attempt; it is never guessed successful. The
+bounded-prefix limit fails closed rather than dropping an uncertified mark.
 
 ## Cluster routing
 
@@ -213,6 +226,5 @@ local volume generations captured for that prefix are already durable. This
 optional confirmation is omitted when a volume is busy, so unrelated replies
 never wait for that volume's storage work. Older
 clients ignore tag 49. The C client clears only covered marks from the same boot;
-confirmation cannot clear uncertainty already latched by losing a modern
-connection. Legacy peers retain their boot-qualified marks across reconnect and
+confirmation cannot clear uncertainty from an unknown in-flight mutation. Legacy peers retain their boot-qualified marks across reconnect and
 confirm them through `SyncThrough` rather than a replacement connection fence.
