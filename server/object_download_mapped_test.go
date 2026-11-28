@@ -75,14 +75,18 @@ type mappedBlockedConn struct {
 	armed             atomic.Bool
 	entered           chan struct{}
 	closed            chan struct{}
+	release           chan struct{}
 	once, enteredOnce sync.Once
 }
 
 func (c *mappedBlockedConn) Write(p []byte) (int, error) {
 	if c.armed.Load() {
 		c.enteredOnce.Do(func() { close(c.entered) })
-		<-c.closed
-		return 0, net.ErrClosed
+		select {
+		case <-c.closed:
+			return 0, net.ErrClosed
+		case <-c.release:
+		}
 	}
 	return c.Conn.Write(p)
 }
@@ -101,7 +105,7 @@ func (l mappedListener) Accept() (net.Conn, error) {
 	if e != nil {
 		return nil, e
 	}
-	wrapped := &mappedBlockedConn{Conn: c, entered: make(chan struct{}), closed: make(chan struct{})}
+	wrapped := &mappedBlockedConn{Conn: c, entered: make(chan struct{}), closed: make(chan struct{}), release: make(chan struct{})}
 	l.accepted <- wrapped
 	return wrapped, nil
 }
@@ -297,24 +301,91 @@ func TestMappedDownloadRejectsBindingBeforeFrame(t *testing.T) {
 	}
 }
 
-func TestMappedDownloadFragmentFallback(t *testing.T) {
+func TestMappedDownloadFragmentCaptureReleasesLockBeforeNetwork(t *testing.T) {
 	s, reader, writer, ctx := subscriptionClients(t)
 	id := client.ObjectID{125}
-	if _, err := writer.Put(ctx, id, bytes.Repeat([]byte("f"), 1<<20), client.PutOptions{Accepted: true}); err != nil {
+	payload := bytes.Repeat([]byte("f"), 1<<20)
+	if _, err := writer.Put(ctx, id, payload, client.PutOptions{Accepted: true}); err != nil {
 		t.Fatal(err)
 	}
 	b, err := s.Bucket(volume.ID(reader.BucketID()))
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Accepted pages are separate RAM allocations, so this read must retain the
-	// owned fallback rather than exceed the native client's64-fragment guard.
-	ws := &wsSession{server: s}
+	ws, c, blocked := mappedSocket(t, s)
+	blocked.armed.Store(true)
 	op := &objectMutation{bucket: b, object: volume.ObjectID(id)}
-	if sent, _, err := ws.writeMappedObject(ctx, client.Message{}, userPrincipal(t, s), op, 1<<20, nil, client.ID{}); sent || err != nil {
-		t.Fatal("fragmented read did not fall back before frame", sent, err)
+	done := make(chan error, 1)
+	principal := userPrincipal(t, s)
+	go func() {
+		sent, _, err := ws.writeMappedObject(ctx, client.Message{}, principal, op, 1<<20, nil, client.ID{})
+		if !sent && err == nil {
+			err = errors.New("fragmented snapshot reread through dispatch")
+		}
+		done <- err
+	}()
+	select {
+	case <-blocked.entered:
+	case <-time.After(time.Second):
+		t.Fatal("capture did not reach socket")
 	}
-	if got, _, err := reader.Get(ctx, id); err != nil || len(got) != 1<<20 {
-		t.Fatal("fallback failed", len(got), err)
+	mutationCtx, cancel := context.WithTimeout(ctx, time.Second)
+	defer cancel()
+	if _, err := writer.Put(mutationCtx, id, []byte("new content"), client.PutOptions{Accepted: true}); err != nil {
+		t.Fatal("owned capture retained volume lock", err)
+	}
+	close(blocked.release)
+	_, got, err := c.ReadMessage()
+	if err != nil || !bytes.HasSuffix(got, payload) {
+		t.Fatal("captured snapshot changed during concurrent put", len(got), err)
+	}
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestMappedDownloadCloneLocalAndInherited(t *testing.T) {
+	s, reader, writer, ctx := subscriptionClients(t)
+	id := client.ObjectID{126}
+	payload := []byte("local clone source")
+	if _, err := writer.Put(ctx, id, payload, client.PutOptions{Accepted: true}); err != nil {
+		t.Fatal(err)
+	}
+	source, err := s.Bucket(volume.ID(reader.BucketID()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	target, _ := createProtocolBucket(t, s, "mapped-inherited")
+	if err := referenceAdminClone(t, s, source, target); err != nil {
+		t.Fatal(err)
+	}
+	if len(source.storageDescription().ClonePeers) == 0 {
+		t.Fatal("source has no clone edges")
+	}
+	p := userPrincipal(t, s)
+	ws, c, _ := mappedSocket(t, s)
+	done := make(chan error, 1)
+	go func() {
+		sent, _, err := ws.writeMappedObject(ctx, client.Message{}, p, &objectMutation{bucket: source, object: volume.ObjectID(id)}, 1024, nil, client.ID{})
+		if !sent && err == nil {
+			err = errors.New("local clone source skipped mapped path")
+		}
+		done <- err
+	}()
+	_, wire, err := c.ReadMessage()
+	if err != nil || !bytes.HasSuffix(wire, payload) {
+		t.Fatal("local source reply", err)
+	}
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	// An inherited missing object must return to dispatch before beginning a frame
+	// or doing peer/COW I/O in the sole socket writer.
+	inherited := &wsSession{server: s}
+	if sent, _, err := inherited.writeMappedObject(ctx, client.Message{}, p, &objectMutation{bucket: target, object: volume.ObjectID(id)}, 1024, nil, client.ID{}); sent || err != nil {
+		t.Fatal("inherited read did not defer to COW path", sent, err)
+	}
+	if got, _, err := target.Get(ctx, p, volume.ObjectID(id)); err != nil || !bytes.Equal(got, payload) {
+		t.Fatal("inherited fallback", string(got), err)
 	}
 }

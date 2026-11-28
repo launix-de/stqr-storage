@@ -232,7 +232,7 @@ func (s *Server) executeObjects(m client.Message, ws *wsSession, p principal) ([
 		if d.Done() != nil {
 			return nil, 0, fail(400, "invalid GET body")
 		}
-		if ws != nil && ws.borrowedWrites != nil && (m.Kind == client.Request || ws.connectionFenceCap.Load()) && len(op.bucket.storageDescription().ClonePeers) == 0 {
+		if ws != nil && ws.borrowedWrites != nil && (m.Kind == client.Request || ws.connectionFenceCap.Load()) {
 			sent, status, err := ws.directObjectDownload(ctx, m, p, op, length, condition, runtime)
 			if sent {
 				return nil, status, errObjectResponseSent

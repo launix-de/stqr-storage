@@ -2,6 +2,7 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"errors"
@@ -14,11 +15,10 @@ import (
 )
 
 var errObjectResponseSent = errors.New("object response already sent")
-var errMappedDownloadFallback = errors.New("mapped download needs owned capture")
 
 // Native clients cap fragmented WebSocket messages at64 frames. A segment can
-// flush up to two frames plus a buffer boundary;16 segments leave room for headers and
-// final framing. More fragmented accepted/decoded views retain owned capture.
+// flush up to two frames plus a buffer boundary;16 segments leave room for
+// headers and final framing. More fragmented views capture that checked snapshot.
 const maxMappedDownloadSegments = 16
 
 type borrowedWriteResult struct {
@@ -35,7 +35,8 @@ type borrowedWriteJob struct {
 // The sole socket writer acquires and releases the volume handle inside run.
 // In-place writes cannot change the borrowed bytes until frame output ends.
 // The tradeoff is that a slow socket blocks this volume's writers for at most the
-// write deadline. Larger and COW reads retain the owned snapshot/spool path.
+// write deadline. Fragmented views release the handle after bounded capture;
+// larger reads and missing inherited objects retain the existing captured path.
 func (ws *wsSession) directObjectDownload(ctx context.Context, m client.Message, p principal, op *objectMutation, length uint64, condition *volume.Options, runtime client.ID) (bool, int, error) {
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
@@ -62,10 +63,9 @@ func (ws *wsSession) writeMappedObject(ctx context.Context, m client.Message, p 
 		return false, 0, err
 	}
 	b := op.bucket
-	// Publication may have attached clone links while this job was queued.
-	if len(b.storageDescription().ClonePeers) != 0 {
-		return false, 0, nil
-	}
+	// Match checked copies: local physical records remain authoritative even
+	// when the bucket has clone dependents. Only missing inherited objects
+	// defer to COW resolution after all local guards have unwound.
 	v, h, description, prior, err := b.openSelectedRead(withMembershipRead(ctx), p, op.object)
 	if err != nil {
 		if errors.Is(err, volume.ErrNotFound) && len(description.ClonePeers) != 0 {
@@ -74,9 +74,6 @@ func (ws *wsSession) writeMappedObject(ctx context.Context, m client.Message, p 
 		return false, 0, b.absenceError(op.object, prior, err)
 	}
 	defer h.Close()
-	if len(description.ClonePeers) != 0 {
-		return false, 0, nil
-	}
 	// Match checked copies: revalidate local ownership/epoch after pinning bytes.
 	// This consults only the RAM placement image; it never contacts a peer.
 	if err := b.server.checkObjectBinding(ctx, b.ID(), op.object, true); err != nil {
@@ -110,30 +107,9 @@ func (ws *wsSession) writeMappedObject(ctx context.Context, m client.Message, p 
 	}
 	started := false
 	var transferred uint64
-	_, err = h.WithReadView(key, op.offset, length, func(view volume.ReadView) error {
-		if len(view.Segments) > maxMappedDownloadSegments {
-			return errMappedDownloadFallback
-		}
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		hash := sha256.New()
-		if _, err := view.WriteTo(hash); err != nil {
-			return err
-		}
-		e := client.Encoder{B: make([]byte, 0, objectDownloadHeader)}
-		encodeObjectInfo(&e, info, runtime)
-		if m.Opcode == 0x0101 {
-			e.U64(op.offset)
-			e.U64(view.Length)
-			e.U64(info.Length)
-		}
-		e.U8(0)
-		e.U64(view.Length)
-		e.B = append(e.B, hash.Sum(nil)...)
-		e.V(view.Length)
-		body := ws.server.durabilityResponse(status, e.B, b.ID())
-		header := client.EncodeMessage(client.Message{Kind: client.Response, Opcode: m.Opcode, ID: m.ID, Body: body})
+	var captured []byte
+	var header []byte
+	send := func(view volume.ReadView) error {
 		deadline := time.Now().Add(10 * time.Second)
 		if end, ok := ctx.Deadline(); ok && end.Before(deadline) {
 			deadline = end
@@ -151,11 +127,48 @@ func (ws *wsSession) writeMappedObject(ctx context.Context, m client.Message, p 
 		}
 		transferred, err = writeMappedFrame(writer, header, view)
 		return err
-	})
-	if errors.Is(err, errMappedDownloadFallback) {
-		return false, 0, nil
 	}
-	h.Close() // Release the volume before accounting and range-statistics locks.
+	_, err = h.WithReadView(key, op.offset, length, func(view volume.ReadView) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		hash := sha256.New()
+		if len(view.Segments) > maxMappedDownloadSegments {
+			// Keep this already checked snapshot. Do not release the handle and
+			// ask dispatch to read/check it a second time. One owned segment also
+			// stays within the native WebSocket fragmentation bound.
+			capture := bytes.NewBuffer(make([]byte, 0, int(view.Length)))
+			if _, err := view.WriteTo(bucketContextWriter{ctx: ctx, w: io.MultiWriter(capture, hash)}); err != nil {
+				return err
+			}
+			captured = capture.Bytes()
+		} else if _, err := view.WriteTo(hash); err != nil {
+			return err
+		}
+		e := client.Encoder{B: make([]byte, 0, objectDownloadHeader)}
+		encodeObjectInfo(&e, info, runtime)
+		if m.Opcode == 0x0101 {
+			e.U64(op.offset)
+			e.U64(view.Length)
+			e.U64(info.Length)
+		}
+		e.U8(0)
+		e.U64(view.Length)
+		e.B = append(e.B, hash.Sum(nil)...)
+		e.V(view.Length)
+		body := ws.server.durabilityResponse(status, e.B, b.ID())
+		header = client.EncodeMessage(client.Message{Kind: client.Response, Opcode: m.Opcode, ID: m.ID, Body: body})
+		if captured != nil {
+			return nil
+		}
+		return send(view)
+	})
+	h.Close() // Never close a handle inside its WithReadView callback.
+	if err == nil && captured != nil {
+		// The captured view is now owned. Network backpressure no longer holds
+		// the volume lock, and concurrent writes cannot alter this response.
+		err = send(volume.ReadView{Length: uint64(len(captured)), Segments: []volume.ReadSegment{{Data: captured, Length: uint64(len(captured))}}})
+	}
 	b.recordTraffic(p, transferred, 0)
 	b.recordRangeTraffic(p, op.object, transferred, 0)
 	if started && err != nil {
