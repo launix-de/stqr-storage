@@ -15,11 +15,12 @@
 #undef sq_disconnect
 #include <assert.h>
 #include <stdio.h>
-struct stqr_socket { struct buf replies,held; unsigned calls[512],pongs; stqr_u64 sequence,reply_length; unsigned boot;int closed,hold,redirect,hold_through,through_status; };
+struct stqr_socket { struct buf replies,held; unsigned calls[512],pongs; stqr_u64 sequence,reply_length; unsigned boot;int closed,hold,redirect,hold_through,through_status,fail_send; };
 int policy_connect(struct stqr_socket **out,const char *host,unsigned port,unsigned ms) {
     (void)out;(void)host;(void)port;(void)ms;return -EOPNOTSUPP;
 }
 int policy_send(struct stqr_socket *socket,const void *data,size_t size) {
+    if(socket->fail_send)return -EIO;
     const stqr_u8 *wire=data;size_t at=2,n;struct buf input={0},message={0},headers={0},mark={0};
     if(size==6 && wire[0]==0x8a && wire[1]==0x80) { socket->pongs++; return 0; }
     assert(size>=6 && (wire[0]&15)==2 && (wire[1]&128));
@@ -31,7 +32,11 @@ int policy_send(struct stqr_socket *socket,const void *data,size_t size) {
     assert(readnum(&input,1)==1);unsigned kind=(unsigned)readnum(&input,1);
     unsigned op=(unsigned)readnum(&input,2);const stqr_u8 *id=take(&input,16);assert(op<512 && id);
     socket->calls[op]++;
-    if(kind==0){assert(op==5 || op==6 || op==0x118);drop(&input);return 0;}
+    if(kind==0){
+        assert(op==5 || op==6 || op==0x118 || op==0x111 || op==0x114);
+        if(op==0x111){assert(!zero(id,16));assert(input.n-input.pos==16);}
+        drop(&input);return 0;
+    }
     assert(kind==1);
     int redirected=socket->redirect && op==0x118;
     number(&message,1,1);number(&message,2,1);number(&message,op,2);put(&message,id,16);varint(&message,redirected?301:(op==0x119 && socket->through_status?socket->through_status:200));
@@ -498,7 +503,34 @@ static void control_without_reply(unsigned opcode,int expected) {
     if(expected>0) assert(!stqr_poll(c,0));
     stqr_close(c);
 }
+static void discarded_coverage(void *arg,const stqr_update *update) {
+ unsigned *lost=arg;assert(!update);(*lost)++;
+}
+static void discard_has_no_pending_or_fence(void) {
+ struct stqr_socket socket={0};stqr_client *c=sq_alloc(sizeof(*c));unsigned lost=0;
+ assert(c);c->socket=&socket;
+ assert(stqr_unsubscribe_discard(c,(stqr_id){{1}})==-EOPNOTSUPP && !socket.calls[0x111]);
+ c->capabilities=STQR_CAP_SUBSCRIPTIONS;assert(!ensure_channel(c));
+ stqr_set_update_handler(c,discarded_coverage,&lost);
+ for(unsigned i=0;i<10000;i++) {
+  stqr_id sid={{0}};memcpy(sid.bytes,&i,sizeof(i));sid.bytes[15]=1;
+  struct sq_binding *binding=sq_alloc(sizeof(*binding));assert(binding);
+  binding->id=sid;binding->channel=c->active;unsigned slot=binding_bucket(sid);
+  binding->next=c->bindings[slot];c->bindings[slot]=binding;
+  assert(!stqr_unsubscribe_discard(c,sid));
+  assert(!*binding_slot(c,sid) && !stqr_async_pending(c));
+ }
+ assert(socket.calls[0x111]==10000 && !socket.replies.n && !socket.held.n && !lost);
+ assert(!socket.calls[0x122] && !socket.calls[0x119]);
+ stqr_id sid={{1}};struct sq_binding *binding=sq_alloc(sizeof(*binding));assert(binding);
+ binding->id=sid;binding->channel=c->active;c->bindings[binding_bucket(sid)]=binding;
+ socket.fail_send=1;assert(stqr_unsubscribe_discard(c,sid)==-EIO);
+ assert(!*binding_slot(c,sid) && !c->socket && socket.closed && lost==1);
+ assert(!stqr_async_pending(c));stqr_close(c);
+ puts("C discarded subscription retirement: 10000no-ACK/no-pending events; failed send loses coverage");
+}
 int main(void) {
+    discard_has_no_pending_or_fence();
     control_before_cas_reply(9);control_before_cas_reply(10);
     control_without_reply(0x89,1);control_without_reply(0x8a,1);
     control_without_reply(0x88,-ECONNRESET);control_without_reply(0x09,-EPROTO);

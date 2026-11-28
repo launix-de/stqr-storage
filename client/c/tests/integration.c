@@ -81,6 +81,30 @@ int main(void) {
         stqr_free(data);stqr_close(c);puts("named connection canonicalization and reconnect passed");return 0;
     }
     CHECK(!stqr_dial(&c, url, getenv("STQR_TEST_USER"), getenv("STQR_TEST_PASSWORD"), bucket,"fs", 3000));
+    if (mode && !strcmp(mode,"subscription-discard")) {
+        enum { CAP=2048, REPLACE=128 };
+        stqr_id sid[CAP];stqr_u64 cursor;
+        o=fresh();o.accepted=1;CHECK(!stqr_put(c,id,"cache",5,&o,&info));
+        for(unsigned i=0;i<CAP;i++) {
+            CHECK(!stqr_request_id(&sid[i]));
+            CHECK(!stqr_subscribe(c,id,sid[i],0,0,0,NULL,&data,&n,&info,&cursor));
+            CHECK(n==5&&cursor);stqr_free(data);
+        }
+        for(unsigned i=0;i<REPLACE;i++) {
+            CHECK(!stqr_unsubscribe_discard(c,sid[i]));CHECK(!stqr_async_pending(c));
+            CHECK(!stqr_request_id(&sid[i]));
+            CHECK(!stqr_subscribe(c,id,sid[i],0,0,0,NULL,&data,&n,&info,&cursor));
+            CHECK(n==5&&cursor);stqr_free(data);
+        }
+        for(unsigned i=0;i<CAP;i++) CHECK(!stqr_unsubscribe_discard(c,sid[i]));
+        CHECK(!stqr_async_pending(c));
+        CHECK(!stqr_request_id(&sid[0]));
+        CHECK(!stqr_subscribe(c,id,sid[0],0,0,0,NULL,&data,&n,&info,&cursor));stqr_free(data);
+        CHECK(!stqr_unsubscribe(c,sid[0]));
+        CHECK(!stqr_subscribe(c,id,sid[0],0,0,0,NULL,&data,&n,&info,&cursor));stqr_free(data);
+        CHECK(!stqr_unsubscribe(c,sid[0]));
+        stqr_close(c);puts("C full2048 subscription capacity replaces entries without ACKs, pending requests or 507");return 0;
+    }
     if (mode && !strcmp(mode,"legacy-reconnect")) {
         stqr_commit_mark mark;
         CHECK(!(stqr_capabilities(c)&STQR_CAP_CONNECTION_SYNC));

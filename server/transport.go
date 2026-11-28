@@ -236,6 +236,17 @@ func (s *Server) serveWebSocket(w http.ResponseWriter, r *http.Request, p princi
 		if m.Kind != client.Request && m.Kind != client.FireAndForget {
 			return
 		}
+		if isObjectSubscriptionControl(m.Opcode) {
+			// These controls touch only RAM, never payload storage. Retire the
+			// descriptor before admitting the next SUBSCRIBE frame, so a client
+			// at its subscription ceiling can replace an entry without an ACK.
+			p, ok := ws.principalNow()
+			if !ok {
+				return
+			}
+			ws.executeRequest(m, p)
+			continue
+		}
 		if isLeaseCoordinatorRequest(m) && ws.leaseRequests != nil && authorization.peerVerified.Load() {
 			select {
 			case ws.leaseRequests <- m:
@@ -409,7 +420,9 @@ func (ws *wsSession) requestLoop() {
 	}
 }
 func (ws *wsSession) executeRequest(m client.Message, p principal) {
-	defer ws.connectionHeaderReady(m.ID)
+	if !isObjectSubscriptionControl(m.Opcode) {
+		defer ws.connectionHeaderReady(m.ID)
+	}
 	body, status := ws.server.dispatchAs(m, ws, p)
 	if status == 0 {
 		return

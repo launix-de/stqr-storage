@@ -408,23 +408,27 @@ func TestConnectionFenceRepeatedSubscriptionACKHasNoStorageJob(t *testing.T) {
 	ws.fenceMu.Lock()
 	job := ws.connectionJobs[request.ID]
 	ws.fenceMu.Unlock()
-	ack := client.Message{Kind: client.FireAndForget, Opcode: client.SubscriptionAck, ID: request.ID}
-	for i := 0; i < 32; i++ {
-		if !ws.admitConnectionMessage(ack) {
-			t.Fatal("repeated RAM ACK closed connection")
+	for _, op := range []uint16{client.SubscriptionAck, client.ObjectUnsubscribe} {
+		for _, kind := range []uint8{client.FireAndForget, client.Request} {
+			ack := client.Message{Kind: kind, Opcode: op, ID: request.ID}
+			for i := 0; i < 32; i++ {
+				if !ws.admitConnectionMessage(ack) {
+					t.Fatal("repeated RAM ACK closed connection")
+				}
+			}
+			ws.completeConnectionMessage(ack, 200, nil)
+			select {
+			case <-job.done:
+				t.Fatal("RAM ACK completed another request with the same ID")
+			default:
+			}
+			ws.fenceMu.Lock()
+			jobs := len(ws.connectionJobs)
+			ws.fenceMu.Unlock()
+			if jobs != 1 {
+				t.Fatal("RAM ACK retained storage jobs", jobs)
+			}
 		}
-	}
-	ws.completeConnectionMessage(ack, 200, nil)
-	select {
-	case <-job.done:
-		t.Fatal("RAM ACK completed another request with the same ID")
-	default:
-	}
-	ws.fenceMu.Lock()
-	jobs := len(ws.connectionJobs)
-	ws.fenceMu.Unlock()
-	if jobs != 1 {
-		t.Fatal("RAM ACK retained storage jobs", jobs)
 	}
 	ws.completeConnectionMessage(request, 200, nil)
 	select {
