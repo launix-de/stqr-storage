@@ -49,7 +49,7 @@ func (r *rangeManager) startPGWorkers() {
 				}
 			}
 			s.peerStatsMu.RUnlock()
-			catalog.volumeRates = placementVolumeRates(catalog.snapshots, r.pgCatalog.Load(), s.placementHalfLives())
+			catalog.volumeRates = placementVolumeRatesAt(catalog.snapshots, r.pgCatalog.Load(), s.placementHalfLives(), now)
 			for _, d := range s.bucketSnapshots() {
 				if d.ID == systemBucket.String() || d.DeletionComplete || d.State == BucketDeleting {
 					continue

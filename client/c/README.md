@@ -216,3 +216,12 @@ clients ignore tag 49. The C client clears only covered marks from the same boot
 confirmation cannot clear uncertainty already latched by losing a modern
 connection. Legacy peers retain their boot-qualified marks across reconnect and
 confirm them through `SyncThrough` rather than a replacement connection fence.
+
+Optional reader locality measurements can be supplied with
+`stqr_report_placement_hints(client, paths, count)` (`count <= 16`). Each
+`stqr_placement_path` contains a committed node ID, positive RTT in nanoseconds
+and measured bytes/second (`0` for unknown bandwidth). The client negotiates
+`STQR_CAP_PLACEMENT_HINTS`, keeps its reader identity across reconnect/owner
+routing and reports to existing owner sessions. It creates no background probes
+or threads. An unsupported server returns `-EOPNOTSUPP`; telemetry never grants
+access or reserves capacity. See [reader/owner placement](../../docs/reader-owner-colocation.md).

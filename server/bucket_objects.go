@@ -249,6 +249,8 @@ func (b *Bucket) selectVolumeProof(d BucketDescription, key volume.Key, request 
 	}
 	var target *volume.Volume
 	var bestFree uint64
+	bestScore := -1.0
+	loads := b.server.localPlacementLoads(candidates, time.Now())
 	for _, v := range candidates {
 		allocatable := true
 		if b.server.controller != nil {
@@ -259,8 +261,12 @@ func (b *Bucket) selectVolumeProof(d BucketDescription, key volume.Key, request 
 		}
 		if allocatable && v.State() == volume.Active && class.Allows(v.Identity().Class) {
 			free := v.AdmissionFreePhysical()
-			if target == nil || free > bestFree {
-				target, bestFree = v, free
+			score := float64(free)
+			if loads != nil {
+				score = localVolumePlacementScore(free, v.Identity().Size, loads[v.Identity().VolumeID])
+			}
+			if target == nil || score > bestScore || score == bestScore && free > bestFree {
+				target, bestFree, bestScore = v, free, score
 			}
 		}
 	}

@@ -372,6 +372,29 @@ func (r *rangeManager) buildPlacementTargets(group string, descriptions []Bucket
 			}
 		}
 	}
+	// Client and peer transfers share one immutable distance image and one
+	// Traffic coefficient. Candidate costs are derived from bounded RAM aggregates.
+	now := time.Now()
+	input.PeerDistances = r.placementPeerDistances(now)
+	unknownDistance := placementDistanceFallback(input.PeerDistances)
+	input.NetworkDistances = make([]float64, len(options))
+	input.ClientNetwork = make([]float64, len(options))
+	byShape := make([][]int, len(shapes))
+	for id, option := range options {
+		byShape[option.Range] = append(byShape[option.Range], id)
+		node := resources[option.Volume].Node
+		input.NetworkDistances[id] = placementPeerDistance(input.PeerDistances, r.node, node, unknownDistance)
+	}
+	for i, ids := range byShape {
+		nodes := make([]client.ID, len(ids))
+		for j, id := range ids {
+			nodes[j] = resources[options[id].Volume].Node
+		}
+		costs := r.placementReaderCosts(rangeMetricKey{shapes[i].bucket, shapes[i].start, shapes[i].bits}, nodes, input.Horizon, now)
+		for j, id := range ids {
+			input.ClientNetwork[id] = costs[j]
+		}
+	}
 	input.BackgroundRead, input.BackgroundWrite = r.placementBackground(destinations)
 	budget := placementImproveBudget
 	if s.ioPriority.users.Load() > 0 {

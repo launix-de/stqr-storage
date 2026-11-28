@@ -39,7 +39,8 @@ struct stqr_client {
  char bucket_selector[261];
     size_t authorization_len;
     unsigned port, timeout;
-    stqr_id bucket, runtime, lease;
+    stqr_id bucket, runtime, lease, placement_reader;
+    stqr_u64 placement_sequence;
     int status, accepted_references;
     stqr_u64 capabilities;
     stqr_update_handler update;
@@ -352,7 +353,7 @@ static void disconnect_channels(stqr_client *c) {
     if (notify && c->update) c->update(c->update_arg,NULL);
 }
 static int handshake(stqr_client *c) {
-    char key[25], expected[29], combined[61], bucket[261], lease[80] = {0}, token[33];
+    char key[25], expected[29], combined[61], bucket[261], lease[80] = {0}, token[33], reader[33];
     char *request = NULL, *headers = NULL, *line, *next;
     stqr_u8 random[16], digest[20];
     size_t n = 0, capacity;
@@ -367,12 +368,13 @@ static int handshake(stqr_client *c) {
         hex(c->lease.bytes, 16, token);
         snprintf(lease, sizeof(lease), "X-STQR-Maintenance: %s\r\n", token);
     }
+    hex(c->placement_reader.bytes,16,reader);
     capacity = c->authorization_len + 2048;
     request = sq_alloc(capacity); headers = sq_alloc(16385);
     if (!request || !headers) { err = -ENOMEM; goto out; }
     n = (size_t)snprintf(request, capacity,
-        "GET /api/ws HTTP/1.1\r\nHost: %s\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: %s\r\nSec-WebSocket-Protocol: stqr.v2\r\nAuthorization: Basic %s\r\nX-STQR-Bucket: %s\r\nX-STQR-Format: %s\r\n%s\r\n",
-        c->authority, key, c->authorization, bucket, c->format, lease);
+        "GET /api/ws HTTP/1.1\r\nHost: %s\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: %s\r\nSec-WebSocket-Protocol: stqr.v2\r\nAuthorization: Basic %s\r\nX-STQR-Bucket: %s\r\nX-STQR-Format: %s\r\nX-STQR-Reader: %s\r\n%s\r\n",
+        c->authority, key, c->authorization, bucket, c->format, reader, lease);
     if (n >= capacity) { err = -E2BIG; goto out; }
     if ((err = sq_send(c->socket, request, n))) goto out;
     for (n = 0; n < 16384; n++) {
@@ -810,7 +812,7 @@ static int reconnect_active(stqr_client *c) {
     if (!err) err = handshake(c);
     if (err) { broken(c); return err; }
     c->status = 0;
-    number(&body, 2, 2); number(&body, 2, 2); number(&body, STQR_CAP_DURABILITY|STQR_CAP_OBJECT_REFERENCES|STQR_CAP_CONNECTION_SYNC|STQR_CAP_ACCEPTED_REFERENCES|STQR_CAP_ACCEPTED_STREAMS, 8); blob(&body, "stqr-c", 6);
+    number(&body, 2, 2); number(&body, 2, 2); number(&body, STQR_CAP_DURABILITY|STQR_CAP_OBJECT_REFERENCES|STQR_CAP_CONNECTION_SYNC|STQR_CAP_ACCEPTED_REFERENCES|STQR_CAP_ACCEPTED_STREAMS|STQR_CAP_PLACEMENT_HINTS, 8); blob(&body, "stqr-c", 6);
     err = request(c, 1, &body, id, 0, &result, NULL);
     if (!err) {
         if (readnum(&result, 2) != 2) result.err = -EPROTO;
@@ -820,6 +822,36 @@ static int reconnect_active(stqr_client *c) {
     if (err) broken(c);
     else if (c->readable) sq_set_readable(c->socket,c->readable,c->readable_arg);
     return err;
+}
+int stqr_report_placement_hints(stqr_client *c,const stqr_placement_path *paths,size_t count) {
+    struct buf body={0},result={0};
+    struct sq_channel *original,*channel;
+    stqr_id rid={{0}};
+    int err,first=0,sent=0;
+    if(!c || (count && !paths) || count>STQR_MAX_PLACEMENT_PATHS)return -EINVAL;
+    for(size_t i=0;i<count;i++) {
+        if(zero(paths[i].node.bytes,16) || !paths[i].rtt_ns || paths[i].rtt_ns>60000000000ULL || paths[i].bytes_per_second>(1ULL<<50))return -EINVAL;
+        for(size_t j=0;j<i;j++)if(!memcmp(paths[i].node.bytes,paths[j].node.bytes,16))return -EINVAL;
+    }
+    if(c->placement_sequence==~(stqr_u64)0)return -EOVERFLOW;
+    if((err=ensure_channel(c)))return err;
+    save_channel(c);original=c->active;
+    number(&body,1,1);number(&body,0,1);put(&body,c->bucket.bytes,16);
+    put(&body,c->placement_reader.bytes,16);number(&body,++c->placement_sequence,8);varint(&body,count);
+    for(size_t i=0;i<count;i++) {
+        put(&body,paths[i].node.bytes,16);number(&body,paths[i].rtt_ns,8);number(&body,paths[i].bytes_per_second,8);
+    }
+    if(body.err) {err=body.err;drop(&body);return err;}
+    for(channel=c->channels;channel;channel=channel->next) {
+        if(!channel->socket || !(channel->capabilities&STQR_CAP_PLACEMENT_HINTS))continue;
+        load_channel(c,channel);sent=1;
+        err=request(c,0x123,&body,rid,0,&result,NULL);
+        if(!err)err=done(&result);
+        if(err && !first)first=err;
+        drop(&result);save_channel(c);
+    }
+    load_channel(c,original);drop(&body);
+    return sent?first:-EOPNOTSUPP;
 }
 int stqr_reconnect(stqr_client *c) {
     if (c && c->lease_taken) return -ESTALE;
@@ -838,6 +870,7 @@ static int dial_bucket(stqr_client **out, const char *url, const char *user, con
     if (u > 4096 || p > 4096) return -E2BIG;
     c = sq_alloc(sizeof(*c)); if (!c) return -ENOMEM;
     c->bucket = bucket; c->timeout = timeout;
+    if ((err=stqr_request_id(&c->placement_reader))) { sq_free(c); return err; }
  if(selector) memcpy(c->bucket_selector,selector,strlen(selector)+1);
     memcpy(c->format, format, strlen(format)+1);
     if ((err = parse_url(c, url))) { sq_free(c); return err; }

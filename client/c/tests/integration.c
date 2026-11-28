@@ -53,6 +53,7 @@ int main(void) {
     size_t n;
     stqr_u64 offset;
     const char *url = getenv("STQR_TEST_URL"), *mode = getenv("STQR_TEST_MODE");
+    CHECK(stqr_report_placement_hints(NULL,NULL,0)==-EINVAL);
     CHECK(stqr_parse_id("not-an-id", &bucket) == -EINVAL);
     CHECK(stqr_parse_object_id("1234", &id) == -EINVAL);
     CHECK(stqr_dial(&c, "http://localhost", "user", "pw", bucket,"fs", 1000) == -EINVAL);
@@ -81,6 +82,17 @@ int main(void) {
         stqr_free(data);stqr_close(c);puts("named connection canonicalization and reconnect passed");return 0;
     }
     CHECK(!stqr_dial(&c, url, getenv("STQR_TEST_USER"), getenv("STQR_TEST_PASSWORD"), bucket,"fs", 3000));
+    if(mode && !strcmp(mode,"placement-hints")) {
+        stqr_placement_path path={0};
+        CHECK(stqr_capabilities(c)&STQR_CAP_PLACEMENT_HINTS);
+        CHECK(!stqr_parse_id(getenv("STQR_TEST_NODE"),&path.node));
+        path.rtt_ns=1000000;path.bytes_per_second=100U*1024U*1024U;
+        CHECK(!stqr_report_placement_hints(c,&path,1));
+        CHECK(!stqr_reconnect(c));
+        CHECK(!stqr_report_placement_hints(c,&path,1));
+        path.rtt_ns=0;CHECK(stqr_report_placement_hints(c,&path,1)==-EINVAL);
+        stqr_close(c);puts("placement hints and stable reader reconnect passed");return 0;
+    }
     if (mode && !strcmp(mode,"legacy-reconnect")) {
         stqr_commit_mark mark;
         CHECK(!(stqr_capabilities(c)&STQR_CAP_CONNECTION_SYNC));

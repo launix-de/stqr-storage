@@ -18,6 +18,8 @@ import (
 // Roles, bucket pointer and permissions are immutable; administrative changes
 // revoke the capability instead of making data requests reread account/ACL data.
 type connectionAuthorization struct {
+	readerID                   client.ID
+	placementHints             atomic.Bool
 	openedFormats              sync.Map    // bucket ID -> immutable format, for administrative object clients
 	objectReferences           atomic.Bool // client participates in cooperative reference/intent lifetime
 	lease                      atomic.Pointer[bucketLease]
@@ -166,6 +168,16 @@ func (s *Server) authorizeConnection(r *http.Request, p principal, allowUnboundF
 	}
 	if (s.shortStopping.Load() || s.drainClosing.Load()) && !auth.clusterPeer {
 		return nil, p, fail(503, "node is shutting down")
+	}
+	if raw := r.Header.Get(client.PlacementReaderHeader); raw != "" {
+		decoded, err := hex.DecodeString(raw)
+		if err != nil || len(decoded) != len(auth.readerID) || auth.clusterPeer || auth.bucket == nil {
+			return nil, p, fail(400, "invalid bucket reader identity")
+		}
+		copy(auth.readerID[:], decoded)
+		if auth.readerID == (client.ID{}) || len(r.Header.Values(client.PlacementReaderHeader)) != 1 {
+			return nil, p, fail(400, "invalid bucket reader identity")
+		}
 	}
 	p.connection = auth
 	return auth, p, nil

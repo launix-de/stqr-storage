@@ -145,6 +145,9 @@ func (t *objectTransport) failure() error {
 	return t.cause
 }
 func (t *objectTransport) roundTrip(ctx context.Context, m Message, mutation bool, upload uploadFunc) (wireReply, error) {
+	if t.subscriptionClient != nil && objectMessage(m) {
+		t.subscriptionClient.notePlacementActivity()
+	}
 	if e := ctx.Err(); e != nil {
 		return wireReply{}, e
 	}

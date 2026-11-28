@@ -26,8 +26,11 @@ type placementWorkload struct {
 type placementImproveInput struct {
 	Work                                              []placementWorkload
 	BackgroundRead, BackgroundWrite, BackgroundGrowth []float64
-	Network                                           []uint64 // copied bytes crossing a node boundary, per option
-	Held                                              []uint64 // bytes already present, per option
+	Network                                           []uint64                 // copied bytes crossing a node boundary, per option
+	NetworkDistances                                  []float64                // optional migration path distances, per option
+	ClientNetwork                                     []float64                // optional forecast client byte-distance cost at primary, per option
+	PeerDistances                                     map[[2]client.ID]float64 // optional directed replication path observations
+	Held                                              []uint64                 // bytes already present, per option
 	Horizon                                           float64
 	PrimaryLoads                                      map[client.ID]float64
 	Weights                                           *placementScore
@@ -85,6 +88,7 @@ type placementImproveState struct {
 	quota                     map[client.ID]placementAmount
 	budgets                   map[client.ID]uint64
 	loadScale                 float64
+	peerFallback              float64
 	roles, nodeCapacity       map[client.ID]float64
 	score                     placementScore
 	touched                   []int
@@ -113,20 +117,36 @@ func improvePlacement(ctx context.Context, d []placementDemand, v []placementRes
 	if stop() || len(d) == 0 || len(in.Work) != len(d) || len(x.Pending) != 0 || len(x.Assignments) != len(d) {
 		return finish()
 	}
+	if math.IsNaN(in.Horizon) || math.IsInf(in.Horizon, 0) {
+		return finish()
+	}
 	if in.Horizon <= 0 {
 		in.Horizon = 30
 	}
-	if len(in.Held) != len(o) || len(in.Network) != len(o) {
+	if len(in.Held) != len(o) || len(in.Network) != len(o) ||
+		len(in.NetworkDistances) != 0 && len(in.NetworkDistances) != len(o) ||
+		len(in.ClientNetwork) != 0 && len(in.ClientNetwork) != len(o) {
 		return finish()
 	}
 	// Bound auxiliary workspace independently of the input graph. There is no
 	// population/frontier retaining a growing history of rejected states.
-	if uint64(len(d))*128+uint64(len(o))*96+uint64(len(v))*256+uint64(len(in.PrimaryLoads))*64 > 64<<20 {
+	if uint64(len(d))*128+uint64(len(o))*96+uint64(len(v))*256+uint64(len(in.PrimaryLoads))*64+uint64(len(in.PeerDistances))*64 > 64<<20 {
 		return finish()
 	}
 	s := placementImproveState{d: d, v: v, o: o, x: x, in: in, budgets: budgets, allocated: make(map[placementAllocation]placementAmount), quota: make(map[client.ID]placementAmount), shared: make([]placementAmount, len(v)), used: make([]float64, len(v)), read: make([]float64, len(v)), write: make([]float64, len(v)), growth: make([]float64, len(v))}
 	s.roles, s.nodeCapacity = make(map[client.ID]float64), make(map[client.ID]float64)
 	s.stamps = make([]uint32, len(v))
+	s.peerFallback = 1
+	index := 0
+	for _, distance := range in.PeerDistances {
+		if index&63 == 0 && stop() {
+			return finish()
+		}
+		index++
+		if validTransferValue(distance) {
+			s.peerFallback = math.Max(s.peerFallback, distance)
+		}
+	}
 	for option, cohort := range in.Cohorts {
 		if stop() || option < 0 || option >= len(o) || o[option].Volume < 0 || o[option].Volume >= len(v) {
 			return finish()
@@ -137,12 +157,15 @@ func improvePlacement(ctx context.Context, d []placementDemand, v []placementRes
 			}
 		}
 	}
-	index := 0
+	index = 0
 	for node, load := range in.PrimaryLoads {
 		if index&63 == 0 && stop() {
 			return finish()
 		}
 		index++
+		if !validTransferValue(load) {
+			return finish()
+		}
 		s.roles[node] = load
 	}
 	byRange := make([][]int, len(d))
@@ -153,11 +176,19 @@ func improvePlacement(ctx context.Context, d []placementDemand, v []placementRes
 		if option.Range < 0 || option.Range >= len(d) || option.Volume < 0 || option.Volume >= len(v) {
 			return finish()
 		}
+		if len(in.NetworkDistances) != 0 && !validTransferValue(in.NetworkDistances[i]) ||
+			len(in.ClientNetwork) != 0 && !validTransferValue(in.ClientNetwork[i]) {
+			return finish()
+		}
 		byRange[option.Range] = append(byRange[option.Range], i)
 	}
 	var movable []int
 	for r := range d {
 		if r&63 == 0 && stop() {
+			return finish()
+		}
+		w := in.Work[r]
+		if !validTransferValue(w.Physical) || !validTransferValue(w.Read) || !validTransferValue(w.Write) || !validTransferValue(w.Growth) {
 			return finish()
 		}
 		if len(byRange[r]) > d[r].Copies || d[r].Copies > 1 {
@@ -174,13 +205,44 @@ func improvePlacement(ctx context.Context, d []placementDemand, v []placementRes
 		s.used[i] = float64(subtractCapacity(resource.Capacity, resource.Free))
 		s.nodeCapacity[resource.Node] += float64(resource.Capacity)
 		if i < len(in.BackgroundRead) {
+			if !validTransferValue(in.BackgroundRead[i]) {
+				return finish()
+			}
 			s.read[i] = in.BackgroundRead[i] * in.Horizon
 		}
 		if i < len(in.BackgroundWrite) {
+			if !validTransferValue(in.BackgroundWrite[i]) {
+				return finish()
+			}
 			s.write[i] = in.BackgroundWrite[i] * in.Horizon
 		}
 		if i < len(in.BackgroundGrowth) {
+			if !validTransferValue(in.BackgroundGrowth[i]) {
+				return finish()
+			}
 			s.growth[i] = in.BackgroundGrowth[i] * in.Horizon
+		}
+	}
+	// Volume snapshots include CURRENT workload, but may lag range counters or
+	// be absent during bootstrap. Remove only that known CURRENT work from a
+	// nonnegative fixed background before adding the candidate assignment. Doing
+	// this after candidate addition would let negative phantom background cancel
+	// the candidate's work and bias moves back toward a stale source.
+	for i, option := range o {
+		if i&63 == 0 && stop() {
+			return finish()
+		}
+		s.used[option.Volume] -= float64(in.Held[i])
+		if in.Held[i] > 0 {
+			w := in.Work[option.Range]
+			fraction := 1.0
+			if option.Range < len(in.Unbound) && in.Unbound[option.Range] {
+				fraction = float64(in.Held[i]) / math.Max(1, w.Physical)
+			}
+			s.write[option.Volume] = math.Max(0, s.write[option.Volume]-fraction*w.Write*in.Horizon)
+			if v[option.Volume].Node == w.Primary {
+				s.read[option.Volume] = math.Max(0, s.read[option.Volume]-fraction*w.Read*in.Horizon)
+			}
 		}
 	}
 	// This initialization is advisory and bounded too. No assignment is changed
@@ -193,7 +255,7 @@ func improvePlacement(ctx context.Context, d []placementDemand, v []placementRes
 			return finish()
 		}
 		seen := make(map[client.ID]bool, len(ids))
-		if in.PrimaryLoads != nil && in.Work[r].Replicated {
+		if in.PrimaryLoads != nil && in.Work[r].Primary != (client.ID{}) {
 			s.roles[in.Work[r].Primary] -= 1 << 20
 		}
 		for slot, id := range ids {
@@ -206,23 +268,11 @@ func improvePlacement(ctx context.Context, d []placementDemand, v []placementRes
 			seen[v[o[id].Volume].Node] = true
 			s.adjust(r, slot, id, 1)
 		}
-	}
-	for i, option := range o {
-		if i&63 == 0 && stop() {
+		traffic, complete := s.replicationTraffic(r, stop)
+		if !complete {
 			return finish()
 		}
-		s.used[option.Volume] -= float64(in.Held[i])
-		if in.Held[i] > 0 {
-			w := in.Work[option.Range]
-			fraction := 1.0
-			if option.Range < len(in.Unbound) && in.Unbound[option.Range] {
-				fraction = float64(in.Held[i]) / math.Max(1, w.Physical)
-			}
-			s.write[option.Volume] -= fraction * w.Write * in.Horizon
-			if v[option.Volume].Node == w.Primary {
-				s.read[option.Volume] -= fraction * w.Read * in.Horizon
-			}
-		}
+		s.score.Traffic += traffic
 	}
 	for i := range v {
 		if i&63 == 0 && stop() {
@@ -334,12 +384,43 @@ func (s *placementImproveState) adjust(r, slot, id int, sign float64) {
 	} else {
 		apply(o.Volume, w.Physical, 1)
 	}
-	if slot == 0 && s.d[r].Copies > 1 {
+	if slot == 0 && (s.d[r].Copies > 1 || s.in.PrimaryLoads != nil) {
 		s.roles[s.v[o.Volume].Node] += sign * (1 << 20)
 	}
 	s.score.Move += sign * float64(o.Move)
-	s.score.Traffic += sign * float64(s.in.Network[id])
+	// Copy/storage work remains in Move. Every network byte-distance, whether
+	// one-time migration or future client traffic, enters the same Traffic term.
+	distance := 1.0
+	if len(s.in.NetworkDistances) != 0 {
+		distance = s.in.NetworkDistances[id]
+	}
+	s.score.Traffic += sign * transferCost(float64(s.in.Network[id]), distance)
+	if slot == 0 && len(s.in.ClientNetwork) != 0 {
+		s.score.Traffic += sign * s.in.ClientNetwork[id]
+	}
 }
+
+// Replication is an assignment-wide cost: changing the primary changes all
+// directed primary-to-follower paths. Trial callers recompute only their at
+// most two affected ranges, including a paired role swap exactly once.
+func (s *placementImproveState) replicationTraffic(r int, stop func() bool) (float64, bool) {
+	ids := s.x.Assignments[r]
+	if s.in.PeerDistances == nil || len(ids) < 2 {
+		return 0, true
+	}
+	primary := s.v[s.o[ids[0]].Volume].Node
+	bytes := s.in.Work[r].Write * s.in.Horizon
+	var cost float64
+	for slot, id := range ids[1:] {
+		if slot&63 == 0 && stop() {
+			return cost, false
+		}
+		peer := s.v[s.o[id].Volume].Node
+		cost += transferCost(bytes, placementPeerDistance(s.in.PeerDistances, primary, peer, s.peerFallback))
+	}
+	return cost, true
+}
+
 func (s *placementImproveState) validVolume(id int) bool {
 	return !s.shared[id].over(s.v[id].Free)
 }
@@ -406,7 +487,25 @@ func (s *placementImproveState) trial(edits []placementEdit, stop func() bool) b
 	if len(s.touched) > 64 || stop() {
 		return false
 	}
+	var ranges [2]int
+	var previousTraffic [2]float64
+	rangeCount := 0
+	for _, e := range edits {
+		if rangeCount != 0 && ranges[0] == e.rangeID {
+			continue
+		}
+		ranges[rangeCount] = e.rangeID
+		traffic, complete := s.replicationTraffic(e.rangeID, stop)
+		if !complete {
+			return false
+		}
+		previousTraffic[rangeCount] = traffic
+		rangeCount++
+	}
 	before := s.score
+	for _, traffic := range previousTraffic[:rangeCount] {
+		s.score.Traffic -= traffic
+	}
 	for _, v := range s.touched {
 		s.score.Future -= s.volumeScore(v).Future
 		s.score.Traffic -= s.trafficScore(v)
@@ -420,6 +519,13 @@ func (s *placementImproveState) trial(edits []placementEdit, stop func() bool) b
 		s.x.Assignments[e.rangeID][e.slot] = e.option
 	}
 	valid := true
+	for _, r := range ranges[:rangeCount] {
+		traffic, complete := s.replicationTraffic(r, stop)
+		if !complete {
+			valid = false
+		}
+		s.score.Traffic += traffic
+	}
 	for _, e := range edits {
 		placed := s.v[s.o[s.x.Assignments[e.rangeID][e.slot]].Volume].Node
 		for index, id := range s.x.Assignments[e.rangeID] {

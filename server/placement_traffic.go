@@ -11,6 +11,7 @@ import (
 type placementVolumeRate struct {
 	read, write             float64 // captured forecast; the underlying windows decay on use
 	readWindow, writeWindow decay.Accumulator
+	sampled                 time.Time // local receipt time of the last new source snapshot
 }
 
 func placementVolumeRates(snapshots []client.StatsSnapshot, previous *pgRebuildCatalog, windows ...decay.HalfLives) map[client.ID]placementVolumeRate {
@@ -18,6 +19,12 @@ func placementVolumeRates(snapshots []client.StatsSnapshot, previous *pgRebuildC
 	if len(windows) != 0 {
 		h = windows[0].Normalized()
 	}
+	return placementVolumeRatesAt(snapshots, previous, h, time.Time{})
+}
+
+// Production windows use local receipt time. Peer wall clocks may be skewed;
+// their timestamps determine source deltas, never the local decay epoch.
+func placementVolumeRatesAt(snapshots []client.StatsSnapshot, previous *pgRebuildCatalog, h decay.HalfLives, received time.Time) map[client.ID]placementVolumeRate {
 	out := make(map[client.ID]placementVolumeRate)
 	if previous == nil {
 		return out
@@ -31,7 +38,7 @@ func placementVolumeRates(snapshots []client.StatsSnapshot, previous *pgRebuildC
 		if !ok || prior.BootID != snapshot.BootID {
 			continue
 		}
-		if prior.Sequence == snapshot.Sequence {
+		if snapshot.Sequence <= prior.Sequence {
 			for _, v := range snapshot.Volumes {
 				out[v.ID] = previous.volumeRates[v.ID]
 			}
@@ -56,9 +63,18 @@ func placementVolumeRates(snapshots []client.StatsSnapshot, previous *pgRebuildC
 			read := float64(subtractCapacity(v.IO.PhysicalReadBytes, p.IO.PhysicalReadBytes))
 			write := float64(subtractCapacity(v.IO.PhysicalWriteBytes, p.IO.PhysicalWriteBytes))
 			last := previous.volumeRates[v.ID]
-			last.readWindow.AddInterval(start, end, read, h)
-			last.writeWindow.AddInterval(start, end, write, h)
-			last.read, last.write = last.readWindow.Rates(end, h).Peak(), last.writeWindow.Rates(end, h).Peak()
+			sampleStart, sampleEnd := start, end
+			if !received.IsZero() {
+				sampleEnd = received
+				sampleStart = received.Add(-end.Sub(start))
+				if !last.sampled.IsZero() {
+					sampleStart = last.sampled
+				}
+			}
+			last.sampled = sampleEnd
+			last.readWindow.AddInterval(sampleStart, sampleEnd, read, h)
+			last.writeWindow.AddInterval(sampleStart, sampleEnd, write, h)
+			last.read, last.write = last.readWindow.Rates(sampleEnd, h).Peak(), last.writeWindow.Rates(sampleEnd, h).Peak()
 			out[v.ID] = last
 		}
 	}

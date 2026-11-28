@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/launix-de/stqr-storage/client"
+	"github.com/launix-de/stqr-storage/internal/decay"
 	"github.com/launix-de/stqr-storage/volume"
 )
 
@@ -18,6 +19,7 @@ type placementMeasurement struct {
 	cost          uint64
 	retained      map[volume.ID]uint64
 	growth        float64
+	growthWindow  decay.Accumulator
 	estimateOnly  bool
 }
 
@@ -97,8 +99,12 @@ func (r *rangeManager) measuredPlacement(shape placementShape, entry client.Rang
 }
 
 func (r *rangeManager) storePlacementMeasurement(key rangeMetricKey, prior, measurement placementMeasurement) placementMeasurement {
-	if prior.epoch == measurement.epoch && prior.policy == measurement.policy && prior.codec == measurement.codec && prior.estimateOnly == measurement.estimateOnly && prior.at.Before(measurement.at) && !prior.at.IsZero() && measurement.cost > prior.cost {
-		measurement.growth = float64(measurement.cost-prior.cost) / measurement.at.Sub(prior.at).Seconds()
+	if prior.epoch == measurement.epoch && prior.policy == measurement.policy && prior.codec == measurement.codec && prior.estimateOnly == measurement.estimateOnly && prior.at.Before(measurement.at) && !prior.at.IsZero() {
+		amount := float64(subtractCapacity(measurement.cost, prior.cost))
+		measurement.growthWindow = prior.growthWindow
+		h := r.server.placementHalfLives()
+		measurement.growthWindow.AddInterval(prior.at, measurement.at, amount, h)
+		measurement.growth = measurement.growthWindow.Rates(measurement.at, h).Peak()
 	}
 	r.measurements.Store(key, measurement)
 	return measurement

@@ -491,6 +491,8 @@ func (s *Server) updateConfig(patch map[string]json.RawMessage) error {
 			dst = &c.RAMCacheBytes
 		case "system_volume_bytes":
 			dst = &c.SystemVolumeBytes
+		case "placement_statistics":
+			dst = &c.PlacementStatistics
 		case "allow_subnets":
 			dst = &c.AllowSubnets
 		case "peers":

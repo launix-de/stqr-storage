@@ -54,11 +54,13 @@ The default equal-weight byte-equivalent criteria are:
 - **Future:** squared physical utilization plus four times predicted shortfall
   above 85% capacity over a 30-second horizon. Measured per-range growth follows
   its data; bulk migration growth is not extrapolated as application growth.
-- **Traffic:** additional inter-node copy bytes, measured read/write pressure
-  over the same horizon, and capacity-weighted primary concentration. These
-  are forecasts/preferences, not promises about future client behavior or a
-  measured topology/latency model. The internal weights are separate modules;
-  no new user-facing policy/configuration schema is introduced.
+- **Traffic:** migration, client and replication byte-distance costs share one
+  coefficient. Optional measured RTT/throughput profiles price candidate paths;
+  measured per-volume read/write pressure and capacity-weighted primary
+  concentration retain independent resource terms. These remain forecasts.
+  [Reader/owner colocation](reader-owner-colocation.md) describes the common
+  short/long half-life accumulators, bounded advisory protocol, local-volume
+  ranking and configurable statistics windows.
 
 All other PGs' occupancy and observed I/O remain fixed background. Retirement
 of old copies is never credited as already free admission space. A normal
@@ -117,8 +119,8 @@ formats; the optimizer sees opaque objects and ranges.
 Safe pruning, forced-decision propagation and equivalent-option reduction can
 save work without promising polynomial exact optimization of NP-hard packing.
 The general replica split/merge planner, full durable PG-wide NEXT map, RAM
-replica restore, physical host/rack/zone enforcement and latency/topology-aware
-traffic prediction remain separate requirements. This patch retains their
+replica restore, physical host/rack/zone enforcement and shared-controller/NIC
+bottleneck modeling remain separate requirements. This patch retains their
 existing support boundaries; it does not declare the entire spec implemented.
 
 Validation includes deadline/cancellation controls, independently checked random

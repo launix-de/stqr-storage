@@ -17,6 +17,7 @@ type rangeMetricKey struct {
 	bits   uint16
 }
 type rangeMetric struct {
+	readers                 map[placementReaderKey]*placementReaderTraffic
 	read, write             atomic.Uint64
 	active                  atomic.Int64
 	mu                      sync.Mutex
@@ -52,6 +53,7 @@ func (b *Bucket) recordRangeTraffic(p principal, id volume.ObjectID, read, write
 	m.read.Add(read)
 	m.write.Add(write)
 	m.active.Store(now.UnixNano())
+	recordPlacementReader(m, key, p, read, write, now)
 }
 
 func (r *rangeManager) rangeWorkload(key rangeMetricKey) (float64, float64) {
@@ -77,6 +79,7 @@ func (r *rangeManager) rangeWorkload(key rangeMetricKey) (float64, float64) {
 }
 
 func (r *rangeManager) collectRangeTelemetry(snap *client.StatsSnapshot) {
+	r.prunePlacementReaders(time.Now())
 	image := r.server.placement.Load()
 	if image == nil {
 		return

@@ -93,6 +93,7 @@ type rangeTxn struct {
 	remaining                                                     uint64
 }
 type rangeManager struct {
+	readers          placementReaders
 	metrics          sync.Map
 	measurements     sync.Map
 	improveSequence  atomic.Uint64

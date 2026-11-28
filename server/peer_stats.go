@@ -87,6 +87,7 @@ func (s *Server) observePeer(p *peerConnection, observation *peerObservation) {
 		return
 	}
 	assembler := client.NewStatsAssembler(1)
+	var lastProbe time.Time
 	for {
 		m, err := p.nextPush(p.ctx)
 		if err != nil || m.Opcode != client.StatsSnapshotMessage {
@@ -114,6 +115,16 @@ func (s *Server) observePeer(p *peerConnection, observation *peerObservation) {
 			return
 		}
 		s.broadcastStats(*snapshot)
+		// Advisory, bounded path observation. A failed probe never changes peer
+		// availability, membership, replica counts or placement authority.
+		if s.scopes != nil && time.Since(lastProbe) >= 10*time.Second {
+			lastProbe = time.Now()
+			probe := client.Encoder{}
+			probe.U64(uint64(lastProbe.UnixNano()))
+			probeCtx, stop := context.WithTimeout(p.ctx, time.Second)
+			_, _ = p.request(probeCtx, client.Ping, probe.B)
+			stop()
+		}
 	}
 }
 
