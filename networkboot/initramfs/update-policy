@@ -1,0 +1,138 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-3.0-only
+"""Pre-PID1 policy for a claimed STQR overlay/edit root; never run on a live OS.
+
+Snap state contract (snapd >=2.58): State.MarshalJSON stores data/changes/tasks;
+config.NewTransaction reads data.config and core.refresh.hold='forever' is the
+system-wide auto-refresh hold. AtSeed preserves an existing hold. No seed flags,
+changes, tasks or installed revisions are synthesized/removed. Sources:
+https://github.com/canonical/snapd/blob/master/overlord/state/state.go
+https://github.com/canonical/snapd/blob/master/overlord/configstate/config/transaction.go
+https://github.com/canonical/snapd/blob/master/overlord/snapstate/autorefresh.go
+Offline state access is safe ONLY before PID1 starts snapd, as used by scripts/stqr.
+"""
+import argparse
+import json
+import os
+from pathlib import Path
+import tempfile
+
+APT_PATH = 'etc/apt/apt.conf.d/99-stqr-ephemeral-updates'
+STATE_PATH = 'var/lib/snapd/state.json'
+RECORD_PATH = 'var/lib/stqr-networkboot/update-policy.json'
+UNITS = ('apt-daily.timer', 'apt-daily.service', 'apt-daily-upgrade.timer',
+         'apt-daily-upgrade.service', 'unattended-upgrades.service')
+APT = '// STQR temporary overlay: explicit apt commands remain available.\nAPT::Periodic::Enable "0";\n'
+DROPIN = '[Unit]\n# STQR temporary overlay: no background package upgrades.\nConditionPathExists=/run/stqr-enable-auto-updates\n'
+
+
+def write(path, value, mode=0o600):
+    if path.is_symlink():
+        raise ValueError('refusing symlink policy target: ' + str(path))
+    data = value.encode()
+    if path.is_file() and path.read_bytes() == data:
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temp = tempfile.mkstemp(prefix='.stqr-', dir=path.parent)
+    try:
+        if path.exists():
+            stat = path.stat()
+            os.fchown(fd, stat.st_uid, stat.st_gid)
+            mode = stat.st_mode & 0o777
+        os.fchmod(fd, mode)
+        with os.fdopen(fd, 'wb') as out:
+            out.write(data)
+        os.replace(temp, path)
+    finally:
+        Path(temp).unlink(missing_ok=True)
+
+
+def read_object(path):
+    if path.is_symlink():
+        raise ValueError('refusing symlink policy target: ' + str(path))
+    result = json.loads(path.read_text())
+    if not isinstance(result, dict):
+        raise ValueError('expected JSON object: ' + str(path))
+    return result
+
+
+def refresh_config(state):
+    for key in ('data', 'changes', 'tasks'):
+        if not isinstance(state.get(key), dict):
+            raise ValueError('unsupported snap state: ' + key)
+    value = state['data']
+    for key in ('config', 'core', 'refresh'):
+        value = value.setdefault(key, {})
+        if not isinstance(value, dict):
+            raise ValueError('unsupported snap refresh configuration')
+    return value
+
+
+def apply(root, mode):
+    if mode not in ('overlay', 'edit'):
+        raise ValueError('invalid claimed boot mode')
+    root = Path(root)
+    record_path = root / RECORD_PATH
+    record = read_object(record_path) if record_path.exists() else None
+    if record is not None and record.get('schema') != 1:
+        raise ValueError('unsupported STQR update policy record')
+    paths = [(root/APT_PATH, APT)] + [
+        (root/'etc/systemd/system'/f'{unit}.d/90-stqr-ephemeral-updates.conf', DROPIN)
+        for unit in UNITS]
+    # Refuse to overwrite another administrator's files, including masks/links.
+    for path, text in paths:
+        if path.is_symlink() or path.exists() and path.read_text() != text:
+            raise ValueError('unexpected STQR policy file: ' + str(path))
+    state_path = root / STATE_PATH
+    snap_installed = (root/'usr/lib/snapd/snapd').is_file() or (root/'usr/bin/snap').is_file()
+    state = None
+    if state_path.exists():
+        state = read_object(state_path)
+    elif mode == 'overlay' and snap_installed:
+        # Exactly the empty checkpoint emitted by snapd State.New/MarshalJSON;
+        # seeded remains ABSENT so devicestate performs its normal initial seed.
+        state = {'data': {}, 'changes': {}, 'tasks': {},
+                 'last-change-id': 0, 'last-task-id': 0, 'last-lane-id': 0}
+    if mode == 'edit':
+        if record is None:
+            return
+        if record.get('snap') and state is not None:
+            refresh = refresh_config(state)
+            if refresh.get('hold') == 'forever':
+                previous = record['snap']
+                if previous['present']:
+                    refresh['hold'] = previous['value']
+                else:
+                    refresh.pop('hold', None)
+                write(state_path, json.dumps(state, separators=(',', ':')) + '\n')
+        for path, _ in paths:
+            path.unlink(missing_ok=True)
+        record_path.unlink()
+        return
+    refresh = refresh_config(state) if state is not None else None
+    if record is None:
+        record = {'schema': 1, 'snap': None}
+        if refresh is not None:
+            record['snap'] = {'present': 'hold' in refresh, 'value': refresh.get('hold')}
+        # Save the previous policy before overriding it; reruns never overwrite
+        # this restoration record with our own 'forever'. No full-state backup.
+        write(record_path, json.dumps(record) + '\n')
+    if refresh is not None:
+        if record['snap'] is None:
+            record['snap'] = {'present': 'hold' in refresh, 'value': refresh.get('hold')}
+            write(record_path, json.dumps(record) + '\n')
+        refresh['hold'] = 'forever'
+        write(state_path, json.dumps(state, separators=(',', ':')) + '\n')
+    for path, text in paths:
+        write(path, text, 0o644)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('mode', choices=('overlay', 'edit'))
+    args = parser.parse_args()
+    apply('/', args.mode)
+
+
+if __name__ == '__main__':
+    main()

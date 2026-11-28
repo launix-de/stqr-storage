@@ -249,6 +249,7 @@ def install_native_kernel(socket, work, version):
         (HERE / 'initramfs/hooks/stqr', '/etc/initramfs-tools/hooks/stqr', '0755'),
         (HERE / 'initramfs/modules.conf', '/etc/initramfs-tools/conf.d/stqr', '0644'),
         (HERE / 'initramfs/prepare-login', '/usr/lib/stqr-networkboot/prepare-login', '0644'),
+        (HERE / 'initramfs/update-policy', '/usr/lib/stqr-networkboot/update-policy', '0644'),
     ):
         commands.append(('upload', origin, target))
         commands.append(('chmod', mode, target))
