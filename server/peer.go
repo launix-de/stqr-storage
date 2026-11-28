@@ -289,7 +289,7 @@ func (p *peerConnection) request(ctx context.Context, opcode uint16, body []byte
 	case result := <-pending.result:
 		if result.err == nil && opcode == client.Ping && len(body) == 8 && len(result.body) == 8 && p.server.scopes != nil {
 			finished := time.Now()
-			p.server.scopes.observePlacementPeer(p.Node, finished.Sub(started), finished)
+			p.server.observePlacementPeer(p.Node, finished.Sub(started), finished)
 		}
 		return result.body, result.err
 	case <-ctx.Done():

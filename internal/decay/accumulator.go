@@ -108,15 +108,7 @@ func (a *Accumulator) Tick(now time.Time, halfLife time.Duration) bool {
 	elapsed := now.Sub(time.Unix(0, lastTime))
 	amount := atomic.SwapInt64(&a.current, 0)
 	rate := float64(amount) / elapsed.Seconds()
-	average := rate
-	if flags&accumulatorKnown != 0 {
-		if halfLife <= 0 {
-			halfLife = DefaultLongHalfLife
-		}
-		alpha := -math.Expm1(-math.Ln2 * elapsed.Seconds() / halfLife.Seconds())
-		old := math.Float64frombits(atomic.LoadUint64(&a.average))
-		average = old + alpha*(rate-old)
-	}
+	average := blendRate(math.Float64frombits(atomic.LoadUint64(&a.average)), rate, flags&accumulatorKnown != 0, elapsed, halfLife)
 	atomic.StoreInt64(&a.last, amount)
 	atomic.StoreInt64(&a.interval, int64(elapsed))
 	atomic.StoreUint64(&a.average, math.Float64bits(average))
@@ -150,29 +142,11 @@ func (a *Accumulator) Snapshot() Snapshot {
 	}
 }
 
-func (a *Accumulator) LastPerSecond() float64 {
-	s := a.Snapshot()
+func (s Snapshot) LastPerSecond() float64 {
 	if !s.Known || s.Interval <= 0 {
 		return 0
 	}
 	return float64(s.Last) / s.Interval.Seconds()
 }
+func (a *Accumulator) LastPerSecond() float64    { return a.Snapshot().LastPerSecond() }
 func (a *Accumulator) AveragePerSecond() float64 { return a.Snapshot().Average }
-
-// restore initializes a private, unused working counter from advisory history.
-// No live counter is copied. Callers own the new counter exclusively until its
-// immutable snapshot has been extracted.
-func (a *Accumulator) restore(s Snapshot) {
-	a.average = math.Float64bits(s.Average)
-	a.last, a.interval, a.current = s.Last, int64(s.Interval), s.Current
-	if !s.Switched.IsZero() {
-		a.switched = s.Switched.UnixNano()
-		a.flags |= accumulatorStarted
-	}
-	if s.Known {
-		a.flags |= accumulatorKnown
-	}
-	if s.Saturated {
-		a.saturated = 1
-	}
-}

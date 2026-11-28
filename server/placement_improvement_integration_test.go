@@ -28,7 +28,7 @@ func TestPlacementImproveTelemetryBound(t *testing.T) {
 		meter := &rangeMetric{}
 		meter.read.Store(1)
 		meter.active.Store(time.Now().UnixNano())
-		r.metrics.Store(rangeMetricKey{bucket, entry.Start, 13}, meter)
+		r.server.statistics.ranges.Store(rangeMetricKey{bucket, entry.Start, 13}, meter)
 	}
 	image, err := buildPlacement([]client.MapPatch{{Membership: 1, Generation: 1, Revision: 1, Bucket: bucket, ToEnd: true, Entries: entries, Addresses: []client.NodeAddress{{Node: r.node, Addresses: []string{"http://node:7419"}}}}})
 	if err != nil {
@@ -44,7 +44,7 @@ func TestPlacementImproveTelemetryBound(t *testing.T) {
 		t.Fatal("invalid bounded snapshot", err)
 	}
 	count := 0
-	r.metrics.Range(func(_, _ any) bool { count++; return true })
+	r.server.statistics.ranges.Range(func(_, _ any) bool { count++; return true })
 	if count != len(entries) {
 		t.Fatal("sampling discarded local optimization counters", count)
 	}
@@ -110,7 +110,7 @@ func TestPlacementImproveUnboundTelemetryCodec(t *testing.T) {
 	if !ok {
 		t.Fatal("missing cohort map")
 	}
-	value, ok := s.scopes.metrics.Load(key)
+	value, ok := s.statistics.ranges.Load(key)
 	if !ok || value.(*rangeMetric).write.Load() != 14 {
 		t.Fatal("cohort traffic was not retained for local optimization")
 	}

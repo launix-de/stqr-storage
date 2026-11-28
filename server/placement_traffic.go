@@ -5,98 +5,27 @@ import (
 	"time"
 
 	"github.com/launix-de/stqr-storage/client"
-	"github.com/launix-de/stqr-storage/internal/decay"
 )
 
-type placementVolumeRate struct {
-	read, write             float64 // captured forecast; the underlying windows decay on use
-	readWindow, writeWindow decay.Windows
-	sampled                 time.Time // local receipt time of the last new source snapshot
-}
-
-func placementVolumeRates(snapshots []client.StatsSnapshot, previous *pgRebuildCatalog, windows ...decay.HalfLives) map[client.ID]placementVolumeRate {
-	h := (decay.HalfLives{}).Normalized()
-	if len(windows) != 0 {
-		h = windows[0].Normalized()
-	}
-	return placementVolumeRatesAt(snapshots, previous, h, time.Time{})
-}
-
-// Production windows use local receipt time. Peer wall clocks may be skewed;
-// their timestamps determine source deltas, never the local decay epoch.
-func placementVolumeRatesAt(snapshots []client.StatsSnapshot, previous *pgRebuildCatalog, h decay.HalfLives, received time.Time) map[client.ID]placementVolumeRate {
-	out := make(map[client.ID]placementVolumeRate)
-	if previous == nil {
-		return out
-	}
-	old := make(map[client.ID]client.StatsSnapshot, len(previous.snapshots))
-	for _, snapshot := range previous.snapshots {
-		old[snapshot.Node] = snapshot
-	}
-	for _, snapshot := range snapshots {
-		prior, ok := old[snapshot.Node]
-		if !ok || prior.BootID != snapshot.BootID {
-			continue
-		}
-		if snapshot.Sequence <= prior.Sequence {
-			for _, v := range snapshot.Volumes {
-				if rate, known := previous.volumeRates[v.ID]; known {
-					out[v.ID] = rate
-				}
-			}
-			continue
-		}
-		if snapshot.CapturedUnixNS <= prior.CapturedUnixNS {
-			for _, v := range snapshot.Volumes {
-				if rate, known := previous.volumeRates[v.ID]; known {
-					out[v.ID] = rate
-				}
-			}
-			continue
-		}
-		if snapshot.CapturedUnixNS > 1<<63-1 || prior.CapturedUnixNS > 1<<63-1 {
-			continue
-		}
-		start, end := time.Unix(0, int64(prior.CapturedUnixNS)), time.Unix(0, int64(snapshot.CapturedUnixNS))
-		volumes := make(map[client.ID]client.VolumeStats, len(prior.Volumes))
-		for _, v := range prior.Volumes {
-			volumes[v.ID] = v
-		}
-		for _, v := range snapshot.Volumes {
-			p, ok := volumes[v.ID]
-			if !ok || v.IO.PhysicalReadBytes < p.IO.PhysicalReadBytes || v.IO.PhysicalWriteBytes < p.IO.PhysicalWriteBytes {
-				continue
-			}
-			read := subtractCapacity(v.IO.PhysicalReadBytes, p.IO.PhysicalReadBytes)
-			write := subtractCapacity(v.IO.PhysicalWriteBytes, p.IO.PhysicalWriteBytes)
-			last, known := previous.volumeRates[v.ID]
-			sampleStart, sampleEnd := start, end
-			if !received.IsZero() {
-				sampleEnd = received
-				sampleStart = received.Add(-end.Sub(start))
-				if !last.sampled.IsZero() {
-					sampleStart = last.sampled
-				}
-			}
-			if known && last.sampled.IsZero() {
-				last.readWindow.SeedRate(sampleStart, last.read, h)
-				last.writeWindow.SeedRate(sampleStart, last.write, h)
-			}
-			observeTrafficFrame(&last.readWindow, &last.writeWindow, sampleStart, sampleEnd, read, write, h)
-			last.sampled = sampleEnd
-			last.read, last.write = last.readWindow.Rates(sampleEnd, h).Peak(), last.writeWindow.Rates(sampleEnd, h).Peak()
-			out[v.ID] = last
-		}
-	}
-	return out
-}
-func placementBackgroundRates(catalog *pgRebuildCatalog, ids []client.ID, h decay.HalfLives, now time.Time) ([]float64, []float64) {
+func (s *Server) placementBackgroundVolumes(ids []client.ID, now time.Time) ([]float64, []float64) {
 	read, write := make([]float64, len(ids)), make([]float64, len(ids))
-	if catalog != nil {
-		for i, id := range ids {
-			rate := catalog.volumeRates[id]
-			read[i], write[i] = rate.readWindow.Rates(now, h).Peak(), rate.writeWindow.Rates(now, h).Peak()
+	type source struct{ node, boot client.ID }
+	sources := make(map[client.ID]source)
+	if s.scopes != nil {
+		if catalog := s.scopes.pgCatalog.Load(); catalog != nil {
+			for _, snap := range catalog.snapshots {
+				for _, v := range snap.Volumes {
+					sources[v.ID] = source{snap.Node, snap.BootID}
+				}
+			}
 		}
+	}
+	for i, id := range ids {
+		ref, ok := sources[id]
+		if !ok {
+			ref = source{s.quotaNode, s.boot}
+		}
+		read[i], write[i], _ = s.statistics.volumeForecast(ref.node, ref.boot, id, now)
 	}
 	return read, write
 }
@@ -105,5 +34,5 @@ func (r *rangeManager) placementBackground(destinations []rangeDestination) ([]f
 	for i, d := range destinations {
 		ids[i] = d.volume.ID
 	}
-	return placementBackgroundRates(r.pgCatalog.Load(), ids, r.server.placementHalfLives(), time.Now())
+	return r.server.placementBackgroundVolumes(ids, time.Now())
 }

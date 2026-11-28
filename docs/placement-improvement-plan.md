@@ -54,8 +54,11 @@ The default equal-weight byte-equivalent criteria are:
 - **Move:** newly copied payload and retry/abort metadata relative to CURRENT,
   crediting bytes already at a destination.
 - **Future:** squared physical utilization plus four times predicted shortfall
-  above 85% capacity over a 30-second horizon. Measured per-range growth follows
-  its data; bulk migration growth is not extrapolated as application growth.
+  above 85% capacity over a 30-second horizon. Growth comes from the central
+  positive-allocation measurements; a range receives its bucket/volume hash-width
+  share. This measures physical allocation, including metadata and transfers,
+  rather than inventing a per-range application-growth history. The pool reserve
+  bounds this advisory forecast.
 - **Traffic:** migration, client and replication byte-distance costs share one
   coefficient. Optional measured RTT/throughput profiles price candidate paths;
   measured per-volume read/write pressure and capacity-weighted primary

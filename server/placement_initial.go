@@ -44,7 +44,7 @@ func (r *rangeManager) initialBucketLocations(d BucketDescription, membership cl
 	if d.Policy.StorageStrategy == "ram" {
 		input.Work[0].Growth = 0
 	}
-	input.BackgroundRead, input.BackgroundWrite = placementBackgroundRates(r.pgCatalog.Load(), ids, r.server.placementHalfLives(), time.Now())
+	input.BackgroundRead, input.BackgroundWrite = r.server.placementBackgroundVolumes(ids, time.Now())
 	ctx := r.server.ctx
 	if ctx == nil {
 		ctx = context.Background()

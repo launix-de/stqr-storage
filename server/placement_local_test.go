@@ -14,10 +14,7 @@ func TestSelectVolumeLoadPreservesExistingStriping(t *testing.T) {
 	s, b, vs, key := capacitySelectionFixture(t, 3)
 	s.scopes = &rangeManager{server: s}
 	now := time.Now()
-	h := s.placementHalfLives()
-	hot := placementVolumeRate{}
-	hot.readWindow.AddInterval(now.Add(-time.Second), now, 128<<20, h)
-	s.scopes.pgCatalog.Store(&pgRebuildCatalog{volumeRates: map[client.ID]placementVolumeRate{client.ID(vs[0].Identity().VolumeID): hot}})
+	seedStatisticsVolume(s, client.ID(vs[0].Identity().VolumeID), now, 128<<20)
 	// The most free disk is hot; spare independent HDDs remain eligible.
 	if err := vs[1].SetGuaranteedReserve(64 << 10); err != nil {
 		t.Fatal(err)

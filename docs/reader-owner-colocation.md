@@ -18,10 +18,12 @@ rates. Overflow is observable rather than wrapping.
 The first tick establishes a baseline; the first completed interval seeds the
 mean, without inventing a week of zero prehistory. Later ticks blend with
 `alpha = 1 - exp(-ln(2) * elapsed / halfLife)`. Duplicate/backwards ticks consume
-nothing; idle ticks contribute measured zero. `Windows` applies two instances of
-this same counter to identical integer interval deltas. Forecast queries preview
-idle decay on a value copy, so polling cannot advance stored history. Fractional
-path distances use a separate weighted `Mean`, rather than integer event units.
+nothing; idle ticks contribute measured zero. `Series` owns one current counter
+and one completed interval. Its weekly mean and configured short/long forecasts
+consume that same frame through the shared decay kernel; they never maintain
+separate delta baselines or sampling clocks. Reads return completed values and
+do not tick, estimate elapsed intervals or preview new decay. Fractional path
+observations use a weighted `Mean` in the same library/kernel.
 
 Node YAML and `NodeConfigSet` accept:
 
@@ -34,9 +36,20 @@ placement_statistics:
 Zero fields select these defaults. Negative, overflowing or inverted durations
 are rejected. Changing the kernel forgets advisory history; cumulative wire
 counters and ownership are unaffected. The shared implementation covers range
-traffic, volume traffic, range/capacity growth and observed handoff duration.
-Volume windows use local receipt time; remote wall clocks do not supply the
-local decay epoch. Snapshot boot identity and sequence prevent replayed load.
+traffic, volume traffic, allocation growth and observed handoff duration. A
+central `Server.statistics` book owns all histories. Peer observations enter it
+once on reception; local observations enter once during telemetry publication.
+Peer windows use local receipt time; source clocks only reject stale/replayed
+samples, never define the local decay epoch. Boot identity prevents cross-process
+subtraction. Planning workers reuse published snapshots and rate views.
+
+The old planner volume sampler, per-range estimated-growth cache, capacity-goal
+growth sampler and reader-on-query sampling are removed. Capacity goals retain
+only their hysteresis target. Range growth is a hash-width share of centrally
+measured bucket/volume allocation growth; changing a policy, splitting a range or
+calling the planner more often cannot create a new growth measurement.
+
+The source-to-consumer inventory is [statistics-dataflow.md](statistics-dataflow.md).
 
 ## Dashboard intervals and weekly averages
 

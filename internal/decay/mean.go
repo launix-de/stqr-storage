@@ -3,7 +3,6 @@ package decay
 
 import (
 	"math"
-	"math/bits"
 	"time"
 )
 
@@ -30,82 +29,6 @@ type Values struct{ Short, Long float64 }
 // The windows stay separate so callers can instead require sustained demand.
 func (v Values) Peak() float64 { return math.Max(v.Short, v.Long) }
 
-// Windows applies two half-lives to the same integer interval observations.
-// Both windows use Accumulator's Tick implementation. Callers synchronize all
-// access. Only immutable frame snapshots are copied, never live atomics.
-type Windows struct {
-	short, long Snapshot
-	halfLives   HalfLives
-}
-
-func (w *Windows) configure(h HalfLives) {
-	if w.halfLives != h {
-		*w = Windows{halfLives: h}
-	}
-}
-
-// SeedRate imports a previously measured forecast. A changed kernel forgets
-// advisory history instead of reinterpreting it under another half-life.
-func (w *Windows) SeedRate(now time.Time, rate float64, h HalfLives) {
-	if !valid(rate) || now.IsZero() {
-		return
-	}
-	w.configure(h.Normalized())
-	w.short = Snapshot{Average: rate, Switched: now, Known: true}
-	w.long = w.short
-}
-
-// AddInterval records integer events distributed over [start,end]. Replayed or
-// backwards frames cannot add load. For a partially overlapping source frame,
-// only its new suffix is admitted; that prorating necessarily estimates where
-// the frame's events occurred but uses integer arithmetic throughout.
-func (w *Windows) AddInterval(start, end time.Time, amount int64, h HalfLives) {
-	if amount < 0 || !end.After(start) || start.IsZero() || end.IsZero() {
-		return
-	}
-	h = h.Normalized()
-	w.configure(h)
-	at := w.short.Switched
-	if !at.IsZero() {
-		if !end.After(at) {
-			return
-		}
-		if start.Before(at) {
-			hi, lo := bits.Mul64(uint64(amount), uint64(end.Sub(at)))
-			scaled, _ := bits.Div64(hi, lo, uint64(end.Sub(start)))
-			amount = int64(scaled)
-			start = at
-		}
-	}
-	w.short = intervalFrame(w.short, start, end, amount, h.Short)
-	w.long = intervalFrame(w.long, start, end, amount, h.Long)
-}
-
-// Rates previews idle decay on a value copy. Querying later than the next real
-// sample does not advance either stored window or drop pending observations.
-func (w Windows) Rates(now time.Time, h HalfLives) Values {
-	h = h.Normalized()
-	w.configure(h)
-	return Values{previewFrame(w.short, now, h.Short), previewFrame(w.long, now, h.Long)}
-}
-
-// Working counters are private to this call. Snapshot import/export preserves
-// value semantics for immutable placement catalogs and speculative forecasts.
-func intervalFrame(frame Snapshot, start, end time.Time, amount int64, half time.Duration) Snapshot {
-	var counter Accumulator
-	counter.restore(frame)
-	counter.Tick(start, half)
-	counter.Add(amount)
-	counter.Tick(end, half)
-	return counter.Snapshot()
-}
-func previewFrame(frame Snapshot, now time.Time, half time.Duration) float64 {
-	var counter Accumulator
-	counter.restore(frame)
-	counter.Tick(now, half)
-	return counter.AveragePerSecond()
-}
-
 func valid(v float64) bool { return v >= 0 && !math.IsNaN(v) && !math.IsInf(v, 0) }
 func finiteAdd(a, b float64) float64 {
 	if b > math.MaxFloat64-a {
@@ -120,7 +43,8 @@ func finiteProduct(a, b float64) float64 {
 	return a * b
 }
 func factor(elapsed, halfLife time.Duration) float64 {
-	return math.Exp2(-float64(elapsed) / float64(halfLife))
+	retained, _ := decayWeights(elapsed, halfLife)
+	return retained
 }
 
 // weightedSum is private and distinct from event counters: fractional network

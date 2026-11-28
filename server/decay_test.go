@@ -46,31 +46,30 @@ func TestDecaySettingsDefaultsAndValidation(t *testing.T) {
 }
 
 func TestDecayVolumeSnapshotCadenceAndReplay(t *testing.T) {
-	h := decay.HalfLives{Short: time.Second, Long: 10 * time.Second}
-	node, boot, vol := client.ID{1}, client.ID{2}, client.ID{3}
-	base := time.Unix(100, 0)
-	snap := func(seq uint64, seconds int64, bytes uint64) client.StatsSnapshot {
-		return client.StatsSnapshot{Node: node, BootID: boot, Sequence: seq, CapturedUnixNS: uint64(base.Add(time.Duration(seconds) * time.Second).UnixNano()), Volumes: []client.VolumeStats{{ID: vol, IO: client.IOStats{PhysicalReadBytes: bytes}}}}
+	h := decay.HalfLives{Short: 3 * time.Second, Long: 10 * time.Second}
+	start := time.Unix(100, 0)
+	node, boot, disk := client.ID{1}, client.ID{2}, client.ID{3}
+	sample := func(seq uint64, dt time.Duration, amount uint64) client.StatsSnapshot {
+		return client.StatsSnapshot{Node: node, BootID: boot, Sequence: seq, CapturedUnixNS: uint64(start.Add(dt).UnixNano()), Volumes: []client.VolumeStats{{ID: disk, IO: client.IOStats{PhysicalReadBytes: amount}}}}
 	}
-	initial := snap(1, 0, 0)
-	prior := &pgRebuildCatalog{snapshots: []client.StatsSnapshot{initial}}
-	last := snap(2, 2, 200)
-	coarse := placementVolumeRates([]client.StatsSnapshot{last}, prior, h)[vol]
-	middle := snap(2, 1, 100)
-	fine := placementVolumeRates([]client.StatsSnapshot{middle}, prior, h)
-	fine = placementVolumeRates([]client.StatsSnapshot{snap(3, 2, 200)}, &pgRebuildCatalog{snapshots: []client.StatsSnapshot{middle}, volumeRates: fine}, h)
-	if math.Abs(coarse.read-fine[vol].read) > 1e-10 || math.Abs(coarse.read-100) > 1e-10 {
-		t.Fatal(coarse.read, fine[vol].read)
+	var coarse, fine statisticsBook
+	coarse.observe(sample(1, 0, 0), nil, h)
+	fine.observe(sample(1, 0, 0), nil, h)
+	coarse.observe(sample(3, 6*time.Second, 600), nil, h)
+	fine.observe(sample(2, 3*time.Second, 300), nil, h)
+	fine.observe(sample(3, 6*time.Second, 600), nil, h)
+	a, _, _ := coarse.volumeForecast(node, boot, disk, start.Add(6*time.Second))
+	b, _, _ := fine.volumeForecast(node, boot, disk, start.Add(6*time.Second))
+	if a != 100 || math.Abs(a-b) > 1e-10 {
+		t.Fatal(a, b)
 	}
-	replay := placementVolumeRates([]client.StatsSnapshot{last}, &pgRebuildCatalog{snapshots: []client.StatsSnapshot{last}, volumeRates: map[client.ID]placementVolumeRate{vol: coarse}}, h)
-	if replay[vol].read != coarse.read {
-		t.Fatal("snapshot counted twice", replay[vol].read)
+	fine.observe(sample(3, 6*time.Second, 600), nil, h)
+	if r, _, _ := fine.volumeForecast(node, boot, disk, start.Add(6*time.Second)); r != b {
+		t.Fatal("replay", r)
 	}
-	if got := coarse.readWindow.Rates(base.Add(3*time.Second), h).Short; math.Abs(got-50) > 1e-10 {
-		t.Fatal("idle snapshot load did not decay", got)
-	}
-	last.BootID = client.ID{4}
-	if rates := placementVolumeRates([]client.StatsSnapshot{last}, prior, h); len(rates) != 0 {
-		t.Fatal("previous boot supplied load", rates)
+	fine.observe(sample(4, 9*time.Second, 600), nil, h)
+	short := fine.volumes[disk.String()].traffic[0].window.Forecast().Short
+	if math.Abs(short-50) > 1e-10 {
+		t.Fatal("idle tick did not decay", short)
 	}
 }

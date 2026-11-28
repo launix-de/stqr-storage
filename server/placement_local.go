@@ -53,11 +53,7 @@ func (s *Server) initialVolumePlacement(bucket client.ID, class volume.Class, vo
 		return nil, volume.ErrFull
 	}
 	input := inputForInitialPlacement(len(options))
-	var catalog *pgRebuildCatalog
-	if s.scopes != nil {
-		catalog = s.scopes.pgCatalog.Load()
-	}
-	input.BackgroundRead, input.BackgroundWrite = placementBackgroundRates(catalog, ids, s.placementHalfLives(), time.Now())
+	input.BackgroundRead, input.BackgroundWrite = s.placementBackgroundVolumes(ids, time.Now())
 	ctx := s.ctx
 	if ctx == nil {
 		ctx = context.Background()

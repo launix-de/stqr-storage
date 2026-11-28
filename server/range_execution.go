@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"sync/atomic"
+	"time"
 
 	"github.com/launix-de/stqr-storage/client"
 	"github.com/launix-de/stqr-storage/volume"
@@ -79,7 +80,12 @@ func (r *rangeManager) executeMove(ctx context.Context, p rangePlan, foreground 
 	if finished {
 		return r.finishPG(ctx, p)
 	}
-	return r.moveSerial(context.WithValue(ctx, rangeExecutionKey{}, e), p)
+	started := time.Now()
+	err := r.moveSerial(context.WithValue(ctx, rangeExecutionKey{}, e), p)
+	if err == nil {
+		r.server.statistics.observeMove(time.Now(), time.Since(started), r.server.placementHalfLives())
+	}
+	return err
 }
 
 // Only borrow an already bound diff that actually retires the full volume's

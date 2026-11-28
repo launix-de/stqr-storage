@@ -46,12 +46,12 @@ func BenchmarkStatisticsTraffic(b *testing.B) {
 func BenchmarkStatisticsRate(b *testing.B) {
 	var counter decay.Accumulator
 	start := time.Unix(100, 0)
-	counter.Tick(start, defaultPlacementStatsHalfLife)
+	counter.Tick(start, decay.DefaultLongHalfLife)
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		counter.Add(200)
-		counter.Tick(start.Add(time.Duration(i+1)*time.Second), defaultPlacementStatsHalfLife)
+		counter.Tick(start.Add(time.Duration(i+1)*time.Second), decay.DefaultLongHalfLife)
 		statisticsRateSink = counter.AveragePerSecond()
 	}
 }

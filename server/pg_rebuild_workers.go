@@ -12,11 +12,10 @@ import (
 type pgRebuildWorker struct{ wake, stop chan struct{} }
 
 type pgRebuildCatalog struct {
-	groups      map[string][]BucketDescription
-	captured    time.Time
-	snapshots   []client.StatsSnapshot
-	seen        map[client.ID]time.Time
-	volumeRates map[client.ID]placementVolumeRate
+	groups    map[string][]BucketDescription
+	captured  time.Time
+	snapshots []client.StatsSnapshot
+	seen      map[client.ID]time.Time
 }
 
 // Collect catalog/telemetry once per node tick; PG workers never enumerate the
@@ -40,7 +39,11 @@ func (r *rangeManager) startPGWorkers() {
 			}
 			now := time.Now()
 			catalog := &pgRebuildCatalog{groups: map[string][]BucketDescription{"": nil}, captured: now, seen: map[client.ID]time.Time{r.node: now}}
-			catalog.snapshots = []client.StatsSnapshot{s.CollectStats(client.StatsFilter{IncludeRanges: true})}
+			local := s.latest.Load()
+			if local == nil {
+				continue
+			}
+			catalog.snapshots = []client.StatsSnapshot{*local}
 			s.peerStatsMu.RLock()
 			for _, p := range s.peerStats {
 				if p.online && p.snapshot != nil && p.snapshot.BootID == p.connection.Boot && p.connection.Capabilities&client.CapabilityRangeHandoff != 0 {
@@ -49,7 +52,6 @@ func (r *rangeManager) startPGWorkers() {
 				}
 			}
 			s.peerStatsMu.RUnlock()
-			catalog.volumeRates = placementVolumeRatesAt(catalog.snapshots, r.pgCatalog.Load(), s.placementHalfLives(), now)
 			for _, d := range s.bucketSnapshots() {
 				if d.ID == systemBucket.String() || d.DeletionComplete || d.State == BucketDeleting {
 					continue
@@ -146,16 +148,9 @@ func (r *rangeManager) runPGWorker(group string, worker pgRebuildWorker) {
 		var err error
 		if ok {
 			ctx, cancel := context.WithCancel(s.ctx)
-			started := time.Now()
 			err = r.move(ctx, plan)
 			cancel()
 			if err == nil {
-				h := s.placementHalfLives()
-				r.mu.Lock()
-				finished := time.Now()
-				r.capacityMoveMean.Observe(finished, float64(finished.Sub(started)), 1, h)
-				r.capacityMoveTime = time.Duration(r.capacityMoveMean.Values(finished, h).Peak())
-				r.mu.Unlock()
 				select {
 				case worker.wake <- struct{}{}:
 				default:

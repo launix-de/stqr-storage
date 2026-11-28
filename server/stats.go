@@ -16,6 +16,15 @@ import (
 // CollectStats is shared by dashboard and placement planning. The peer transport
 // pushes these same source-bound snapshots; liveness never changes membership.
 func (s *Server) CollectStats(filter client.StatsFilter) client.StatsSnapshot {
+	return s.collectStats(filter, true)
+}
+
+// resourceSnapshot projects authoritative RAM capacity/accounting facts through
+// the same builder. It neither measures OS activity nor records any time series.
+func (s *Server) resourceSnapshot() client.StatsSnapshot {
+	return s.collectStats(client.StatsFilter{}, false)
+}
+func (s *Server) collectStats(filter client.StatsFilter, counters bool, native ...map[string]volume.IOStats) client.StatsSnapshot {
 	// Pin the configuration/cohort and retired counters together, then release
 	// the node lock before native Volume accessors can wait for storage locks.
 	// Otherwise a writer holding a Volume handle and needing node admission can
@@ -38,7 +47,11 @@ func (s *Server) CollectStats(filter client.StatsFilter) client.StatsSnapshot {
 	}
 	s.mu.RUnlock()
 	node, _ := parseID(cfgNode.ID)
-	snap := client.StatsSnapshot{Schema: 1, Node: client.ID(node), BootID: s.boot, Sequence: s.sequence.Add(1), CapturedUnixNS: uint64(time.Now().UnixNano()), WindowNS: uint64(3 * time.Second), MembershipEpoch: 1, Generation: generation, MapRevision: generation, Volumes: []client.VolumeStats{}, Buckets: []client.BucketStats{}, Ranges: []client.RangeStats{}}
+	sequence := s.sequence.Load()
+	if counters {
+		sequence = s.sequence.Add(1)
+	}
+	snap := client.StatsSnapshot{Schema: 1, Node: client.ID(node), BootID: s.boot, Sequence: sequence, CapturedUnixNS: uint64(time.Now().UnixNano()), WindowNS: uint64(3 * time.Second), MembershipEpoch: 1, Generation: generation, MapRevision: generation, Volumes: []client.VolumeStats{}, Buckets: []client.BucketStats{}, Ranges: []client.RangeStats{}}
 	snap.IO = retired
 	if scopes != nil {
 		if activity := scopes.activity.Load(); activity != nil && activity.Active > 0 {
@@ -99,15 +112,17 @@ func (s *Server) CollectStats(filter client.StatsFilter) client.StatsSnapshot {
 		snap.NodeState = 2         // runtime pause only; never persistent drain/admin intent
 		snap.ReasonBits |= 1 << 10 // accounting/recovery warmup
 	}
-	var usage syscall.Rusage
-	if syscall.Getrusage(syscall.RUSAGE_SELF, &usage) == nil {
-		snap.CPUTimeNS = uint64(usage.Utime.Nano() + usage.Stime.Nano())
-	}
-	if b, e := os.ReadFile("/proc/self/statm"); e == nil {
-		f := strings.Fields(string(b))
-		if len(f) > 1 {
-			pages, _ := strconv.ParseUint(f[1], 10, 64)
-			snap.ResidentBytes = pages * uint64(os.Getpagesize())
+	if counters {
+		var usage syscall.Rusage
+		if syscall.Getrusage(syscall.RUSAGE_SELF, &usage) == nil {
+			snap.CPUTimeNS = uint64(usage.Utime.Nano() + usage.Stime.Nano())
+		}
+		if b, e := os.ReadFile("/proc/self/statm"); e == nil {
+			f := strings.Fields(string(b))
+			if len(f) > 1 {
+				pages, _ := strconv.ParseUint(f[1], 10, 64)
+				snap.ResidentBytes = pages * uint64(os.Getpagesize())
+			}
 		}
 	}
 	if !matches(filter.Nodes, snap.Node) {
@@ -115,6 +130,9 @@ func (s *Server) CollectStats(filter client.StatsFilter) client.StatsSnapshot {
 	}
 	for _, m := range volumes {
 		v := m.store.Stats()
+		if len(native) > 0 {
+			native[0][client.ID(v.Identity.VolumeID).String()] = v.IO
+		}
 		id := client.ID(v.Identity.VolumeID)
 		io := volumeAccessIO(v.IO)
 		state := uint8(m.store.State())
@@ -142,7 +160,7 @@ func (s *Server) CollectStats(filter client.StatsFilter) client.StatsSnapshot {
 		}
 	}
 	s.collectQuotaStats(&snap, filter)
-	if filter.IncludeRanges && scopes != nil {
+	if counters && filter.IncludeRanges && scopes != nil {
 		scopes.collectRangeTelemetry(&snap)
 	}
 	sort.Slice(snap.Volumes, func(i, j int) bool { return snap.Volumes[i].ID.String() < snap.Volumes[j].ID.String() })
@@ -188,8 +206,9 @@ func filterSnapshot(snap client.StatsSnapshot, f client.StatsFilter) client.Stat
 }
 func (s *Server) publishStats() {
 	s.publishVersions()
-	snap := s.CollectStats(client.StatsFilter{IncludeRanges: true})
-	s.observeDashboardRates(snap)
+	native := make(map[string]volume.IOStats)
+	snap := s.collectStats(client.StatsFilter{IncludeRanges: true}, true, native)
+	s.observeStatistics(snap, native)
 	s.latest.Store(&snap)
 	s.broadcastStats(snap)
 }

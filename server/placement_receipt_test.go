@@ -2,36 +2,36 @@
 package server
 
 import (
+	"github.com/launix-de/stqr-storage/client"
+	"github.com/launix-de/stqr-storage/internal/decay"
 	"math"
 	"testing"
 	"time"
-
-	"github.com/launix-de/stqr-storage/client"
-	"github.com/launix-de/stqr-storage/internal/decay"
 )
 
 func TestPlacementVolumeClockSkewAndSequence(t *testing.T) {
-	h := decay.HalfLives{Short: time.Second, Long: time.Hour}
+	h := decay.HalfLives{Short: 3 * time.Second, Long: time.Hour}
 	local := time.Unix(100000, 0)
-	node, vol := client.ID{1}, client.ID{2}
-	snapshot := func(seq uint64, remote time.Time, amount uint64) client.StatsSnapshot {
-		return client.StatsSnapshot{Node: node, BootID: node, Sequence: seq, CapturedUnixNS: uint64(remote.UnixNano()), Volumes: []client.VolumeStats{{ID: vol, IO: client.IOStats{PhysicalReadBytes: amount}}}}
-	}
+	node, boot, disk := client.ID{1}, client.ID{2}, client.ID{3}
 	for _, offset := range []time.Duration{-12 * time.Hour, 12 * time.Hour} {
-		first := snapshot(1, local.Add(offset), 0)
-		second := snapshot(2, local.Add(offset+time.Second), 100)
-		rates := placementVolumeRatesAt([]client.StatsSnapshot{second}, &pgRebuildCatalog{snapshots: []client.StatsSnapshot{first}}, h, local.Add(time.Second))
-		rate := rates[vol]
-		if got := rate.readWindow.Rates(local.Add(time.Second), h).Short; math.Abs(got-100) > 1e-9 {
-			t.Fatal("remote clock changed load", offset, got)
+		var book statisticsBook
+		sample := func(seq uint64, dt time.Duration, amount uint64) client.StatsSnapshot {
+			return client.StatsSnapshot{Node: node, BootID: boot, Sequence: seq, CapturedUnixNS: uint64(local.Add(offset + dt).UnixNano()), Volumes: []client.VolumeStats{{ID: disk, IO: client.IOStats{PhysicalReadBytes: amount}}}}
 		}
-		if got := rate.readWindow.Rates(local.Add(2*time.Second), h).Short; math.Abs(got-50) > 1e-9 {
-			t.Fatal("local idle decay failed", offset, got)
+		book.observePeer(sample(1, 0, 0), local, h)
+		book.observePeer(sample(2, 3*time.Second, 300), local.Add(3*time.Second), h)
+		r, _, _ := book.volumeForecast(node, boot, disk, local.Add(3*time.Second))
+		if r != 100 {
+			t.Fatal(offset, r)
 		}
-		old := snapshot(1, local.Add(offset+2*time.Second), 10000)
-		replay := placementVolumeRatesAt([]client.StatsSnapshot{old}, &pgRebuildCatalog{snapshots: []client.StatsSnapshot{second}, volumeRates: rates}, h, local.Add(2*time.Second))
-		if got := replay[vol].readWindow.Rates(local.Add(2*time.Second), h).Short; math.Abs(got-50) > 1e-9 {
-			t.Fatal("old sequence injected load", got)
+		book.observePeer(sample(1, 4*time.Second, 100000), local.Add(4*time.Second), h)
+		r, _, _ = book.volumeForecast(node, boot, disk, local.Add(4*time.Second))
+		if r != 100 {
+			t.Fatal("old sequence", r)
+		}
+		book.observePeer(sample(3, 6*time.Second, 300), local.Add(6*time.Second), h)
+		if r := book.peers[node].volumes[disk.String()].traffic[0].window.Forecast().Short; math.Abs(r-50) > 1e-9 {
+			t.Fatal("idle", r)
 		}
 	}
 }

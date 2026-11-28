@@ -14,7 +14,7 @@ import (
 func TestDashboardRatesCompletedFrames(t *testing.T) {
 	start := time.Unix(100, 0)
 	node, boot, disk, bucket, user := client.ID{1}, client.ID{2}, client.ID{3}, client.ID{4}, client.ID{5}
-	var book dashboardRateBook
+	var book statisticsBook
 	sample := func(now time.Time, bytes uint64) {
 		io := client.IOStats{PhysicalReadBytes: bytes, PhysicalWriteBytes: 2 * bytes, LogicalReadBytes: 3 * bytes, LogicalWriteBytes: 4 * bytes}
 		book.observe(client.StatsSnapshot{Node: node, BootID: boot, CapturedUnixNS: uint64(now.UnixNano()), IO: io, Volumes: []client.VolumeStats{{ID: disk, IO: io}}, Buckets: []client.BucketStats{{ID: bucket, IO: io}}}, map[string]client.IOStats{user.String(): io})
@@ -60,7 +60,7 @@ func TestDashboardRatesCompletedFrames(t *testing.T) {
 }
 
 func TestDashboardRatesPrecisionResetAndBoot(t *testing.T) {
-	var counter dashboardRateCounter
+	var counter statisticsCounter
 	now := time.Unix(100, 0)
 	base := uint64(1<<60 + 11)
 	counter.observe(now, base, false)
@@ -80,7 +80,7 @@ func TestDashboardRatesPrecisionResetAndBoot(t *testing.T) {
 	if counter.rate() != nil {
 		t.Fatal("unrepresentable amount invented a valid rate")
 	}
-	var book dashboardRateBook
+	var book statisticsBook
 	snap := client.StatsSnapshot{Node: client.ID{1}, BootID: client.ID{2}, CapturedUnixNS: uint64(now.UnixNano())}
 	book.observe(snap, nil)
 	snap.CapturedUnixNS += uint64(3 * time.Second)
@@ -143,7 +143,7 @@ func TestDashboardRatesNativeAuthorization(t *testing.T) {
 	if checkPeerOperation(s.protocolVersion(), legacyProfile(), client.StatsRatesGet) == nil {
 		t.Fatal("legacy peers assumed to support new rate frames")
 	}
-	s.dashboardRates.observe(client.StatsSnapshot{CapturedUnixNS: uint64(time.Now().Add(-20 * time.Second).UnixNano())}, nil)
+	s.statistics.observe(client.StatsSnapshot{CapturedUnixNS: uint64(time.Now().Add(-20 * time.Second).UnixNano())}, nil)
 	m.Body = e.B
 	if _, status := s.dispatchAs(m, nil, admin); status != 503 {
 		t.Fatal("stale publisher renewed a cached rate frame", status)

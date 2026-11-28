@@ -17,14 +17,12 @@ type rangeMetricKey struct {
 	bits   uint16
 }
 type rangeMetric struct {
-	readers                 map[placementReaderKey]*placementReaderTraffic
-	read, write             atomic.Uint64
-	active                  atomic.Int64
-	mu                      sync.Mutex
-	readWindow, writeWindow decay.Windows
-	sampled                 time.Time
-	lastRead, lastWrite     uint64
-	readRate, writeRate     float64
+	readers                   map[placementReaderKey]*placementReaderTraffic
+	read, write               atomic.Uint64
+	active                    atomic.Int64
+	mu                        sync.Mutex
+	readCounter, writeCounter statisticsCounter
+	sampled                   time.Time
 }
 
 // Range telemetry is advisory. Keep snapshots comfortably below the existing
@@ -33,11 +31,11 @@ type rangeMetric struct {
 const maxRangeTelemetry = 4096
 
 func (b *Bucket) recordRangeTraffic(p principal, id volume.ObjectID, read, write uint64) {
-	if p.internalCoordination || b.server == nil || b.server.scopes == nil || p.cowInternal || p.ClusterPeer || read == 0 && write == 0 {
+	if p.internalCoordination || b.server == nil || p.cowInternal || p.ClusterPeer || read == 0 && write == 0 {
 		return
 	}
-	r := b.server.scopes
-	image := b.server.placement.Load()
+	s := b.server
+	image := s.placement.Load()
 	if image == nil {
 		return
 	}
@@ -46,9 +44,9 @@ func (b *Bucket) recordRangeTraffic(p principal, id volume.ObjectID, read, write
 		return
 	}
 	now := time.Now()
-	value, exists := r.metrics.Load(key)
+	value, exists := s.statistics.ranges.Load(key)
 	if !exists {
-		value, _ = r.metrics.LoadOrStore(key, &rangeMetric{sampled: now})
+		value, _ = s.statistics.ranges.LoadOrStore(key, &rangeMetric{sampled: now})
 	}
 	m := value.(*rangeMetric)
 	m.read.Add(read)
@@ -57,54 +55,84 @@ func (b *Bucket) recordRangeTraffic(p principal, id volume.ObjectID, read, write
 	recordPlacementReader(m, key, p, read, write, now)
 }
 
-func (r *rangeManager) rangeWorkload(key rangeMetricKey, h decay.HalfLives) (float64, float64) {
-	value, ok := r.metrics.Load(key)
+// Range and reader sampling belong to central telemetry, never a planner read.
+func (m *rangeMetric) tick(now time.Time, h decay.HalfLives) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.sampled.IsZero() {
+		m.sampled = now
+	}
+	for _, counter := range []*statisticsCounter{&m.readCounter, &m.writeCounter} {
+		if !counter.started {
+			counter.observe(m.sampled, 0, false, h)
+		}
+	}
+	tick := now.Sub(m.readCounter.window.Snapshot().Switched) >= dashboardRateInterval
+	m.readCounter.observe(now, m.read.Load(), tick, h)
+	m.writeCounter.observe(now, m.write.Load(), tick, h)
+	for _, traffic := range m.readers {
+		if h.Long <= time.Duration((1<<63-1)/4) && now.Sub(traffic.active) > h.Long*4 {
+			continue
+		}
+		if !traffic.readCounter.started {
+			traffic.readCounter.observe(traffic.sampled, 0, false, h)
+			traffic.writeCounter.observe(traffic.sampled, 0, false, h)
+		}
+		tick := now.Sub(traffic.readCounter.window.Snapshot().Switched) >= dashboardRateInterval
+		traffic.readCounter.observe(now, traffic.read, tick, h)
+		traffic.writeCounter.observe(now, traffic.write, tick, h)
+	}
+}
+func (m *rangeMetric) workload() (float64, float64) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.readCounter.window.Forecast().Peak(), m.writeCounter.window.Forecast().Peak()
+}
+func (b *statisticsBook) rangeWorkload(key rangeMetricKey) (float64, float64) {
+	value, ok := b.ranges.Load(key)
 	if !ok {
 		return 0, 0
 	}
-	return value.(*rangeMetric).workloadWindows(time.Now(), h)
+	return value.(*rangeMetric).workload()
 }
-func (m *rangeMetric) workload(now time.Time, halfLife time.Duration) (float64, float64) {
-	return m.workloadWindows(now, decay.HalfLives{Short: halfLife, Long: halfLife})
-}
-func (m *rangeMetric) workloadWindows(now time.Time, h decay.HalfLives) (float64, float64) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	read, write := m.read.Load(), m.write.Load()
-	if m.sampled.IsZero() {
-		m.sampled, m.lastRead, m.lastWrite = now, read, write
-		return 0, 0
+func (b *statisticsBook) tickRanges(s *Server, now time.Time, h decay.HalfLives) {
+	s.prunePlacementReaders(now)
+	image := s.placement.Load()
+	if image == nil {
+		return
 	}
-	if now.Sub(m.sampled) >= time.Second {
-		if read < m.lastRead || write < m.lastWrite {
-			m.readWindow, m.writeWindow = decay.Windows{}, decay.Windows{}
+	b.mu.Lock()
+	node := b.node
+	b.mu.Unlock()
+	b.ranges.Range(func(k, v any) bool {
+		key := k.(rangeMetricKey)
+		entry, ok := image.lookup(key.bucket, key.start)
+		if !ok || entry.Start != key.start || entry.PrefixBits != key.bits {
+			b.ranges.Delete(key)
+			return true
 		}
-		observeTrafficFrame(&m.readWindow, &m.writeWindow, m.sampled, now, subtractCapacity(read, m.lastRead), subtractCapacity(write, m.lastWrite), h)
-		m.readRate, m.writeRate = m.readWindow.Rates(now, h).Peak(), m.writeWindow.Rates(now, h).Peak()
-		m.sampled, m.lastRead, m.lastWrite = now, read, write
-	}
-	return m.readRate, m.writeRate
+		local := false
+		for _, location := range entry.Locations {
+			local = local || location.Node == node
+		}
+		if !local {
+			b.ranges.Delete(key)
+			return true
+		}
+		v.(*rangeMetric).tick(now, h)
+		return true
+	})
 }
 
 func (r *rangeManager) collectRangeTelemetry(snap *client.StatsSnapshot) {
-	r.prunePlacementReaders(time.Now())
 	image := r.server.placement.Load()
 	if image == nil {
 		return
 	}
-	r.measurements.Range(func(k, v any) bool {
-		key := k.(rangeMetricKey)
-		entry, ok := image.lookup(key.bucket, key.start)
-		if !ok || entry.Start != key.start || entry.PrefixBits != key.bits || len(entry.Locations) == 0 || entry.Locations[0].Node != r.node {
-			r.measurements.Delete(key)
-		}
-		return true
-	})
-	r.metrics.Range(func(k, v any) bool {
+	r.server.statistics.ranges.Range(func(k, v any) bool {
 		key, m := k.(rangeMetricKey), v.(*rangeMetric)
 		entry, ok := image.lookup(key.bucket, key.start)
 		if !ok || entry.Start != key.start || entry.PrefixBits != key.bits {
-			r.metrics.Delete(key)
 			return true
 		}
 		var local *client.Location
@@ -115,7 +143,6 @@ func (r *rangeManager) collectRangeTelemetry(snap *client.StatsSnapshot) {
 			}
 		}
 		if local == nil {
-			r.metrics.Delete(key)
 			return true
 		}
 		// The existing wire schema requires a concrete volume. Cohort traffic is

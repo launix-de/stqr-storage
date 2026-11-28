@@ -15,11 +15,7 @@ func TestInitialPlacementUsesRebuildPhase(t *testing.T) {
 	s, b, volumes, key := capacitySelectionFixture(t, 2)
 	s.scopes = &rangeManager{server: s}
 	now := time.Now()
-	h := s.placementHalfLives()
-	busy := placementVolumeRate{}
-	busy.readWindow.AddInterval(now.Add(-time.Second), now, 128<<20, h)
-	catalog := &pgRebuildCatalog{volumeRates: map[client.ID]placementVolumeRate{client.ID(volumes[0].Identity().VolumeID): busy}}
-	s.scopes.pgCatalog.Store(catalog)
+	seedStatisticsVolume(s, client.ID(volumes[0].Identity().VolumeID), now, 128<<20)
 	resources := make([]placementResource, len(volumes))
 	options := make([]placementOption, len(volumes))
 	ids := make([]client.ID, len(volumes))
@@ -30,7 +26,7 @@ func TestInitialPlacementUsesRebuildPhase(t *testing.T) {
 		ids[i] = client.ID(v.Identity().VolumeID)
 	}
 	input := inputForInitialPlacement(len(options))
-	input.BackgroundRead, input.BackgroundWrite = placementBackgroundRates(catalog, ids, h, now)
+	input.BackgroundRead, input.BackgroundWrite = s.placementBackgroundVolumes(ids, now)
 	phase, result := rebuildPlacement(context.Background(), []placementDemand{{Bucket: client.ID(b.ID()), Copies: 1, Bytes: 1}}, resources, options, nil, input, nil, initialPlacementBudget, 1)
 	target, _, found, err := b.selectVolume(b.Describe(), key, volume.ID{}, true)
 	if err != nil || found || target != volumes[options[phase.Assignments[0][0]].Volume] {
