@@ -146,6 +146,25 @@ The published root uses a network-root fstab. The original disk fstab is restore
 on the temporary builder disk, allowing an unfinished build to be resumed. The root is
 served directly by kstqr; there is no SquashFS conversion or NFS root export.
 
+### Initial installed-system boot
+
+Before publishing an installation disk, preparation checks whether Snap's initial
+seed has finished. A pending seed is completed automatically in a bounded,
+headless boot of that same temporary disk, using its installed bootloader,
+networking, memory/CPU settings and optional UEFI firmware. No installer ISO or
+additional command is needed. The real installed snapd performs the work; no
+seed flags are fabricated and no snapd is run in an offline chroot. Other
+operating systems, and images already fully seeded, skip this boot.
+
+Publication requires both a per-attempt success receipt and the stopped disk's
+actual completed seed state. Failure, timeout or a firmware/bootloader problem
+keeps the installation disk and staging diagnostics and prevents publication.
+Temporary first-boot units are removed before export, including verified cleanup
+on retry. `--publish-only` skips the installer; it may still perform this required
+installed-system initialization. Old unpublished prepared archives without the
+validation stamp remain on disk and are rejected with instructions to re-extract
+from their recorded installation disk.
+
 ### Continue after an interruption
 
 If installation completed but extraction, publication or cleanup failed:
@@ -628,20 +647,3 @@ editor user; their image bucket is never deleted. The same maintenance guard
 retains an orphan editor account while any client still has its image open;
 automatic retries finish that cleanup once the image becomes idle. Stop the gateway and keep its
 private cache if a member is unavailable; remaining records allow later retry.
-
-Before publishing an installation disk, preparation checks whether Snap's initial
-seed has finished. A pending seed is completed automatically in a bounded,
-headless boot of that same temporary disk, using its installed bootloader,
-networking, memory/CPU settings and optional UEFI firmware. No installer ISO or
-additional command is needed. The real installed snapd performs the work; no
-seed flags are fabricated and no snapd is run in an offline chroot. Other
-operating systems, and images already fully seeded, skip this boot.
-
-Publication requires both a per-attempt success receipt and the stopped disk's
-actual completed seed state. Failure, timeout or a firmware/bootloader problem
-keeps the installation disk and staging diagnostics and prevents publication.
-Temporary first-boot units are removed before export, including verified cleanup
-on retry. `--publish-only` skips the installer; it may still perform this required
-installed-system initialization. Old unpublished prepared archives without the
-validation stamp remain on disk and are rejected with instructions to re-extract
-from their recorded installation disk.
