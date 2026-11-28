@@ -3,6 +3,8 @@ import copy
 import importlib.machinery
 import importlib.util
 import json
+import http.server
+import threading
 from pathlib import Path
 import subprocess
 import tempfile
@@ -110,6 +112,48 @@ class BootUpdatePolicy(unittest.TestCase):
         self.assertFalse((self.root/policy.APT_PATH).exists())
         with self.assertRaises(ValueError):
             policy.apply(self.root, 'unknown')
+
+    def test_successful_claim_invocation_emits_only_authenticated_mode(self):
+        # Exercise the real HTTP claim parser/main/mount-success path. Only the
+        # privileged mount/sys-directory boundary is stubbed; credentials use a
+        # memfd, so the fixture never writes host /run or invokes mount.kstqr.
+        source = self.root/'claim-main.c'
+        source.write_text('#define main claim_main\n#define open fixture_open\n#define mkdir fixture_mkdir\n'
+                          '#define unlink fixture_unlink\n#define fork fixture_fork\n#define waitpid fixture_waitpid\n'
+                          '#include '+json.dumps(str(ROOT/'linux-client/boot-root.c'))+'\n'
+                          '#undef main\n'
+                          'int fixture_open(const char *p,int flags,...) { (void)p; (void)flags; return memfd_create("fixture",0); }\n'
+                          'int fixture_mkdir(const char *p,mode_t mode) { (void)p; (void)mode; return 0; }\n'
+                          'int fixture_unlink(const char *p) { (void)p; return 0; }\n'
+                          'pid_t fixture_fork(void) { return 42; }\n'
+                          'pid_t fixture_waitpid(pid_t p,int *status,int flags) { (void)flags; *status=0; return p; }\n'
+                          'int main(int argc,char **argv) { return claim_main(argc,argv); }\n')
+        binary = self.root/'claim-main'
+        subprocess.run(['cc', '-std=c11', '-Wall', '-Wextra', '-Werror', '-O2', '-o', binary, source], check=True)
+        for mode in ('overlay', 'edit'):
+            upper, lower = 'ab'*16, ('ab' if mode == 'edit' else 'cd')*16
+            body = ('STQR-BOOT-1\nuri=http://127.0.0.1:7419\nusername=fixture\npassword=fixture\n'
+                    f'lower={lower}\nupper={upper}\nmode={mode}\n').encode()
+            class Handler(http.server.BaseHTTPRequestHandler):
+                protocol_version = 'HTTP/1.1'
+                def do_GET(self):
+                    self.send_response(200)
+                    self.send_header('Content-Length', str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+                def log_message(self, *args):
+                    pass
+            server = http.server.HTTPServer(('127.0.0.1', 0), Handler)
+            thread = threading.Thread(target=server.handle_request)
+            thread.start()
+            try:
+                result = subprocess.run([binary, '127.0.0.1', str(server.server_port), '0'*64,
+                                         '/disposable-fixture'], capture_output=True, text=True, timeout=5)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout, mode+'\n')
+            finally:
+                server.server_close()
+                thread.join(timeout=5)
 
     def test_claim_mode_validation_and_stdout_after_successful_mount(self):
         source = (ROOT/'linux-client/boot-root.c').read_text()
