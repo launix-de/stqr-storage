@@ -1699,16 +1699,19 @@ static void ks_put_super(struct super_block *sb)
 	cancel_delayed_work_sync(&f->orphan_work);
 	if (f->lower)
 		WRITE_ONCE(f->lower->stopping, true);
+	/* Read/writeback jobs can finish by retiring a PIN or completing an
+	 * interrupted intent. Keep the mount-owned retirement queue and both
+	 * connections alive until all of those producers have exited. */
+	if (f->read_queue) {
+		destroy_workqueue(f->read_queue);
+		f->read_queue = NULL;
+	}
 	/* No cleanup callback may outlive its mount or owner connection. Normal
 	 * close never waits for this queue; explicit teardown owns the drain. */
 	if (f->reference_queue) {
 		destroy_workqueue(f->reference_queue);
 		f->reference_queue = NULL;
 	}
- if (f->read_queue) {
-  destroy_workqueue(f->read_queue);
-  f->read_queue = NULL;
- }
 	/* Teardown cancels connection-local touches. Persistence is requested only
 	 * through the VFS sync callbacks; closing a connection adds no fence. */
 	WRITE_ONCE(f->stopping, true);
