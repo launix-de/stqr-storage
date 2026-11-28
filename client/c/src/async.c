@@ -7,6 +7,7 @@ struct sq_async {
     struct sq_channel *channel;
     stqr_id id, subscription;
     stqr_u64 *cursor;
+    stqr_space *space;
     stqr_object_id object;
     unsigned op, wire_op, redirects;
     stqr_u64 offset, length, sequence, cut;
@@ -241,6 +242,7 @@ static int async_dispatch(stqr_client *c,unsigned kind,unsigned op,const stqr_u8
     }
     else if(!err&&p->op==0x121){if(readnum(m,1)!=1)m->err=-EPROTO;err=done(m);}
     else if(!err&&p->op==0x106)err=done(m);
+    else if(!err&&p->op==0x11b)err=decode_space(m,p->space);
     else if(!err&&p->op==0x111){
         struct sq_binding **at=binding_slot(c,p->subscription);err=done(m);
         if(!err&&*at){struct sq_binding *binding=*at;*at=binding->next;sq_free(binding);}
@@ -322,6 +324,15 @@ int stqr_get_async(stqr_client *c,stqr_object_id id,stqr_completion cb,void *arg
 int stqr_get_range_async(stqr_client *c,stqr_object_id id,stqr_u64 off,stqr_u64 len,stqr_completion cb,void *arg) {
     struct buf b={0};stqr_id rid={{0}};int err;if(!c||len>~(stqr_u64)0-off)return -EINVAL;
     reference(c,&b,id);number(&b,off,8);number(&b,len,8);number(&b,0,1);err=async_submit(c,0x101,&b,rid,id,0,0,off,len,cb,arg);drop(&b);return err;
+}
+int stqr_bucket_space_async(stqr_client *c,stqr_space *space,stqr_completion cb,void *arg) {
+    struct buf body={0};stqr_id rid;int err;
+    if(!c || !space || !cb)return -EINVAL;
+    err=stqr_request_id(&rid);if(err)return err;
+    put(&body,c->bucket.bytes,16);
+    err=async_submit(c,0x11b,&body,rid,(stqr_object_id){{0}},0,0,0,0,cb,arg);drop(&body);
+    if(!err)async_find(c,rid.bytes)->space=space;
+    return err;
 }
 int stqr_stat_async(stqr_client *c,stqr_object_id id,stqr_completion cb,void *arg) {
     struct buf b={0};stqr_id rid={{0}};int err;if(!c)return -EINVAL;reference(c,&b,id);

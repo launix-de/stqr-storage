@@ -126,6 +126,11 @@ typedef struct {
     int quota_limited;
 } stqr_space;
 int stqr_bucket_space(stqr_client *, stqr_space *);
+/* Advisory capacity over the existing owner session, without blocking other
+ * requests. `out` remains owned by the caller until its completion callback;
+ * it is written only for a validated successful reply. No data/info payload
+ * is transferred to the callback. Submission itself never receives replies. */
+int stqr_bucket_space_async(stqr_client *, stqr_space *out, stqr_completion, void *);
 int stqr_put(stqr_client *, stqr_object_id, const void *, size_t,
              const stqr_options *, stqr_info *);
 int stqr_put_range(stqr_client *, stqr_object_id, stqr_u64, const void *, size_t,

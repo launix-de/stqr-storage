@@ -33,6 +33,7 @@ type kernelWritebackFault struct {
 	unpin       kernelUnpinGate
 	ranges      kernelRangeGate
 	editRetry   kernelEditRetryFault
+	statfs      kernelStatfsGate
 }
 
 // kernelRangeGate holds the first selected leaf reply until another distinct
@@ -384,7 +385,7 @@ func (f *kernelWritebackFault) proxy(w http.ResponseWriter, r *http.Request, ups
 		return
 	}
 	defer downstream.Close()
-	f.connections.Add(1)
+	connection := f.connections.Add(1)
 	var peerWriter sync.Mutex
 	forward := func(kind int, raw []byte) error {
 		peerWriter.Lock()
@@ -411,6 +412,23 @@ func (f *kernelWritebackFault) proxy(w http.ResponseWriter, r *http.Request, ups
 				return
 			}
 			f.editRetry.holdFatalReply(raw)
+			if release := f.statfs.response(raw, connection); release != nil {
+				replies.Add(1)
+				go func() {
+					defer replies.Done()
+					select {
+					case <-release:
+					case <-time.After(5 * time.Second):
+						f.statfs.timeout()
+					case <-ctx.Done():
+						return
+					}
+					if write(kind, raw) != nil {
+						downstream.Close()
+					}
+				}()
+				continue
+			}
 			if f.editRetry.response(raw) {
 				peer.Close()
 				downstream.Close()
@@ -483,6 +501,7 @@ func (f *kernelWritebackFault) proxy(w http.ResponseWriter, r *http.Request, ups
 		if err != nil {
 			return
 		}
+		f.statfs.request(raw, connection)
 		if reject, disconnect := f.editRetry.request(raw); reject || disconnect {
 			if disconnect {
 				return

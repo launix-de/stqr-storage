@@ -220,7 +220,11 @@ send operation to avoid delaying a small payload behind its separate header.
 - Namespace editing materializes directory contents, limited to 16 MiB per
   directory; an intent is limited to 1 MiB and 1024 participants. Very large
   edits can fail with `E2BIG`. Index flattening needs further performance work.
-- `statfs`/`df` report live bucket usage and available eligible cluster storage,
+- `statfs`/`df` use the normal asynchronous receiver, holding the shared RPC
+  lock only for submission. A delayed capacity reply does not block unrelated
+  reads or writes, and a killed caller cannot receive or break their shared
+  connection. The output/completion remains alive until the receiver finishes.
+  They report live bucket usage and available eligible cluster storage,
   capped by a finite bucket quota. Without a quota the remaining cluster pool
   is available. Measurements are advisory and do not reserve space; objects
   awaiting offline fsck still count as used. See [capacity reporting](space.md).

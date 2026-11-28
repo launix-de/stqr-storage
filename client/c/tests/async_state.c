@@ -16,11 +16,12 @@
 #undef sq_connect
 #undef sq_disconnect
 #include <assert.h>
+#include <stdbool.h>
 #include <stdio.h>
-void *sq_alloc(size_t n);
+ *sq_alloc(size_t n);
 static int reject_allocation;
 void *policy_alloc(size_t n) {return reject_allocation?NULL:sq_alloc(n);}
-struct stqr_socket { struct buf replies,held; unsigned calls[512],pongs; stqr_u64 sequence,reply_length; unsigned boot,read_mark_tag,through_boots;int closed,hold,redirect,hold_through,through_status,fail_send,send_error,fail_call;unsigned sends; };
+struct stqr_socket { struct buf replies,held,space_held; unsigned calls[512],pongs; stqr_u64 sequence,reply_length; unsigned boot,read_mark_tag,through_boots;int closed,hold,redirect,hold_through,through_status,hold_space,fail_space_send,fail_send,send_error,fail_call;unsigned sends; };
 int policy_connect(struct stqr_socket **out,const char *host,unsigned port,unsigned ms) {
     (void)out;(void)host;(void)port;(void)ms;return -EOPNOTSUPP;
 }
@@ -39,7 +40,8 @@ int policy_send(struct stqr_socket *socket,const void *data,size_t size) {
     assert(readnum(&input,1)==1);unsigned kind=(unsigned)readnum(&input,1);
     unsigned op=(unsigned)readnum(&input,2);const stqr_u8 *id=take(&input,16);assert(op<512 && id);
     socket->calls[op]++;
-    if(kind==0){
+    if(op==0x11b && socket->fail_space_send){drop(&input);return -EINTR;}
+if(kind==0){
         assert(op==5 || op==6 || op==0x118 || op==0x111 || op==0x114);
         if(op==0x111){assert(!zero(id,16));assert(input.n-input.pos==16);}
         drop(&input);return 0;
@@ -58,7 +60,7 @@ int policy_send(struct stqr_socket *socket,const void *data,size_t size) {
     }else if(op==0x121 || op==0x118 || (op==0x100 && socket->read_mark_tag)) {
         if(op==0x121)assert(input.p[input.n-1]==1); /* accepted reference trailer */
         stqr_u8 boot[16]={1};boot[0]=(stqr_u8)(socket->boot?socket->boot:1);put(&mark,boot,16);number(&mark,++socket->sequence,8);
-        varint(&headers,1);varint(&headers,op==0x100?socket->read_mark_tag:48);blob(&headers,mark.p,mark.n);
+    varint(&headers,1);varint(&headers,op==0x100?socket->read_mark_tag:48);blob(&headers,mark.p,mark.n);
     }else { assert(op==0x122 || op==0x119 || op==0x11b || op==0x100);varint(&headers,0); }
     blob(&message,headers.p,headers.n);
     if(redirected) { /* A rejected original owner publishes no object result. */ }
@@ -66,7 +68,7 @@ int policy_send(struct stqr_socket *socket,const void *data,size_t size) {
     else if(op==0x118) {
         stqr_u8 runtime[16]={0};number(&message,socket->reply_length?socket->reply_length:4,8);number(&message,0,1);number(&message,0,4);
         put(&message,runtime,16);number(&message,0,1);number(&message,0,2);
-    }else if(op==0x100) {
+}else if(op==0x100) {
         const char *payload=socket->read_mark_tag?NULL:"new!";size_t length=socket->read_mark_tag?0:4;
         stqr_u8 runtime[16]={0},hash[32];assert(!sq_hash(256,payload,length,hash));
         number(&message,length,8);number(&message,0,1);number(&message,0,4);
@@ -90,7 +92,7 @@ int policy_send(struct stqr_socket *socket,const void *data,size_t size) {
     stqr_u8 frame[4]={0x82,0};size_t h=2;
     if(message.n<126)frame[1]=(stqr_u8)message.n;
     else{frame[1]=126;frame[2]=(stqr_u8)(message.n>>8);frame[3]=(stqr_u8)message.n;h=4;}
-    struct buf *output=(socket->hold && op!=0x122 && op!=0x119) || (socket->hold_through && op==0x119)?&socket->held:&socket->replies;
+    struct buf *output=op==0x11b&&socket->hold_space?&socket->space_held:((socket->hold && op!=0x122 && op!=0x119) || (socket->hold_through && op==0x119)?&socket->held:&socket->replies);
     put(output,frame,h);put(output,message.p,message.n);
     drop(&input);drop(&message);drop(&headers);drop(&mark);return 0;
 }
@@ -101,7 +103,7 @@ int policy_recv(struct stqr_socket *socket,void *out,size_t n) {
 int policy_wait(struct stqr_socket *socket,unsigned ms) {
     (void)ms;return socket->replies.pos<socket->replies.n;
 }
-void policy_disconnect(struct stqr_socket *socket) {if(socket){socket->closed=1;drop(&socket->replies);drop(&socket->held);}}
+void policy_disconnect(struct stqr_socket *socket) {if(socket){socket->closed=1;drop(&socket->replies);drop(&socket->held);drop(&socket->space_held);}}
 struct result {int called,error,status;};
 static void completed(void *arg,int error,int status,void *data,size_t n,const stqr_info *info) {
     struct result *r=arg;(void)n;(void)info;sq_free(data);
@@ -575,7 +577,7 @@ static void control_without_reply(unsigned opcode,int expected) {
     if(expected>0) assert(!stqr_poll(c,0));
     stqr_close(c);
 }
-/* Fatal cancellation before the transport worker is dispatched must not make
+atal cancellation before the transport worker is dispatched must not make
  * unrelated accepted or in-flight operations permanently uncertain. A generic
  * EINTR cannot prove zero bytes, so that separate case stays conservative. */
 static void rejected_before_transport(int synchronous, int send_error) {
