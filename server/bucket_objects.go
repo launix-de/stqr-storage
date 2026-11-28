@@ -468,6 +468,14 @@ func (b *Bucket) mutateUnmetered(ctx context.Context, p principal, id volume.Obj
 			// outside node admission, without replaying the mutation/payload.
 			return result, published.volume.CheckpointThrough(published.generation)
 		}
+		var admission *metadataAdmissionWait
+		if errors.As(err, &admission) {
+			if err = ctx.Err(); err != nil {
+				return volume.Result{}, err
+			}
+			admission.volume.WaitForMetadata()
+			continue
+		}
 		var wait *acceptedCheckpoint
 		if !errors.As(err, &wait) {
 			return result, err
@@ -1043,9 +1051,10 @@ func (b *Bucket) mutateAttempt(ctx context.Context, p principal, id volume.Objec
 		return volume.Result{}, err
 	}
 	if !acquired {
-		// A zero target only waits for the volume lock outside node admission.
-		// Do not take a second, potentially blocking read lock here.
-		return volume.Result{}, &acceptedCheckpoint{v, 0}
+		// Retry after only the contended metadata lock, outside node admission.
+		// CheckpointThrough(0) would additionally wait for physical I/O, even
+		// when this accepted mutation can use the live fence's next overlay.
+		return volume.Result{}, &metadataAdmissionWait{v}
 	}
 	var result volume.Result
 	var ticket *mutationQuotaTicket

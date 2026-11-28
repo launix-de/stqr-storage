@@ -139,6 +139,14 @@ func (v *Volume) acceptedMutation(op uint8, k Key, off, length uint64, src io.Re
 	return v.mutateCore(op, k, off, length, src, expected, opt)
 }
 
+// WaitForMetadata waits only for the current metadata lock owner. It neither
+// requests nor waits for physical persistence. This grants no mutation authority:
+// callers must retry admission and recheck permissions/placement afterward.
+func (v *Volume) WaitForMetadata() {
+	v.mu.Lock()
+	v.mu.Unlock()
+}
+
 // CheckpointThrough may also confirm a generation after clean close. A later
 // failed operation cannot revoke a previously completed durable checkpoint.
 // Generation zero waits only for an ongoing checkpoint/admission lock. It does

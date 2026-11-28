@@ -381,9 +381,10 @@ func (r *rangeManager) cleanupBatch(ctx context.Context, p rangePlan, v *volume.
 		}
 		if !acquired {
 			r.server.opMu.Unlock()
-			if err := v.CheckpointThrough(0); err != nil {
-				return err
-			}
+			// This is metadata contention, not a persistence prerequisite. The
+			// next loop rechecks cancellation, priority and cleanup authority,
+			// then distinguishes any actual checkpoint before trying admission.
+			v.WaitForMetadata()
 			continue
 		}
 		var generation uint64
