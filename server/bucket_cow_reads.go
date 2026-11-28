@@ -22,7 +22,7 @@ func (s *Server) cowLogicalSnapshot(ctx context.Context, bucket volume.ID, objec
 		}
 		snapshot, err := g.resolve(ctx, cowServerObjects{server: s, metadata: metadata, readReplica: true}, bucket, object, map[volume.ID]bool{})
 		if err != nil {
-			return nil, err
+			return nil, cowStorageError(err)
 		}
 		current, err := s.cowGraph()
 		if err != nil {
@@ -120,6 +120,9 @@ func (b *Bucket) cowLogicalUsage() (uint64, error) {
 	var used uint64
 	var after *volume.ObjectID
 	for {
+		if err := b.server.ctx.Err(); err != nil {
+			return 0, err
+		}
 		page, next, more, err := b.server.cowLogicalPage(b.server.ctx, b.ID(), after, 128, true)
 		if err != nil {
 			return 0, err
@@ -139,10 +142,24 @@ func (b *Bucket) cowLogicalUsage() (uint64, error) {
 
 // A quota checkpoint may inspect a prospective clone graph while all affected
 // namespaces are fenced, without publishing it or materializing any payload.
-func (s *Server) cowGraphPage(ctx context.Context, bucket volume.ID, after *volume.ObjectID, limit int, local bool, g cowGraph, placement *placementImage) ([]volume.ObjectRecord, volume.ObjectID, bool, error) {
+func (s *Server) cowGraphPage(ctx context.Context, bucket volume.ID, after *volume.ObjectID, limit int, local bool, g cowGraph, placement *placementImage, descriptions ...[]BucketDescription) ([]volume.ObjectRecord, volume.ObjectID, bool, error) {
+	store := cowServerObjects{server: s, metadata: true, readReplica: true}
+	if len(descriptions) > 0 {
+		store.graphDescriptions = make(map[volume.ID]BucketDescription, len(descriptions[0]))
+		for _, d := range descriptions[0] {
+			id, err := bucketID(d.ID)
+			if err != nil {
+				return nil, volume.ObjectID{}, false, err
+			}
+			store.graphDescriptions[id] = d
+		}
+	}
 	seen := map[volume.ObjectID]bool{}
 	more := false
 	for _, peer := range g.component(bucket) {
+		if err := ctx.Err(); err != nil {
+			return nil, volume.ObjectID{}, false, err
+		}
 		page, extra, err := s.cowPhysicalPage(ctx, peer, after, limit)
 		if err != nil {
 			return nil, volume.ObjectID{}, false, err
@@ -164,6 +181,9 @@ func (s *Server) cowGraphPage(ctx context.Context, bucket volume.ID, after *volu
 	var next volume.ObjectID
 	var out []volume.ObjectRecord
 	for _, id := range ids {
+		if err := ctx.Err(); err != nil {
+			return nil, next, false, err
+		}
 		next = id
 		if local {
 			owner := client.ID{}
@@ -178,7 +198,7 @@ func (s *Server) cowGraphPage(ctx context.Context, bucket volume.ID, after *volu
 				continue
 			}
 		}
-		snapshot, err := g.resolve(ctx, cowServerObjects{server: s, metadata: true, readReplica: true}, bucket, id, map[volume.ID]bool{})
+		snapshot, err := g.resolve(ctx, store, bucket, id, map[volume.ID]bool{})
 		if err != nil {
 			return nil, next, false, err
 		}

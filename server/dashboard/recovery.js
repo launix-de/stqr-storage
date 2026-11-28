@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: GPL-3.0-only
 export function setupRecovery({connection,config,states,toast,refresh,newID}){
  const $=id=>document.getElementById(id);
- let nodeAction,volumeAction,timer;
+ let nodeAction,volumeAction,timer,volumeBusy=false;
  const scoped=target=>connection().forNode(target);
  function stop(){clearTimeout(timer);timer=undefined}
- function busy(value){$('recovery-stage-fields').disabled=value;$('recovery-commit-fields').disabled=value}
+ function busy(value){volumeBusy=value;$('recovery-stage-fields').disabled=value;$('recovery-commit-fields').disabled=value}
  async function refreshVolumes(action){
   const view=await scoped(action.target).getConfig();
   if(volumeAction!==action)return;
@@ -59,6 +59,8 @@ export function setupRecovery({connection,config,states,toast,refresh,newID}){
   try{const result=await scoped(action.target).commitRecoveredVolumes(action.volumes,action.commitEpoch,action.id);if(result.state==='fulfilled'){await complete(action,false);return}$('recovery-volume-error').textContent='Übernahme läuft …';timer=setTimeout(()=>observe(action,false),3000)}
   catch(e){$('recovery-volume-error').textContent=e.message;action.pending=false;if(e.status>=400&&e.status<500)action.id=undefined;busy(false)}
  });
+ $('recovery-node-dialog').addEventListener('cancel',event=>{if(nodeAction?.pending)event.preventDefault()});
+ $('recovery-volume-dialog').addEventListener('cancel',event=>{if(volumeAction?.pending||volumeBusy)event.preventDefault()});
  for(const id of ['recovery-node-dialog','recovery-volume-dialog'])$(id).addEventListener('close',stop);
  return {
   openNode(target){const view=config();if(!view?.member_nodes?.includes(target)||view.member_nodes.length<2)return;stop();nodeAction={target,epoch:BigInt(view.membership_epoch)};$('recovery-node-description').textContent=`„${states.get(target)?.config?.config.node.name??target}“ durch neue Hardware ersetzen.`;$('recovery-node-fenced').checked=false;$('recovery-node-error').textContent='';$('recovery-node-submit').disabled=false;$('recovery-node-dialog').showModal()},

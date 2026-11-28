@@ -823,11 +823,15 @@ func TestDaemonBucketDeletionReclaimsEveryNode(t *testing.T) {
 		complete := true
 		for _, node := range []*Server{source.node, target.node} {
 			deleted := false
+			// Catalog publication precedes placement installation inside admission.
+			// Observe completion only after that entire installation has finished.
+			node.opMu.RLock()
 			for _, description := range node.currentSystem.Load().descriptions {
 				if description.ID == bucket.ID().String() && description.DeletionComplete {
 					deleted = true
 				}
 			}
+			node.opMu.RUnlock()
 			complete = complete && deleted
 		}
 		if complete {

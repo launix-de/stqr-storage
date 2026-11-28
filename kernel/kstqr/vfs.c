@@ -241,7 +241,6 @@ static int ks_revalidate(struct inode *parent, const struct qstr *name, struct d
 	struct ks_dentry *proof;
 	struct ks_fs *f = parent->i_sb->s_fs_info;
 	stqr_proof cached_proof;
-	(void)name;
 	if (flags & LOOKUP_RCU)
 		return -ECHILD;
 	if (f->lower) {
@@ -271,15 +270,52 @@ static int ks_revalidate(struct inode *parent, const struct qstr *name, struct d
 		return d_inode(d) ? (refresh_inode(d_inode(d)) ? 0 : 1) : 1;
 	}
 
+	stqr_proof parent_proof = {0};
+	spin_lock(&d->d_lock);
 	proof = d->d_fsdata;
+	if (proof)
+		parent_proof = proof->parent_proof;
+	spin_unlock(&d->d_lock);
 	if (!proof || !ks_cache_proof(f, KS_I(parent)->id, &cached_proof) ||
-	    memcmp(&cached_proof, &proof->parent_proof, sizeof(cached_proof)))
-		return 0;
-	/* Namespace proof also covers negative dentries. Refresh a positive inode
-	 * from its live subscription before permission checks use its attributes. */
-	if (d_inode(d) &&
-	    (!ks_cache_proof(f, KS_I(d_inode(d))->id, &cached_proof) || refresh_inode(d_inode(d))))
-		return 0;
+	    memcmp(&cached_proof, &parent_proof, sizeof(cached_proof))) {
+		struct ks_snapshot s = {0};
+		struct ks_entry *entries = NULL;
+		size_t count = 0, k;
+		bool found = false, same = !d_inode(d);
+		int err = ks_snapshot(f, KS_I(parent)->id, &s);
+		if (!err)
+			err = ks_directory(f, &s.node, &entries, &count);
+		if (!err)
+			for (k = 0; k < count; k++)
+				/* qstr can point into a longer pathname, e.g. usr/lib.
+				 * Compare this component, not the nonterminated suffix. */
+				if (strlen(entries[k].name) == name->len &&
+				    !memcmp(entries[k].name, name->name, name->len)) {
+					found = true;
+					same = d_inode(d) && !memcmp(entries[k].id.bytes,
+						KS_I(d_inode(d))->id.bytes, 32);
+					break;
+				}
+		if (!found && d_inode(d))
+			same = false;
+		/* A sibling edit changes the parent proof, not this binding. Dropping
+		 * an unchanged dentry can detach a live file bind mount. */
+		if (!err && same) {
+			spin_lock(&d->d_lock);
+			if (d->d_fsdata)
+				((struct ks_dentry *)d->d_fsdata)->parent_proof = s.info.proof;
+			spin_unlock(&d->d_lock);
+		}
+		sq_free(entries);
+		ks_snapshot_free(&s);
+		if (err || !same)
+			return err ? err : 0;
+	}
+	/* Re-establish child coverage without discarding an unchanged binding. */
+	if (d_inode(d)) {
+		int err = refresh_inode(d_inode(d));
+		return err ? err : 1;
+	}
 	return 1;
 }
 static void ks_dentry_release(struct dentry *d) { kfree(d->d_fsdata); }
@@ -564,9 +600,16 @@ static int ks_setattr_vfs(struct mnt_idmap *idmap, struct dentry *d, struct iatt
 		return err;
 	if (resize) {
 		filemap_invalidate_lock(i->i_mapping);
-		err = filemap_write_and_wait(i->i_mapping);
-		if (err)
-			goto out_resize;
+		/* Only shrink can discard bytes from an outstanding mmap writeback.
+		 * Growth keeps every queued batch inside the new EOF; ks_write merges
+		 * against the current inode head and never reduces its size. Forcing
+		 * dirty pages out on every allocation growth makes append/mmap users
+		 * such as journald repeatedly write their entire dirty working set. */
+		if (attr->ia_size < i_size_read(i)) {
+			err = filemap_write_and_wait(i->i_mapping);
+			if (err)
+				goto out_resize;
+		}
 	}
 	saved = enter_fs(f);
 	err = ks_setattr(f, KS_I(i)->id, attr);
@@ -1123,85 +1166,215 @@ static int ks_fsync(struct file *file, loff_t start, loff_t end, int datasync)
 	return err ? err : ks_checkpoint(file_inode(file)->i_sb->s_fs_info);
 }
 struct ks_file_reference {
+	struct work_struct cleanup;
+	struct ks_fs *fs;
+	stqr_object_id id;
 	stqr_id upper, lower;
-	bool upper_pinned, lower_pinned;
+	bool upper_pinned, lower_pinned, retained;
+	unsigned users;
+	u64 upper_epoch, lower_epoch;
 };
-static int ks_open_file(struct inode *inode, struct file *file)
+/* A final fput may run while a generator is exiting. Waiting there for a
+ * remote UNPIN ACK can prevent the entire process group from exiting. Retain
+ * the caller-owned tokens in mount-owned work until their accepted retirement
+ * completes; put_super drains this work before destroying either connection.
+ */
+static void ks_release_reference(struct work_struct *work)
 {
-	struct ks_fs *f = inode->i_sb->s_fs_info;
-	struct ks_file_reference *ref;
-	struct ks_snapshot snapshot = {0};
-	stqr_object_id id = KS_I(inode)->id;
-	unsigned saved;
-	int err = generic_file_open(inode, file);
+	struct ks_file_reference *ref = container_of(work, struct ks_file_reference, cleanup);
+	struct ks_fs *f = ref->fs;
+	unsigned saved = enter_fs(f);
+	int err = 0;
+	if (ref->lower_pinned)
+		err = ks_object_reference(f->lower, ref->id, ref->lower, 1);
+	if (!err && ref->upper_pinned)
+		err = ks_object_reference(f, ref->id, ref->upper, 1);
 	if (err)
-		return err;
-	ref = kzalloc(sizeof(*ref), GFP_NOFS);
-	if (!ref)
-		return -ENOMEM;
-	saved = enter_fs(f);
-	err = 0;
-	if (f->references) {
-		err = stqr_request_id(&ref->upper);
-		if (!err)
-			err = ks_object_reference(f, id, ref->upper, 0);
-		ref->upper_pinned = !err;
-	}
-	if (!err && f->lower && f->lower->references) {
-		err = stqr_request_id(&ref->lower);
-		if (!err)
-			err = ks_object_reference(f->lower, id, ref->lower, 0);
-		ref->lower_pinned = !err;
-	}
-	if (!err)
-		err = ks_validate_open_cache(f, id);
-	if (!err && f->lower)
-		err = ks_validate_open_cache(f->lower, id);
-	if (!err)
-		err = ks_snapshot(f, id, &snapshot);
-	if (!err && (snapshot.node.removed || !snapshot.node.links))
-		err = -ENOENT;
-	ks_snapshot_free(&snapshot);
-	if (err) {
-		if (ref->lower_pinned)
-			ks_object_reference(f->lower, id, ref->lower, 1);
-		if (ref->upper_pinned)
-			ks_object_reference(f, id, ref->upper, 1);
-		kfree(ref);
-	} else
-		file->private_data = ref;
-	leave_fs(f, saved);
-	return err;
-}
-static int ks_release_file(struct inode *inode, struct file *file)
-{
-	struct ks_fs *f = inode->i_sb->s_fs_info;
-	struct ks_file_reference *ref = file->private_data;
-	stqr_object_id id = KS_I(inode)->id;
-	unsigned saved;
-	int err, next;
-	if (!ref)
-		return 0;
-	/* VMAs retain struct file, so this also runs only after the final mmap,
-	 * dup and fork reference has gone. Never reclaim dirty unmapped data. */
-	err = file_write_and_wait_range(file, 0, LLONG_MAX);
-	saved = enter_fs(f);
-	if (!err && ref->lower_pinned)
-		err = ks_object_reference(f->lower, id, ref->lower, 1);
-	if (!err && ref->upper_pinned) {
-		next = ks_object_reference(f, id, ref->upper, 1);
-		if (next)
-			err = next;
-	}
-	if (err)
-		pr_warn_ratelimited("kstqr: retaining durable open reference after close error: %d\n", err);
+		pr_warn_ratelimited("kstqr: retaining open reference after asynchronous close error: %d\n", err);
 	else
 		ks_schedule_orphans(f);
 	leave_fs(f, saved);
-	file->private_data = NULL;
 	kfree(ref);
+}
+static void ks_retire_reference(struct ks_file_reference *ref)
+{
+	if (ref->retained || (!ref->lower_pinned && !ref->upper_pinned))
+		kfree(ref);
+	else
+		queue_work(ref->fs->reference_queue, &ref->cleanup);
+}
+static void ks_put_reference(struct inode *inode, struct ks_file_reference *ref, bool retain)
+{
+	struct ks_inode *ki = KS_I(inode);
+	bool last;
+	mutex_lock(&ki->reference_lock);
+	ref->retained |= retain;
+	last = --ref->users == 0;
+	if (last) {
+		WARN_ON_ONCE(ki->reference != ref);
+		/* A new open gets fresh token identities even while this detached
+		 * group's asynchronous UNPIN is still awaiting its owner. */
+		ki->reference = NULL;
+	}
+	mutex_unlock(&ki->reference_lock);
+	if (last)
+		ks_retire_reference(ref);
+}
+/* Sharing is valid within an acknowledged transport incarnation. A reused
+ * group after reconnect re-establishes its original idempotent tokens before a
+ * new file joins it; it never assumes an accepted PIN survived a node restart.
+ * Capture the epoch before submitting: a disconnect after the ACK must not
+ * certify an older PIN as belonging to its replacement connection. A retry
+ * may conservatively require one extra renewal on the next open.
+ * Caller owns the inode reference lock, not the RPC framing lock. */
+static int ks_refresh_reference(struct ks_file_reference *ref)
+{
+	struct ks_fs *f = ref->fs;
+	u64 epoch = READ_ONCE(f->rpc[0].reconnect_epoch);
+	int err;
+	if (ref->upper_pinned && ref->upper_epoch != epoch) {
+		err = ks_object_reference(f, ref->id, ref->upper, 0);
+		if (err)
+			return err;
+		ref->upper_epoch = epoch;
+	}
+	epoch = f->lower ? READ_ONCE(f->lower->rpc[0].reconnect_epoch) : 0;
+	if (ref->lower_pinned && ref->lower_epoch != epoch) {
+		err = ks_object_reference(f->lower, ref->id, ref->lower, 0);
+		if (err)
+			return err;
+		ref->lower_epoch = epoch;
+	}
+	return 0;
+}
+static int ks_open_file(struct inode *inode, struct file *file)
+{
+	struct ks_fs *f = inode->i_sb->s_fs_info;
+	struct ks_inode *ki = KS_I(inode);
+	struct ks_file_reference *ref;
+	struct ks_snapshot snapshot = {0};
+	stqr_object_id id = ki->id;
+	unsigned saved, attempt;
+	int err = generic_file_open(inode, file);
+	if (err)
+		return err;
+	saved = enter_fs(f);
+	mutex_lock(&ki->reference_lock);
+	ref = ki->reference;
+	if (ref) {
+		if (ref->users == UINT_MAX) {
+			err = -EMFILE;
+			goto unlock;
+		}
+		err = ks_refresh_reference(ref);
+		if (err)
+			goto unlock;
+		ref->users++;
+	} else {
+		ref = kzalloc(sizeof(*ref), GFP_NOFS);
+		if (!ref) {
+			err = -ENOMEM;
+			goto unlock;
+		}
+		ref->fs = f;
+		ref->id = id;
+		INIT_WORK(&ref->cleanup, ks_release_reference);
+		if (f->references) {
+			ref->upper_epoch = READ_ONCE(f->rpc[0].reconnect_epoch);
+			err = stqr_request_id(&ref->upper);
+			if (!err)
+				err = ks_object_reference(f, id, ref->upper, 0);
+			ref->upper_pinned = !err;
+		}
+		if (!err && f->lower && f->lower->references) {
+			ref->lower_epoch = READ_ONCE(f->lower->rpc[0].reconnect_epoch);
+			err = stqr_request_id(&ref->lower);
+			if (!err)
+				err = ks_object_reference(f->lower, id, ref->lower, 0);
+			ref->lower_pinned = !err;
+		}
+		if (err) {
+			/* Never publish a group until every required PIN is acknowledged.
+			 * A partial acquisition is retired using its own original tokens. */
+			mutex_unlock(&ki->reference_lock);
+			ks_retire_reference(ref);
+			leave_fs(f, saved);
+			return err;
+		}
+		ref->users = 1;
+		ki->reference = ref;
+	}
+	mutex_unlock(&ki->reference_lock);
+	/* Sharing lifetime protection does not reuse stale open permissions or
+	 * namespace/link state. A fresh GET can itself recover the connection after
+	 * the group was joined. Re-establish the PIN, then repeat the metadata
+	 * validation under that protection before completing this new open. */
+	for (attempt = 0; attempt < 128; attempt++) {
+		bool renewed;
+		u64 upper_epoch, lower_epoch;
+		/* Another opener may renew the shared group during our GET. Compare
+		 * against the protection under which this pass began, not its later
+		 * mutable epoch, so that renewal cannot certify pre-PIN metadata. */
+		mutex_lock(&ki->reference_lock);
+		upper_epoch = ref->upper_epoch;
+		lower_epoch = ref->lower_epoch;
+		mutex_unlock(&ki->reference_lock);
+		if (!err)
+			err = ks_validate_open_cache(f, id);
+		if (!err && f->lower)
+			err = ks_validate_open_cache(f->lower, id);
+		if (!err)
+			err = ks_snapshot(f, id, &snapshot);
+		if (!err && (snapshot.node.removed || !snapshot.node.links))
+			err = -ENOENT;
+		ks_snapshot_free(&snapshot);
+		if (err)
+			break;
+		mutex_lock(&ki->reference_lock);
+		renewed = (ref->upper_pinned && upper_epoch !=
+			   READ_ONCE(f->rpc[0].reconnect_epoch)) ||
+			  (ref->lower_pinned && lower_epoch !=
+			   READ_ONCE(f->lower->rpc[0].reconnect_epoch));
+		if (renewed)
+			err = ks_refresh_reference(ref);
+		mutex_unlock(&ki->reference_lock);
+		if (err || !renewed)
+			break;
+		/* Match snapshot's bounded consistency retries, without bounding any
+		 * individual RPC's existing transport recovery. Never accept metadata
+		 * from before the last renewal when incarnations keep changing. */
+		if (attempt == 127)
+			err = -EAGAIN;
+	}
+	if (err)
+		ks_put_reference(inode, ref, false);
+	else
+		file->private_data = ref;
+	leave_fs(f, saved);
+	return err;
+unlock:
+	mutex_unlock(&ki->reference_lock);
+	leave_fs(f, saved);
 	return err;
 }
+
+static int ks_release_file(struct inode *inode, struct file *file)
+{
+	struct ks_file_reference *ref = file->private_data;
+	int err;
+	if (!ref)
+		return 0;
+	/* VMAs retain struct file, so this runs after the final mmap/dup/fork
+	 * reference. Dirty bytes must reach accepted storage before dropping their
+	 * lifetime protection; this adds no persistence fence. */
+	err = file_write_and_wait_range(file, 0, LLONG_MAX);
+	file->private_data = NULL;
+	if (err)
+		pr_warn_ratelimited("kstqr: retaining open reference after writeback close error: %d\n", err);
+	ks_put_reference(inode, ref, !!err);
+	return err;
+}
+
 void ks_schedule_orphans(struct ks_fs *f)
 {
 	if (f->references && !f->readonly && !READ_ONCE(f->stopping))
@@ -1486,6 +1659,7 @@ static struct inode *ks_alloc_inode(struct super_block *sb)
 	if (!i)
 		return NULL;
 	mutex_init(&i->metadata_lock);
+	mutex_init(&i->reference_lock);
     mutex_init(&i->writeback_publish_lock);
 	INIT_LIST_HEAD(&i->mount_list);
 	inode_init_once(&i->inode);
@@ -1523,6 +1697,14 @@ static void ks_put_super(struct super_block *sb)
 		return;
 	WRITE_ONCE(f->stopping, true);
 	cancel_delayed_work_sync(&f->orphan_work);
+	if (f->lower)
+		WRITE_ONCE(f->lower->stopping, true);
+	/* No cleanup callback may outlive its mount or owner connection. Normal
+	 * close never waits for this queue; explicit teardown owns the drain. */
+	if (f->reference_queue) {
+		destroy_workqueue(f->reference_queue);
+		f->reference_queue = NULL;
+	}
  if (f->read_queue) {
   destroy_workqueue(f->read_queue);
   f->read_queue = NULL;
@@ -1727,6 +1909,8 @@ static int ks_fill_super(struct super_block *sb, struct fs_context *fc)
 	set_default_d_op(sb, &ks_dentry_ops);
  f->read_queue = alloc_workqueue("kstqr-read", WQ_UNBOUND | WQ_MEM_RECLAIM, 0);
  if (!f->read_queue) { ks_put_super(sb); return -ENOMEM; }
+ f->reference_queue = alloc_workqueue("kstqr-unpin", WQ_UNBOUND | WQ_MEM_RECLAIM, 0);
+ if (!f->reference_queue) { ks_put_super(sb); return -ENOMEM; }
 
 	saved = enter_fs(f);
 	err = 0;

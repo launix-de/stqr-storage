@@ -145,6 +145,14 @@ The Go collector is shared with the future generation-builder interface. Snapsho
 parts carry SHA-256 and are fully verified/assembled by the browser before render.
 The JavaScript sender also has a bounded queue and correlates request promises by ID.
 
+Placement derives sampled volume/range byte rates from the existing counters.
+The optional node YAML setting `placement_stats_half_life: 168h` controls their
+elapsed-time exponential average (default one week; omission/zero keeps that
+default). It applies on restart and does not change the short-term capacity
+forecast or authoritative quota/reservation checks. No per-object or client
+locality statistics are added. See [accounting and statistics measurements](benchmarks/statistics-placement.md)
+for the overhead tradeoff and remaining placement limitations.
+
 Additional local administrative messages are defined in the architecture spec:
 0x201a config get, 0x201b typed field patch, 0x201c volume discovery, 0x201d rescan, 0x201e available filesystem/RAM capacity, 0x201f growth bounds, and 0x2020 manual growth.
 `BUCKET_INFO` (0x010c) accepts `name:Text` and returns the current `Policy` plus
@@ -1149,7 +1157,9 @@ The storage dashboard does not interpret bucket objects or manage virtual disks.
 It displays the client-declared, opaque format string from bucket metadata.
 The first authorized bucket connection persists an unset format atomically;
 a later connection declaring a different format is rejected with HTTP 409.
-Format-specific operations belong to external clients.
+Format-specific operations belong to clients. The dashboard can load optional
+[format plugins](dashboard-plugins.md); only those modules interpret objects.
+The generic host supplies windows, shared lists and a tunnel-mode native JS client.
 
 
 ## PG-local rebuild cycles

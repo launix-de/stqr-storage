@@ -206,6 +206,13 @@ int ks_object_reference(struct ks_fs *f, stqr_object_id id, stqr_id token, unsig
             if(!err){wait_for_completion(&result.done);err=result.error;status=result.status;}
             sq_free(result.data);mutex_lock(&rpc->lock);
         }else { err = operation(rpc->client, id, token); status = stqr_status(rpc->client); }
+        /* Reference status 429 reports global/account table capacity. Expose ENFILE
+         * to VFS for this operation only. Remap only the SDK's server-status
+         * errno: a stale status after transport loss must not suppress hard
+         * reconnection. Status 503 outage waits and 412 preconditions retain their
+         * existing retry handling. */
+        if (err == -EREMOTEIO && status == 429)
+            err = -ENFILE;
 		if (err == -EACCES && !auth_retry)
 			auth_retry = true;
 		else if (!(err == -EAGAIN ? (status == 0 || status == 503) : ks_transport_retryable(NULL, err)))
@@ -1005,7 +1012,7 @@ static int index_segments_range(struct ks_fs *f, const struct ks_node *view, stq
 	take(&b, 4);
 	version = readnum(&b, 2);
 	count = readnum(&b, 4);
-	if ((version != 1 && version != 3) || !count || count > 1024) {
+	if ((version != 1 && version != 2 && version != 3) || !count || count > 1024) {
 		err = -EUCLEAN;
 		goto out;
 	}
@@ -1020,6 +1027,13 @@ static int index_segments_range(struct ks_fs *f, const struct ks_node *view, stq
 		s.offset = readnum(&b, version == 1 ? 4 : 8);
 		if (version == 3)
 			lower = boolean(&b);
+		else if (version == 2 && readnum(&b, 8)) {
+			/* Decode old local indexes without reviving historical object
+			 * versions. A nonzero legacy lower reference needs explicit
+			 * materialization; never reinterpret it as local data. */
+			err = -EOPNOTSUPP;
+			goto out;
+		}
 		if (b.err || !s.length || total > length || s.length > length - total ||
 		    s.offset > S64_MAX || s.length > S64_MAX - s.offset ||
 		    (depth > 1 && (s.offset || lower)) || (nullid(s.id) && (s.offset || lower)) ||
@@ -1071,7 +1085,7 @@ struct ks_range_read {
 	void *destination;
 	size_t length;
 	struct ks_async_result result;
-	bool pending, finished;
+	bool pending, finished, sparse;
 };
 static int range_read_submit(struct ks_range_read *job)
 {
@@ -1121,6 +1135,12 @@ static bool range_read_retryable(const struct ks_async_result *result)
 	return result->error == -EAGAIN ? result->status == 0 || result->status == 503 :
 		ks_transport_retryable(NULL, result->error);
 }
+static bool range_read_sparse_error(const struct ks_range_read *job)
+{
+	/* Qualify by errno as well as status: a stale 416 after socket loss must
+	 * not turn a transport failure into a successful zero-filled read. */
+	return job->sparse && job->result.error == -EREMOTEIO && job->result.status == 416;
+}
 static int range_read_finish(struct ks_range_read *jobs, unsigned count)
 {
 	int err = 0;
@@ -1134,11 +1154,40 @@ static int range_read_finish(struct ks_range_read *jobs, unsigned count)
 			struct ks_range_read *job = &jobs[i];
 			if (job->finished)
 				continue;
+			if (range_read_sparse_error(job)) {
+				void *raw = NULL;
+				size_t size = 0;
+				stqr_info info;
+				/* Mutable FS pages may end before their logical extent: the Go
+				 * format defines the remainder as zeros. A full GET proves the
+				 * object exists; a missing/corrupt payload is never a hole. */
+				err = get_object(job->store, job->id, &raw, &size, &info);
+				if (err) {
+					sq_free(raw);
+					goto out;
+				}
+				if (size != info.length) {
+					sq_free(raw);
+					err = -EUCLEAN;
+					goto out;
+				}
+				memset(job->destination, 0, job->length);
+				if (job->offset < size)
+					memcpy(job->destination, (u8 *)raw + job->offset,
+					       min_t(u64, job->length, size - job->offset));
+				sq_free(raw);
+				sq_free(job->result.data);
+				job->result.data = NULL;
+				job->finished = true;
+				continue;
+			}
 			if (job->result.error && !range_read_retryable(&job->result)) {
 				err = job->result.error;
 				goto out;
 			}
-			if (!job->result.error && job->result.length != job->length) {
+			if (!job->result.error && (job->result.length > job->length ||
+			    (job->result.length != job->length && (!job->sparse ||
+			     job->result.info.length != job->offset + job->result.length)))) {
 				err = -EUCLEAN;
 				goto out;
 			}
@@ -1148,7 +1197,10 @@ static int range_read_finish(struct ks_range_read *jobs, unsigned count)
 			if (job->finished)
 				continue;
 			if (!job->result.error) {
-				memcpy(job->destination, job->result.data, job->length);
+				if (job->result.length < job->length)
+					memset(job->destination, 0, job->length);
+				if (job->result.length)
+					memcpy(job->destination, job->result.data, job->result.length);
 				sq_free(job->result.data);
 				job->result.data = NULL;
 				job->finished = true;
@@ -1181,7 +1233,7 @@ static int range_read_finish(struct ks_range_read *jobs, unsigned count)
 			/* Retry submissions still form a wave; a delayed first reply never
 			 * prevents the other rejected ranges from being resubmitted. */
 			err = range_read_submit(job);
-			if (err && !range_read_retryable(&job->result))
+			if (err && !range_read_retryable(&job->result) && !range_read_sparse_error(job))
 				goto out;
 		}
 	}
@@ -1252,10 +1304,11 @@ static int index_read(struct ks_fs *f, const struct ks_node *view, stqr_object_i
 			job->offset = p->offset + offset;
 			job->destination = dst;
 			job->length = n;
+			job->sparse = view && view->mutable;
 			pending_bytes += n;
 			atomic64_inc(&f->rpc_ranges);
 			err = range_read_submit(job);
-			if (err && !range_read_retryable(&job->result))
+			if (err && !range_read_retryable(&job->result) && !range_read_sparse_error(job))
 				goto out;
 			err = 0;
 		}
@@ -1767,14 +1820,7 @@ out:
 	drop(&b);
 	return err;
 }
-static long find_entry(struct ks_entry *e, size_t n, const char *name)
-{
-	size_t i;
-	for (i = 0; i < n; i++)
-		if (!strcmp(e[i].name, name))
-			return i;
-	return -1;
-}
+#include "directory_lookup.h"
 static int entry_cmp(const void *a, const void *b)
 {
 	return strcmp(((const struct ks_entry *)a)->name, ((const struct ks_entry *)b)->name);
@@ -1872,7 +1918,7 @@ int ks_newnode(struct ks_fs *f, stqr_object_id parent, const char *name, unsigne
 			return err;
 		err = ks_directory(f, &old.node, &entries, &n);
 		next = old.node;
-		if (!err && find_entry(entries, n, name) >= 0)
+		if (!err && find_sorted_entry(entries, n, name) >= 0)
 			err = -EEXIST;
 		if (!err && !made) {
 			struct ks_node child = {.kind = kind,
@@ -2007,7 +2053,7 @@ int ks_remove(struct ks_fs *f, stqr_object_id parent, const char *name, bool dir
 			return err;
 		next = old.node;
 		err = ks_directory(f, &old.node, &entries, &n);
-		at = err ? -1 : find_entry(entries, n, name);
+		at = err ? -1 : find_sorted_entry(entries, n, name);
 		if (!err && at < 0)
 			err = -ENOENT;
 		if (!err)
@@ -2172,8 +2218,8 @@ int ks_rename(struct ks_fs *f, stqr_object_id from, const char *name, stqr_objec
 			nb = na;
 		}
 		if (!err) {
-			ai = find_entry(ae, na, name);
-			bi = find_entry(be, nb, newname);
+			ai = find_sorted_entry(ae, na, name);
+			bi = find_sorted_entry(be, nb, newname);
 			if (ai < 0)
 				err = -ENOENT;
 			else if ((flags & RENAME_EXCHANGE) && bi < 0)
@@ -2301,7 +2347,7 @@ int ks_link(struct ks_fs *f, stqr_object_id parent, const char *name, stqr_objec
 		err = ks_snapshot(f, parent, &p);
 		if (!err)
 			err = ks_directory(f, &p.node, &entries, &n);
-		if (!err && find_entry(entries, n, name) >= 0)
+		if (!err && find_sorted_entry(entries, n, name) >= 0)
 			err = -EEXIST;
 		if (!err)
 			err = ks_snapshot(f, target, &child);

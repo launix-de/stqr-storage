@@ -35,6 +35,12 @@ func (s *Server) placementHalfLives() decay.HalfLives {
 	}
 	s.mu.RLock()
 	c := s.cfg.PlacementStatistics
+	legacy := s.cfg.PlacementStatsHalfLife
 	s.mu.RUnlock()
-	return c.halfLives()
+	h := c.halfLives()
+	if c.LongHalfLifeSeconds == 0 && legacy > 0 {
+		h.Long = legacy
+		h.Short = min(h.Short, h.Long)
+	}
+	return h
 }

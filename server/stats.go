@@ -189,6 +189,7 @@ func filterSnapshot(snap client.StatsSnapshot, f client.StatsFilter) client.Stat
 func (s *Server) publishStats() {
 	s.publishVersions()
 	snap := s.CollectStats(client.StatsFilter{IncludeRanges: true})
+	s.observeDashboardRates(snap)
 	s.latest.Store(&snap)
 	s.broadcastStats(snap)
 }

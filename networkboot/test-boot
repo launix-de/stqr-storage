@@ -9,7 +9,7 @@ import secrets
 import time
 import urllib.error
 import urllib.request
-from common import boot_network, cli, run
+from common import HERE, boot_network, cli, run
 
 
 def wait_for_gateway(url, timeout=900):
@@ -47,6 +47,9 @@ def default_mac():
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('bucket', nargs='?', help='source image for --no-overlay (default: ubuntu)')
+    parser.add_argument('--no-overlay', action='store_true', help='boot a private writable image copy without a client overlay')
+    parser.add_argument('--config', default='stqr.yaml', help='STQR configuration for --no-overlay')
     parser.add_argument('--server', help='gateway IPv4 address (default: this host on its default-route interface)')
     parser.add_argument('--http-port', type=int, default=8088)
     parser.add_argument('--memory', type=int, default=4096, help='VM memory in MiB')
@@ -55,6 +58,18 @@ def main():
     args = parser.parse_args()
     if args.memory < 512 or args.cpus < 1 or not 1 <= args.http_port <= 65535:
         parser.error('memory must be >=512 MiB, CPU count positive, and port valid')
+    if args.no_overlay:
+        if args.server or args.http_port != 8088 or args.mac:
+            parser.error('--no-overlay uses its own private gateway; --server, --http-port and --mac are not supported')
+        source = args.bucket or 'ubuntu'
+        target = 'test-plain-' + secrets.token_hex(8)
+        print(f'Booting {source} without a client overlay; writable test copy: {target}. '
+              'The copy is retained after shutdown.', flush=True)
+        run(str(HERE / 'edit-image'), target, '--copy-from=' + source,
+            '--config', args.config, '--memory', str(args.memory), '--cpus', str(args.cpus))
+        return
+    if args.bucket:
+        parser.error('a bucket argument requires --no-overlay; normal PXE uses the gateway image')
     try:
         server = str(ipaddress.IPv4Address(args.server)) if args.server else boot_network()[1]
     except ValueError as error:

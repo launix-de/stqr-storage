@@ -34,16 +34,16 @@ func lazyFreeWatermarks(capacity, free uint64, poolCapacity, poolFree uint64) (u
 type capacityGoal struct {
 	sampled   time.Time
 	allocated uint64
-	growth    decay.Accumulator // discounted application growth
+	growth    decay.Windows // discounted application growth
 	halfLives decay.HalfLives
 	target    uint64
 }
 
 func (g *capacityGoal) observe(v rangeDestination, poolCapacity, poolFree uint64, now time.Time, horizon ...time.Duration) uint64 {
 	if !g.sampled.IsZero() && now.Sub(g.sampled) >= time.Second {
-		growth := float64(0)
+		growth := int64(0)
 		if v.volume.AllocatedPhysical > g.allocated {
-			growth = float64(v.volume.AllocatedPhysical - g.allocated)
+			growth = counterAmount(v.volume.AllocatedPhysical - g.allocated)
 		}
 		g.growth.AddInterval(g.sampled, now, growth, g.halfLives)
 		g.sampled, g.allocated = now, v.volume.AllocatedPhysical

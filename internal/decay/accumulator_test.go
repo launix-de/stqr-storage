@@ -3,6 +3,8 @@ package decay
 
 import (
 	"math"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -14,107 +16,157 @@ func closeValue(t *testing.T, got, want float64) {
 	}
 }
 
-func TestAccumulatorHalfLifeAndIdle(t *testing.T) {
-	h := HalfLives{time.Second, 10 * time.Second}
+func TestAccumulatorExactCompletedFramesAndScaling(t *testing.T) {
 	now := time.Unix(100, 0)
 	var a Accumulator
-	a.Add(now, 100, h)
-	v := a.Values(now.Add(time.Second), h)
-	closeValue(t, v.Short, 50)
-	closeValue(t, v.Long, 100*math.Exp2(-.1))
-	v = a.Values(now.Add(10*time.Second), h)
-	closeValue(t, v.Short, 100.0/1024)
-	closeValue(t, v.Long, 50)
-	// Queries are pure, including a query later than the next real event.
-	a.Values(now.Add(time.Hour), h)
-	a.Add(now.Add(time.Second), 25, h)
-	closeValue(t, a.Values(now.Add(time.Second), h).Short, 75)
-	closeValue(t, a.Rates(now.Add(time.Second), h).Short, 75*math.Ln2)
-}
-
-func TestAccumulatorIntervalCadenceInvariant(t *testing.T) {
-	h := HalfLives{3 * time.Second, 30 * time.Second}
-	now := time.Unix(100, 0)
-	var single, many Accumulator
-	single.AddInterval(now, now.Add(time.Minute), 6000, h)
-	for i := 0; i < 60; i++ {
-		many.AddInterval(now.Add(time.Duration(i)*time.Second), now.Add(time.Duration(i+1)*time.Second), 100, h)
-		many.Values(now.Add(time.Hour), h)
+	if a.Snapshot().Known || a.LastPerSecond() != 0 || a.AveragePerSecond() != 0 {
+		t.Fatal("zero value invented a measurement")
 	}
-	a, b := single.Rates(now.Add(time.Minute), h), many.Rates(now.Add(time.Minute), h)
-	closeValue(t, a.Short, b.Short)
-	closeValue(t, a.Long, b.Long)
-	closeValue(t, a.Short, 100*(1-math.Exp2(-20)))
-	closeValue(t, a.Long, 75)
-	// Replayed and backwards intervals cannot add load or rewind the clock.
-	many.AddInterval(now, now.Add(time.Minute), 6000, h)
-	many.AddInterval(now.Add(time.Second), now.Add(10*time.Second), 900, h)
-	closeValue(t, many.Rates(now.Add(time.Minute), h).Short, a.Short)
-	// A partially overlapping snapshot contributes only its new suffix.
-	many.AddInterval(now.Add(59*time.Second), now.Add(62*time.Second), 300, h)
-	single.AddInterval(now.Add(time.Minute), now.Add(62*time.Second), 200, h)
-	closeValue(t, many.Rates(now.Add(62*time.Second), h).Long, single.Rates(now.Add(62*time.Second), h).Long)
+	// Preserve integer precision above the largest consecutive float64 integer.
+	const first = int64(1<<53 + 3)
+	a.Add(first)
+	if a.Tick(now, time.Second) || a.Snapshot().Current != first {
+		t.Fatal("first tick consumed counts or completed an unknown interval")
+	}
+	a.Add(17)
+	if !a.Tick(now.Add(2*time.Second), time.Second) {
+		t.Fatal("interval did not complete")
+	}
+	s := a.Snapshot()
+	if !s.Known || s.Last != first+17 || s.Current != 0 || s.Interval != 2*time.Second || !s.Switched.Equal(now.Add(2*time.Second)) {
+		t.Fatalf("bad completed frame: %+v", s)
+	}
+	closeValue(t, a.LastPerSecond(), float64(first+17)/2)
+	closeValue(t, a.AveragePerSecond(), float64(first+17)/2)
+	a.Add(42)
+	if s = a.Snapshot(); s.Current != 42 || s.Last != first+17 {
+		t.Fatalf("current additions changed the completed interval: %+v", s)
+	}
 }
 
-func TestAccumulatorFiniteInputsAndClock(t *testing.T) {
-	h := HalfLives{time.Nanosecond, time.Second}
+func TestAccumulatorHalfLifeIdleAndChangingIntervals(t *testing.T) {
 	now := time.Unix(100, 0)
 	var a Accumulator
-	a.Add(now, 5, h)
-	for _, v := range []float64{-1, math.NaN(), math.Inf(1), math.Inf(-1)} {
-		a.Add(now, v, h)
-		a.AddInterval(now, now.Add(time.Second), v, h)
+	a.Tick(now, time.Second)
+	a.Add(300)
+	a.Tick(now.Add(3*time.Second), time.Second)
+	closeValue(t, a.AveragePerSecond(), 100)
+	a.Tick(now.Add(4*time.Second), time.Second)
+	closeValue(t, a.LastPerSecond(), 0)
+	closeValue(t, a.AveragePerSecond(), 50)
+	a.Add(200)
+	a.Tick(now.Add(6*time.Second), time.Second)
+	closeValue(t, a.LastPerSecond(), 100)
+	closeValue(t, a.AveragePerSecond(), 87.5)
+	before := a.Snapshot()
+	a.Add(7)
+	if a.Tick(now.Add(6*time.Second), time.Second) || a.Tick(now.Add(time.Second), time.Second) {
+		t.Fatal("duplicate or backwards tick completed an interval")
 	}
-	closeValue(t, a.Values(now, h).Short, 5)
-	a.Add(now.Add(-time.Second), 5, h)
-	closeValue(t, a.Values(now, h).Short, 10)
-	a.AddInterval(now, now, 100, h)
-	closeValue(t, a.Values(now, h).Short, 10)
-	a.Add(now, math.MaxFloat64, h)
-	a.Add(now, math.MaxFloat64, h)
-	for _, v := range []float64{a.Values(now, h).Short, a.Rates(now, h).Short, a.Values(now.Add(time.Hour), h).Long} {
-		if math.IsNaN(v) || math.IsInf(v, 0) || v < 0 {
-			t.Fatal("non-finite state", v)
+	after := a.Snapshot()
+	if after.Last != before.Last || after.Average != before.Average || after.Interval != before.Interval || !after.Switched.Equal(before.Switched) || after.Current != 7 {
+		t.Fatalf("backwards tick changed state: before=%+v after=%+v", before, after)
+	}
+	// The default half-life is exactly one week, independently of the unit.
+	var weekly Accumulator
+	weekly.Tick(now, 0)
+	weekly.Add(10)
+	weekly.Tick(now.Add(time.Second), 0)
+	weekly.Tick(now.Add(time.Second+DefaultLongHalfLife), 0)
+	closeValue(t, weekly.AveragePerSecond(), 5)
+}
+
+func TestAccumulatorSignedAmountsAndObservableSaturation(t *testing.T) {
+	now := time.Unix(100, 0)
+	var a Accumulator
+	a.Tick(now, time.Second)
+	a.Add(-4)
+	a.Tick(now.Add(2*time.Second), time.Second)
+	closeValue(t, a.LastPerSecond(), -2)
+	closeValue(t, a.AveragePerSecond(), -2)
+	if !a.Add(math.MaxInt64) || a.Add(1) || !a.Snapshot().Saturated || a.Snapshot().Current != math.MaxInt64 {
+		t.Fatal("positive overflow wrapped or was not observable")
+	}
+	a.Tick(now.Add(3*time.Second), time.Second)
+	if !a.Add(math.MinInt64) || a.Add(-1) || a.Snapshot().Current != math.MinInt64 {
+		t.Fatal("negative overflow wrapped or was not observable")
+	}
+	if a.Tick(time.Time{}, time.Second) || a.Snapshot().Current != math.MinInt64 {
+		t.Fatal("zero timestamp consumed pending counts")
+	}
+}
+
+func TestAccumulatorConcurrentAddTickAndSnapshotConserveCounts(t *testing.T) {
+	const workers, adds, amount = 8, 20000, int64(3)
+	now := time.Unix(100, 0)
+	var a Accumulator
+	a.Tick(now, time.Second)
+	var writers sync.WaitGroup
+	writers.Add(workers)
+	for i := 0; i < workers; i++ {
+		go func() {
+			defer writers.Done()
+			for j := 0; j < adds; j++ {
+				if !a.Add(amount) {
+					t.Error("unexpected saturation")
+				}
+			}
+		}()
+	}
+	var finished atomic.Bool
+	readDone := make(chan struct{})
+	go func() {
+		defer close(readDone)
+		for !finished.Load() {
+			s := a.Snapshot()
+			if s.Known && (s.Interval != time.Microsecond || s.Last < 0 || s.Average < 0) {
+				t.Errorf("incoherent completed frame: %+v", s)
+				return
+			}
+			a.LastPerSecond()
+			a.AveragePerSecond()
+		}
+	}()
+	done := make(chan struct{})
+	go func() { writers.Wait(); close(done) }()
+	var total int64
+	for frame := 1; ; frame++ {
+		next := now.Add(time.Duration(frame) * time.Microsecond)
+		a.Tick(next, time.Second)
+		total += a.Snapshot().Last
+		select {
+		case <-done:
+			a.Tick(next.Add(time.Microsecond), time.Second)
+			total += a.Snapshot().Last
+			finished.Store(true)
+			<-readDone
+			if total != workers*adds*amount || a.Snapshot().Current != 0 {
+				t.Fatalf("concurrent interval exchange lost/duplicated events: %d, want %d", total, workers*adds*amount)
+			}
+			return
+		default:
 		}
 	}
-	if got := (HalfLives{}).Normalized(); got.Short != DefaultShortHalfLife || got.Long != DefaultLongHalfLife {
-		t.Fatal(got)
-	}
 }
 
-func TestMeanWeightedAndEvidenceDecay(t *testing.T) {
+func TestAccumulatorConcurrentTicksCloseOnce(t *testing.T) {
 	now := time.Unix(100, 0)
-	h := HalfLives{time.Second, 10 * time.Second}
-	var m Mean
-	if m.Known(now, h) {
-		t.Fatal("unobserved mean is known")
-	}
-	m.Observe(now, 10, 1, h)
-	m.Observe(now, 30, 3, h)
-	closeValue(t, m.Values(now, h).Short, 25)
-	closeValue(t, m.Values(now.Add(time.Second), h).Long, 25)
-	closeValue(t, m.Weight(now.Add(time.Second), h).Short, 2)
-	m.Observe(now.Add(time.Second), 0, 2, h)
-	closeValue(t, m.Values(now.Add(time.Second), h).Short, 12.5)
-	m.Observe(now, math.Inf(1), 1, h)
-	m.Observe(now, 10, math.NaN(), h)
-	closeValue(t, m.Values(now.Add(time.Second), h).Short, 12.5)
-}
-
-func TestAccumulatorKernelChangeForgetsAdvisoryHistory(t *testing.T) {
-	now := time.Unix(100, 0)
-	old := HalfLives{time.Second, 10 * time.Second}
-	changed := HalfLives{2 * time.Second, 20 * time.Second}
 	var a Accumulator
-	a.Add(now, 100, old)
-	if v := a.Rates(now, changed); v.Short != 0 || v.Long != 0 {
-		t.Fatal("old history reinterpreted", v)
+	a.Tick(now, time.Second)
+	a.Add(123)
+	var completed atomic.Int64
+	var ticks sync.WaitGroup
+	for i := 0; i < 16; i++ {
+		ticks.Add(1)
+		go func() {
+			defer ticks.Done()
+			if a.Tick(now.Add(time.Second), time.Second) {
+				completed.Add(1)
+			}
+		}()
 	}
-	a.Add(now, 10, changed)
-	closeValue(t, a.Values(now, changed).Short, 10)
-	var m Mean
-	m.Observe(now, 20, 1, old)
-	if m.Known(now, changed) {
-		t.Fatal("old mean survived kernel change")
+	ticks.Wait()
+	if completed.Load() != 1 || a.Snapshot().Last != 123 || a.Snapshot().Current != 0 {
+		t.Fatal("concurrent ticks closed the same interval more than once")
 	}
 }

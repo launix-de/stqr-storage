@@ -32,7 +32,7 @@ func (b *Bucket) plannedCowUsage(view *systemView) (uint64, error) {
 	var total uint64
 	var after *volume.ObjectID
 	for {
-		records, next, more, err := b.server.cowGraphPage(b.server.ctx, b.ID(), after, 128, true, graph, view.placement)
+		records, next, more, err := b.server.cowGraphPage(b.server.ctx, b.ID(), after, 128, true, graph, view.placement, view.descriptions)
 		if err != nil {
 			return 0, err
 		}

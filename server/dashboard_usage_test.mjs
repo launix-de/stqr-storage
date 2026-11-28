@@ -20,26 +20,26 @@ test('unlimited buckets show absolute physical occupancy without a fake percenta
  assert.match(missing,/Belegung nicht verfügbar/);
 });
 test('user summary sums full node totals once independently of paged user rows',()=>{
- const entry=(node,read,write)=>({node,entry:{received:1000,snapshot:{boot:node,captured:4000000000n,users:[{id:'only-visible-user',io:{logicalRead:1n,logicalWrite:1n}}],io:{logicalRead:read,logicalWrite:write}},previous:{boot:node,captured:1000000000n,io:{logicalRead:0n,logicalWrite:0n}}}});
+ const entry=(node,read,write)=>({node,entry:{received:1000,ratesReceived:1000,snapshot:{node,boot:node,captured:4000000000n,users:[{id:'only-visible-user',io:{logicalRead:1n,logicalWrite:1n}}],io:{logicalRead:read,logicalWrite:write}},rates:{schema:1,node,boot:node,captured_ns:'4000000000',user_io:{logicalRead:{last:Number(read)/3,average:Number(read)/6},logicalWrite:{last:Number(write)/3,average:Number(write)/6}}}}});
  const a=entry('a',9000n,12000n),b=entry('b',3000n,6000n);
- assert.deepEqual(userTrafficSummary([a,b,a],1000),{read:12000n,write:18000n,readRate:4000n,writeRate:6000n});
+ assert.deepEqual(userTrafficSummary([a,b,a],1000),{read:12000n,write:18000n,readRate:{last:4000,average:2000},writeRate:{last:6000,average:3000}});
  assert.deepEqual(userTrafficSummary([a,{node:'missing'}],1000),{read:null,write:null,readRate:null,writeRate:null});
  assert.deepEqual(userTrafficSummary([a],11000),{read:null,write:null,readRate:null,writeRate:null});
- const restarted=entry('a',100n,200n);restarted.entry.previous.boot='old';
+ const restarted=entry('a',100n,200n);restarted.entry.rates.boot='old';
  assert.deepEqual(userTrafficSummary([restarted],1000),{read:100n,write:200n,readRate:null,writeRate:null});
  assert.deepEqual(userTrafficSummary([],1000),{read:null,write:null,readRate:null,writeRate:null});
 });
 
 test('user totals retain an unsampled current member instead of shrinking the sum',()=>{
  const view={member_nodes:['a','b'],membership_epoch:'1',config:{generation:1}};
- const sample={received:1000,snapshot:{node:'a',boot:'a',captured:2000000000n,io:{logicalRead:100n,logicalWrite:200n}},previous:{boot:'a',captured:1000000000n,io:{logicalRead:0n,logicalWrite:0n}}};
+ const sample={received:1000,ratesReceived:1000,rates:{node:'a',boot:'a',user_io:{logicalRead:{last:100,average:50},logicalWrite:{last:200,average:100}}},snapshot:{node:'a',boot:'a',captured:2000000000n,io:{logicalRead:100n,logicalWrite:200n}},previous:{boot:'a',captured:1000000000n,io:{logicalRead:0n,logicalWrite:0n}}};
  const states=new Map([['a',sample],['departed',{snapshot:{node:'departed'}}]]);
  seedMembers(view,states);
  const sources=currentSnapshots(view,states,true).map(entry=>({node:entry.snapshot.node,entry:entry.placeholder?null:entry}));
  assert.deepEqual(userTrafficSummary(sources,1000),{read:null,write:null,readRate:null,writeRate:null});
- const fresh={received:1000,snapshot:{node:'b',boot:'b',captured:2000000000n,io:{logicalRead:300n,logicalWrite:400n}},previous:{boot:'b',captured:1000000000n,io:{logicalRead:0n,logicalWrite:0n}}};
+ const fresh={received:1000,ratesReceived:1000,rates:{node:'b',boot:'b',user_io:{logicalRead:{last:300,average:150},logicalWrite:{last:400,average:200}}},snapshot:{node:'b',boot:'b',captured:2000000000n,io:{logicalRead:300n,logicalWrite:400n}},previous:{boot:'b',captured:1000000000n,io:{logicalRead:0n,logicalWrite:0n}}};
  states.set('b',fresh);
- assert.deepEqual(userTrafficSummary(currentSnapshots(view,states,true).map(entry=>({node:entry.snapshot.node,entry})),1000),{read:400n,write:600n,readRate:400n,writeRate:600n});
+ assert.deepEqual(userTrafficSummary(currentSnapshots(view,states,true).map(entry=>({node:entry.snapshot.node,entry})),1000),{read:400n,write:600n,readRate:{last:400,average:200},writeRate:{last:600,average:300}});
 });
 test('new counters keep uint64 precision and old/reset samples stay unknown',()=>{
  const n='18446744073709551615';

@@ -500,7 +500,7 @@ func (b *Bucket) mutateAttempt(ctx context.Context, p principal, id volume.Objec
 			}
 		}
 	}
-	cowProof, cowLinked, cowErr := s.cowPrepareWrite(ctx, b, id, p)
+	cowProof, cowLinked, cowErr := s.cowPrepareWrite(ctx, b, id, p, opt.Accepted)
 	if cowErr != nil {
 		return volume.Result{}, cowErr
 	}
@@ -866,6 +866,11 @@ func (b *Bucket) mutateAttempt(ctx context.Context, p principal, id volume.Objec
 		case 0x0108:
 			if opt.WholeObject {
 				next = length
+			} else {
+				if length > math.MaxUint64-offset {
+					return volume.Result{}, volume.ErrRange
+				}
+				next = max(next, offset+length)
 			}
 		}
 		usage, e := b.logicalUsage()

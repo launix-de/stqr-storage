@@ -87,6 +87,7 @@ type Server struct {
 	latest                 atomic.Pointer[client.StatsSnapshot]
 	retiredIO              client.IOStats
 	userIO                 sync.Map
+	dashboardRates         dashboardRateBook
 	ioPriority             ioPriorities
 	cleanupMu              sync.Mutex
 	cleanupJobs            map[volume.ID]*bucketCleanupJob

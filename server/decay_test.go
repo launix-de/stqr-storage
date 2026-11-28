@@ -59,14 +59,14 @@ func TestDecayVolumeSnapshotCadenceAndReplay(t *testing.T) {
 	middle := snap(2, 1, 100)
 	fine := placementVolumeRates([]client.StatsSnapshot{middle}, prior, h)
 	fine = placementVolumeRates([]client.StatsSnapshot{snap(3, 2, 200)}, &pgRebuildCatalog{snapshots: []client.StatsSnapshot{middle}, volumeRates: fine}, h)
-	if math.Abs(coarse.read-fine[vol].read) > 1e-10 || math.Abs(coarse.read-75) > 1e-10 {
+	if math.Abs(coarse.read-fine[vol].read) > 1e-10 || math.Abs(coarse.read-100) > 1e-10 {
 		t.Fatal(coarse.read, fine[vol].read)
 	}
 	replay := placementVolumeRates([]client.StatsSnapshot{last}, &pgRebuildCatalog{snapshots: []client.StatsSnapshot{last}, volumeRates: map[client.ID]placementVolumeRate{vol: coarse}}, h)
 	if replay[vol].read != coarse.read {
 		t.Fatal("snapshot counted twice", replay[vol].read)
 	}
-	if got := coarse.readWindow.Rates(base.Add(3*time.Second), h).Short; math.Abs(got-37.5) > 1e-10 {
+	if got := coarse.readWindow.Rates(base.Add(3*time.Second), h).Short; math.Abs(got-50) > 1e-10 {
 		t.Fatal("idle snapshot load did not decay", got)
 	}
 	last.BootID = client.ID{4}

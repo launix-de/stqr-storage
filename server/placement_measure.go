@@ -2,7 +2,9 @@
 package server
 
 import (
+	"bytes"
 	"math"
+	"sort"
 	"time"
 
 	"github.com/launix-de/stqr-storage/client"
@@ -19,7 +21,7 @@ type placementMeasurement struct {
 	cost          uint64
 	retained      map[volume.ID]uint64
 	growth        float64
-	growthWindow  decay.Accumulator
+	growthWindow  decay.Windows
 	estimateOnly  bool
 }
 
@@ -79,7 +81,7 @@ func (r *rangeManager) measuredPlacement(shape placementShape, entry client.Rang
 		if !known {
 			return placementMeasurement{}, false
 		}
-		total := storagePhysical(rows, volume.ID(shape.bucket))
+		total := sortedStoragePhysical(rows, volume.ID(shape.bucket))
 		weight := weights[placementWeightKey{shape.bucket, id}]
 		if weight <= 0 {
 			return placementMeasurement{}, false
@@ -98,9 +100,21 @@ func (r *rangeManager) measuredPlacement(shape placementShape, entry client.Rang
 	return r.storePlacementMeasurement(key, prior, measurement), true
 }
 
+// Local quota images originate in volume.usage and are sorted by bucket. Keep
+// this fast path separate from storagePhysical's externally supplied slices.
+func sortedStoragePhysical(rows []volume.BucketStorage, bucket volume.ID) uint64 {
+	i := sort.Search(len(rows), func(i int) bool {
+		return bytes.Compare(rows[i].Bucket[:], bucket[:]) >= 0
+	})
+	if i < len(rows) && rows[i].Bucket == bucket {
+		return rows[i].Physical
+	}
+	return 0
+}
+
 func (r *rangeManager) storePlacementMeasurement(key rangeMetricKey, prior, measurement placementMeasurement) placementMeasurement {
 	if prior.epoch == measurement.epoch && prior.policy == measurement.policy && prior.codec == measurement.codec && prior.estimateOnly == measurement.estimateOnly && prior.at.Before(measurement.at) && !prior.at.IsZero() {
-		amount := float64(subtractCapacity(measurement.cost, prior.cost))
+		amount := counterAmount(subtractCapacity(measurement.cost, prior.cost))
 		measurement.growthWindow = prior.growthWindow
 		h := r.server.placementHalfLives()
 		measurement.growthWindow.AddInterval(prior.at, measurement.at, amount, h)

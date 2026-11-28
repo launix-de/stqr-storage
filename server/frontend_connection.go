@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 
 	"github.com/launix-de/stqr-storage/client"
 	"github.com/launix-de/stqr-storage/volume"
@@ -22,6 +23,7 @@ const frontendCredentialPrefix = "node-frontend-"
 const peerVerifyFrontend uint16 = 0x104e
 
 type frontendGrant struct {
+	browser   bool
 	ctx       context.Context
 	bucket    volume.ID
 	principal principal
@@ -187,6 +189,23 @@ func (s *Server) verifyFrontend(body []byte, actor client.ID) ([]byte, error) {
 	info, err := b.Info(uid, current.Role == "ADMIN")
 	if err != nil {
 		return nil, err
+	}
+	if grant.browser {
+		if _, _, err := s.referenceAccountSnapshot(grant.principal); err != nil {
+			return nil, err
+		}
+		if grant.principal.Cookie {
+			s.authMu.Lock()
+			session, ok := s.sessions[grant.principal.SessionToken]
+			s.authMu.Unlock()
+			if !ok || !time.Now().Before(session.Expires) {
+				return nil, ErrBucketForbidden
+			}
+		}
+		if info.Permissions == 0 {
+			return nil, ErrBucketForbidden
+		}
+		return nil, nil
 	}
 	if info.Permissions&grant.principal.frontendPermission == 0 {
 		return nil, ErrBucketForbidden

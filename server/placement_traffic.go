@@ -10,7 +10,7 @@ import (
 
 type placementVolumeRate struct {
 	read, write             float64 // captured forecast; the underlying windows decay on use
-	readWindow, writeWindow decay.Accumulator
+	readWindow, writeWindow decay.Windows
 	sampled                 time.Time // local receipt time of the last new source snapshot
 }
 
@@ -40,11 +40,18 @@ func placementVolumeRatesAt(snapshots []client.StatsSnapshot, previous *pgRebuil
 		}
 		if snapshot.Sequence <= prior.Sequence {
 			for _, v := range snapshot.Volumes {
-				out[v.ID] = previous.volumeRates[v.ID]
+				if rate, known := previous.volumeRates[v.ID]; known {
+					out[v.ID] = rate
+				}
 			}
 			continue
 		}
 		if snapshot.CapturedUnixNS <= prior.CapturedUnixNS {
+			for _, v := range snapshot.Volumes {
+				if rate, known := previous.volumeRates[v.ID]; known {
+					out[v.ID] = rate
+				}
+			}
 			continue
 		}
 		if snapshot.CapturedUnixNS > 1<<63-1 || prior.CapturedUnixNS > 1<<63-1 {
@@ -57,12 +64,12 @@ func placementVolumeRatesAt(snapshots []client.StatsSnapshot, previous *pgRebuil
 		}
 		for _, v := range snapshot.Volumes {
 			p, ok := volumes[v.ID]
-			if !ok {
+			if !ok || v.IO.PhysicalReadBytes < p.IO.PhysicalReadBytes || v.IO.PhysicalWriteBytes < p.IO.PhysicalWriteBytes {
 				continue
 			}
-			read := float64(subtractCapacity(v.IO.PhysicalReadBytes, p.IO.PhysicalReadBytes))
-			write := float64(subtractCapacity(v.IO.PhysicalWriteBytes, p.IO.PhysicalWriteBytes))
-			last := previous.volumeRates[v.ID]
+			read := subtractCapacity(v.IO.PhysicalReadBytes, p.IO.PhysicalReadBytes)
+			write := subtractCapacity(v.IO.PhysicalWriteBytes, p.IO.PhysicalWriteBytes)
+			last, known := previous.volumeRates[v.ID]
 			sampleStart, sampleEnd := start, end
 			if !received.IsZero() {
 				sampleEnd = received
@@ -71,9 +78,12 @@ func placementVolumeRatesAt(snapshots []client.StatsSnapshot, previous *pgRebuil
 					sampleStart = last.sampled
 				}
 			}
+			if known && last.sampled.IsZero() {
+				last.readWindow.SeedRate(sampleStart, last.read, h)
+				last.writeWindow.SeedRate(sampleStart, last.write, h)
+			}
+			observeTrafficFrame(&last.readWindow, &last.writeWindow, sampleStart, sampleEnd, read, write, h)
 			last.sampled = sampleEnd
-			last.readWindow.AddInterval(sampleStart, sampleEnd, read, h)
-			last.writeWindow.AddInterval(sampleStart, sampleEnd, write, h)
 			last.read, last.write = last.readWindow.Rates(sampleEnd, h).Peak(), last.writeWindow.Rates(sampleEnd, h).Peak()
 			out[v.ID] = last
 		}

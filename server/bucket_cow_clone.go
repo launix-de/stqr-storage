@@ -133,6 +133,9 @@ func (s *Server) cloneCow(ctx context.Context, m client.Message, p principal) ([
 			return (peerControlParticipants{runtime: s.control}).call(ctx, members[0], peerBucketCopy, e.B)
 		}
 	}
+	if err := s.requireDirectedCOWCompatibility(ctx); err != nil {
+		return nil, err
+	}
 	s.copyCoordinator.Lock()
 	defer s.copyCoordinator.Unlock()
 	result := client.Encoder{}
@@ -176,7 +179,7 @@ func (s *Server) cloneCow(ctx context.Context, m client.Message, p principal) ([
 		if len(graph.component(source)) >= 4096 {
 			return fail(409, "clone component has reached its traversal limit")
 		}
-		a.ClonePeers = append(a.ClonePeers, BucketClonePeer{Bucket: b.ID, Link: m.ID.String()})
+		a.ClonePeers = append(a.ClonePeers, BucketClonePeer{Bucket: b.ID, Link: m.ID.String(), Direction: "child"})
 		if b.Format != "" && b.Format != a.Format {
 			return fail(409, "clone destination format differs from source")
 		}
@@ -184,7 +187,7 @@ func (s *Server) cloneCow(ctx context.Context, m client.Message, p principal) ([
 		if b.Format != "" {
 			b.Schema = 2
 		}
-		b.ClonePeers = append(b.ClonePeers, BucketClonePeer{Bucket: a.ID, Link: m.ID.String()})
+		b.ClonePeers = append(b.ClonePeers, BucketClonePeer{Bucket: a.ID, Link: m.ID.String(), Direction: "parent"})
 		b.CloneDetach = !cowSameStorage(a.Policy, b.Policy)
 		receipt.Running = false
 		receipt.Status = 200

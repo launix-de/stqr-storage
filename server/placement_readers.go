@@ -48,7 +48,7 @@ type placementReaderTraffic struct {
 	lastRead, lastWrite     uint64
 	sampled                 time.Time
 	active                  time.Time
-	readWindow, writeWindow decay.Accumulator
+	readWindow, writeWindow decay.Windows
 }
 
 func (s *Server) executePlacementHints(m client.Message, ws *wsSession, p principal) ([]byte, int) {
@@ -202,8 +202,7 @@ func (r *rangeManager) placementReaderCosts(key rangeMetricKey, nodes []client.I
 			continue
 		}
 		if now.Sub(traffic.sampled) >= time.Second {
-			traffic.readWindow.AddInterval(traffic.sampled, now, float64(traffic.read-traffic.lastRead), half)
-			traffic.writeWindow.AddInterval(traffic.sampled, now, float64(traffic.write-traffic.lastWrite), half)
+			observeTrafficFrame(&traffic.readWindow, &traffic.writeWindow, traffic.sampled, now, traffic.read-traffic.lastRead, traffic.write-traffic.lastWrite, half)
 			traffic.sampled, traffic.lastRead, traffic.lastWrite = now, traffic.read, traffic.write
 		}
 		rate := math.Min(math.MaxFloat64, traffic.readWindow.Rates(now, half).Peak()+traffic.writeWindow.Rates(now, half).Peak())

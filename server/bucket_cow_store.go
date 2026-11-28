@@ -20,6 +20,7 @@ type cowProofKey struct{}
 type cowLeaseKey struct{}
 type cowLocalOwnerKey struct{}
 type cowRestoreKey struct{}
+type cowAcceptedBucketKey struct{}
 type cowRestore struct {
 	info   volume.Info
 	source volume.ID
@@ -30,6 +31,8 @@ type cowServerObjects struct {
 	server      *Server
 	metadata    bool
 	readReplica bool
+	// Prospective quota evaluation must use its fenced future catalog snapshot.
+	graphDescriptions map[volume.ID]BucketDescription
 }
 
 func (store cowServerObjects) capture(ctx context.Context, bucket volume.ID, object volume.ObjectID) (*cowSnapshot, error) {
@@ -113,6 +116,14 @@ func (store cowServerObjects) present(ctx context.Context, bucket volume.ID, obj
 	present := snapshot != nil
 	snapshot.close()
 	return present, nil
+}
+
+// Confirm an already visible preservation record through the same owner RPC.
+// The tombstone is only a create-if-ABSENT fallback; an existing record is never
+// replaced. Unlike a new leaf write, this source mutation depends on that
+// independent namespace retaining a materialization boundary after a crash.
+func (store cowServerObjects) preserveExisting(ctx context.Context, bucket volume.ID, object volume.ObjectID) error {
+	return store.materialize(ctx, bucket, object, &cowSnapshot{Info: volume.Info{Deleted: true}})
 }
 func (store cowServerObjects) materialize(ctx context.Context, bucket volume.ID, object volume.ObjectID, snapshot *cowSnapshot) error {
 	s := store.server
@@ -326,7 +337,21 @@ func (s *Server) cowPeerMutation(ctx context.Context, m client.Message, bucket v
 	}
 	if existing != nil {
 		existing.close()
-		return nil, nil
+		acceptedBucket, accepted := ctx.Value(cowAcceptedBucketKey{}).(volume.ID)
+		if accepted && acceptedBucket == bucket {
+			return nil, nil
+		}
+		// The record may have come from an accepted mutation which subsequently
+		// failed its CAS. Presence is still volatile. Confirm this finite local
+		// generation before allowing a different namespace to destroy its preimage.
+		// No Volume handle or node/range lock is retained across this barrier.
+		if err := s.cowValidateRestore(bucket, cowRestore{info: info, source: source, proof: proof, lease: lease}); err != nil {
+			return nil, err
+		}
+		if existing.store == nil {
+			return nil, volume.ErrRecovery
+		}
+		return nil, existing.store.CheckpointThrough(existing.generation)
 	}
 	snapshot := &cowSnapshot{Info: info, Extents: extents, Data: &cowRemoteReader{ctx: ctx, server: s, node: node, transfer: transfer, length: info.Length}}
 	stream, err := newCowStream(snapshot)
@@ -339,11 +364,21 @@ func (s *Server) cowPeerMutation(ctx context.Context, m client.Message, bucket v
 	if err != nil {
 		return nil, err
 	}
-	_, err = b.mutate(ctx, principal{cowInternal: true}, object, cowRestoreOpcode, 0, uint64(stream.length), stream, nil, volume.Options{RequestID: request})
+	// Copying an inherited preimage into the writing bucket is part of that
+	// same owner's accepted mutation. Its generation is tracked by the usual
+	// bucket/connection fence, so it must not introduce a physical checkpoint
+	// before the caller can publish its change. The context is deliberately
+	// local: preserving a DIFFERENT linked namespace still requires the existing
+	// durability barrier, including when that namespace has a remote owner.
+	// Removing that barrier requires cross-owner preservation dependencies at
+	// every volume checkpoint, not merely a flag on this RPC.
+	acceptedBucket, accepted := ctx.Value(cowAcceptedBucketKey{}).(volume.ID)
+	opt := volume.Options{RequestID: request, Accepted: accepted && acceptedBucket == bucket}
+	_, err = b.mutate(ctx, principal{cowInternal: true}, object, cowRestoreOpcode, 0, uint64(stream.length), stream, nil, opt)
 	return nil, err
 }
 
-func (s *Server) cowPrepareWrite(ctx context.Context, b *Bucket, id volume.ObjectID, p principal) ([32]byte, bool, error) {
+func (s *Server) cowPrepareWrite(ctx context.Context, b *Bucket, id volume.ObjectID, p principal, accepted bool) ([32]byte, bool, error) {
 	if p.cowInternal || bucketLocalReferenceRoot(id) || len(b.storageDescription().ClonePeers) == 0 {
 		return [32]byte{}, false, nil
 	}
@@ -356,6 +391,9 @@ func (s *Server) cowPrepareWrite(ctx context.Context, b *Bucket, id volume.Objec
 		return proof, false, err
 	}
 	ctx = context.WithValue(ctx, cowProofKey{}, proof)
+	if accepted {
+		ctx = context.WithValue(ctx, cowAcceptedBucketKey{}, b.ID())
+	}
 	if p.connection != nil {
 		ctx = context.WithValue(ctx, cowLocalOwnerKey{}, p.connection)
 		if lease := p.connection.lease.Load(); lease != nil {
@@ -363,7 +401,7 @@ func (s *Server) cowPrepareWrite(ctx context.Context, b *Bucket, id volume.Objec
 		}
 	}
 	err = g.prepareWrite(ctx, cowServerObjects{server: s}, b.ID(), id)
-	return proof, true, err
+	return proof, true, cowStorageError(err)
 }
 func (s *Server) cowValidateRestore(bucket volume.ID, restore cowRestore) error {
 	g, err := s.cowGraph()
@@ -446,4 +484,43 @@ func (b *Bucket) cowMaterializationRequest(object volume.ObjectID, proof [32]byt
 		id = volume.ID(next[:16])
 	}
 	return volume.ID{}, fail(503, "clone materialization has too many retained aborts")
+}
+
+func (store cowServerObjects) cloneNeighbors(bucket volume.ID, preserve bool) ([]volume.ID, error) {
+	var d BucketDescription
+	if store.graphDescriptions != nil {
+		var ok bool
+		d, ok = store.graphDescriptions[bucket]
+		if !ok {
+			return nil, fail(503, "prospective clone namespace metadata is unavailable")
+		}
+	} else {
+		b, err := store.server.Bucket(bucket)
+		if err != nil {
+			return nil, fail(503, "clone namespace metadata is unavailable")
+		}
+		d = b.storageDescription()
+	}
+	var ids []volume.ID
+	for _, edge := range d.ClonePeers {
+		if preserve && edge.Direction == "parent" || !preserve && edge.Direction == "child" {
+			continue
+		}
+		id, err := bucketID(edge.Bucket)
+		if err != nil {
+			return nil, fail(503, "clone neighbor metadata is invalid")
+		}
+		ids = append(ids, id)
+	}
+	return ids, nil
+}
+
+// An owner whose inheritance semantics cannot be used is unavailable, not
+// empty or unsupported client storage. Keep peer/admin 426 diagnostics intact;
+// storage-facing callers return retryable 503 without changing placement.
+func cowStorageError(err error) error {
+	if err != nil && statusOf(err) == 426 {
+		return fail(503, "clone owner is temporarily unavailable due to incompatible semantics")
+	}
+	return err
 }

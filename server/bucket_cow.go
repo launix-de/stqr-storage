@@ -32,6 +32,9 @@ type cowSnapshot struct {
 	Data           io.ReaderAt
 	Extents        []volume.Extent
 	Close          func() error
+	// Local-only finite publication cut, not an object version or wire metadata.
+	store      *volume.Volume
+	generation uint64
 }
 
 func (s *cowSnapshot) close() {
@@ -68,7 +71,11 @@ func (g cowGraph) resolve(ctx context.Context, store cowObjects, bucket volume.I
 		return nil, fail(503, "clone graph exceeds traversal budget")
 	}
 	seen[bucket] = true
-	for _, peer := range g[bucket] {
+	peers, err := g.readPeers(store, bucket, false)
+	if err != nil {
+		return nil, err
+	}
+	for _, peer := range peers {
 		if seen[peer] {
 			continue
 		}
@@ -88,8 +95,8 @@ func (g cowGraph) resolve(ctx context.Context, store cowObjects, bucket volume.I
 	return nil, nil
 }
 
-// prepareWrite preserves the old logical contents for every direct peer before
-// the ordinary mutation may acquire its volume write lock. Connections must be
+// prepareWrite preserves the old logical contents for children (and legacy
+// symmetric neighbors) before the ordinary mutation may acquire its volume write lock. Connections must be
 // revalidated under the server's mutation lock before applying that mutation.
 // Concurrent preservation is safe because materialize never replaces a record.
 func (g cowGraph) prepareWrite(ctx context.Context, store cowObjects, bucket volume.ID, object volume.ObjectID) error {
@@ -97,8 +104,12 @@ func (g cowGraph) prepareWrite(ctx context.Context, store cowObjects, bucket vol
 		return nil
 	}
 	// Positive physical presence is permanent while this graph remains linked.
-	// Once every neighbor has its own record, a ranged overwrite need not read
+	// Once every preservation target has its own record, an overwrite need not read
 	// or copy the object's payload again.
+	peers, err := g.readPeers(store, bucket, true)
+	if err != nil {
+		return err
+	}
 	var missing []volume.ID
 	probe, fast := store.(interface {
 		present(context.Context, volume.ID, volume.ObjectID) (bool, error)
@@ -110,20 +121,28 @@ func (g cowGraph) prepareWrite(ctx context.Context, store cowObjects, bucket vol
 		if err != nil {
 			return err
 		}
-		for _, peer := range g[bucket] {
+		for _, peer := range peers {
 			present, err := probe.present(ctx, peer, object)
 			if err != nil {
 				return err
 			}
 			if !present {
 				missing = append(missing, peer)
+			} else if proof, ok := store.(interface {
+				preserveExisting(context.Context, volume.ID, volume.ObjectID) error
+			}); ok {
+				// Visibility alone is not a crash-isolation proof. A failed child CAS
+				// may have materialized its inherited preimage without client Sync.
+				if err := proof.preserveExisting(ctx, peer, object); err != nil {
+					return err
+				}
 			}
 		}
 		if ownPresent && len(missing) == 0 {
 			return nil
 		}
 	} else {
-		missing = g[bucket]
+		missing = peers
 	}
 	if !ownPresent {
 		own, err := g.resolve(ctx, store, bucket, object, map[volume.ID]bool{})
@@ -139,10 +158,14 @@ func (g cowGraph) prepareWrite(ctx context.Context, store cowObjects, bucket vol
 			return err
 		}
 	}
+	// A leaf has no independent preservation target. Its own materialization
+	// is enough; avoid opening another snapshot/transfer just to close it.
+	if len(missing) == 0 {
+		return nil
+	}
 	// A competing writer may have won the first materialization. Capture the
 	// record actually stored here before preserving it for remaining peers.
 	var own *cowSnapshot
-	var err error
 	own, err = store.capture(ctx, bucket, object)
 	if err != nil {
 		return err
@@ -177,4 +200,16 @@ func (g cowGraph) component(start volume.ID) []volume.ID {
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].String() < out[j].String() })
 	return out
+}
+
+// The full graph remains the lifetime/proof graph. Directed stores restrict
+// reads to parents and preservation to children. Legacy stores/edges retain
+// symmetric semantics, including the independent in-memory format fixtures.
+func (g cowGraph) readPeers(store cowObjects, bucket volume.ID, preserve bool) ([]volume.ID, error) {
+	if directed, ok := store.(interface {
+		cloneNeighbors(volume.ID, bool) ([]volume.ID, error)
+	}); ok {
+		return directed.cloneNeighbors(bucket, preserve)
+	}
+	return g[bucket], nil
 }

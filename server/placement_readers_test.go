@@ -52,7 +52,7 @@ func TestPlacementReadersActualDemandAndConservativeMissingPath(t *testing.T) {
 	r.metrics.Store(key, m)
 	recordPlacementReader(m, key, p, 1000, 0, now)
 	costs := r.placementReaderCosts(key, nodes, 10, now.Add(10*time.Second))
-	for i, want := range []float64{1000, 5500, 5500} {
+	for i, want := range []float64{2000, 11000, 11000} {
 		if math.Abs(costs[i]-want) > 1e-7 {
 			t.Fatal("forecast or unknown-path optimism", costs)
 		}
@@ -65,8 +65,14 @@ func TestPlacementReadersActualDemandAndConservativeMissingPath(t *testing.T) {
 		}
 	}
 	idle := r.placementReaderCosts(key, nodes, 10, now.Add(20*time.Second))
-	if math.Abs(idle[0]-500) > 1e-7 {
-		t.Fatal("idle demand did not halve", idle)
+	half := r.server.placementHalfLives()
+	want := costs[0] * math.Exp2(-float64(10*time.Second)/float64(half.Long))
+	if math.Abs(idle[0]-want) > 1e-7 {
+		t.Fatal("idle forecast did not follow long-window decay", idle, want)
+	}
+	traffic := m.readers[group]
+	if got := traffic.readWindow.Rates(now.Add(20*time.Second), half).Short; math.Abs(got-50) > 1e-7 {
+		t.Fatal("short-window idle demand did not halve", got)
 	}
 	if stale := r.placementReaderCosts(key, nodes, 10, now.Add(placementPathTTL+time.Second)); stale[0] != 0 || stale[1] != 0 || stale[2] != 0 {
 		t.Fatal("stale path used", stale)

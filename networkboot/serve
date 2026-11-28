@@ -76,7 +76,16 @@ def editor_initrd(path):
     private cached initrd changes; the published image and its kernel stay put.
     This also permits editing an image prepared before editor mount mode existed.
     """
-    helper = (BIN / 'stqr-boot-root').read_bytes()
+    helper_path = BIN / 'stqr-boot-root'
+    try:
+        probe = subprocess.run([str(helper_path), '--capabilities'],
+                               stdin=subprocess.DEVNULL, capture_output=True, timeout=5, check=True)
+        compatible = {'mount-edit', 'login-uri'} <= set(probe.stdout.decode('ascii').splitlines())
+    except (OSError, subprocess.SubprocessError, UnicodeError):
+        compatible = False
+    if not compatible:
+        raise RuntimeError('stqr-boot-root is outdated or incompatible; rebuild with make -C networkboot before editing or booting without an overlay')
+    helper = helper_path.read_bytes()
     archive = bytearray()
     def entry(name, data, mode):
         encoded = name.encode() + b'\0'

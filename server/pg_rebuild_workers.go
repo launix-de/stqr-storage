@@ -43,7 +43,7 @@ func (r *rangeManager) startPGWorkers() {
 			catalog.snapshots = []client.StatsSnapshot{s.CollectStats(client.StatsFilter{IncludeRanges: true})}
 			s.peerStatsMu.RLock()
 			for _, p := range s.peerStats {
-				if p.online && p.snapshot != nil && p.connection.Capabilities&client.CapabilityRangeHandoff != 0 {
+				if p.online && p.snapshot != nil && p.snapshot.BootID == p.connection.Boot && p.connection.Capabilities&client.CapabilityRangeHandoff != 0 {
 					catalog.snapshots = append(catalog.snapshots, *p.snapshot)
 					catalog.seen[p.snapshot.Node] = p.lastSeen
 				}

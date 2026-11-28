@@ -14,7 +14,14 @@ capacity. With a finite quota, available space is additionally capped at
 
 `Used` counts live object bytes in this bucket: file data, filesystem metadata,
 and retained objects awaiting offline fsck. It is not the sum of visible file
-sizes or a measurement of compressed physical allocation. `Total = Used + Free`
+sizes. An **unlimited COW bucket** instead reports its eligible physical pool:
+`Used` is allocated physical bytes on eligible volumes, including other buckets
+sharing that pool, and `Free` retains the placement, storage-class and guarantee
+filters above. This avoids scanning its inherited namespace during boot or `df`.
+It is not an exact logical size of the COW view and does not change quota
+admission. Finite logical quotas still require known exact logical usage; a cold
+COW measurement fails as unavailable instead of scanning or inventing zero.
+`Total = Used + Free`
 and `Available = Free`; the implementation has no extra root-only filesystem
 reserve. Total is therefore dynamic and can be smaller than a configured quota
 when the physical pool is insufficient. Compression and future metadata growth
@@ -30,7 +37,9 @@ report byte values in 4 KiB units, rounded down. Inode counts are not estimated.
 Cluster aggregation uses maintained owner counters and validated member volume
 statistics. Internal owner-usage requests use schema 2 of `BUCKET_OWNER_USAGE`,
 restricted to authenticated current member nodes and carrying no user identity.
-Ordinary clients receive only their authorized bucket's aggregate. Unknown or
+Ordinary clients receive a capacity snapshot only for their authorized bucket;
+for unlimited COW this includes the coarse physical-pool totals described above.
+Unknown or
 disconnected member statistics, unavailable owners, recovery ranges or changing
 placement/configuration fail the measurement rather than reporting a partial
 cluster as empty or full. Statistics are snapshots and can lag concurrent writes.

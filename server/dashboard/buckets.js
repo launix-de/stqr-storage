@@ -1,7 +1,10 @@
 // SPDX-License-Identifier: GPL-3.0-only
+import {finishBucketCreation} from './bucket-create.js';
+import {configureDialog} from './dialogs.js';
+import {ui} from './plugin-ui.js';
 import {copyText} from './clipboard.js';
 import {bucketThroughput} from './throughput.js';
-import {EndlessList} from './endless.js';
+import {EndlessList,bindSearch} from './endless.js';
 import {newID,Writer} from './protocol.js';
 import {writeBucketPolicy,parseQuota,defaultBucketPolicy} from './bucket-codec.js';
 import {formatSize,sizeLabel,sizeSteps} from './size.js';
@@ -27,10 +30,10 @@ function bucketUsage(b,escape){
  return html;
 }
 const permissions=[[1,'Lesen'],[2,'Schreiben'],[4,'Anhängen'],[8,'Löschen']];
-export function setupBucketViews({connection,escape,toast,showView,onUsersChanged=()=>{},statsEntries=()=>[]}){
+export function setupBucketViews({connection,escape,toast,showView,onUsersChanged=()=>{},statsEntries=()=>[],formatPlugins}){
  const seenStats=new Set(),checkedCatalog=new Set(),pendingCatalog=new Set();let syncingCatalog=false;
  let groups=[],buckets=[],users=[],epoch=0,poll,editor,createProgress,access,grantRetry,action,actionRetry,editorPending=false;
- let pageMeta={},searchTimer,userChoices=[],userSearchTimer,userSearchEpoch=0;
+ let pageMeta={},userChoices=[],userSearchTimer,userSearchEpoch=0;
  let quotaInfo=null,quotaSteps=[],quotaEpoch=0,quotaPoll,grantRows=[],lockRetry;
  async function fetchGroups(){const out=[];let after='';const seen=new Set;for(;;){const page=await connection().listPlacementGroups(after);out.push(...page.groups);if(!page.next)return out;if(seen.has(page.next))throw Error('Ungültige PG-Folgeseite.');seen.add(page.next);after=page.next}}
  function applyGroup(){const g=groups.find(g=>g.id===$('bucket-pg').value);if(!g)return;const p=(g.desired??g.effective).storage;$('bucket-storage').value=p.storage_strategy;$('bucket-compression').value=p.compression;$('bucket-placement').value=p.placement_mode;$('bucket-replicas').value=p.redundancy.replicas||1;updateFields()}
@@ -44,7 +47,7 @@ export function setupBucketViews({connection,escape,toast,showView,onUsersChange
   const ids=[...$('bucket-rows').querySelectorAll('[data-bucket]')].filter(row=>{const r=row.getBoundingClientRect();return r.bottom>=0&&r.top<=innerHeight}).map(row=>row.dataset.bucket);
   if(!ids.length){schedulePoll();return}
   try{const page=await connection().listBucketsPage('',Math.max(1,Math.min(1000,ids.length)),$('bucket-search').value.trim(),ids);if(seq!==epoch)return;
-   const updates=new Map(page.buckets.map(b=>[b.id,b])),removed=new Set(ids.filter(id=>!updates.has(id)));pager.items=pager.items.filter(b=>!removed.has(b.id)).map(b=>updates.get(b.id)??b);buckets=pager.items;pageMeta.all_total=page.all_total;if(removed.size)pageMeta.total=Math.max(0,(pageMeta.total??buckets.length)-removed.size);
+   const updates=new Map(page.buckets.map(b=>[b.id,b])),removed=new Set(ids.filter(id=>!updates.has(id)));pager.patch(page.buckets,{remove:[...removed],notify:false});buckets=pager.items;pageMeta.all_total=page.all_total;if(removed.size)pageMeta.total=Math.max(0,(pageMeta.total??buckets.length)-removed.size);
    for(const row of $('bucket-rows').querySelectorAll('[data-bucket]')){const b=updates.get(row.dataset.bucket);if(removed.has(row.dataset.bucket)){row.remove();continue}if(b){const wrapper=document.createElement('tbody');wrapper.innerHTML=rowHTML(b);row.replaceChildren(...wrapper.firstElementChild.childNodes)}}if(!buckets.length)$('bucket-rows').innerHTML='<tr><td colspan="9" class="empty">Keine passenden Buckets.</td></tr>';bindRows();pager.status();$('bucket-count').textContent=String(pageMeta.total??buckets.length);$('nav-buckets-count').textContent=String(page.all_total);$('bucket-metric-count').textContent=String(page.all_total);
   }catch(e){if(seq===epoch)$('buckets-error').textContent=e.message}finally{if(seq===epoch)schedulePoll()}
  }
@@ -63,21 +66,25 @@ export function setupBucketViews({connection,escape,toast,showView,onUsersChange
  function rowHTML(b){
    const p=b.policy,system=b.id===SYSTEM,job=deletionJobs.get(b.id),pending=job?.state==='pending',failed=job?.state==='failed',busy=b.state==='deleting'||pending,locked=b.state==='locked';
    const disabled=system||busy?'disabled':'',changing=!!b.desired_policy;
-   return `<tr data-bucket="${b.id}"><td><div class="user-cell"><span class="bucket-avatar">▱</span><div><div class="volume-name"><button type="button" class="bucket-open" data-bucket-edit="${b.id}" ${disabled||changing?'disabled':''}>${escape(b.name)}</button>${system?'<span class="system-label">SYSTEM</span>':''}</div><div class="volume-path bucket-id"><code>${escape(b.id)}</code> <button type="button" class="row-action bucket-id-copy" data-copy-bucket="${b.id}" aria-label="Bucket-ID kopieren" title="Bucket-ID kopieren">Kopieren</button></div></div></div></td><td><span class="class-badge ${p.storage_strategy}">${p.storage_strategy.toUpperCase()}</span><div class="bucket-sub">${escape(groups.find(g=>g.id===p.placement_group)?.name??'PG')} · v${p.placement_mask_version??'—'}</div><div class="bucket-sub">${p.placement_mode==='everywhere'?'Jede Node':p.redundancy.replicas+' Kopie'+(p.redundancy.replicas===1?'':'n')}</div></td><td><span class="class-badge">${escape(p.compression.toUpperCase())}</span></td><td class="bucket-format">${escape(b.format||'-')}</td><td>${bucketUsage(b,escape)}</td><td data-bucket-throughput="${b.id}">${bucketThroughput(statsEntries(),b.id)}</td><td>${system?'Alle Admins':(b.grants??[]).length+' User'}</td><td><span class="state-badge ${failed?'failed':busy?'draining':locked?'detached':''}"><i></i>${pending?'Löschung ausstehend':failed?'Löschung fehlgeschlagen':busy?'Wird gelöscht':changing?'Wird umgestellt · PG v'+(b.desired_policy.placement_mask_version??'—'):locked?'Gesperrt':'Aktiv'}</span>${failed?'<div class="error deletion-error">'+escape(job.error)+'</div>':''}</td><td><div class="row-actions bucket-actions"><button class="row-action" data-bucket-action="clone" data-id="${b.id}" ${disabled}>Kopieren</button><button class="row-action" data-bucket-action="rename" data-id="${b.id}" ${disabled}>Umbenennen</button><button class="row-action danger-action" data-bucket-action="delete" data-id="${b.id}" ${disabled}>${failed?'Erneut versuchen':'Löschen'}</button></div></td></tr>`;
+   return `<tr data-bucket="${b.id}"><td><div class="user-cell"><span class="bucket-avatar">▱</span><div><div class="volume-name"><button type="button" class="bucket-open" data-bucket-edit="${b.id}" ${disabled||changing?'disabled':''}>${escape(b.name)}</button>${system?'<span class="system-label">SYSTEM</span>':''}</div><div class="volume-path bucket-id"><code>${escape(b.id)}</code> <button type="button" class="row-action bucket-id-copy" data-copy-bucket="${b.id}" aria-label="Bucket-ID kopieren" title="Bucket-ID kopieren">Kopieren</button></div></div></div></td><td><span class="class-badge ${p.storage_strategy}">${p.storage_strategy.toUpperCase()}</span><div class="bucket-sub">${escape(groups.find(g=>g.id===p.placement_group)?.name??'PG')} · v${p.placement_mask_version??'—'}</div><div class="bucket-sub">${p.placement_mode==='everywhere'?'Jede Node':p.redundancy.replicas+' Kopie'+(p.redundancy.replicas===1?'':'n')}</div></td><td><span class="class-badge">${escape(p.compression.toUpperCase())}</span></td><td class="bucket-format">${formatPlugins?.cell(b)??escape(b.format||'-')}</td><td>${bucketUsage(b,escape)}</td><td data-bucket-throughput="${b.id}">${bucketThroughput(statsEntries(),b.id)}</td><td>${system?'Alle Admins':(b.grants??[]).length+' User'}</td><td><span class="state-badge ${failed?'failed':busy?'draining':locked?'detached':''}"><i></i>${pending?'Löschung ausstehend':failed?'Löschung fehlgeschlagen':busy?'Wird gelöscht':changing?'Wird umgestellt · PG v'+(b.desired_policy.placement_mask_version??'—'):locked?'Gesperrt':'Aktiv'}</span>${failed?'<div class="error deletion-error">'+escape(job.error)+'</div>':''}</td><td><div class="row-actions bucket-actions"><button class="row-action" data-bucket-action="clone" data-id="${b.id}" ${disabled}>Kopieren</button><button class="row-action" data-bucket-action="rename" data-id="${b.id}" ${disabled}>Umbenennen</button><button class="row-action danger-action" data-bucket-action="delete" data-id="${b.id}" ${disabled}>${failed?'Erneut versuchen':'Löschen'}</button></div></td></tr>`;
  }
  function bindRows(){
+  for(const button of $('bucket-rows').querySelectorAll('[data-format-bucket]'))button.onclick=()=>{const b=buckets.find(b=>b.id===button.dataset.formatBucket);if(b&&b.state!=='deleting')formatPlugins?.open(b)};
   for(const bar of $('bucket-rows').querySelectorAll('[data-percent]'))bar.style.width=bar.dataset.percent+'%';
   for(const b of document.querySelectorAll('[data-bucket-edit]'))b.onclick=()=>openEditor(b.dataset.bucketEdit);
   for(const row of document.querySelectorAll('[data-bucket]'))row.onclick=e=>{if(!e.target.closest('button,a,input,select,.bucket-id'))openEditor(row.dataset.bucket)};
   for(const b of document.querySelectorAll('[data-copy-bucket]'))b.onclick=async e=>{e.stopPropagation();try{await copyText(b.dataset.copyBucket);toast('Bucket-ID kopiert')}catch(error){toast(error.message,true)}};
   for(const b of document.querySelectorAll('[data-bucket-action]'))b.onclick=()=>openAction(b.dataset.id,b.dataset.bucketAction);
  }
- $('refresh-buckets').onclick=()=>load();$('bucket-search').oninput=()=>{clearTimeout(searchTimer);searchTimer=setTimeout(()=>load(),250)};$('add-bucket').onclick=()=>openCreate();
+ $('refresh-buckets').onclick=async()=>{try{await formatPlugins?.refresh();await load()}catch(e){$('buckets-error').textContent=e.message}};const search=bindSearch($('bucket-search'),()=>load(),{onChange:()=>{epoch++;clearTimeout(poll);pager.cancel()}});$('add-bucket').onclick=()=>openCreate();
+ function renderFormatChoices(){const select=$('bucket-format'),selected=select.value;select.replaceChildren(new Option('Noch nicht festlegen',''));for(const format of formatPlugins?.formats()??[])select.add(new Option(format,format));select.value=[...select.options].some(o=>o.value===selected)?selected:''}
+ async function refreshFormats(draft){try{await formatPlugins?.refresh();if(editor?.bucket!==draft||!$('bucket-create-dialog').open)return;renderFormatChoices();$('bucket-format-note').textContent='Ohne Auswahl wird das Format beim ersten Client-Zugriff festgelegt.'}catch(e){if(editor?.bucket===draft){$('bucket-format').value='';$('bucket-format-note').textContent='Formatliste nicht verfügbar. Ein Bucket ohne Format kann trotzdem angelegt werden: '+e.message}}}
  function fillEditor(b,create){
-  const p=b.policy,l=p.limits;editor={bucket:b,create};createProgress=null;
+  const p=b.policy,l=p.limits;editor={bucket:b,create,ready:!create};createProgress=null;
  $('bucket-pg').innerHTML=groups.filter(g=>g.id!=='53545152535953504701000000000000').map(g=>`<option value="${g.id}">${escape(g.name)}</option>`).join('');$('bucket-pg').value=p.placement_group??groups.find(g=>g.name==='Standard')?.id??groups[0]?.id??'';
   quotaInfo=null;quotaEpoch++;clearTimeout(quotaPoll);$('bucket-create-form').reset();userChoices=[];userSearchEpoch++;$('bucket-policy-fields').disabled=false;$('bucket-create-error').textContent='';$('bucket-editor-note').textContent='';
   $('bucket-editor-title').textContent=create?'Bucket anlegen':`Einstellungen · ${b.name}`;$('bucket-create-submit').textContent=create?'Bucket anlegen':'Änderungen speichern';$('bucket-create-submit').disabled=true;
+  $('bucket-format-field').hidden=!create;renderFormatChoices();$('bucket-format').value='';$('bucket-format-note').textContent='Ohne Auswahl wird das Format beim ersten Client-Zugriff festgelegt.';
   $('bucket-name').value=b.name;$('bucket-name').readOnly=!create;$('bucket-storage').value=p.storage_strategy;$('bucket-compression').value=p.compression;$('bucket-placement').value=p.placement_mode;
   $('bucket-replicas').value=String(p.redundancy.replicas||1);$('bucket-unlimited').checked=l.absolute_unlimited;$('bucket-quota').value=l.absolute_unlimited&&BigInt(l.absolute_quota_bytes)===0n?'1G':quotaText(l.absolute_quota_bytes);$('bucket-quota').setCustomValidity('');
   $('bucket-accounting').value=l.quota_accounting;$('bucket-guaranteed').value=quotaText(l.guaranteed_quota_bytes);$('bucket-object-size').innerHTML=(create||l.metadata_reserve_ppm===150000)?'<option value="5">1M (Blockdevices)</option>':'<option value="255">Bestehende Einstellung</option>';$('bucket-owner-section').hidden=!create;
@@ -98,11 +105,11 @@ export function setupBucketViews({connection,escape,toast,showView,onUsersChange
  for(const id of ['bucket-owner-search','bucket-grant-search'])$(id).oninput=()=>{clearTimeout(userSearchTimer);const seq=++userSearchEpoch,owner=editor;userSearchTimer=setTimeout(async()=>{try{const selected=$('bucket-owner').value,result=await userCandidates($(id).value.trim());if(seq!==userSearchEpoch||editor!==owner)return;rememberUsers(result);if(id==='bucket-owner-search')renderOwnerOptions(selected);else renderAccess()}catch(e){if(seq===userSearchEpoch)$(id==='bucket-owner-search'?'bucket-create-error':'bucket-access-error').textContent=e.message}},250)};
  async function openCreate({name='',userID=''}={}){
   showView('buckets');groups=await fetchGroups();const draft={id:newID(),name,state:'active',policy:defaultBucketPolicy()};fillEditor(draft,true);$('bucket-create-dialog').showModal();$('bucket-name').focus();
-  $('bucket-create-submit').disabled=true;let ready=false;const capacityReady=refreshQuota();
+  $('bucket-create-submit').disabled=true;let ready=false;const capacityReady=refreshQuota(),formatsReady=refreshFormats(draft);
   try{const result=await userCandidates('',userID?[userID]:[]);if(editor?.bucket!==draft||!$('bucket-create-dialog').open)return;rememberUsers(result);renderOwnerOptions(userID);
    if(userID){if(!users.some(u=>u.id===userID))throw Error('Der neue Benutzer ist nicht mehr vorhanden.');$('bucket-owner').value=userID}
-   await capacityReady;ready=!!quotaInfo;
-  }catch(e){$('bucket-create-error').textContent=e.message;return}finally{if(editor?.bucket===draft)$('bucket-create-submit').disabled=!ready}
+   await Promise.all([capacityReady,formatsReady]);ready=!!quotaInfo;
+  }catch(e){$('bucket-create-error').textContent=e.message;return}finally{if(editor?.bucket===draft){editor.ready=ready;$('bucket-create-submit').disabled=!ready}}
  }
  function openEditor(id){const b=buckets.find(b=>b.id===id);if(!b||b.id===SYSTEM||b.desired_policy||b.state==='deleting')return;fillEditor(b,false);$('bucket-create-dialog').showModal();refreshQuota();renderState(b);openAccess(id)}
  function renderState(b){$('bucket-lock').checked=b.state==='locked';$('bucket-lock').disabled=false;$('bucket-state-error').textContent='';lockRetry=null}
@@ -128,7 +135,7 @@ export function setupBucketViews({connection,escape,toast,showView,onUsersChange
    quotaInfo=info;const match=info.profiles.find(p=>p.overhead===info.overhead),selected=profile===255&&match?match.key:profile;
    $('bucket-object-size').innerHTML=(selected===255?'<option value="255">Bestehende Einstellung</option>':'')+info.profiles.map(p=>`<option value="${p.key}">${escape(p.label)}</option>`).join('');$('bucket-object-size').value=String(selected);
    if(owner.create&&!owner.initialCapacity&&parseQuota($('bucket-quota').value)>info.maximum)$('bucket-quota').value=quotaText(info.maximum);
-   owner.initialCapacity=true;syncQuota();$('bucket-create-submit').disabled=editorPending;
+   owner.initialCapacity=true;syncQuota();$('bucket-create-submit').disabled=editorPending||(owner.create&&!owner.ready);
   }catch(e){if(seq===quotaEpoch){$('bucket-quota-capacity').textContent=e.message;$('bucket-create-submit').disabled=true}}
   finally{if(seq===quotaEpoch&&$('bucket-create-dialog').open)quotaPoll=setTimeout(()=>{if(!editorPending)refreshQuota()},3000)}
  }
@@ -154,19 +161,19 @@ export function setupBucketViews({connection,escape,toast,showView,onUsersChange
   p.limits={...p.limits,quota_accounting:$('bucket-accounting').value,absolute_unlimited:unlimited,absolute_quota_bytes:unlimited?base.policy.limits.absolute_quota_bytes:parseQuota($('bucket-quota').value).toString(),metadata_reserve_ppm:quotaInfo.overhead,guaranteed_quota_bytes:parseQuota($('bucket-guaranteed').value).toString()};
   if(!unlimited&&BigInt(p.limits.guaranteed_quota_bytes)>BigInt(p.limits.absolute_quota_bytes))throw Error('Garantierter Platz darf die maximale Größe nicht überschreiten.');
   const name=$('bucket-name').value;if(!name||new TextEncoder().encode(name).length>255||name.includes('\0'))throw Error('Der Name muss 1 bis 255 UTF-8-Bytes lang sein.');
-  return {...base,name,policy:p};
+  return {...base,name,policy:p,format:editor.create?$('bucket-format').value:base.format};
  }
  $('bucket-create-dialog').addEventListener('cancel',e=>{if(editorPending)e.preventDefault()});
+ configureDialog($('bucket-create-dialog'),{canClose:async({signal})=>{if(editorPending)return false;if(createProgress?.created&&!createProgress.initialized)return ui.confirm({title:'Initialisierung unvollständig',message:'Der Bucket ist bereits angelegt. Ohne erfolgreiche Initialisierung fortfahren und den Dialog schließen?',confirmLabel:'Trotzdem schließen',cancelLabel:'Erneut versuchen',signal});return true}});
  $('bucket-create-form').addEventListener('submit',async e=>{
   e.preventDefault();$('bucket-create-error').textContent='';const submit=e.submitter;submit.disabled=true;editorPending=true;for(const b of document.querySelectorAll('[data-close="bucket-create-dialog"]'))b.disabled=true;
   try{
    if(!createProgress?.created){await refreshQuota();if(!$('bucket-unlimited').checked&&!$('bucket-quota').reportValidity())return}
    const b=createProgress?.created?createProgress.bucket:readEditor(),owner=createProgress?.created?createProgress.owner:$('bucket-owner').value;
-   const signature=policyBytes(b)+':'+b.policy.placement_group+':'+owner;if(createProgress?.signature!==signature)createProgress={signature,id:newID(),grantID:newID(),bucket:b,owner,created:false};
+   const signature=JSON.stringify([policyBytes(b),b.policy.placement_group,owner,b.format]);if(createProgress?.signature!==signature)createProgress={signature,id:newID(),grantID:newID(),initializationID:newID(),initializationState:{},bucket:b,owner,created:false,initialized:false,granted:false};
    let result;
    if(editor.create){
-    if(!createProgress.created){await connection().createBucket(b,createProgress.id);createProgress.created=true;$('bucket-policy-fields').disabled=true}
-    if(owner)await connection().grantBucket(b.id,owner,15,createProgress.grantID);
+    await finishBucketCreation({connection:connection(),plugins:formatPlugins,progress:createProgress,onCreated:()=>{$('bucket-policy-fields').disabled=true}});
    }else{
     const base=editor.bucket;
     if(policyBytes(b)===policyBytes(base)&&b.policy.placement_group===base.policy.placement_group){$('bucket-create-dialog').close();return}
@@ -177,7 +184,7 @@ export function setupBucketViews({connection,escape,toast,showView,onUsersChange
     else result=await connection().setBucketPlacementGroup(b.id,base.policy.version,b.policy.placement_group,createProgress.id,b.policy.limits)
    }
    $('bucket-create-dialog').close();toast(editor.create?'Bucket wurde angelegt.':result?.state==='running'?'Bucket wird umgestellt.':'Bucket-Einstellungen gespeichert.');await load();
-  }catch(err){$('bucket-create-error').textContent=createProgress?.created?'Bucket ist angelegt. Die Benutzerfreigabe fehlt noch: '+err.message:err.message;if(createProgress?.created)submit.textContent='Freigabe erneut versuchen';if(err.status===409&&!editor.create){$('bucket-editor-note').textContent='Die Konfiguration wurde zwischenzeitlich geändert. Bitte schließen und erneut öffnen.';await load()}}
+  }catch(err){$('bucket-create-error').textContent=createProgress?.created?'Bucket ist angelegt. '+(!createProgress.initialized?'Formatbindung oder Initialisierung fehlt noch: ':'Die Benutzerfreigabe fehlt noch: ')+err.message:err.message;if(createProgress?.created){submit.textContent=createProgress.initialized?'Freigabe erneut versuchen':'Initialisierung erneut versuchen';await load()};if(err.status===409&&!editor.create){$('bucket-editor-note').textContent='Die Konfiguration wurde zwischenzeitlich geändert. Bitte schließen und erneut öffnen.';await load()}}
   finally{submit.disabled=false;editorPending=false;for(const b of document.querySelectorAll('[data-close="bucket-create-dialog"]'))b.disabled=false}
  });
  async function openAccess(id){
@@ -256,5 +263,5 @@ export function setupBucketViews({connection,escape,toast,showView,onUsersChange
   }catch(e){if(seq===epoch)$('buckets-error').textContent=e.message}finally{syncingCatalog=false;if(pendingCatalog.size)void fetchNewBuckets()}
  }
  function refreshThroughput(){for(const cell of $('bucket-rows').querySelectorAll('[data-bucket-throughput]'))cell.innerHTML=bucketThroughput(statsEntries(),cell.dataset.bucketThroughput)}
- return {load,openCreate,refreshThroughput,syncStats,clear(){deletionJobs.clear();epoch++;seenStats.clear();checkedCatalog.clear();pendingCatalog.clear();clearTimeout(poll);clearTimeout(searchTimer);pager.clear();pageMeta={};userSearchEpoch++;clearTimeout(userSearchTimer);userChoices=[];buckets=[];users=[];render()}};
+ return {load,openCreate,render,refreshThroughput,syncStats,clear(){deletionJobs.clear();epoch++;seenStats.clear();checkedCatalog.clear();pendingCatalog.clear();clearTimeout(poll);search.clear();pager.clear();pageMeta={};userSearchEpoch++;clearTimeout(userSearchTimer);userChoices=[];buckets=[];users=[];render()}};
 }

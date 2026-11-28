@@ -28,6 +28,7 @@ const (
 	Ping                 uint16 = 0x0002
 	Event                uint16 = 0x0004
 	StatsGet             uint16 = 0x0008
+	StatsRatesGet        uint16 = 0x2040 // optional admin interval/half-life rate frames
 	StatsSubscribe       uint16 = 0x0009
 	StatsUnsubscribe     uint16 = 0x000a
 	StatsSnapshotMessage uint16 = 0x000b

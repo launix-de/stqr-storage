@@ -22,15 +22,15 @@ func TestPlacementVolumeClockSkewAndSequence(t *testing.T) {
 		second := snapshot(2, local.Add(offset+time.Second), 100)
 		rates := placementVolumeRatesAt([]client.StatsSnapshot{second}, &pgRebuildCatalog{snapshots: []client.StatsSnapshot{first}}, h, local.Add(time.Second))
 		rate := rates[vol]
-		if got := rate.readWindow.Rates(local.Add(time.Second), h).Short; math.Abs(got-50) > 1e-9 {
+		if got := rate.readWindow.Rates(local.Add(time.Second), h).Short; math.Abs(got-100) > 1e-9 {
 			t.Fatal("remote clock changed load", offset, got)
 		}
-		if got := rate.readWindow.Rates(local.Add(2*time.Second), h).Short; math.Abs(got-25) > 1e-9 {
+		if got := rate.readWindow.Rates(local.Add(2*time.Second), h).Short; math.Abs(got-50) > 1e-9 {
 			t.Fatal("local idle decay failed", offset, got)
 		}
 		old := snapshot(1, local.Add(offset+2*time.Second), 10000)
 		replay := placementVolumeRatesAt([]client.StatsSnapshot{old}, &pgRebuildCatalog{snapshots: []client.StatsSnapshot{second}, volumeRates: rates}, h, local.Add(2*time.Second))
-		if got := replay[vol].readWindow.Rates(local.Add(2*time.Second), h).Short; math.Abs(got-25) > 1e-9 {
+		if got := replay[vol].readWindow.Rates(local.Add(2*time.Second), h).Short; math.Abs(got-50) > 1e-9 {
 			t.Fatal("old sequence injected load", got)
 		}
 	}

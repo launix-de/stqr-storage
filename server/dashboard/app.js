@@ -1,7 +1,10 @@
 // SPDX-License-Identifier: GPL-3.0-only
+import {installDialogDismissal} from './dialogs.js';
+import {bindSearch} from './endless.js';
+import {FormatPlugins} from './format-plugins.js';
 import {capacityKnown,capacityAdmissionKnown,renderCapacitySummary} from './capacity.js';
 import {setupVolumeGrowth} from './volume-growth.js';
-import {formatNumber,formatBytes} from './numbers.js';
+import {formatNumber,formatBytes,formatRatePair} from './numbers.js';
 import {setupClusterJoin} from './join.js';
 import {NodeConnection,newID} from './protocol.js';
 import {memberIDs,nodeMembership,currentSnapshots,seedMembers} from './membership.js';
@@ -10,11 +13,12 @@ import {setupRecovery} from './recovery.js';
 import {setupForceDisconnect} from './force-disconnect.js';
 import {setupUserViews} from './users.js';
 import {setupPlacementGroups} from './placement-groups.js';
-import {entityRate,nodeRate,throughputHTML,bucketTotals,recordRateSnapshot} from './throughput.js';
+import {entityRate,nodeRate,throughputHTML,bucketTotals,recordRateSnapshot,recordAccumulatorRates,sumRatePairs,RateRefreshQueue} from './throughput.js';
 import {setupBucketViews} from './buckets.js';
 import {MIN_VOLUME_SIZE,parseSize,sizeSteps,sizeLimit,formatSize,sizeLabel} from './size.js';
+installDialogDismissal();
 const $=id=>document.getElementById(id),escape=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-let node,configView,snapshot,source=0,candidates=[],volumeNode,drainID,drainVolume,addRetry,addPending=false;
+let rateRefresh,node,configView,snapshot,source=0,candidates=[],volumeNode,drainID,drainVolume,addRetry,addPending=false;
 const nodeStates=new Map,fetchingConfigs=new Set;
 const localNode=()=>configView?.config.node.id;
 const volumeConnection=()=>volumeNode&&volumeNode!==localNode()?node.forNode(volumeNode):node;
@@ -24,10 +28,14 @@ export const bytes=formatBytes;
 function toast(message,error=false){const div=document.createElement('div');div.className='toast'+(error?' error-toast':'');div.textContent=message;while($('toasts').children.length>=3)$('toasts').firstElementChild.remove();$('toasts').append(div);setTimeout(()=>div.remove(),error?10000:5000)}
 function setConnected(connected){$('connection').classList.toggle('offline',!connected);$('connection').innerHTML=`<span class="dot"></span>${connected?'Live · alle 3 Sekunden':'Verbindung wird wiederhergestellt'}`;$('refresh').disabled=!connected}
 function beginSession(session){
- joinView.stop();
+ rateRefresh?.stop();joinView.stop();formatPlugins.clear();
  $('login').hidden=true;$('app').hidden=false;$('profile-name').textContent=session.username;volumeGrowth.clear();userViews.clear();bucketViews.clear();pgViews.clear();node?.stop();nodeStates.clear();fetchingConfigs.clear();snapshot=null;configView=null;volumeNode=null;
  const connection=node=new NodeConnection(session.csrf_token,connected=>{if(node===connection)setConnected(connected)},stats=>{if(node===connection)onStats(stats)});
- connection.onOpen=async()=>{try{const [cfg]=await Promise.all([connection.getConfig(),connection.subscribeVersions(),connection.subscribeStats(),userViews.load(),bucketViews.load()]);if(node===connection)applyConfig(cfg)}catch(e){if(node===connection)toast(e.message,true)}};
+ rateRefresh=new RateRefreshQueue(id=>connection.forNode(id).getRates(),(id,rates)=>{
+  const entry=nodeStates.get(id);if(node!==connection||!entry)return;
+  if(recordAccumulatorRates(entry,rates)){delete entry.ratesError;renderMetrics();renderVolumes();bucketViews.refreshThroughput()}
+ },(id,error)=>{const entry=nodeStates.get(id);if(node===connection&&entry){entry.ratesError=error.message;renderVolumes()}});
+ connection.onOpen=async()=>{try{const [cfg]=await Promise.all([connection.getConfig(),formatPlugins.refresh().catch(e=>{if(node===connection)toast(e.message,true)}),connection.subscribeVersions(),connection.subscribeStats(),userViews.load(),bucketViews.load()]);if(node===connection)applyConfig(cfg)}catch(e){if(node===connection)toast(e.message,true)}};
  connection.onVersions=versions=>{if(node===connection){if(configView)configView.node_versions=versions;renderVolumes()}};
  connection.onProtocolError=e=>{if(node===connection)toast('Protokollfehler: '+e.message,true)};
  connection.onDisconnect=async()=>{
@@ -42,7 +50,7 @@ function beginSession(session){
 
 async function sessionFetch(method='GET',headers={}){return fetch('/api/session',{method,headers,credentials:'same-origin'})}
 $('login-form').addEventListener('submit',async e=>{e.preventDefault();const submit=e.submitter;submit.disabled=true;$('login-error').textContent='';try{const raw=new TextEncoder().encode(`${$('username').value}:${$('password').value}`);const response=await sessionFetch('POST',{Authorization:'Basic '+btoa(Array.from(raw,b=>String.fromCharCode(b)).join(''))});if(!response.ok){const failure=await response.json().catch(()=>({}));throw Error(response.status===503?'Die Node wartet auf die Aufnahme durch den Cluster. Bitte anschließend mit dem Zielkonto anmelden.':response.status===401?'Benutzername oder Passwort ist nicht korrekt.':response.status===403&&failure.error==='administrator required'?'Für das Dashboard ist ein Administratorkonto erforderlich.':response.status===403?'Zugriff auf das Dashboard verweigert.':'Anmeldung nicht möglich.')}const data=await response.json();$('password').value='';beginSession(data)}catch(e){$('login-error').textContent=e.message}finally{submit.disabled=false}});
-$('logout').addEventListener('click',async()=>{try{await sessionFetch('DELETE',{'X-CSRF-Token':node.csrf})}catch{}volumeGrowth.clear();node?.stop();$('app').hidden=true;$('login').hidden=false;$('password').focus()});
+$('logout').addEventListener('click',async()=>{rateRefresh?.stop();try{await sessionFetch('DELETE',{'X-CSRF-Token':node.csrf})}catch{}formatPlugins.clear();volumeGrowth.clear();node?.stop();$('app').hidden=true;$('login').hidden=false;$('password').focus()});
 function showView(view){
  for(const b of document.querySelectorAll('[data-view]'))b.classList.toggle('selected',b.dataset.view===view);
  for(const name of ['volumes','buckets','users','groups','settings'])$(name+'-view').hidden=view!==name;
@@ -51,12 +59,13 @@ function showView(view){
  if(view==='settings')node.getConfig().then(applyConfig).catch(e=>toast(e.message,true));if(view==='users')userViews.load();if(view==='buckets')bucketViews.load();
 }
 for(const button of document.querySelectorAll('[data-view]'))button.addEventListener('click',()=>showView(button.dataset.view));
-function requireLogin(message){volumeGrowth.clear();node?.stop();$('app').hidden=true;$('login').hidden=false;$('password').value='';$('login-error').textContent=message;$('password').focus()}
+function requireLogin(message){rateRefresh?.stop();formatPlugins.clear();volumeGrowth.clear();node?.stop();$('app').hidden=true;$('login').hidden=false;$('password').value='';$('login-error').textContent=message;$('password').focus()}
 const recoveryView=setupRecovery({connection:()=>node,config:()=>configView,states:nodeStates,toast,newID,refresh:target=>refreshConfig(target)});
 const forceView=setupForceDisconnect({connection:()=>node,config:()=>configView,states:nodeStates,toast,newID,refresh:()=>refreshConfig()});
 $('add-error').insertAdjacentHTML('beforebegin','<section id="volume-pg-selection" class="bucket-form-section"></section>');
 const pgViews=setupPlacementGroups({connection:()=>node,escape,toast,states:nodeStates});
-const bucketViews=setupBucketViews({onUsersChanged:()=>userViews.load(true),connection:()=>node,escape,toast,showView,statsEntries:()=>currentSnapshots(configView,nodeStates)});
+const formatPlugins=new FormatPlugins({toast,onChange:()=>bucketViews.render(),connect:async(bucket,{signal})=>{const {Client}=await import('/assets/sdk/index.mjs');return Client.connect({endpoint:location.origin,bucket:bucket.id,format:bucket.format,csrf:node.csrf,routing:'gateway',signal})}});
+const bucketViews=setupBucketViews({formatPlugins,onUsersChanged:()=>userViews.load(true),connection:()=>node,escape,toast,showView,statsEntries:()=>currentSnapshots(configView,nodeStates,true)});
 const userViews=setupUserViews({connection:()=>node,currentUsername:()=>$('profile-name').textContent,escape,toast,showView,requireLogin,openBucketCreate:options=>bucketViews.openCreate(options),onUserDeleted:()=>bucketViews.load(),statsEntries:()=>currentSnapshots(configView,nodeStates,true)});
 
 const joinView=setupClusterJoin({connection:()=>node,onJoined:beginSession});
@@ -79,7 +88,7 @@ function onStats(s){
  joinView.refresh();
  const entry=nodeStates.get(s.node)??{};
  if(entry.snapshot&&s.boot===entry.snapshot.boot&&s.sequence<=entry.snapshot.sequence)return;
- recordRateSnapshot(entry,s);nodeStates.set(s.node,entry);
+ recordRateSnapshot(entry,s);nodeStates.set(s.node,entry);rateRefresh?.request(s.node);
  if(s.node===localNode()||!snapshot)snapshot=s;
  renderMetrics();renderVolumes();bucketViews.syncStats(s);bucketViews.refreshThroughput();
  const count=memberIDs(configView)?.size??nodeStates.size;
@@ -88,21 +97,28 @@ function onStats(s){
  const ids=new Set(entry.config?.config.volumes.map(v=>v.id)??[]);
  if(s.node===localNode()&&configView.membership_epoch!==undefined&&configView.membership_epoch!==String(s.membership)||!entry.config||s.volumes.length!==ids.size||s.volumes.some(v=>!ids.has(v.id))){fetchingConfigs.add(s.node);refreshConfig(s.node).finally(()=>fetchingConfigs.delete(s.node))}
 }
+// Expire a displayed frame even when its source stops pushing entirely.
+setInterval(()=>{
+ if(!node||node.stopped||$('app').hidden)return;
+ const now=Date.now();let changed=false;
+ for(const entry of nodeStates.values()){
+  const freshness=`${now-entry.received<10000}:${!!entry.rates&&now-entry.ratesReceived<10000}`;
+  if(entry.rateFreshness!==freshness){entry.rateFreshness=freshness;changed=true}
+ }
+ if(changed){renderMetrics();renderVolumes();bucketViews.refreshThroughput();userViews.refreshThroughput()}
+},1000);
 function totals(volumes){return volumes.reduce((a,v)=>({capacity:a.capacity+v.capacity,allocated:a.allocated+v.allocated,admission:a.admission+v.admission,reserved:a.reserved+v.operating+v.guaranteed+v.inFlightReserved}),{capacity:0n,allocated:0n,admission:0n,reserved:0n})}
 function renderMetrics(){
- const entries=currentSnapshots(configView,nodeStates);const memberCount=memberIDs(configView)?.size??entries.length;
+ const entries=currentSnapshots(configView,nodeStates),rateEntries=currentSnapshots(configView,nodeStates,true);const memberCount=memberIDs(configView)?.size??entries.length;
  const volumes=entries.flatMap(e=>e.snapshot.volumes),t=totals(volumes);
  for(const prefix of ['', 'bucket-'])renderCapacitySummary($(prefix+'capacity-summary'),t,capacityKnown(entries,memberCount),capacityAdmissionKnown(entries));
  $('metric-volumes').textContent=formatNumber(volumes.length);
  const active=volumes.filter(v=>v.state===1).length,draining=volumes.filter(v=>v.state===2).length;
  $('metric-active').textContent=`${active} aktiv${draining?` · ${draining} im Drain`:''}`;$('nav-count').textContent=formatNumber(volumes.length);
  for(const key of ['read','write']){
-  let sum=0n,count=0;
-  for(const {snapshot:s,previous:p,received}of entries){const seconds=p&&p.boot===s.boot?Number(s.captured-p.captured)/1e9:0;
-   if(seconds>0&&s.io[key]>=p.io[key]&&Date.now()-received<10000){sum+=BigInt(Math.round(Number(s.io[key]-p.io[key])/seconds));count++}}
-  $('metric-'+key).textContent=count?bytes(sum)+'/s':'—';
-  const logical=bucketTotals(entries)[key==='read'?0:1];
-  $('bucket-metric-'+key).textContent=logical==null?'—':bytes(logical)+'/s';
+  $('metric-'+key).textContent=formatRatePair(sumRatePairs(rateEntries.map(entry=>nodeRate(entry,key))));
+  const logical=bucketTotals(rateEntries)[key==='read'?0:1];
+  $('bucket-metric-'+key).textContent=formatRatePair(logical);
  }
  const count=memberCount===1?'1 Node':`${memberCount} Nodes`;$('node-count').textContent=count;$('topbar-node-count').textContent=count.toUpperCase();
  const mode=document.querySelector('.mode-card');mode.querySelector('strong').textContent=count;
@@ -118,7 +134,7 @@ function renderVolumes(){
   const visible=s.volumes.filter(v=>{const c=byID.get(v.id);return `${cfg?.node.name??id} ${c?.name??''} ${v.path} ${classes[v.class]}`.toLowerCase().includes(query)});
   visibleCount+=visible.length;
   const version=configView?.node_versions?.[id],warning=versionWarning(version),stale=Date.now()-entry.received>=10000,label=versionLabel(version)||(membership==='excluded'?'Ausgeschlossen':membership==='departed'?'Ausgeschieden':entry.placeholder?'Noch keine Statistiken':stale?'Statistiken veraltet':s.reason&1024n?'Speicher wird vorbereitet':s.state===0&&s.needRebuild?(s.reason&256n?'Bucket-Bereinigung':s.reason&512n?'Clusteränderung':'Rebuild'):(['Online','Wird geleert','Wartung','Wird beendet','Beitritt','Ausgeschlossen'][s.state]??'Unbekannt'));
-  rows+=`<tr class="node-row ${warning?'version-warning':''}" title="${escape(version?.reason??'')}" data-node="${id}"><td><div class="node-cell"><button class="node-toggle" data-toggle="${id}" aria-label="Volumes ${collapsed?'aufklappen':'einklappen'}" aria-expanded="${!collapsed}">${collapsed?'›':'⌄'}</button><span class="node-symbol">▤</span><div><div class="node-name">${escape(cfg?.node.name??id.slice(0,8))}${id===localNode()?'<span class="node-badge">DIESE NODE</span>':''}</div><div class="node-sub">${escape(id.slice(0,8))} · ${escape(view?.active_listen??'')} ${version?' · '+escape(protocolLabel(version))+' · '+escape(version.profile.version):''}</div></div></div></td><td><span class="class-badge">${s.volumes.length} VOLUMES</span></td><td>${usage(t)}</td><td class="free-value">${escape(bytes(t.admission))}</td><td>${throughputHTML(nodeRate(entry,'read'),nodeRate(entry,'write'))}</td><td><span class="state-badge ${stale?'pending':''}"><i></i>${label}</span></td><td><div class="row-actions"><button class="secondary" data-node-maintenance="${id}" ${!member?'disabled':''}>Wartung</button></div></td></tr>`;
+  rows+=`<tr class="node-row ${warning?'version-warning':''}" title="${escape(version?.reason??'')}" data-node="${id}"><td><div class="node-cell"><button class="node-toggle" data-toggle="${id}" aria-label="Volumes ${collapsed?'aufklappen':'einklappen'}" aria-expanded="${!collapsed}">${collapsed?'›':'⌄'}</button><span class="node-symbol">▤</span><div><div class="node-name">${escape(cfg?.node.name??id.slice(0,8))}${id===localNode()?'<span class="node-badge">DIESE NODE</span>':''}</div><div class="node-sub">${escape(id.slice(0,8))} · ${escape(view?.active_listen??'')} ${version?' · '+escape(protocolLabel(version))+' · '+escape(version.profile.version):''}</div></div></div></td><td><span class="class-badge">${s.volumes.length} VOLUMES</span></td><td>${usage(t)}</td><td class="free-value">${escape(bytes(t.admission))}</td><td><div title="${escape(entry.ratesError??'')}">${throughputHTML(nodeRate(entry,'read'),nodeRate(entry,'write'))}</div></td><td><span class="state-badge ${stale?'pending':''}"><i></i>${label}</span></td><td><div class="row-actions"><button class="secondary" data-node-maintenance="${id}" ${!member?'disabled':''}>Wartung</button></div></td></tr>`;
   if(!collapsed)for(const v of visible){const c=byID.get(v.id),state=states[v.state]??'failed';rows+=`<tr data-volume="${v.id}" data-node="${id}"><td><div class="volume-cell"><span class="volume-symbol">▤</span><div><div class="volume-name">${escape(c?.name??v.path.split('/').pop())}${c?.system?'<span class="system-label">SYSTEM</span>':c?.recovery_only?'<span class="system-label" title="Für die übernommenen Datenbereiche reserviert">GERETTET</span>':''}</div><div class="volume-path" title="${escape(v.path)}">${escape(v.path)}</div></div></div></td><td><span class="class-badge ${classes[v.class]}">${classes[v.class].toUpperCase()}</span></td><td>${usage(v)}</td><td class="free-value">${escape(bytes(v.admission))}</td><td>${throughputHTML(entityRate(entry,'volumes',v.id,'read'),entityRate(entry,'volumes',v.id,'write'))}</td><td><span class="state-badge ${state}"><i></i>${stateNames[v.state]??'Unbekannt'}</span></td><td><div class="row-actions">${c?.placement_groups_pending?.length?`<button class="row-action" data-finish-pg="${v.id}" data-node="${id}">PG-Listen fortsetzen</button>`:''}<button class="row-action" data-detail="${v.id}" data-node="${id}" aria-label="Details für ${escape(c?.name??v.path)}">Details</button><button class="row-action" data-grow="${v.id}" data-node="${id}" ${!member||!cfg||v.state!==1?'disabled':''}>Vergrößern</button><button class="row-action" data-drain="${v.id}" data-node="${id}" ${!member||!cfg||c?.system||v.state!==1?'disabled':''} title="${c?.system?'Das Admin-Volume bleibt für Systemdaten eingebunden':'Kooperativ aushängen und entfernen'}">Aushängen ↗</button></div></td></tr>`}
   rows+=`<tr class="add-row"><td colspan="7"><button class="add-volume-button" data-add-node="${id}" ${!member||!cfg?'disabled':''}>＋ Volume hinzufügen</button><button class="row-action" data-recovery-volumes="${id}" ${!member||!cfg?'disabled':''}>Gerettete Volumes</button><span class="add-row-note">Datei, ungemountetes Blockdevice oder RAM</span></td></tr>`;
  }
@@ -133,8 +149,8 @@ function renderVolumes(){
  for(const b of document.querySelectorAll('[data-finish-pg]'))b.onclick=async()=>{b.disabled=true;const target=b.dataset.node,id=b.dataset.finishPg,groups=nodeStates.get(target)?.config?.config.volumes.find(v=>v.id===id)?.placement_groups_pending??[];try{await pgViews.finishVolume(target,id,groups);await refreshConfig(target);toast('Volume für Placement freigegeben.')}catch(e){toast(e.message,true)}finally{b.disabled=false}};
  for(const [attr,fn]of [['detail',openDetail],['grow',openGrow],['drain',openDrain]])for(const b of $('volume-rows').querySelectorAll(`[data-${attr}]`))b.onclick=()=>fn(b.dataset[attr],b.dataset.node);
 }
-$('volume-search').addEventListener('input',renderVolumes);$('refresh').onclick=async()=>{try{onStats(await node.getStats());toast('Statistik aktualisiert.')}catch(e){toast(e.message,true)}};
-for(const b of document.querySelectorAll('[data-close]'))b.addEventListener('click',()=>$(b.dataset.close).close());
+bindSearch($('volume-search'),renderVolumes,{delay:0});$('refresh').onclick=async()=>{try{onStats(await node.getStats());toast('Statistik aktualisiert.')}catch(e){toast(e.message,true)}};
+for(const [dialog,submit] of [['node-action-dialog','node-action-submit'],['drain-dialog',null],['detail-dialog','rescan-volume']])$(dialog).addEventListener('cancel',e=>{const button=submit?$(submit):$('drain-form').querySelector('button[type=submit]');if(button?.disabled)e.preventDefault()});
 function openDetail(id,target=localNode()){volumeNode=target;const v=nodeStates.get(target)?.snapshot?.volumes.find(v=>v.id===id),c=volumeConfig()?.config.volumes.find(v=>v.id===id);if(!v)return;$('detail-title').textContent=c?.name??v.path;const details=[['Volume-ID',id,true],['Pfad / Device',v.path,true],['Klasse',classes[v.class].toUpperCase()],['Zustand',stateNames[v.state]],['Kapazität',bytes(v.capacity)],['Belegt',bytes(v.allocated)],['Metadaten',bytes(v.metadata)],['Betriebsreserve',bytes(v.operating)],['Für neue Daten nutzbar',bytes(v.admission)]];let html='<dl class="detail-grid">'+details.map(([k,value,mono])=>`<div><dt>${escape(k)}</dt><dd class="${mono?'mono':''}">${escape(value)}</dd></div>`).join('')+'</dl>';if(c?.system)html+='<div class="notice">Admin-Dateivolume: wächst bei Platzbedarf automatisch. Die Startgröße ist keine Obergrenze.</div>';if(v.class<2)html+='<button id="rescan-volume" class="secondary">↻ Größe neu einlesen</button><p class="field-note">Nach einer externen Vergrößerung, z. B. mit LVM, wird zusätzlicher Platz crashsicher ins Layout übernommen.</p>';$('detail-body').innerHTML=html;if($('rescan-volume'))$('rescan-volume').onclick=async e=>{e.currentTarget.disabled=true;try{await volumeConnection().rescanVolume(id);toast('Volume-Größe neu eingelesen.');$('detail-dialog').close();await refreshConfig(volumeNode)}catch(e){toast(e.message,true);$('rescan-volume').disabled=false}};$('detail-dialog').showModal()}
 const volumeGrowth=setupVolumeGrowth({connection:target=>target&&target!==localNode()?node.forNode(target):node,describe:(id,target)=>{const view=nodeStates.get(target)?.config?.config??configView?.config;return {volume:view?.volumes.find(v=>v.id===id),node:view?.node.name??target}},toast,refresh:async target=>{await refreshConfig(target);onStats(await node.getStats())}});
 function openGrow(id,target=localNode()){return volumeGrowth.open(id,target)}

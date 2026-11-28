@@ -84,6 +84,9 @@ type BucketPolicy struct {
 type BucketClonePeer struct {
 	Bucket string `json:"bucket"`
 	Link   string `json:"link"`
+	// Empty retains legacy symmetric COW. Parent is read-through only; child
+	// receives preimages before this namespace changes. Schema 3 is required.
+	Direction string `json:"direction,omitempty"`
 }
 
 type BucketGrant struct {
@@ -252,7 +255,7 @@ func validateBucketPolicy(p BucketPolicy) error {
 func normalizeBucketDescription(d BucketDescription) (BucketDescription, error) {
 	d = cloneBucketDescription(d)
 	id, err := bucketID(d.ID)
-	if err != nil || (d.Schema != 1 && d.Schema != 2) || d.Revision == 0 || len(d.Name) == 0 || len(d.Name) > 255 || !utf8.ValidString(d.Name) || strings.ContainsRune(d.Name, 0) {
+	if err != nil || (d.Schema != 1 && d.Schema != 2 && d.Schema != 3) || d.Revision == 0 || len(d.Name) == 0 || len(d.Name) > 255 || !utf8.ValidString(d.Name) || strings.ContainsRune(d.Name, 0) {
 		return d, ErrBucketInvalid
 	}
 	if !validBucketFormat(d.Format, true) || d.Format != "" && d.Schema < 2 || d.Schema == 2 && d.Format == "" {
@@ -278,9 +281,19 @@ func normalizeBucketDescription(d BucketDescription) (BucketDescription, error) 
 	if len(d.ClonePeers) > 4096 || id == systemBucket && len(d.ClonePeers) > 0 {
 		return d, ErrBucketInvalid
 	}
+	parents := 0
 	for i, peer := range d.ClonePeers {
+		if peer.Direction == "parent" {
+			parents++
+			if parents > 1 {
+				return d, ErrBucketInvalid
+			}
+		}
 		p, e := bucketID(peer.Bucket)
 		_, linkErr := bucketID(peer.Link)
+		if peer.Direction != "" && (d.Schema < 3 || peer.Direction != "parent" && peer.Direction != "child") {
+			return d, ErrBucketInvalid
+		}
 		if e != nil || linkErr != nil || p == id || p == systemBucket || i > 0 && d.ClonePeers[i-1].Bucket == peer.Bucket {
 			return d, ErrBucketInvalid
 		}
@@ -588,10 +601,7 @@ func (c *BucketCatalog) Save(d BucketDescription, expectedRevision uint64) (*Buc
 	if expectedRevision == math.MaxUint64 {
 		return nil, ErrBucketInvalid
 	}
-	d.Schema = 1
-	if d.Format != "" {
-		d.Schema = 2
-	}
+	d.Schema = bucketDescriptionSchema(d)
 	d.Revision = expectedRevision + 1
 	d, err := normalizeBucketDescription(d)
 	if err != nil {
@@ -739,4 +749,18 @@ func (c *BucketCatalog) write(fn func(*volume.Handle) error) error {
 			return errors.Join(err, growErr)
 		}
 	}
+}
+
+// Direction must never be silently dropped by a later rename/ACL/format edit.
+// Readers predating directed COW reject schema 3 before interpreting its edges.
+func bucketDescriptionSchema(d BucketDescription) uint16 {
+	for _, edge := range d.ClonePeers {
+		if edge.Direction != "" {
+			return 3
+		}
+	}
+	if d.Format != "" {
+		return 2
+	}
+	return 1
 }

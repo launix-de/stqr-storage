@@ -215,8 +215,9 @@ func (r *rangeManager) buildPlacementTargets(group string, descriptions []Bucket
 	mixed ^= mixed >> 29
 	mixed *= 0xbf58476d1ce4e5b9
 	mixed ^= mixed >> 31
+	halfLife := s.placementHalfLives()
 	for i, shape := range shapes {
-		input.Work[i].Read, input.Work[i].Write = r.rangeWorkload(rangeMetricKey{shape.bucket, shape.start, shape.bits})
+		input.Work[i].Read, input.Work[i].Write = r.rangeWorkload(rangeMetricKey{shape.bucket, shape.start, shape.bits}, halfLife)
 	}
 	weights := r.placementWeights(image, byBucket)
 	for i, shape := range shapes {

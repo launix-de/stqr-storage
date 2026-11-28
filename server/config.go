@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/launix-de/stqr-storage/volume"
 	"gopkg.in/yaml.v3"
@@ -62,6 +63,9 @@ type VolumeConfig struct {
 	OperationID            string   `yaml:"operation_id,omitempty" json:"operation_id,omitempty"`
 }
 type Config struct {
+	PlacementStatsHalfLife time.Duration             `yaml:"placement_stats_half_life,omitempty" json:"placement_stats_half_life,omitempty"`
+	FormatPluginsDir       string                    `yaml:"format_plugins_dir,omitempty" json:"format_plugins_dir,omitempty"`
+	BrowserOrigins         []string                  `yaml:"browser_origins,omitempty" json:"browser_origins,omitempty"`
 	PlacementStatistics    PlacementStatisticsConfig `yaml:"placement_statistics,omitempty" json:"placement_statistics"`
 	RecoveryVolumes        []VolumeConfig            `yaml:"recovery_volumes,omitempty" json:"recovery_volumes,omitempty"`
 	Node                   NodeConfig                `yaml:"node" json:"node"`
@@ -288,6 +292,9 @@ func loadConfig(path string, o Options) (Config, error) {
 	return c, nil
 }
 func validateConfig(c Config) error {
+	if c.PlacementStatsHalfLife < 0 {
+		return errors.New("placement_stats_half_life must be positive")
+	}
 	if err := c.PlacementStatistics.validate(); err != nil {
 		return err
 	}
@@ -321,6 +328,18 @@ func validateConfig(c Config) error {
 	}
 	if c.Auth.ClusterToken == "" || !c.JoinPending && c.ControlVersion == 0 && (c.Auth.BootstrapAdmin.Username == "" || c.Auth.BootstrapAdmin.Password == "") {
 		return errors.New("existing cluster credentials are missing; refusing to recreate them")
+	}
+	for _, origin := range c.BrowserOrigins {
+		u, err := url.Parse(origin)
+		scheme, cidr, isCIDR := strings.Cut(origin, "://")
+		if isCIDR && (scheme == "http" || scheme == "https") {
+			if _, err := netip.ParsePrefix(cidr); err == nil {
+				continue
+			}
+		}
+		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Hostname() == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || u.Path != "" {
+			return fmt.Errorf("invalid browser origin %q", origin)
+		}
 	}
 	for _, s := range c.AllowSubnets {
 		if _, e = netip.ParsePrefix(s); e != nil {

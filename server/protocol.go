@@ -66,6 +66,20 @@ func (s *Server) dispatchAs(m client.Message, ws *wsSession, p principal) ([]byt
 	if m.Opcode == client.PlacementHintsMessage {
 		return s.executePlacementHints(m, ws, p)
 	}
+	if m.Opcode == client.StatsRatesGet {
+		if !p.isAdmin() {
+			return client.ResponseBody(403, nil, "administrator required"), 403
+		}
+		if m.Kind != client.Request {
+			return client.ResponseBody(400, nil, "rate frames require a request"), 400
+		}
+		result, err := s.dashboardRateFrames(m.Body)
+		if err != nil {
+			status := statusOf(err)
+			return client.ResponseBody(status, nil, err.Error()), status
+		}
+		return client.ResponseBody(200, result, ""), 200
+	}
 	if m.Opcode == client.BucketFormatOpen {
 		return s.openSocketBucketFormat(m, ws, p)
 	}

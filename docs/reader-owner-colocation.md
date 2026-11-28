@@ -7,12 +7,21 @@ storage, alter membership or relax a hard placement constraint.
 
 ## Shared short and long history
 
-`internal/decay.Accumulator` stores two discounted amounts, with a timestamp and
-half-life configuration. `Add` records events; `AddInterval` integrates a
-cumulative-counter delta over an interval. `Rates` returns amounts per second.
-`Mean` uses the same kernel for weighted measurements. Reads do not mutate the
-history, so polling cadence does not accelerate decay. Replayed intervals are
-ignored, invalid numeric observations are rejected, and idle rates decay.
+`internal/decay.Accumulator` is a unit-neutral interval counter. `Add(int64)`
+updates the current amount with CAS, preserving exact integer quantities. `Tick`
+atomically exchanges that amount for zero, retains the last completed amount and
+its actual elapsed interval, and updates a `float64` mean normalized to units per
+second. Its snapshot exposes average, last amount, last interval, current amount
+and last switch timestamp. `LastPerSecond` and `AveragePerSecond` expose the two
+rates. Overflow is observable rather than wrapping.
+
+The first tick establishes a baseline; the first completed interval seeds the
+mean, without inventing a week of zero prehistory. Later ticks blend with
+`alpha = 1 - exp(-ln(2) * elapsed / halfLife)`. Duplicate/backwards ticks consume
+nothing; idle ticks contribute measured zero. `Windows` applies two instances of
+this same counter to identical integer interval deltas. Forecast queries preview
+idle decay on a value copy, so polling cannot advance stored history. Fractional
+path distances use a separate weighted `Mean`, rather than integer event units.
 
 Node YAML and `NodeConfigSet` accept:
 
@@ -28,6 +37,31 @@ counters and ownership are unaffected. The shared implementation covers range
 traffic, volume traffic, range/capacity growth and observed handoff duration.
 Volume windows use local receipt time; remote wall clocks do not supply the
 local decay epoch. Snapshot boot identity and sequence prevent replayed load.
+
+## Dashboard intervals and weekly averages
+
+All displayed throughput rates (node, volume, bucket, user and summary cards)
+come from these server accumulators. Every display shows the last completed
+interval amount divided by that interval's actual seconds first, followed by
+`ø` with a one-week half-life. Browser snapshots are not used to reconstruct
+rates or averages. Cumulative totals and capacity gauges retain their units.
+
+The node keeps compact aggregates per volume, bucket and account, initialized
+from maintained cumulative counters. Event pushes add exact deltas to the current
+frame; they do not close it early. The next frame closes after at least three
+seconds. Request frequency does not tick frames. A reset or a new process boot
+requires a new measured interval. Missing/stale sources remain unknown, including
+in cluster sums. Deleted entities are pruned, and no per-object histories or
+object/volume index scans are introduced.
+
+Optional administrator opcode `StatsRatesGet` (`0x2040`, semantics revision 1)
+returns native `Text(JSON)` without altering existing statistics schema 1. Its
+request is `u16(1), varint(user count <= 1000), user IDs`; delegated node
+administration uses its existing authorization path. The response identifies
+node, boot and captured time, states the weekly half-life, and contains
+`{last, average}` rate pairs (or null before measurement) for node I/O, account
+totals and volume/bucket/requested-user maps. Both numbers are already per second.
+Unsupported old nodes expose unknown rates instead of a browser approximation.
 
 ## One price for network transfers
 

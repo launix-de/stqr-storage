@@ -21,9 +21,10 @@ type rangeMetric struct {
 	read, write             atomic.Uint64
 	active                  atomic.Int64
 	mu                      sync.Mutex
-	readWindow, writeWindow decay.Accumulator
+	readWindow, writeWindow decay.Windows
 	sampled                 time.Time
 	lastRead, lastWrite     uint64
+	readRate, writeRate     float64
 }
 
 // Range telemetry is advisory. Keep snapshots comfortably below the existing
@@ -56,26 +57,33 @@ func (b *Bucket) recordRangeTraffic(p principal, id volume.ObjectID, read, write
 	recordPlacementReader(m, key, p, read, write, now)
 }
 
-func (r *rangeManager) rangeWorkload(key rangeMetricKey) (float64, float64) {
+func (r *rangeManager) rangeWorkload(key rangeMetricKey, h decay.HalfLives) (float64, float64) {
 	value, ok := r.metrics.Load(key)
 	if !ok {
 		return 0, 0
 	}
-	m := value.(*rangeMetric)
-	h := r.server.placementHalfLives()
+	return value.(*rangeMetric).workloadWindows(time.Now(), h)
+}
+func (m *rangeMetric) workload(now time.Time, halfLife time.Duration) (float64, float64) {
+	return m.workloadWindows(now, decay.HalfLives{Short: halfLife, Long: halfLife})
+}
+func (m *rangeMetric) workloadWindows(now time.Time, h decay.HalfLives) (float64, float64) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	now := time.Now()
+	read, write := m.read.Load(), m.write.Load()
 	if m.sampled.IsZero() {
-		m.sampled = now
-		m.lastRead, m.lastWrite = m.read.Load(), m.write.Load()
-	} else if now.Sub(m.sampled) >= time.Second {
-		read, write := m.read.Load(), m.write.Load()
-		m.readWindow.AddInterval(m.sampled, now, float64(read-m.lastRead), h)
-		m.writeWindow.AddInterval(m.sampled, now, float64(write-m.lastWrite), h)
+		m.sampled, m.lastRead, m.lastWrite = now, read, write
+		return 0, 0
+	}
+	if now.Sub(m.sampled) >= time.Second {
+		if read < m.lastRead || write < m.lastWrite {
+			m.readWindow, m.writeWindow = decay.Windows{}, decay.Windows{}
+		}
+		observeTrafficFrame(&m.readWindow, &m.writeWindow, m.sampled, now, subtractCapacity(read, m.lastRead), subtractCapacity(write, m.lastWrite), h)
+		m.readRate, m.writeRate = m.readWindow.Rates(now, h).Peak(), m.writeWindow.Rates(now, h).Peak()
 		m.sampled, m.lastRead, m.lastWrite = now, read, write
 	}
-	return m.readWindow.Rates(now, h).Peak(), m.writeWindow.Rates(now, h).Peak()
+	return m.readRate, m.writeRate
 }
 
 func (r *rangeManager) collectRangeTelemetry(snap *client.StatsSnapshot) {
