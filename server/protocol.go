@@ -56,12 +56,29 @@ func (s *Server) dispatchAs(m client.Message, ws *wsSession, p principal) ([]byt
 				return client.ResponseBody(426, nil, err.Error()), 426
 			}
 		}
-		if p.connection.bucket != nil && m.Opcode != client.Hello && m.Opcode != client.Ping && !(m.Opcode >= 0x0100 && m.Opcode <= client.BucketObjectList || m.Opcode == client.ObjectAccepted || m.Opcode == client.BucketObjectLease || m.Opcode == client.BucketMaintenanceEnd || m.Opcode == client.BucketStatFS || m.Opcode == client.BucketSync || m.Opcode == client.ConnectionSync || m.Opcode == client.ObjectReference) {
+		if p.connection.bucket != nil && m.Opcode != client.Hello && m.Opcode != client.Ping && !(m.Opcode >= 0x0100 && m.Opcode <= client.BucketObjectList || m.Opcode == client.ObjectAccepted || m.Opcode == client.BucketObjectLease || m.Opcode == client.BucketMaintenanceEnd || m.Opcode == client.BucketStatFS || m.Opcode == client.BucketSync || m.Opcode == client.ConnectionSync || m.Opcode == client.ObjectReference || m.Opcode == client.PlacementHintsMessage) {
 			return client.ResponseBody(403, nil, "bucket connection has no administrative privileges"), 403
 		}
 	}
 	if s.storageWarming.Load() && !storageWarmReadMessage(m) {
 		return client.ResponseBody(503, nil, s.storageUnavailable().Error()), 503
+	}
+	if m.Opcode == client.PlacementHintsMessage {
+		return s.executePlacementHints(m, ws, p)
+	}
+	if m.Opcode == client.StatsRatesGet {
+		if !p.isAdmin() {
+			return client.ResponseBody(403, nil, "administrator required"), 403
+		}
+		if m.Kind != client.Request {
+			return client.ResponseBody(400, nil, "rate frames require a request"), 400
+		}
+		result, err := s.dashboardRateFrames(m.Body)
+		if err != nil {
+			status := statusOf(err)
+			return client.ResponseBody(status, nil, err.Error()), status
+		}
+		return client.ResponseBody(200, result, ""), 200
 	}
 	if m.Opcode == client.BucketFormatOpen {
 		return s.openSocketBucketFormat(m, ws, p)
@@ -423,7 +440,7 @@ func (s *Server) dispatchAs(m client.Message, ws *wsSession, p principal) ([]byt
 		return client.ResponseBody(403, nil, "cluster peer operation required"), 403
 	}
 
-	if !p.isAdmin() && m.Opcode != client.Hello && m.Opcode != client.Ping && !(m.Opcode >= 0x0100 && m.Opcode <= client.BucketObjectList || m.Opcode == client.ObjectAccepted || m.Opcode == client.BucketObjectLease || m.Opcode == client.BucketMaintenanceEnd || m.Opcode == client.BucketStatFS || m.Opcode == client.BucketSync || m.Opcode == client.ConnectionSync || m.Opcode == client.ObjectReference) {
+	if !p.isAdmin() && m.Opcode != client.Hello && m.Opcode != client.Ping && !(m.Opcode >= 0x0100 && m.Opcode <= client.BucketObjectList || m.Opcode == client.ObjectAccepted || m.Opcode == client.BucketObjectLease || m.Opcode == client.BucketMaintenanceEnd || m.Opcode == client.BucketStatFS || m.Opcode == client.BucketSync || m.Opcode == client.ConnectionSync || m.Opcode == client.ObjectReference || m.Opcode == client.PlacementHintsMessage) {
 		return client.ResponseBody(403, nil, "administrator required"), 403
 	}
 
@@ -697,6 +714,7 @@ func (s *Server) execute(m client.Message, ws *wsSession) ([]byte, int, error) {
 		}
 		if ws != nil && ws.authorization != nil {
 			ws.authorization.objectReferences.Store(requestedCapabilities&client.CapabilityObjectReferences != 0)
+			ws.authorization.placementHints.Store(requestedCapabilities&client.CapabilityPlacementHints != 0)
 		}
 		if ws != nil {
 			ws.durabilityCap.Store(requestedCapabilities&client.CapabilityDurability != 0)
@@ -732,7 +750,7 @@ func (s *Server) execute(m client.Message, ws *wsSession) ([]byte, int, error) {
 			s.control.ledger.mu.Unlock()
 		}
 		if s.scopes != nil {
-			caps |= client.CapabilityRangeHandoff | client.CapabilityExclusion | client.CapabilityControlRecovery | client.CapabilityVolumeRecovery | client.CapabilityRecoveryFenceClearance | client.CapabilityPhysicalQuotas | client.CapabilityReplication | client.CapabilityReplicaTopology | client.CapabilityCompactAuthority
+			caps |= client.CapabilityPlacementHints | client.CapabilityRangeHandoff | client.CapabilityExclusion | client.CapabilityControlRecovery | client.CapabilityVolumeRecovery | client.CapabilityRecoveryFenceClearance | client.CapabilityPhysicalQuotas | client.CapabilityReplication | client.CapabilityReplicaTopology | client.CapabilityCompactAuthority
 		}
 		if s.retiring() {
 			caps |= client.CapabilityRetiringNode

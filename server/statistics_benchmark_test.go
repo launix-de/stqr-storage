@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/launix-de/stqr-storage/internal/decay"
 	"github.com/launix-de/stqr-storage/volume"
 )
 
@@ -43,8 +44,14 @@ func BenchmarkStatisticsTraffic(b *testing.B) {
 }
 
 func BenchmarkStatisticsRate(b *testing.B) {
+	var counter decay.Accumulator
+	start := time.Unix(100, 0)
+	counter.Tick(start, decay.DefaultLongHalfLife)
 	b.ReportAllocs()
+	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		statisticsRateSink = statisticsRate(100, 200, time.Second, defaultPlacementStatsHalfLife)
+		counter.Add(200)
+		counter.Tick(start.Add(time.Duration(i+1)*time.Second), decay.DefaultLongHalfLife)
+		statisticsRateSink = counter.AveragePerSecond()
 	}
 }

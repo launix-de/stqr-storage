@@ -78,6 +78,17 @@ void stqr_free(void *data);
  * callbacks must not reenter this client. Successful data ownership transfers
  * to the callback (stqr_free); info is borrowed only during callback execution.
  * Transport failure of a possibly sent write reports -EINPROGRESS. */
+/* Optional bucket-scoped reader path telemetry. Values are advisory, never
+ * reservations or authority. Report to already open owner sessions; no probes
+ * or background threads are created. The caller serializes this with framing.
+ * Unsupported servers return -EOPNOTSUPP; maximum 16 distinct node paths. */
+#define STQR_CAP_PLACEMENT_HINTS (1U << 23)
+#define STQR_MAX_PLACEMENT_PATHS 16U
+typedef struct {
+    stqr_id node;
+    stqr_u64 rtt_ns, bytes_per_second; /* positive RTT; zero bandwidth = unknown */
+} stqr_placement_path;
+int stqr_report_placement_hints(stqr_client *, const stqr_placement_path *, size_t);
 #define STQR_CAP_CONNECTION_SYNC 524288U
 #define STQR_CAP_ACCEPTED_STREAMS (1U << 21)
 #define STQR_CAP_ACCEPTED_REFERENCES 1048576U

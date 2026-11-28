@@ -11,10 +11,18 @@ try{
  await page.waitForFunction(id=>{const cell=document.querySelector(`[data-volume="${id}"] .io-rates`),rates=cell?.querySelectorAll('strong');return rates?.length===2&&[...rates].every(r=>!r.textContent.includes('—')&&r.textContent!=='0 B/s')},config.volume);
  const tooltip=await page.locator(`[data-volume="${config.volume}"] .io-rates`).getAttribute('title');
  if(!tooltip?.includes('RAM/mmap')||!tooltip.includes('kein Datenträger-I/O'))throw Error('Volume access metric is mislabeled as physical disk I/O');
+ const assertPairs=async selector=>{
+  const texts=await page.locator(selector).allTextContents();
+  if(!texts.length||texts.some(text=>!text.includes(' · ø ')||(text.match(/\/s/g)??[]).length!==2))throw Error('Completed interval and weekly average pair missing: '+texts.join('; '));
+ };
+ await assertPairs(`[data-volume="${config.volume}"] .io-rates strong`);
+ await assertPairs('#metric-read, #metric-write');
  await page.screenshot({path:'/tmp/stqr-throughput-volumes.png'});
  await page.locator('[data-view="buckets"]').click();
  await page.waitForFunction(id=>{const cell=document.querySelector(`[data-bucket-throughput="${id}"]`);return cell&&!cell.textContent.includes('—')&&!cell.textContent.includes(' 0 B/s')},config.bucket);
  await page.screenshot({path:'/tmp/stqr-throughput-buckets.png'});
+ await assertPairs(`[data-bucket-throughput="${config.bucket}"] .io-rates strong`);
+ await assertPairs('#bucket-metric-read, #bucket-metric-write');
  const occupancy=page.locator(`[data-bucket="${config.bucket}"] .bucket-usage`);
  await occupancy.waitFor();
  const occupiedText=await occupancy.innerText();
@@ -36,6 +44,7 @@ try{
  await page.waitForFunction(()=>['read','write'].every(key=>{const text=document.querySelector('#user-metric-'+key).textContent;return text!=='—'&&text!=='0 B/s'}));
  if(await page.locator('#user-metric-count').textContent()!=='4')throw Error('User summary has the wrong total count');
  for(const key of ['read','write'])if((await page.locator('#user-metric-'+key+'-total').textContent())==='—')throw Error('Cumulative user '+key+' total is missing');
+ await assertPairs(`#user-metric-read, #user-metric-write, [data-user="${config.user}"] .io-rates strong`);
  await page.screenshot({path:'/tmp/stqr-throughput-users.png'});
  if(errors.length)throw Error(errors.join('\n'));
  console.log('Nonzero volume storage-access and logical bucket/user rates, unlimited occupancy and all-user summaries render correctly; labels distinguish RAM/mmap from disk I/O.');

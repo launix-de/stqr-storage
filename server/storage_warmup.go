@@ -151,7 +151,7 @@ func storageWarmReadMessage(m client.Message) bool {
 		return err == nil && storageWarmReadMessage(client.Message{Opcode: inner.Opcode, Body: inner.Body})
 	}
 	switch m.Opcode {
-	case client.Hello, client.Ping, client.StatsGet, client.StatsSubscribe, client.StatsUnsubscribe,
+	case client.Hello, client.Ping, client.StatsGet, client.StatsSubscribe, client.StatsUnsubscribe, client.StatsRatesGet,
 		client.MapGetMessage, client.BucketInfoGet, client.BucketScan, client.BucketObjectList, client.BucketFormatOpen,
 		client.ObjectSubscribe, client.ObjectUnsubscribe, client.SubscriptionAck,
 		client.AdminGet, client.NodeConfigGet, client.UserList, client.UserListPage, client.UserS3KeyList,

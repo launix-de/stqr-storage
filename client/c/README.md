@@ -238,3 +238,12 @@ errors, including `EINTR` after transport dispatch, remain uncertain for mutatio
 This proof applies to one frame: failure of a later upload chunk cannot undo an
 already submitted request header or earlier chunks. No cancellation initiates a
 sync, and only explicit caller sync confirms persistence.
+
+Optional reader locality measurements can be supplied with
+`stqr_report_placement_hints(client, paths, count)` (`count <= 16`). Each
+`stqr_placement_path` contains a committed node ID, positive RTT in nanoseconds
+and measured bytes/second (`0` for unknown bandwidth). The client negotiates
+`STQR_CAP_PLACEMENT_HINTS`, keeps its reader identity across reconnect/owner
+routing and reports to existing owner sessions. It creates no background probes
+or threads. An unsupported server returns `-EOPNOTSUPP`; telemetry never grants
+access or reserves capacity. See [reader/owner placement](../../docs/reader-owner-colocation.md).

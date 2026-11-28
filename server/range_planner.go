@@ -12,6 +12,7 @@ import (
 
 type rangeDestination struct {
 	node           client.ID
+	boot           client.ID
 	volume         client.VolumeStats
 	capacity, free uint64
 	observed       time.Time
@@ -27,7 +28,7 @@ func (r *rangeManager) destinations(d BucketDescription, fresh ...bool) ([]range
 		snapshots = catalog.snapshots
 		seen = catalog.seen
 	} else {
-		local := s.CollectStats(client.StatsFilter{})
+		local := s.resourceSnapshot()
 		snapshots = []client.StatsSnapshot{local}
 		seen[local.Node] = time.Now()
 		s.peerStatsMu.RLock()
@@ -68,7 +69,7 @@ func (r *rangeManager) destinations(d BucketDescription, fresh ...bool) ([]range
 					own = addCapacity(own, reserve.Backing)
 				}
 			}
-			out = append(out, rangeDestination{node: snapshot.Node, volume: v, capacity: v.CapacityPhysical, free: addCapacity(v.AdmissionFreePhysical, min(own, v.GuaranteedRemainingPhysical)), observed: seen[snapshot.Node]})
+			out = append(out, rangeDestination{node: snapshot.Node, boot: snapshot.BootID, volume: v, capacity: v.CapacityPhysical, free: addCapacity(v.AdmissionFreePhysical, min(own, v.GuaranteedRemainingPhysical)), observed: seen[snapshot.Node]})
 		}
 	}
 	sort.Slice(out, func(i, j int) bool {

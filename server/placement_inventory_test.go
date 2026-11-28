@@ -164,7 +164,6 @@ func TestPlacementEstimatesUseRAMWithoutIO(t *testing.T) {
 				goal.Compression = "gzip"
 				next.DesiredPolicy = &goal
 			}
-			r.measurements.Store(rangeMetricKey{shape.bucket, shape.start, shape.bits}, placementMeasurement{at: time.Now().Add(-time.Hour)})
 			before := v.IOStats()
 			for i := 0; i < 20; i++ {
 				m, ok := r.measuredPlacement(shape, p.Entries[0], next, weights)
@@ -277,12 +276,6 @@ func TestPlacementIdlePlanningDoesNotReadStorage(t *testing.T) {
 		}
 		before := v.IOStats()
 		for i := 0; i < 3; i++ {
-			r.measurements.Range(func(key, value any) bool {
-				m := value.(placementMeasurement)
-				m.at = time.Now().Add(-time.Hour)
-				r.measurements.Store(key, m)
-				return true
-			})
 			m := r.buildPlacementTargets("", []BucketDescription{next})
 			if m == nil {
 				t.Fatal("target planner skipped fixture")

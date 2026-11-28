@@ -263,6 +263,7 @@ func (p *peerConnection) request(ctx context.Context, opcode uint16, body []byte
 		return nil, client.ErrProtocol
 	}
 	body = append([]byte(nil), body...)
+	started := time.Now()
 	id := client.NewRequestID()
 	pending := peerPending{opcode: opcode, result: make(chan peerReply, 1)}
 	p.mu.Lock()
@@ -286,6 +287,10 @@ func (p *peerConnection) request(ctx context.Context, opcode uint16, body []byte
 	}
 	select {
 	case result := <-pending.result:
+		if result.err == nil && opcode == client.Ping && len(body) == 8 && len(result.body) == 8 && p.server.scopes != nil {
+			finished := time.Now()
+			p.server.observePlacementPeer(p.Node, finished.Sub(started), finished)
+		}
 		return result.body, result.err
 	case <-ctx.Done():
 		return nil, ctx.Err()

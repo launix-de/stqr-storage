@@ -146,7 +146,7 @@ func TestReferenceControlMarkerExcludesFrontendRangeTraffic(t *testing.T) {
 	if !ok {
 		t.Fatal("missing range")
 	}
-	v, ok := r.metrics.Load(key)
+	v, ok := r.server.statistics.ranges.Load(key)
 	if !ok {
 		t.Fatal("normal frontend traffic not counted")
 	}

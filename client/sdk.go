@@ -14,6 +14,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 	"weak"
@@ -26,6 +27,12 @@ import (
 // cluster statistics. IDs are native 256-bit object addresses, never rehashed.
 // It is safe to call methods concurrently; Close is idempotent.
 type Client struct {
+	placementActivity atomic.Int64
+	placementReader   ID
+	placementSequence uint64
+	placementDone     chan struct{}
+	placementPaused   bool
+
 	durabilityError error
 
 	durability map[ID]pendingDurability
@@ -111,13 +118,15 @@ func dialBucket(ctx context.Context, rawURL, username, password string, bucket B
 		cancel()
 		return nil, errors.New("client: a nonempty bucket format is required")
 	}
-	c := &Client{endpoint: u.String(), username: username, password: password, bucket: bucket, bucketSelector: selector, format: format, done: make(chan struct{}), dialGate: make(chan struct{}, 1), life: life, cancel: cancel}
+	c := &Client{placementReader: NewRequestID(), endpoint: u.String(), username: username, password: password, bucket: bucket, bucketSelector: selector, format: format, done: make(chan struct{}), dialGate: make(chan struct{}, 1), life: life, cancel: cancel}
+	c.notePlacementActivity()
 	t, e := c.connect(ctx)
 	if e != nil {
 		cancel()
 		return nil, e
 	}
 	c.transport = t
+	c.startPlacementMeasurements()
 	return c, nil
 }
 func (c *Client) connect(ctx context.Context) (*objectTransport, error) {
@@ -136,6 +145,9 @@ func (c *Client) connectEndpoint(ctx context.Context, endpoint string) (*objectT
 		headers.Set(BucketHeader, c.bucket.String())
 	}
 	headers.Set(FormatHeader, c.format)
+	if c.placementReader != (ID{}) {
+		headers.Set(PlacementReaderHeader, c.placementReader.String())
+	}
 	c.mu.Lock()
 	token := c.maintenanceToken
 	distributed := c.distributedMaintenance
@@ -201,7 +213,7 @@ func (c *Client) connectEndpoint(ctx context.Context, endpoint string) (*objectT
 	hello := Encoder{}
 	hello.U16(2)
 	hello.U16(2)
-	hello.U64(CapabilityDurability | CapabilityObjectReferences | CapabilityConnectionSync | CapabilityAcceptedReferences | CapabilityAcceptedStreams)
+	hello.U64(CapabilityDurability | CapabilityObjectReferences | CapabilityConnectionSync | CapabilityAcceptedReferences | CapabilityAcceptedStreams | CapabilityPlacementHints)
 	hello.Text("stqr-go")
 	r, e := t.roundTrip(ctx, Message{Kind: Request, Opcode: Hello, ID: NewRequestID(), Body: hello.B}, false, nil)
 	if e == nil {
@@ -291,6 +303,9 @@ func (c *Client) Close() error {
 		for _, transport := range routed {
 			transport.fail(ErrClosed)
 			transport.workers.Wait()
+		}
+		if c.placementDone != nil {
+			<-c.placementDone
 		}
 	})
 	return nil

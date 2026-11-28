@@ -7,7 +7,6 @@ import (
 	"github.com/launix-de/stqr-storage/client"
 	"github.com/launix-de/stqr-storage/volume"
 	"testing"
-	"time"
 )
 
 func TestLazyFreeWatermarks(t *testing.T) {
@@ -55,30 +54,29 @@ func TestLazyHealthyPlacementDoesNotMoveOrReadPayload(t *testing.T) {
 }
 
 func TestCapacityGoalHysteresisAndForecast(t *testing.T) {
-	now := time.Unix(100, 0)
 	v := rangeDestination{capacity: 1000, free: 90, volume: client.VolumeStats{AllocatedPhysical: 910}}
 	g := capacityGoal{}
-	if n := g.observe(v, 10000, 8000, now); n != 410 {
+	if n := g.need(v, 10000, 8000, 0); n != 410 {
 		t.Fatal("initial reserve", n)
 	}
 	v.free = 200
 	v.volume.AllocatedPhysical = 800
-	if n := g.observe(v, 10000, 8000, now.Add(time.Second)); n != 300 {
+	if n := g.need(v, 10000, 8000, 0); n != 300 {
 		t.Fatal("stopped after crossing start watermark", n)
 	}
 	v.free = 500
 	v.volume.AllocatedPhysical = 500
-	if n := g.observe(v, 10000, 8000, now.Add(2*time.Second)); n != 0 {
+	if n := g.need(v, 10000, 8000, 0); n != 0 {
 		t.Fatal("did not stop at reserve", n)
 	}
 	v.free = 200
 	v.volume.AllocatedPhysical = 800
-	if n := g.observe(v, 10000, 8000, now.Add(3*time.Second)); n != 0 {
+	if n := g.need(v, 10000, 8000, 0); n != 0 {
 		t.Fatal("ordinary writes restarted balancing", n)
 	}
 	v.free = 90
 	v.volume.AllocatedPhysical = 910
-	if n := g.observe(v, 10000, 8000, now.Add(4*time.Second)); n <= 410 || n > 630 {
+	if n := g.need(v, 10000, 8000, 20); n <= 410 || n > 630 {
 		t.Fatal("forecast not bounded by pool reserve", n)
 	}
 }

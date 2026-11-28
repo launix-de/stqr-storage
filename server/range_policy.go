@@ -159,7 +159,7 @@ func (r *rangeManager) placementCostTotals(before client.MapPatch, moving client
 		if !known {
 			return 0, 0, 0, fail(503, "volume accounting is unavailable")
 		}
-		weight := weights[placementWeightKey{before.Bucket, id}]
+		weight := weights[bucketVolumeKey{before.Bucket, id}]
 		if weight <= 0 {
 			return 0, 0, 0, fail(503, "range accounting is unavailable")
 		}

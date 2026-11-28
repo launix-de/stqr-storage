@@ -347,6 +347,8 @@ func baselineOpcode(op uint16) bool {
 // Safe unchanged messages (PING, stats, directory, config) remain revision 1.
 func currentOperationSemantics() map[string]operationSemantics {
 	result := map[string]operationSemantics{}
+	result[fmt.Sprintf("%04x", client.StatsRatesGet)] = operationSemantics{Emit: 1, Min: 1, Max: 1}
+	result[fmt.Sprintf("%04x", client.PlacementHintsMessage)] = operationSemantics{Emit: 1, Min: 1, Max: 1}
 	result[fmt.Sprintf("%04x", client.ConnectionSync)] = operationSemantics{Emit: 1, Min: 1, Max: 1}
 	result[fmt.Sprintf("%04x", client.BucketFormatOpen)] = operationSemantics{Emit: 1, Min: 1, Max: 1}
 	result[fmt.Sprintf("%04x", peerBucketFormat)] = operationSemantics{Emit: 1, Min: 1, Max: 1}

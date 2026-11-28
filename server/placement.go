@@ -92,7 +92,7 @@ func buildPlacement(patches []client.MapPatch) (*placementImage, error) {
 		}
 		span[1] = i + 1
 		image.bounds[item.bucket] = span
-		if r.State == 0 && len(r.Locations) > 1 {
+		if r.State == 0 && len(r.Locations) > 0 {
 			image.primaries[r.Locations[0].Node]++
 		}
 		b := image.data[i*placementHeaderBytes : (i+1)*placementHeaderBytes]

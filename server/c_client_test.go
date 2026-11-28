@@ -65,6 +65,18 @@ func TestCClient(t *testing.T) {
 			t.Fatalf("C client: %v\n%s", err, out)
 		}
 	}
+	t.Run("placement-hints", func(t *testing.T) {
+		node := startDaemonTestNode(t, filepath.Join(t.TempDir(), "node.yaml"), nil, false)
+		s := node.node
+		addReplicaDataVolume(t, s, "c-hints", "hdd", 8<<20)
+		b, _ := createProtocolBucket(t, s, "c-placement-hints")
+		a := s.cfg.Auth.BootstrapAdmin
+		cmd := exec.Command(binary)
+		cmd.Env = append(os.Environ(), "STQR_TEST_URL="+"http://"+node.listener.Addr().String(), "STQR_TEST_USER="+a.Username, "STQR_TEST_PASSWORD="+a.Password, "STQR_TEST_BUCKET="+b.ID().String(), "STQR_TEST_NODE="+s.cfg.Node.ID, "STQR_TEST_MODE=placement-hints")
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("C hints: %v\n%s", err, out)
+		}
+	})
 	t.Run("named", func(t *testing.T) {
 		s := testServer(t)
 		addTestVolume(t, s, "c-client-named", "hdd", 8<<20)

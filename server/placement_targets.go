@@ -159,7 +159,7 @@ func (r *rangeManager) buildPlacementTargets(group string, descriptions []Bucket
 			}
 		}
 	} else {
-		local := s.CollectStats(client.StatsFilter{})
+		local := s.resourceSnapshot()
 		for _, b := range local.Buckets {
 			usage[usageKey{local.Node, b.ID}] = b.AttributedPhysical
 		}
@@ -215,9 +215,8 @@ func (r *rangeManager) buildPlacementTargets(group string, descriptions []Bucket
 	mixed ^= mixed >> 29
 	mixed *= 0xbf58476d1ce4e5b9
 	mixed ^= mixed >> 31
-	halfLife := s.placementStatsHalfLife()
 	for i, shape := range shapes {
-		input.Work[i].Read, input.Work[i].Write = r.rangeWorkload(rangeMetricKey{shape.bucket, shape.start, shape.bits}, halfLife)
+		input.Work[i].Read, input.Work[i].Write = s.statistics.rangeWorkload(rangeMetricKey{shape.bucket, shape.start, shape.bits})
 	}
 	weights := r.placementWeights(image, byBucket)
 	for i, shape := range shapes {
@@ -362,15 +361,31 @@ func (r *rangeManager) buildPlacementTargets(group string, descriptions []Bucket
 			input.Network = append(input.Network, network)
 		}
 	}
-	solution := solvePlacement(demands, resources, options, budgets)
-	// Slot zero is the primary in the transformation graph. Preserve current
-	// authority in the seed whenever that copy still satisfies the new policy.
-	for i, ids := range solution.Assignments {
-		for slot, id := range ids {
-			if resources[options[id].Volume].Node == current[i].Locations[0].Node {
-				ids[0], ids[slot] = ids[slot], ids[0]
-				break
-			}
+	primaries := make([]client.ID, len(current))
+	for i, entry := range current {
+		primaries[i] = entry.Locations[0].Node
+	}
+	// Client and peer transfers share one immutable distance image and one
+	// Traffic coefficient. Candidate costs are derived from bounded RAM aggregates.
+	now := time.Now()
+	input.PeerDistances = r.placementPeerDistances(now)
+	unknownDistance := placementDistanceFallback(input.PeerDistances)
+	input.NetworkDistances = make([]float64, len(options))
+	input.ClientNetwork = make([]float64, len(options))
+	byShape := make([][]int, len(shapes))
+	for id, option := range options {
+		byShape[option.Range] = append(byShape[option.Range], id)
+		node := resources[option.Volume].Node
+		input.NetworkDistances[id] = placementPeerDistance(input.PeerDistances, r.node, node, unknownDistance)
+	}
+	for i, ids := range byShape {
+		nodes := make([]client.ID, len(ids))
+		for j, id := range ids {
+			nodes[j] = resources[options[id].Volume].Node
+		}
+		costs := r.placementReaderCosts(rangeMetricKey{shapes[i].bucket, shapes[i].start, shapes[i].bits}, nodes, input.Horizon, now)
+		for j, id := range ids {
+			input.ClientNetwork[id] = costs[j]
 		}
 	}
 	input.BackgroundRead, input.BackgroundWrite = r.placementBackground(destinations)
@@ -378,7 +393,8 @@ func (r *rangeManager) buildPlacementTargets(group string, descriptions []Bucket
 	if s.ioPriority.users.Load() > 0 {
 		budget = 5 * time.Millisecond
 	}
-	result.improvement = improvePlacement(s.ctx, demands, resources, options, budgets, &solution, input, budget, mixed)
+	solution, improvement := rebuildPlacement(s.ctx, demands, resources, options, budgets, input, primaries, budget, mixed)
+	result.improvement = improvement
 	result.pending = len(solution.Pending)
 	for _, mandatory := range []bool{true, false} {
 		for _, i := range solution.Order {

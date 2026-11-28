@@ -12,95 +12,106 @@ import (
 	"time"
 
 	"github.com/launix-de/stqr-storage/client"
+	"github.com/launix-de/stqr-storage/internal/decay"
 	"github.com/launix-de/stqr-storage/volume"
 	"gopkg.in/yaml.v3"
 )
 
 func TestStatisticsHalfLife(t *testing.T) {
-	for _, halfLife := range []time.Duration{time.Second, time.Hour, defaultPlacementStatsHalfLife} {
-		if got := statisticsRate(100, 0, halfLife, halfLife); math.Abs(got-50) > 1e-10 {
+	start := time.Unix(100, 0)
+	for _, halfLife := range []time.Duration{time.Second, time.Hour, decay.DefaultLongHalfLife} {
+		h := decay.HalfLives{Short: halfLife, Long: halfLife}
+		var whole, parts, idle decay.Series
+		for _, counter := range []*decay.Series{&whole, &parts, &idle} {
+			counter.Tick(start, h)
+			counter.Add(100)
+			counter.Tick(start.Add(time.Second), h)
+		}
+		from := start.Add(time.Second)
+		idle.Tick(from.Add(halfLife), h)
+		if got := idle.Forecast().Long; math.Abs(got-50) > 1e-10 {
 			t.Fatal(got)
 		}
-		whole := statisticsRate(100, 20, halfLife, halfLife)
-		parts := 100.0
+		whole.Add(int64(200 * halfLife.Seconds()))
+		whole.Tick(from.Add(halfLife), h)
 		for i := 0; i < 100; i++ {
-			parts = statisticsRate(parts, 20, halfLife/100, halfLife)
+			a := from.Add(time.Duration(i) * halfLife / 100)
+			b := from.Add(time.Duration(i+1) * halfLife / 100)
+			parts.Add(int64(200 * b.Sub(a).Seconds()))
+			parts.Tick(b, h)
 		}
-		if math.Abs(whole-parts) > 1e-10 {
-			t.Fatal("sampling cadence changed weighting", whole, parts)
+		a, b := whole.Forecast().Long, parts.Forecast().Long
+		if math.Abs(a-b) > 1e-10 {
+			t.Fatal("cadence changed weighting", a, b)
 		}
-	}
-	if statisticsRate(12, 100, 0, time.Hour) != 12 {
-		t.Fatal("zero interval changed rate")
-	}
-	if got := statisticsRate(100, 0, time.Nanosecond, defaultPlacementStatsHalfLife); got > 100 || got < 0 || math.IsNaN(got) {
-		t.Fatal(got)
 	}
 }
 
 func TestStatisticsRangeSampling(t *testing.T) {
 	start := time.Unix(100, 0)
+	h := decay.HalfLives{Short: time.Minute, Long: time.Minute}
 	m := &rangeMetric{sampled: start}
 	m.read.Store(100)
 	m.write.Store(200)
-	read, write := m.workload(start.Add(10*time.Second), time.Minute)
+	m.tick(start.Add(10*time.Second), h)
+	read, write := m.workload()
 	if read != 10 || write != 20 {
-		t.Fatal("initial measured rate must not ramp from zero", read, write)
+		t.Fatal(read, write)
 	}
 	m.read.Add(100)
-	if r, w := m.workload(start.Add(10500*time.Millisecond), time.Minute); r != read || w != write {
-		t.Fatal("short frame changed sampling cut", r, w)
+	m.tick(start.Add(10500*time.Millisecond), h)
+	if r, w := m.workload(); r != read || w != write {
+		t.Fatal("unfinished frame changed rates", r, w)
 	}
-	// The short call did not consume the new read bytes.
-	r, w := m.workload(start.Add(70*time.Second), time.Minute)
+	m.tick(start.Add(70*time.Second), h)
+	r, w := m.workload()
 	if math.Abs(r-(10+100.0/60)/2) > 1e-10 || math.Abs(w-10) > 1e-10 {
 		t.Fatal(r, w)
 	}
-	if r2, w2 := m.workload(start, time.Minute); r2 != r || w2 != w {
-		t.Fatal("clock rollback consumed counters")
+	for i := 0; i < 100; i++ {
+		if a, b := m.workload(); a != r || b != w {
+			t.Fatal("read mutated history")
+		}
 	}
 }
-
 func TestStatisticsVolumeFrames(t *testing.T) {
+	start := time.Unix(100, 0)
 	node, boot, disk := client.ID{1}, client.ID{2}, client.ID{3}
-	old := client.StatsSnapshot{Node: node, BootID: boot, Sequence: 1, CapturedUnixNS: uint64(time.Second), Volumes: []client.VolumeStats{{ID: disk}}}
-	previous := &pgRebuildCatalog{snapshots: []client.StatsSnapshot{old}, volumeRates: map[client.ID]placementVolumeRate{disk: {read: 100, write: 200}}}
-	next := old
-	next.Sequence++
-	next.CapturedUnixNS += uint64(time.Hour)
-	rates := placementVolumeRates([]client.StatsSnapshot{next}, previous, time.Hour)
-	if rates[disk].read != 50 || rates[disk].write != 100 {
-		t.Fatal(rates)
+	h := decay.HalfLives{Short: time.Hour, Long: time.Hour}
+	var book statisticsBook
+	snap := client.StatsSnapshot{Node: node, BootID: boot, Sequence: 1, CapturedUnixNS: uint64(start.UnixNano()), Volumes: []client.VolumeStats{{ID: disk}}}
+	book.observe(snap, nil, h)
+	snap.Sequence++
+	snap.CapturedUnixNS += uint64(time.Hour)
+	snap.Volumes[0].IO.PhysicalReadBytes = 3600
+	book.observe(snap, nil, h)
+	at := start.Add(time.Hour)
+	read, _, _ := book.volumeForecast(node, boot, disk, at)
+	if read != 1 {
+		t.Fatal("first measurement", read)
 	}
-	duplicate := placementVolumeRates([]client.StatsSnapshot{old}, previous, time.Hour)
-	if duplicate[disk] != previous.volumeRates[disk] {
-		t.Fatal("duplicate frame decayed twice")
+	book.observe(snap, nil, h)
+	if r, _, _ := book.volumeForecast(node, boot, disk, at); r != read {
+		t.Fatal("replay changed mean", r)
 	}
-	rollback := old
-	rollback.Sequence = 0
-	if got := placementVolumeRates([]client.StatsSnapshot{rollback}, previous, time.Hour); got[disk] != previous.volumeRates[disk] {
-		t.Fatal("out-of-order frame changed rates", got)
+	snap.Sequence = 1
+	snap.CapturedUnixNS++
+	book.observe(snap, nil, h)
+	if r, _, _ := book.volumeForecast(node, boot, disk, at); r != read {
+		t.Fatal("old sequence changed mean", r)
 	}
-	reboot := next
-	reboot.BootID = client.ID{9}
-	if got := placementVolumeRates([]client.StatsSnapshot{reboot}, previous, time.Hour); len(got) != 0 {
-		t.Fatal("cross-boot subtraction", got)
+	snap.Sequence = 3
+	snap.CapturedUnixNS = uint64(at.Add(time.Hour).UnixNano())
+	snap.Volumes[0].IO.PhysicalReadBytes = 0
+	book.observe(snap, nil, h)
+	if frame := book.frames(nil).Volumes[disk.String()].Read; frame != nil {
+		t.Fatal("counter reset retained measurement", frame)
 	}
-	initial := &pgRebuildCatalog{snapshots: []client.StatsSnapshot{old}}
-	if got := placementVolumeRates([]client.StatsSnapshot{old}, initial, time.Hour); len(got) != 0 {
-		t.Fatal("duplicate initial frame invented a zero-rate measurement", got)
-	}
-	next.Volumes = []client.VolumeStats{{ID: disk, IO: client.IOStats{PhysicalReadBytes: 3600, PhysicalWriteBytes: 7200}}}
-	got := placementVolumeRates([]client.StatsSnapshot{next}, initial, time.Hour)
-	if got[disk].read != 1 || got[disk].write != 2 {
-		t.Fatal("measured initial interval lost", got)
-	}
-	resetOld := old
-	resetOld.Volumes = []client.VolumeStats{{ID: disk, IO: client.IOStats{PhysicalReadBytes: 1000}}}
-	previous.snapshots = []client.StatsSnapshot{resetOld}
-	next.Volumes = []client.VolumeStats{{ID: disk}}
-	if got := placementVolumeRates([]client.StatsSnapshot{next}, previous, time.Hour); len(got) != 0 {
-		t.Fatal("reopened volume retained old counter rate", got)
+	snap.BootID = client.ID{9}
+	snap.Sequence = 1
+	book.observe(snap, nil, h)
+	if r, _, _ := book.volumeForecast(node, boot, disk, at); r != 0 {
+		t.Fatal("cross-boot lookup", r)
 	}
 }
 
@@ -114,11 +125,11 @@ func TestStatisticsHalfLifeConfiguration(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		want := defaultPlacementStatsHalfLife
+		want := decay.DefaultLongHalfLife
 		if text == "placement_stats_half_life: 1h\n" {
 			want = time.Hour
 		}
-		if got := (&Server{cfg: cfg}).placementStatsHalfLife(); got != want {
+		if got := (&Server{cfg: cfg}).placementHalfLives().Long; got != want {
 			t.Fatal(got, want)
 		}
 		wire, err := yaml.Marshal(cfg)

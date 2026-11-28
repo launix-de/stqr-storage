@@ -14,4 +14,11 @@ export function formatBytes(value=0n){
  if(index<units.length-1&&absolute*10n>=scale*10240n-scale/2n){scale*=1024n;index++}
  return `${formatNumber(Number(n)/Number(scale))} ${units[index]}`;
 }
-export function formatRate(value){return value==null?'—':formatBytes(value)+'/s'}
+export function formatRate(value){
+ if(value==null||typeof value==='number'&&!Number.isFinite(value))return '—';
+ if(typeof value!=='number')return formatBytes(value)+'/s';
+ const units=['B','KiB','MiB','GiB','TiB','PiB','EiB'];let index=0,amount=value;
+ while(index<units.length-1&&Math.abs(amount)>=1023.95){amount/=1024;index++}
+ return `${formatNumber(amount)} ${units[index]}/s`;
+}
+export function formatRatePair(value){return `${formatRate(value?.last)} · ø ${formatRate(value?.average)}`}
