@@ -30,7 +30,7 @@ install: all pam
 	install -m 0755 bin/pam_stqr.so $(DESTDIR)$(PAM_MODULE_DIR)/
 	install -d $(DESTDIR)$(PREFIX)/libexec/stqr-networkboot/bin
 	install -m 0755 prepare-system edit-image serve test-boot $(DESTDIR)$(PREFIX)/libexec/stqr-networkboot/
-	install -m 0644 common.py sessions.py native_sessions.py $(DESTDIR)$(PREFIX)/libexec/stqr-networkboot/
+	install -m 0644 common.py firstboot.py sessions.py native_sessions.py $(DESTDIR)$(PREFIX)/libexec/stqr-networkboot/
 	cp -R initramfs $(DESTDIR)$(PREFIX)/libexec/stqr-networkboot/
 	install -d $(DESTDIR)$(PREFIX)/libexec/stqr-networkboot/pam
 	install -m 0755 pam/stqr-home pam/install-login $(DESTDIR)$(PREFIX)/libexec/stqr-networkboot/pam/

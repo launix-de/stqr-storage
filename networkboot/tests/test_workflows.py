@@ -35,6 +35,14 @@ class Workflows(unittest.TestCase):
         env = patch.dict(os.environ, {'XDG_STATE_HOME': state.name})
         env.start()
         self.addCleanup(env.stop)
+        firstboot = patch('firstboot.prepare_first_boot', side_effect=self.fake_first_boot)
+        self.firstboot = firstboot.start()
+        self.addCleanup(firstboot.stop)
+
+    def fake_first_boot(self, socket, work, args):
+        if not Path(work).is_dir():
+            return
+        (Path(work)/'first-boot-validated.json').write_text(json.dumps({'schema': 1, 'snap_seed': 'already-seeded'}))
 
     def test_bucket_only_resumes_failed_publication_without_reextracting(self):
         self.remember_disk()

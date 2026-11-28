@@ -50,7 +50,10 @@ def remember_preparation(config, bucket, work, phase='prepared'):
         return
     record = preparation_record(config, bucket)
     record.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    data = json.dumps({'work': str(work), 'phase': phase, 'login_setup': 1, 'image_layout': 2})
+    validation = work / 'first-boot-validated.json'
+    proof = json.loads(validation.read_text()) if validation.is_file() else {}
+    checked = proof.get('schema') == 1 and proof.get('snap_seed') in ('not-installed', 'already-seeded', 'completed')
+    data = json.dumps({'work': str(work), 'phase': phase, 'login_setup': 1, 'image_layout': 2, 'first_boot_checked': checked})
     marker = work / '.stqr-preparation.json'
     marker.write_text(str(record))
     marker.chmod(0o600)
@@ -78,6 +81,10 @@ def prepared_release(config, bucket):
                 or marker.read_text() != str(record)
                 or not all((work / name).is_file() for name in ('rootfs.tar', 'vmlinuz', 'initrd.img', 'release.json'))):
             return None
+        if data['phase'] == 'prepared' and not data.get('first_boot_checked'):
+            raise RuntimeError(f'Prepared archive predates first-boot validation; retained at {work}. '
+                               'The recorded installation disk is unchanged. Rerun prepare-system with '
+                               '--kernel-version <installed-version> to finish its first boot and re-extract.')
         return data
     except (OSError, ValueError, KeyError, TypeError):
         return None
@@ -188,7 +195,7 @@ def guest_many(socket, commands, readonly=False):
     return guest(socket, readonly=readonly, input=text, text=True)
 
 
-def qemu(socket, args, installer=None):
+def qemu_command(socket, args, installer=None):
     block = {'driver': 'nbd', 'server': {'type': 'unix', 'path': str(socket)}, 'node-name': 'stqr-disk', 'discard': 'unmap'}
     command = ['qemu-system-x86_64', '-name', 'STQR image builder', '-m', str(args.memory),
                '-smp', str(args.cpus), '-machine', 'accel=kvm:tcg', '-netdev', 'user,id=net0',
@@ -198,7 +205,10 @@ def qemu(socket, args, installer=None):
         command += ['-bios', str(Path(args.uefi).resolve())]
     if installer:
         command += ['-blockdev', json.dumps({'driver': 'raw', 'file': {'driver': 'file', 'filename': str(Path(installer).resolve())}, 'node-name': 'installer', 'read-only': True}), '-device', 'ide-cd,drive=installer,bootindex=1', '-no-reboot']
-    run(*command)
+    return command
+
+def qemu(socket, args, installer=None):
+    run(*qemu_command(socket, args, installer))
 
 def source_archive(destination):
     """Ship exactly the sources matching the built mount helpers."""
