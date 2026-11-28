@@ -14,8 +14,9 @@
 #undef sq_connect
 #undef sq_disconnect
 #include <assert.h>
+#include <stdbool.h>
 #include <stdio.h>
-struct stqr_socket { struct buf replies,held; unsigned calls[512],pongs; stqr_u64 sequence,reply_length; unsigned boot;int closed,hold,redirect,hold_through,through_status; };
+struct stqr_socket { struct buf replies,held,space_held; unsigned calls[512],pongs; stqr_u64 sequence,reply_length; unsigned boot;int closed,hold,redirect,hold_through,through_status,hold_space,fail_space_send; };
 int policy_connect(struct stqr_socket **out,const char *host,unsigned port,unsigned ms) {
     (void)out;(void)host;(void)port;(void)ms;return -EOPNOTSUPP;
 }
@@ -31,6 +32,7 @@ int policy_send(struct stqr_socket *socket,const void *data,size_t size) {
     assert(readnum(&input,1)==1);unsigned kind=(unsigned)readnum(&input,1);
     unsigned op=(unsigned)readnum(&input,2);const stqr_u8 *id=take(&input,16);assert(op<512 && id);
     socket->calls[op]++;
+    if(op==0x11b && socket->fail_space_send){drop(&input);return -EINTR;}
     if(kind==0){assert(op==5 || op==6 || op==0x118);drop(&input);return 0;}
     assert(kind==1);
     int redirected=socket->redirect && op==0x118;
@@ -47,13 +49,14 @@ int policy_send(struct stqr_socket *socket,const void *data,size_t size) {
         if(op==0x121)assert(input.p[input.n-1]==1); /* accepted reference trailer */
         stqr_u8 boot[16]={1};boot[0]=(stqr_u8)(socket->boot?socket->boot:1);put(&mark,boot,16);number(&mark,++socket->sequence,8);
         varint(&headers,1);varint(&headers,48);blob(&headers,mark.p,mark.n);
-    }else { assert(op==0x122 || op==0x119 || op==0x11b);varint(&headers,0); }
+    }else { assert(op==0x122 || op==0x119 || op==0x11b || op==0x100);varint(&headers,0); }
     blob(&message,headers.p,headers.n);
     if(redirected) { /* A rejected original owner publishes no object result. */ }
     else if(op==0x121)number(&message,1,1);
-    else if(op==0x118) {
+    else if(op==0x118 || op==0x100) {
         stqr_u8 runtime[16]={0};number(&message,socket->reply_length?socket->reply_length:4,8);number(&message,0,1);number(&message,0,4);
         put(&message,runtime,16);number(&message,0,1);number(&message,0,2);
+        if(op==0x100) { stqr_u8 hash[32];assert(!sq_hash(256,"read",4,hash));number(&message,0,1);number(&message,4,8);put(&message,hash,32);blob(&message,"read",4); }
     }else if(op==0x11b) {
         number(&message,1024,8);number(&message,4096,8);
         number(&message,3072,8);number(&message,2048,8);
@@ -62,7 +65,7 @@ int policy_send(struct stqr_socket *socket,const void *data,size_t size) {
     stqr_u8 frame[4]={0x82,0};size_t h=2;
     if(message.n<126)frame[1]=(stqr_u8)message.n;
     else{frame[1]=126;frame[2]=(stqr_u8)(message.n>>8);frame[3]=(stqr_u8)message.n;h=4;}
-    struct buf *output=(socket->hold && op!=0x122 && op!=0x119) || (socket->hold_through && op==0x119)?&socket->held:&socket->replies;
+    struct buf *output=op==0x11b&&socket->hold_space?&socket->space_held:((socket->hold && op!=0x122 && op!=0x119) || (socket->hold_through && op==0x119)?&socket->held:&socket->replies);
     put(output,frame,h);put(output,message.p,message.n);
     drop(&input);drop(&message);drop(&headers);drop(&mark);return 0;
 }
@@ -73,7 +76,7 @@ int policy_recv(struct stqr_socket *socket,void *out,size_t n) {
 int policy_wait(struct stqr_socket *socket,unsigned ms) {
     (void)ms;return socket->replies.pos<socket->replies.n;
 }
-void policy_disconnect(struct stqr_socket *socket) {if(socket){socket->closed=1;drop(&socket->replies);drop(&socket->held);}}
+void policy_disconnect(struct stqr_socket *socket) {if(socket){socket->closed=1;drop(&socket->replies);drop(&socket->held);drop(&socket->space_held);}}
 struct result {int called,error,status;};
 static void completed(void *arg,int error,int status,void *data,size_t n,const stqr_info *info) {
     struct result *r=arg;(void)n;(void)info;sq_free(data);
@@ -498,7 +501,48 @@ static void control_without_reply(unsigned opcode,int expected) {
     if(expected>0) assert(!stqr_poll(c,0));
     stqr_close(c);
 }
+static stqr_client *space_client(struct stqr_socket *socket) {
+ stqr_client *c=sq_alloc(sizeof(*c));assert(c);c->socket=socket;c->bucket.bytes[0]=1;
+ c->capabilities=STQR_CAP_DURABILITY|STQR_CAP_CONNECTION_SYNC;return c;
+}
+static void space_wait_does_not_hold_other_results(void) {
+ struct stqr_socket socket={.hold_space=1};stqr_client *c=space_client(&socket);
+ struct result capacity={0},read={0},write={0};stqr_space space={.total=99};
+ stqr_object_id object={{7}};stqr_options options={.accepted=1};options.request_id.bytes[0]=1;
+ assert(!stqr_bucket_space_async(c,&space,completed,&capacity));
+ assert(!capacity.called && space.total==99 && stqr_async_pending(c)==1);
+ assert(!stqr_get_async(c,object,completed,&read));
+ assert(!stqr_cas_async(c,object,1,0,"old!",4,"new!",4,&options,completed,&write));
+ while(!read.called || !write.called)assert(stqr_poll(c,0)>0);
+ assert(!capacity.called && !read.error && !write.error && space.total==99);
+ assert(stqr_async_pending(c)==1 && !c->durability_lost && !socket.calls[0x122] && !socket.calls[0x119]);
+ put(&socket.replies,socket.space_held.p,socket.space_held.n);drop(&socket.space_held);
+ while(!capacity.called)assert(stqr_poll(c,0)>0);
+ assert(!capacity.error && space.used==1024 && space.total==4096 && space.free==3072 && space.available==2048 && space.quota==4096 && space.quota_limited);
+ assert(!stqr_async_pending(c));stqr_close(c);
+ puts("C delayed STATFS allows independent GET and CAS completions without fences");
+}
+static void space_send_cancellation(bool asynchronous) {
+ struct stqr_socket socket={.hold=1};stqr_client *c=space_client(&socket);
+ struct result capacity={0},write={0};stqr_space space={.total=99};
+ stqr_object_id object={{7}};stqr_options options={.accepted=1};options.request_id.bytes[0]=1;
+ assert(!stqr_cas_async(c,object,1,0,"old!",4,"new!",4,&options,completed,&write));
+ socket.fail_space_send=1;
+ int err=asynchronous?stqr_bucket_space_async(c,&space,completed,&capacity):stqr_bucket_space(c,&space);
+ assert(err==-EINTR && space.total==99 && !capacity.called);
+ if(asynchronous) {
+  assert(!write.called && !c->durability_lost && c->socket && stqr_async_pending(c)==1);
+  put(&socket.replies,socket.held.p,socket.held.n);drop(&socket.held);
+  while(!write.called)assert(stqr_poll(c,0)>0);
+  assert(!write.error && !c->durability_lost && !stqr_async_pending(c));
+ } else {
+  assert(write.called && write.error==-EINPROGRESS && c->durability_lost && !c->socket);
+ }
+ stqr_close(c);
+ printf("C STATFS cancellation async=%d preserves_pending_mutation=%d\n",asynchronous,asynchronous);
+}
 int main(void) {
+    space_wait_does_not_hold_other_results();space_send_cancellation(false);space_send_cancellation(true);
     control_before_cas_reply(9);control_before_cas_reply(10);
     control_without_reply(0x89,1);control_without_reply(0x8a,1);
     control_without_reply(0x88,-ECONNRESET);control_without_reply(0x09,-EPROTO);

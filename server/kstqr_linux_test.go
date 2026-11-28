@@ -107,6 +107,7 @@ func TestKSTQRVirtualMachine(t *testing.T) {
 	run("cc", "-static", "-std=c11", "-Wall", "-Wextra", "-Werror", "-O2", "-o", filepath.Join(initrdRoot, "reference-limit"), filepath.Join(root, "tests/reference_limit.c"))
 	run("cc", "-static", "-std=c11", "-Wall", "-Wextra", "-Werror", "-O2", "-o", filepath.Join(initrdRoot, "sandbox"), filepath.Join(root, "tests/sandbox.c"))
 	run("cc", "-static", "-std=c11", "-Wall", "-Wextra", "-Werror", "-O2", "-o", filepath.Join(initrdRoot, "signal-rpc"), filepath.Join(root, "tests/signals.c"))
+	run("cc", "-static", "-std=c11", "-Wall", "-Wextra", "-Werror", "-O2", "-o", filepath.Join(initrdRoot, "statfs-async"), filepath.Join(root, "tests/statfs_async.c"))
 	run("cc", "-static", "-std=c11", "-Wall", "-Wextra", "-Werror", "-O2", "-o", filepath.Join(initrdRoot, "coherence"), filepath.Join(root, "tests/coherence.c"))
 	run("cc", "-static", "-std=c11", "-Wall", "-Wextra", "-Werror", "-O2", "-o", filepath.Join(initrdRoot, "cache-capacity"), filepath.Join(root, "tests/cache_capacity.c"))
 	run("cc", "-static", "-std=c11", "-Wall", "-Wextra", "-Werror", "-O2", "-o", filepath.Join(initrdRoot, "throughput"), filepath.Join(root, "tests/throughput.c"))
@@ -152,6 +153,10 @@ func TestKSTQRVirtualMachine(t *testing.T) {
 	}))
 	defer upstream.Close()
 	host := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/__kstqr_test/statfs/") {
+			writebackFault.statfs.control(w, r)
+			return
+		}
 		if strings.HasPrefix(r.URL.Path, "/__kstqr_test/edit-retry/") {
 			parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/__kstqr_test/edit-retry/"), "/")
 			if len(parts) != 2 {
@@ -1012,7 +1017,12 @@ umount /readonly
 echo initialized-by-kernel > /fresh/new.txt
 umount /fresh
 if pidof mount.kstqr; then exit 1; fi
+
 /signal-rpc
+mkdir /statfs
+/mount.kstqr --uri @@URL@@ --bucket @@BUCKET@@ --credentials /credentials --metadata-cache-bytes 0 /statfs
+/statfs-async @@URL@@
+umount /statfs
 /smoke
 /mmap-test @@URL@@
 /writeback

@@ -181,6 +181,40 @@ int ks_rpc_retry(struct ks_fs *f, struct ks_rpc *rpc, u64 epoch, int status)
     rpc->reconnect_epoch++;
     return ks_reconnect_wait(f, rpc->client);
 }
+/* STATFS is read-only but can wait for cluster capacity information. A mounted
+ * filesystem already has its normal receiver: only submit holds framing. Keep
+ * the stack output/completion alive with the same uninterruptible join as GET;
+ * a caller's fatal signal must never run receive/broken() for shared requests. */
+int ks_bucket_space(struct ks_fs *f, stqr_space *space)
+{
+	struct ks_rpc *rpc = &f->rpc[0];
+	int err;
+	mutex_lock(&rpc->lock);
+	for (;;) {
+		struct ks_async_result result = {0};
+		u64 epoch = rpc->reconnect_epoch;
+		int status = 0;
+		init_completion(&result.done);
+		err = stqr_bucket_space_async(rpc->client, space, ks_async_completed, &result);
+		mutex_unlock(&rpc->lock);
+		if (!err) {
+			wait_for_completion(&result.done);
+			err = result.error;
+			status = result.status;
+		}
+		sq_free(result.data);
+		mutex_lock(&rpc->lock);
+		if (!(err == -EAGAIN ? (status == 0 || status == 503) :
+					ks_transport_retryable(NULL, err)))
+			break;
+		err = ks_rpc_retry(f, rpc, epoch, status);
+		if (err)
+			break;
+	}
+	mutex_unlock(&rpc->lock);
+	return err;
+}
+
 int ks_object_reference(struct ks_fs *f, stqr_object_id id, stqr_id token, unsigned action)
 {
 	struct ks_rpc *rpc = ks_rpc_lock(f, id);

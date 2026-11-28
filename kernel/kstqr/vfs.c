@@ -1774,18 +1774,7 @@ static int ks_statfs(struct dentry *d, struct kstatfs *s)
 {
 	struct ks_fs *f = d->d_sb->s_fs_info;
 	stqr_space space;
-	int err;
-	mutex_lock(&f->rpc[0].lock);
-	for (;;) {
-        u64 epoch = f->rpc[0].reconnect_epoch;
-		err = stqr_bucket_space(f->rpc[0].client, &space);
-		if (!ks_transport_retryable(f->rpc[0].client, err))
-			break;
-		err = ks_rpc_retry(f, &f->rpc[0], epoch, stqr_status(f->rpc[0].client));
-		if (err)
-			break;
-	}
-	mutex_unlock(&f->rpc[0].lock);
+	int err = ks_bucket_space(f, &space);
 	if (err)
 		return err;
 	memset(s, 0, sizeof(*s));

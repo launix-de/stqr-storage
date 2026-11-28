@@ -184,6 +184,7 @@ int ks_remove(struct ks_fs *, stqr_object_id, const char *, bool);
 int ks_rename(struct ks_fs *, stqr_object_id, const char *, stqr_object_id, const char *, unsigned,
 	      const stqr_object_id *, size_t, const stqr_object_id *, size_t);
 int ks_write(struct ks_fs *, stqr_object_id, u64 *, const void *, size_t, bool);
+int ks_bucket_space(struct ks_fs *, stqr_space *);
 int ks_object_reference(struct ks_fs *, stqr_object_id, stqr_id, unsigned);
 int ks_collect_orphans(struct ks_fs *, bool *);
 void ks_schedule_orphans(struct ks_fs *);
