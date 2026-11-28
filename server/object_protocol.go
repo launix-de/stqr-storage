@@ -8,7 +8,6 @@ import (
 	"errors"
 	"io"
 	"math"
-	"os"
 	"syscall"
 
 	"github.com/launix-de/stqr-storage/client"
@@ -193,7 +192,7 @@ func (s *Server) executeObjects(m client.Message, ws *wsSession, p principal) ([
 		ctx = bindObjectRequest(ctx, m)
 	}
 	runtime := client.ID{}
-	if op.bucket.Describe().Policy.StorageStrategy == "ram" {
+	if op.bucket.storageDescription().Policy.StorageStrategy == "ram" {
 		runtime = s.boot
 		if s.controller != nil {
 			patch, known := s.routingPatch(op.bucket.ID(), op.object)
@@ -233,41 +232,39 @@ func (s *Server) executeObjects(m client.Message, ws *wsSession, p principal) ([
 		if d.Done() != nil {
 			return nil, 0, fail(400, "invalid GET body")
 		}
-		// Spooling pins just one snapshot while computing its transfer checksum;
-		// the volume lock is released before network backpressure can stall it.
-		file, err := os.CreateTemp("", "stqr-server-download-*")
-		if err != nil {
-			return nil, 0, err
-		}
-		defer func() { file.Close(); os.Remove(file.Name()) }()
+		// Capture exactly one snapshot. Small replies own their memory; large
+		// replies spill lazily. Both release the volume before socket output.
+		snapshot := objectDownload{streaming: ws != nil}
+		defer snapshot.Close()
 		hash := sha256.New()
-		info, n, err := op.bucket.copyToChecked(withMembershipRead(ctx), p, op.object, op.offset, length, &objectBudgetWriter{dst: io.MultiWriter(file, hash), remaining: maxObjectStagingBytes}, condition)
+		info, n, err := op.bucket.copyToChecked(withMembershipRead(ctx), p, op.object, op.offset, length, &objectBudgetWriter{dst: io.MultiWriter(&snapshot, hash), remaining: maxObjectStagingBytes}, condition)
 		if err != nil {
-			return nil, 0, err
-		}
-		if _, err = file.Seek(0, io.SeekStart); err != nil {
 			return nil, 0, err
 		}
 		var digest [32]byte
 		copy(digest[:], hash.Sum(nil))
-		e := client.Encoder{}
+		e := client.Encoder{B: make([]byte, 0, objectDownloadHeader)}
 		encodeObjectInfo(&e, info, runtime)
 		if m.Opcode == 0x0101 {
 			e.U64(op.offset)
 			e.U64(n)
 			e.U64(info.Length)
 		}
-		if n <= 1<<20 {
-			payload, err := io.ReadAll(file)
-			if err != nil {
-				return nil, 0, err
-			}
-			encodeObjectTransfer(&e, 0, n, digest, payload)
+		if n <= inlineObjectDownload {
+			// Encode Blob's length now, then reuse the owned payload's prefix.
+			e.U8(0)
+			e.U64(n)
+			e.B = append(e.B, digest[:]...)
+			e.V(n)
+			e.B = snapshot.inline(e.B)
 		} else {
 			if ws == nil {
 				return nil, 0, fail(400, "large GET requires WebSocket streaming")
 			}
-			if err = ws.sendObjectStream(m.ID, file, n, digest); err != nil {
+			if _, err := snapshot.file.Seek(0, io.SeekStart); err != nil {
+				return nil, 0, err
+			}
+			if err = ws.sendObjectStream(m.ID, snapshot.file, n, digest); err != nil {
 				return nil, 0, err
 			}
 			encodeObjectTransfer(&e, 1, n, digest, nil)

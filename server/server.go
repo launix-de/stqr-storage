@@ -35,15 +35,16 @@ type Server struct {
 	storageWarmError        atomic.Pointer[storageWarmFailure]
 	accountingDir           string
 
-	joinHosted      bool
-	joinRequested   atomic.Bool
-	joinSignal      chan struct{}
-	leaseGate       chan struct{}
-	copyCoordinator sync.Mutex
-	cow             cowTransfers
-	leaseMu         sync.Mutex
-	activeLeases    map[volume.ID]*Bucket
-	durability      durabilityState
+	joinHosted       bool
+	joinRequested    atomic.Bool
+	joinSignal       chan struct{}
+	leaseGate        chan struct{}
+	copyCoordinator  sync.Mutex
+	cow              cowTransfers
+	cowTopologyCache cowTopologyCache
+	leaseMu          sync.Mutex
+	activeLeases     map[volume.ID]*Bucket
+	durability       durabilityState
 
 	requestCoordination   requestIDCoordination
 	membershipJobs        map[*volume.Volume]*membershipJob

@@ -600,11 +600,11 @@ func (b *Bucket) mutateAttempt(ctx context.Context, p principal, id volume.Objec
 	}
 	if !p.cowInternal && !bucketLocalReferenceRoot(id) {
 		if cowLinked {
-			g, e := s.cowGraph()
+			g, e := s.cowTopology()
 			if e != nil {
 				return volume.Result{}, e
 			}
-			current, e := s.cowGraphDigest(g, b.ID())
+			current, e := g.proof(b.ID())
 			if e != nil {
 				return volume.Result{}, e
 			}

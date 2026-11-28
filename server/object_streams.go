@@ -199,7 +199,7 @@ func (ws *wsSession) objectTransfer(m client.Message, p principal, startCall fun
 			_, err = u.file.Seek(0, io.SeekStart)
 			if err == nil {
 				runtime := client.ID{}
-				if u.op.bucket.Describe().Policy.StorageStrategy == "ram" {
+				if u.op.bucket.storageDescription().Policy.StorageStrategy == "ram" {
 					runtime = ws.server.boot
 					if ws.server.controller != nil {
 						if patch, known := ws.server.routingPatch(u.op.bucket.ID(), u.op.object); known {
