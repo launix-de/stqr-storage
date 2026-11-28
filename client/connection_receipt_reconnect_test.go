@@ -88,3 +88,63 @@ func TestReceiptRecordedBeforeCallerObservation(t *testing.T) {
 		t.Fatal("ACK/EOF window lacks exact receipt")
 	}
 }
+
+func TestConfirmedReceiptReconnectNeedsNoNewProof(t *testing.T) {
+	const caps = CapabilityDurability | CapabilityConnectionSync | CapabilityObjectReferences | CapabilityAcceptedReferences
+	p, host := newDeferredFSPeer(t, caps)
+	p.confirmedReceipts.Store(true)
+	c := dialConnectionTest(t, host)
+	ctx := context.Background()
+	fs := filesystemDeferredStore(c).(*filesystemNativeStore)
+	if err := fs.PinObject(ctx, ObjectID{3}, NewRequestID()); err != nil {
+		t.Fatal(err)
+	}
+	old := c.transport
+	old.fail(errors.New("EOF after confirmed accepted reply"))
+	if err := c.Sync(ctx); err != nil {
+		t.Fatal("confirmed result became uncertain after disconnect", err)
+	}
+	if p.fences.Load() != 0 || p.receiptFences.Load() != 0 || old.hasConnectionWork() {
+		t.Fatal("confirmed result required another proof or retained work")
+	}
+}
+
+func TestReceiptConfirmationPreservesLaterUnconfirmedPrefix(t *testing.T) {
+	tpt := &objectTransport{}
+	boot := ID{4}
+	tpt.recordConnectionReceiptLocked(CommitMark{Boot: boot, Sequence: 10}, false)
+	tpt.recordConnectionReceiptLocked(CommitMark{Boot: boot, Sequence: 9}, true)
+	if r := tpt.connectionReceipts[boot]; r.confirmed || r.mark.Sequence != 10 {
+		t.Fatal("older confirmation covered newer receipt", r)
+	}
+	tpt.recordConnectionReceiptLocked(CommitMark{Boot: boot, Sequence: 10}, true)
+	tpt.recordConnectionReceiptLocked(CommitMark{Boot: boot, Sequence: 10}, false)
+	if !tpt.connectionReceipts[boot].confirmed {
+		t.Fatal("duplicate observation lost existing confirmation")
+	}
+	tpt.recordConnectionReceiptLocked(CommitMark{Boot: boot, Sequence: 11}, false)
+	if tpt.connectionReceipts[boot].confirmed {
+		t.Fatal("new prefix inherited an earlier confirmation")
+	}
+}
+
+func TestConfirmedReceiptNeverCoversUnknownMutation(t *testing.T) {
+	id := NewRequestID()
+	tpt := &objectTransport{cause: ErrClosed, connectionWrites: map[ID]*connectionSubmission{id: {sequence: 2, accepted: true}}}
+	tpt.recordConnectionReceiptLocked(CommitMark{Boot: ID{4}, Sequence: 10}, true)
+	var unknown *UnknownOutcomeError
+	if err := tpt.syncDisconnected(context.Background()); !errors.As(err, &unknown) || unknown.RequestID != id {
+		t.Fatal("confirmed prefix hid unknown mutation", err)
+	}
+}
+
+func TestReceiptTrackingBoundFailsClosed(t *testing.T) {
+	tpt := &objectTransport{}
+	for i := 1; i <= 1025; i++ {
+		boot := ID{byte(i), byte(i >> 8)}
+		tpt.recordConnectionReceiptLocked(CommitMark{Boot: boot, Sequence: 1}, false)
+	}
+	if len(tpt.connectionReceipts) != 1024 || !errors.Is(tpt.syncDisconnected(context.Background()), ErrFull) {
+		t.Fatal("receipt bound silently discarded proof requirements", len(tpt.connectionReceipts), tpt.connectionReceiptErr)
+	}
+}

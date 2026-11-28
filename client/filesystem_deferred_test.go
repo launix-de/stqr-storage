@@ -23,6 +23,7 @@ type deferredFSPeer struct {
 	caps                                                 uint64
 	accepted, durable, refsAccepted, refsDurable, fences atomic.Int64
 	recoverReceipts                                      atomic.Bool
+	confirmedReceipts                                    atomic.Bool
 	receiptFences                                        atomic.Int64
 	boot                                                 ID
 }
@@ -253,7 +254,11 @@ func newDeferredFSPeer(t *testing.T, caps uint64) (*deferredFSPeer, *httptest.Se
 				sequence++
 				header := Encoder{}
 				header.V(1)
-				header.V(DurabilityHeader)
+				if p.confirmedReceipts.Load() {
+					header.V(49) // actual server confirmation-only reply
+				} else {
+					header.V(DurabilityHeader)
+				}
 				header.Blob((CommitMark{p.boot, sequence}).MarshalBinary())
 				envelope := Encoder{}
 				envelope.V(uint64(status))

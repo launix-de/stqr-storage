@@ -23,8 +23,9 @@ type connectionSubmission struct {
 	err             error
 }
 type connectionReceipt struct {
-	mark     CommitMark
-	sequence uint64
+	mark      CommitMark
+	sequence  uint64
+	confirmed bool
 }
 
 type connectionCut struct{ sequence, readSequence uint64 }
@@ -42,7 +43,7 @@ func (c *Client) rememberConnection(t *objectTransport) {
 	c.connectionTransports[t] = struct{}{}
 	c.mu.Unlock()
 }
-func (t *objectTransport) recordConnectionReceiptLocked(mark CommitMark) {
+func (t *objectTransport) recordConnectionReceiptLocked(mark CommitMark, confirmed bool) {
 	if t.connectionReceipts == nil {
 		t.connectionReceipts = map[ID]connectionReceipt{}
 	}
@@ -52,9 +53,11 @@ func (t *objectTransport) recordConnectionReceiptLocked(mark CommitMark) {
 		return
 	}
 	if mark.Sequence < old.mark.Sequence {
-		mark = old.mark
+		mark, confirmed = old.mark, old.confirmed
+	} else if mark.Sequence == old.mark.Sequence {
+		confirmed = confirmed || old.confirmed
 	}
-	t.connectionReceipts[mark.Boot] = connectionReceipt{mark: mark, sequence: t.connectionSequence}
+	t.connectionReceipts[mark.Boot] = connectionReceipt{mark: mark, sequence: t.connectionSequence, confirmed: confirmed}
 }
 
 func (t *objectTransport) noteConnectionDependency(mark CommitMark) {
@@ -64,7 +67,7 @@ func (t *objectTransport) noteConnectionDependency(mark CommitMark) {
 	if t.connectionBoot == (ID{}) {
 		t.connectionBoot = mark.Boot
 	}
-	t.recordConnectionReceiptLocked(mark)
+	t.recordConnectionReceiptLocked(mark, false)
 	if t.subscriptionClient != nil {
 		t.subscriptionClient.rememberConnection(t)
 	}
@@ -127,12 +130,23 @@ func (t *objectTransport) finishConnectionRequest(id ID, r wireReply, err error)
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if work := t.connectionWrites[id]; work != nil && !work.noAck {
-		if err != nil || !work.accepted && len(r.headers[DurabilityHeader]) == 0 {
+		receipt := r.headers[DurabilityHeader]
+		confirmed := false
+		if len(receipt) == 0 {
+			receipt = r.headers[49]
+			confirmed = len(receipt) != 0
+		}
+		if err != nil || !work.accepted && len(receipt) == 0 {
 			delete(t.connectionWrites, id)
-		} else if mark, decodeErr := DecodeCommitMark(r.headers[DurabilityHeader]); decodeErr == nil {
+		} else if mark, decodeErr := DecodeCommitMark(receipt); decodeErr == nil {
+			// Header 49 confirms only its own boot-qualified prefix. An
+			// independent unacknowledged mutation still has an unknown outcome.
+			if durable, err := DecodeCommitMark(r.headers[49]); err == nil && durable.Boot == mark.Boot && durable.Sequence >= mark.Sequence {
+				mark, confirmed = durable, true
+			}
 			// Record the result before delivering it: EOF can race the caller receiving its ACK.
 			work.acknowledged = true
-			t.recordConnectionReceiptLocked(mark)
+			t.recordConnectionReceiptLocked(mark, confirmed)
 		}
 	}
 }
@@ -277,6 +291,9 @@ func (t *objectTransport) syncDisconnected(ctx context.Context) error {
 	}
 	t.mu.Unlock()
 	for _, receipt := range receipts {
+		if receipt.confirmed {
+			continue
+		}
 		if err := owner.syncDurabilityPrefix(ctx, pendingDurability{receipt.mark, t.endpoint, t.node}); err != nil {
 			return err
 		}
