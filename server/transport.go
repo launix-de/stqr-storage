@@ -95,6 +95,17 @@ func (ws *wsSession) close() {
 	})
 }
 
+func (ws *wsSession) invalidateBeforeCloseReply() {
+	reply := ws.conn.CloseHandler()
+	ws.conn.SetCloseHandler(func(code int, text string) error {
+		// A client may acquire an exclusive bucket lease as soon as it sees
+		// this reply. Stop counting this connection before acknowledging its
+		// close; the read-loop defer runs only after the reply is sent.
+		ws.authorization.invalid.Store(true)
+		return reply(code, text)
+	})
+}
+
 // Authentication and capabilities were fixed at upgrade. Revocation is pushed
 // into the connection by administrative changes; this path performs no lookups.
 func (ws *wsSession) principalNow() (principal, bool) {
@@ -187,6 +198,7 @@ func (s *Server) serveWebSocket(w http.ResponseWriter, r *http.Request, p princi
 	conn.SetReadLimit(client.MaxMessage)
 	sessionCtx, sessionCancel := context.WithCancel(s.ctx)
 	ws := &wsSession{authorization: authorization, ctx: sessionCtx, cancel: sessionCancel, server: s, conn: conn, request: r, principal: p, done: make(chan struct{}), terminal: make(chan terminalFrame, 1), responses: make(chan []byte, sendQueueCapacity), telemetry: newStatsSendQueue(), requests: make(chan client.Message, receiveQueueCapacity)}
+	ws.invalidateBeforeCloseReply()
 	if p.isPeer() {
 		ws.controlRequests = make(chan client.Message, receiveQueueCapacity)
 		ws.leaseRequests = make(chan client.Message, receiveQueueCapacity)
