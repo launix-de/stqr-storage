@@ -44,7 +44,8 @@ type pgRebuildWork struct {
 	// First durable source cancellation, retained across journal replay. Older
 	// writers could append duplicates; the first proof may already be accepted
 	// by another participant and must not be replaced on a retry.
-	Cancellation client.Proof
+	Cancellation  client.Proof
+	Cancellations map[client.Proof]bool
 }
 type pgRebuildState struct {
 	Generation uint64
@@ -237,6 +238,10 @@ func (r *rangeManager) replayPG(kind uint16, a *pgRebuildRound, proof client.Pro
 		if state.Active == nil || !samePGRound(state.Active.Round, *a) || proof.Node != mustDecodePGPlan(a.Plan).Source || proof.RecordSequence == 0 {
 			return volume.ErrCorrupt
 		}
+		if state.Active.Cancellations == nil {
+			state.Active.Cancellations = map[client.Proof]bool{}
+		}
+		state.Active.Cancellations[proof] = true
 		if state.Active.Cancellation.RecordSequence == 0 {
 			state.Active.Cancellation = proof
 		}
@@ -265,7 +270,7 @@ func (r *rangeManager) replayPG(kind uint16, a *pgRebuildRound, proof client.Pro
 			delete(r.pgOffers, a.Group)
 			return nil
 		}
-		if kind != rangePGCompleted || !state.Active.Started || a.Done.RecordSequence == 0 {
+		if kind != rangePGCompleted || !state.Active.Started && !a.Cancelled || a.Done.RecordSequence == 0 {
 			return volume.ErrCorrupt
 		}
 	}
@@ -320,6 +325,9 @@ func (s *Server) pgRebuildPeer(ctx context.Context, m client.Message, actor clie
 		}
 		if actor != a.Members[0] || !hasControlNode(a.Members, r.node) {
 			return nil, ErrBucketForbidden
+		}
+		if req.Action == 2 && a.Cancelled {
+			return nil, r.acceptPGCancellation(a)
 		}
 		// A newly admitted participant imports the committed PG chain before READY.
 		r.mu.Lock()
@@ -416,6 +424,9 @@ func (s *Server) pgRebuildPeer(ctx context.Context, m client.Message, actor clie
 	p, err := decodeRangePlan(req.Plan)
 	if err != nil || p.Source != actor {
 		return nil, ErrBucketForbidden
+	}
+	if req.Action == 2 {
+		return r.requestPGCancellation(ctx, p, req.Done)
 	}
 	group, members, mask, err := s.pgForPlan(p)
 	if err != nil {
@@ -667,13 +678,18 @@ func (r *rangeManager) syncPGArchive(ctx context.Context, node, group client.ID)
 				continue
 			}
 			state := r.pgStates[group]
+			if a.Cancelled && mustDecodePGPlan(a.Plan).Source == r.node && (state == nil || state.Active == nil || (state.Active.Cancellation != a.Done && !state.Active.Cancellations[a.Done])) {
+				r.mu.Unlock()
+				err = errControlConflict
+				break
+			}
 			if state != nil && state.Active != nil {
 				if !samePGRound(state.Active.Round, a) {
 					r.mu.Unlock()
 					err = errControlConflict
 					break
 				}
-				if !state.Active.Started {
+				if !state.Active.Started && !a.Cancelled {
 					err = errControlConflict
 				} else {
 					_, err = r.persist(rangePGCompleted, rangeEvent{PG: &a})
@@ -767,19 +783,20 @@ func (r *rangeManager) abortPG(ctx context.Context, p rangePlan) error {
 	if p.Source != r.node {
 		return errControlConflict
 	}
-	group, members, _, err := r.server.pgForPlan(p)
-	if err != nil || group == (client.ID{}) {
-		return err
-	}
 	r.mu.Lock()
-	state := r.pgStates[group]
+	round, ok := r.retainedPGRoundLocked(p.id())
+	if !ok {
+		r.mu.Unlock()
+		return nil
+	}
+	state := r.pgStates[round.Group]
 	t := r.txns[p.id()]
 	if state == nil || state.Active == nil || state.Active.Round.ID != p.id() || t != nil && !t.aborted {
 		r.mu.Unlock()
 		return nil
 	}
-	round := state.Active.Round
 	proof := state.Active.Cancellation
+	var err error
 	if proof.RecordSequence == 0 {
 		proof, err = r.persist(rangePGSourceCancelled, rangeEvent{PG: &round})
 	}
@@ -787,7 +804,7 @@ func (r *rangeManager) abortPG(ctx context.Context, p rangePlan) error {
 	if err != nil {
 		return err
 	}
-	_, err = r.pgCall(ctx, members[0], peerPGRebuildRequest, pgRebuildRequest{Action: 2, Plan: mustRangeWire(p), Done: proof})
+	_, err = r.pgCall(ctx, round.Members[0], peerPGRebuildRequest, pgRebuildRequest{Action: 2, Plan: mustRangeWire(p), Done: proof})
 	return err
 }
 

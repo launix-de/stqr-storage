@@ -8,10 +8,17 @@ import (
 	"testing"
 	"time"
 
+	"github.com/launix-de/stqr-storage/client"
 	"github.com/launix-de/stqr-storage/volume"
 )
 
 func TestAbortedRangeRetriesPGCancellationWithoutNewProofOrMove(t *testing.T) {
+	testAbortedPGCancellation(t, false)
+}
+func TestAbortedRangeCancellationSurvivesBucketDeletion(t *testing.T) {
+	testAbortedPGCancellation(t, true)
+}
+func testAbortedPGCancellation(t *testing.T, deleteBucket bool) {
 	node := startDaemonTestNode(t, filepath.Join(t.TempDir(), "node.yaml"), nil, false)
 	s := node.node
 	addReplicaDataVolume(t, s, "source", "hdd", 8<<20)
@@ -79,6 +86,38 @@ func TestAbortedRangeRetriesPGCancellationWithoutNewProofOrMove(t *testing.T) {
 		t.Fatal("replay replaced original cancellation proof")
 	}
 
+	if deleteBucket {
+		body := client.Encoder{}
+		body.ID(client.ID(bucket.ID()))
+		if _, status, reply := adminBucketMessage(t, s, client.BucketDelete, body.B); status != 202 {
+			t.Fatalf("delete bucket while cancellation is pending: %d %+v", status, reply)
+		}
+		for {
+			if _, err = s.Bucket(bucket.ID()); errors.Is(err, ErrBucketNotFound) {
+				break
+			}
+			select {
+			case <-ctx.Done():
+				t.Fatal("bucket was not purged", ctx.Err())
+			case <-time.After(time.Millisecond):
+			}
+		}
+		if _, _, _, err = s.pgForPlan(p); !errors.Is(err, ErrBucketNotFound) {
+			t.Fatal("deleted bucket lookup unexpectedly usable", err)
+		}
+	}
+	forged := round
+	forged.Cancelled = true
+	forged.Done = proof
+	forged.Done.RecordSequence += 100
+	if err = r.acceptPGCancellation(forged); !errors.Is(err, errControlConflict) {
+		t.Fatal("source accepted unjournalled cancellation proof", err)
+	}
+	unknown := p
+	unknown.Attempt[0] ^= 0xff
+	if _, err = r.requestPGCancellation(ctx, unknown, proof); !errors.Is(err, errControlConflict) {
+		t.Fatal("cancellation created an unaccepted generation", err)
+	}
 	if err = r.executeMove(ctx, p, false); !errors.Is(err, errControlConflict) {
 		t.Fatal("aborted range retry", err)
 	}
