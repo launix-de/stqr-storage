@@ -104,7 +104,7 @@ func (c *Client) ReadObjectDependencies(ctx context.Context) ([]ObjectID, error)
 	}
 	bucket := d.ID()
 	n := d.U32()
-	if n > 8192 || len(raw) != 24+int(n)*81 {
+	if len(raw) < 24 || uint64(n)*81 != uint64(len(raw)-24) {
 		return nil, ErrProtocol
 	}
 	var out []ObjectID

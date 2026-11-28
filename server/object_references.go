@@ -6,14 +6,12 @@ import (
 	"context"
 	"crypto/sha256"
 	"errors"
+	"math"
 	"sync"
 
 	"github.com/launix-de/stqr-storage/client"
 	"github.com/launix-de/stqr-storage/volume"
 )
-
-const maxObjectReferences = 8192
-const maxAccountReferences = 1024
 
 // referenceCoordination contains only running/waiting requests, never object
 // metadata or cached ownership. The registry mutex covers lifetimes only;
@@ -53,13 +51,14 @@ func decodeObjectReferences(raw []byte, bucket volume.ID) ([]objectReferenceEntr
 	}
 	owner := volume.ID(d.ID())
 	n := d.U32()
-	if n > maxObjectReferences || uint64(n)*81 != uint64(len(raw)-24) {
+	if len(raw) < referenceHeaderBytes || uint64(n)*referenceEntryBytes != uint64(len(raw)-referenceHeaderBytes) {
 		return nil, volume.ErrCorrupt
 	}
 	// PIN commonly appends one entry immediately after decoding. Reserve that
-	// slot without relaxing the encoded length or global reference limit.
+	// slot without relaxing the encoded length. No account/object count quota
+	// exists; the existing ORF1 uint32 and address-space bounds still apply.
 	capacity := n
-	if capacity < maxObjectReferences {
+	if capacity < math.MaxUint32 && uint64(capacity)+1 <= uint64((math.MaxInt-referenceHeaderBytes)/referenceEntryBytes) {
 		capacity++
 	}
 	entries := make([]objectReferenceEntry, 0, capacity)
@@ -86,8 +85,8 @@ func decodeObjectReferences(raw []byte, bucket volume.ID) ([]objectReferenceEntr
 	return entries, nil
 }
 func encodeObjectReferences(entries []objectReferenceEntry, bucket volume.ID) []byte {
-	// Entries are bounded by maxObjectReferences. Reserve the exact encoded
-	// size so whole-root updates do not repeatedly grow and copy the buffer.
+	// Reserve the validated representation's exact encoded size, avoiding
+	// repeated buffer growth. Admission has no artificial reference quota.
 	e := client.Encoder{B: make([]byte, 4, 24+81*len(entries))}
 	copy(e.B, "ORF1")
 	e.ID(client.ID(bucket))
@@ -268,7 +267,6 @@ func (s *Server) executeObjectReferenceHeld(ctx context.Context, m client.Messag
 		return s.pruneAbsentAccountPins(ctx, op.bucket, internal, accepted)
 	}
 	proof := sha256.Sum256(token[:])
-referenceRetry:
 	for retry := 0; retry < 128; retry++ {
 		if err := ctx.Err(); err != nil {
 			return nil, err
@@ -284,29 +282,7 @@ referenceRetry:
 		if err != nil {
 			return nil, err
 		}
-		casCtx := ctx
-		full, err := table.apply(target, proof, uid, account.Role == "ADMIN", action, true)
-		if full {
-			entries, e := decodeObjectReferences(raw, op.bucket.ID())
-			if e != nil {
-				return nil, e
-			}
-			filtered, nextCtx, e := s.pruneAbsentPlainReferencePins(casCtx, op.bucket, entries)
-			if e != nil {
-				if errors.Is(e, volume.ErrPrecondition) && !errors.Is(e, volume.ErrRecovery) {
-					continue referenceRetry
-				}
-				return nil, e
-			}
-			casCtx = nextCtx
-			if len(filtered) < len(entries) {
-				table, e = borrowReferenceBytes(encodeObjectReferences(filtered, op.bucket.ID()), op.bucket.ID(), 1)
-				if e != nil {
-					return nil, e
-				}
-			}
-			_, err = table.apply(target, proof, uid, account.Role == "ADMIN", action, false)
-		}
+		err = table.apply(target, proof, uid, account.Role == "ADMIN", action)
 		if err != nil {
 			return nil, err
 		}
@@ -314,7 +290,7 @@ referenceRetry:
 			return []byte{1}, nil
 		}
 		next := table.raw
-		_, err = op.bucket.CAS(casCtx, internal, op.object, 0, raw, next, volume.Options{RequestID: volume.ID(client.NewRequestID()), CreateOnly: absent, WholeObject: true, Accepted: accepted})
+		_, err = op.bucket.CAS(ctx, internal, op.object, 0, raw, next, volume.Options{RequestID: volume.ID(client.NewRequestID()), CreateOnly: absent, WholeObject: true, Accepted: accepted})
 		if errors.Is(err, volume.ErrPrecondition) && !errors.Is(err, volume.ErrRecovery) {
 			continue
 		}

@@ -108,14 +108,11 @@ func (s *Server) referenceAccountsStable() bool {
 	return true
 }
 
-// Lazy bounded cleanup only when a root is full. Account IDs in byID are
+// Explicit, guarded cleanup of one reference image. Account IDs in byID are
 // present even when disabled. Claims and dependency anchors are never removed.
 // The returned context derives from ctx, preserving the collector's original
 // connectionWork/fence linkage. CAS must validate this guard under admission.
 func (s *Server) pruneAbsentPlainReferencePins(ctx context.Context, b *Bucket, entries []objectReferenceEntry) ([]objectReferenceEntry, context.Context, error) {
-	if len(entries) < maxObjectReferences {
-		return entries, ctx, nil
-	}
 	return s.pruneAbsentPlainReferencePinsExact(ctx, b, entries)
 }
 

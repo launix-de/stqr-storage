@@ -904,10 +904,9 @@ func TestKSTQRVirtualMachine(t *testing.T) {
 		}
 	}
 	if os.Getenv("STQR_KERNEL_REFERENCE_LIMIT") == "1" {
-		// Exercise the real server admission limit, not a synthesized429 reply.
-		// These fixture-only holders belong to another synthetic account so the
-		// guest hits the global 8192 limit rather than its per-account 1024 limit.
-		entries := make([]objectReferenceEntry, maxObjectReferences)
+		// Seed the historical global boundary with protected dependency holders.
+		// Ordinary opens must still succeed without erasing any existing roots.
+		entries := make([]objectReferenceEntry, historicalReferenceRootLimit)
 		for i := range entries {
 			binary.LittleEndian.PutUint32(entries[i].object[:4], uint32(i+1))
 			binary.LittleEndian.PutUint32(entries[i].proof[:4], uint32(i+1))
@@ -916,12 +915,12 @@ func TestKSTQRVirtualMachine(t *testing.T) {
 			entries[i].dependency = true
 		}
 		if len(entries) != 8192 {
-			t.Fatal("reference capacity contract changed", len(entries))
+			t.Fatal("historical reference fixture changed", len(entries))
 		}
 		if _, err = conn.Put(ctx, client.ObjectReferenceRootID(), encodeObjectReferences(entries, b.ID()), client.MutationOptions{RequestID: client.NewRequestID()}); err != nil {
 			t.Fatal(err)
 		}
-		t.Logf("seeded exact %d-entry global reference limit", len(entries))
+		t.Logf("seeded %d-entry historical reference boundary", len(entries))
 	}
 
 	var plainBindID client.ID
@@ -1788,7 +1787,7 @@ poweroff -f
 
 	if os.Getenv("STQR_KERNEL_REFERENCE_LIMIT") == "1" {
 		if !strings.Contains(string(output), "KSTQR_REFERENCE_LIMIT_PASS") {
-			t.Fatal("terminal reference limit probe did not complete")
+			t.Fatal("dynamic reference admission probe did not complete")
 		}
 		for _, line := range strings.Split(string(output), "\n") {
 			if strings.Contains(line, "reference-limit:") || strings.Contains(line, "KSTQR_REFERENCE_LIMIT_PASS") {
