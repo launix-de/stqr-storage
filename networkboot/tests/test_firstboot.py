@@ -7,6 +7,8 @@ import types
 import unittest
 from unittest.mock import patch, Mock
 import sys
+import os
+import time
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import firstboot
 import common
@@ -118,3 +120,113 @@ class InstalledFirstBoot(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError,'predates first-boot validation'):
                 common.prepared_release('config','ubuntu')
             self.assertTrue((work/'rootfs.tar').exists())
+
+    def test_seed_failures_are_derived_from_referenced_tasks_not_pending_statuses(self):
+        for status in range(11):
+            state = {'data': {}, 'changes': {'1': {'kind': 'seed', 'status': 0,
+                     'task-ids': ['38']}}, 'tasks': {'38': {'status': status}}}
+            with self.subTest(status=status):
+                self.assertEqual(firstboot.seed_failed(state), status in (5, 6, 7, 8, 9))
+        self.assertFalse(firstboot.seed_failed(None))
+        self.assertFalse(firstboot.seed_failed({'data': {}, 'changes': {'2': {
+            'kind': 'refresh', 'status': 9, 'task-ids': ['38']}}, 'tasks': {'38': {'status': 9}}}))
+        self.assertFalse(firstboot.seed_failed({'data': {}, 'changes': {'1': {
+            'kind': 'seed', 'status': 0, 'task-ids': ['1']}},
+            'tasks': {'1': {'status': 3}, 'unrelated': {'status': 9}}}))
+
+    def test_known_task_failure_stops_inflight_official_wait_immediately(self):
+        state = self.work/'state.json'
+        state.write_text(json.dumps({'data': {}, 'changes': {'1': {'kind': 'seed',
+            'status': 0, 'task-ids': ['38']}}, 'tasks': {'38': {'status': 9}}}))
+        process = Mock()
+        process.poll.return_value = None
+        with patch.object(firstboot, 'STATE', str(state)), patch.object(firstboot.subprocess, 'Popen', return_value=process) as popen, patch.object(time, 'sleep') as sleep:
+            self.assertFalse(firstboot.wait_for_seed())
+        self.assertEqual(popen.call_args.args[0], ['/usr/bin/snap', 'wait', 'system', 'seed.loaded'])
+        self.assertEqual(popen.call_args.kwargs['stdin'], subprocess.DEVNULL)
+        sleep.assert_not_called()
+        process.terminate.assert_called_once_with()
+        process.wait.assert_called_once_with(timeout=5)
+        process.kill.assert_not_called()
+        self.assertEqual(json.loads(state.read_text())['tasks']['38']['status'], 9)
+
+    def test_wait_requires_official_ack_and_all_tasks_done(self):
+        state = self.work/'state.json'
+        pending = {'data': {'seeded': True}, 'changes': {'1': {'kind': 'seed',
+                   'task-ids': ['38']}}, 'tasks': {'38': {'status': 3}}}
+        state.write_text(json.dumps(pending))
+        process = Mock()
+        process.poll.return_value = 0
+        def complete(seconds):
+            pending['tasks']['38']['status'] = 4
+            state.write_text(json.dumps(pending))
+        with patch.object(firstboot, 'STATE', str(state)), patch.object(firstboot.subprocess, 'Popen', return_value=process), patch.object(time, 'sleep', side_effect=complete) as sleep:
+            self.assertTrue(firstboot.wait_for_seed())
+        sleep.assert_called_once_with(1)
+        process.terminate.assert_not_called()
+        process.kill.assert_not_called()
+
+    def test_deadline_and_unresponsive_wait_child_are_bounded(self):
+        state = self.work/'state.json'
+        # Hold is still pending, never an invented task failure or success.
+        state.write_text(json.dumps({'data': {'seeded': True}, 'changes': {'1': {
+            'kind': 'seed', 'task-ids': ['38']}}, 'tasks': {'38': {'status': 1}}}))
+        process = Mock()
+        process.poll.return_value = None
+        process.wait.side_effect = [subprocess.TimeoutExpired('snap wait', 5), 0]
+        clock = types.SimpleNamespace(now=0)
+        def advance(seconds): clock.now += seconds
+        with patch.object(firstboot, 'STATE', str(state)), patch.object(firstboot.subprocess, 'Popen', return_value=process), patch.object(time, 'monotonic', side_effect=lambda: clock.now), patch.object(time, 'sleep', side_effect=advance):
+            self.assertFalse(firstboot.wait_for_seed(timeout=3))
+        self.assertEqual(clock.now, 3)
+        process.terminate.assert_called_once_with()
+        process.kill.assert_called_once_with()
+        self.assertEqual(len(process.wait.call_args_list), 2)
+        self.assertTrue(all(call.kwargs == {'timeout': 5} for call in process.wait.call_args_list))
+
+    def test_exited_wait_error_and_missing_initial_state_are_not_success(self):
+        process = Mock()
+        process.poll.return_value = 1
+        with patch.object(firstboot, 'STATE', str(self.work/'not-created.json')), patch.object(firstboot.subprocess, 'Popen', return_value=process):
+            self.assertFalse(firstboot.wait_for_seed())
+        process.terminate.assert_not_called()
+
+    def test_generated_service_aborts_known_failed_seed_without_waiting_api_deadline(self):
+        nonce = '05'*16
+        state = self.work/'state.json'
+        state.write_text(json.dumps({'data': {}, 'changes': {'1': {'kind': 'seed',
+            'status': 0, 'task-ids': ['38']}}, 'tasks': {'38': {'status': 9}}}))
+        result = self.work/'completed.json'
+        clock = types.SimpleNamespace(now=0)
+        process = Mock()
+        process.poll.return_value = None
+        def run(command, **kwargs):
+            if command[:2] == ['/usr/bin/snap', 'wait']:
+                # Negative control: the old generated helper waits its entire
+                # official API deadline despite this already-failed seed.
+                clock.now += kwargs['timeout']
+                raise subprocess.TimeoutExpired(command, kwargs['timeout'])
+            self.assertEqual(command, ['/usr/bin/systemctl', '--no-block', 'poweroff'])
+            return types.SimpleNamespace(returncode=0)
+        def advance(seconds): clock.now += seconds
+        with patch.object(firstboot, 'STATE', str(state)):
+            program = firstboot.completion_program(nonce, str(result))
+        with patch.object(subprocess, 'Popen', return_value=process), patch.object(subprocess, 'run', side_effect=run), patch.object(time, 'monotonic', side_effect=lambda: clock.now), patch.object(time, 'sleep', side_effect=advance), patch.object(os, 'makedirs'), patch.object(os, 'umask'), patch.object(os, 'sync') as sync:
+            exec(compile(program, '<first-boot-service>', 'exec'), {})
+        self.assertEqual(json.loads(result.read_text()), {'schema': 1, 'nonce': nonce, 'status': 'failed'})
+        self.assertEqual(clock.now, 0, 'known failed seed waited for the official API deadline')
+        process.terminate.assert_called_once_with()
+        sync.assert_called_once_with()
+
+    def test_complete_checkpoint_without_official_wait_ack_is_not_success(self):
+        state = self.work/'state.json'
+        state.write_text(json.dumps({'data': {'seeded': True}, 'changes': {'1': {
+            'kind': 'seed', 'task-ids': ['38']}}, 'tasks': {'38': {'status': 4}}}))
+        process = Mock()
+        process.poll.return_value = None
+        clock = types.SimpleNamespace(now=0)
+        def advance(seconds): clock.now += seconds
+        with patch.object(firstboot, 'STATE', str(state)), patch.object(firstboot.subprocess, 'Popen', return_value=process), patch.object(time, 'monotonic', side_effect=lambda: clock.now), patch.object(time, 'sleep', side_effect=advance):
+            self.assertFalse(firstboot.wait_for_seed(timeout=2))
+        self.assertEqual(clock.now, 2)
+        process.terminate.assert_called_once_with()

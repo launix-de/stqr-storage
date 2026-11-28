@@ -12,6 +12,7 @@ import re
 from pathlib import Path
 import secrets
 import subprocess
+import time
 
 from common import guest, guest_many, qemu_command, require
 
@@ -52,6 +53,56 @@ def seeded(state):
             if tasks.get(task_id, {}).get('status', 0) != 4:
                 return False
     return True
+
+
+def seed_failed(state):
+    if state is None:
+        return False
+    tasks = state.get('tasks', {})
+    for change in state.get('changes', {}).values():
+        if change.get('kind') != 'seed':
+            continue
+        # Abort/Undo/Undoing/Undone/Error indicate failed or cancelled work.
+        # Do, Doing, Hold and Wait remain pending. Snap normally persists a
+        # default change status0 and derives its public status from the tasks.
+        if change.get('status', 0) in (5, 6, 7, 8, 9):
+            return True
+        if any(tasks.get(tid, {}).get('status', 0) in (5, 6, 7, 8, 9)
+               for tid in change.get('task-ids', [])):
+            return True
+    return False
+
+
+def wait_for_seed(timeout=600):
+    """Monitor actual seed failures while the supported API waits in parallel."""
+    deadline = time.monotonic() + timeout
+    process = subprocess.Popen(['/usr/bin/snap', 'wait', 'system', 'seed.loaded'],
+                               stdin=subprocess.DEVNULL)
+    try:
+        while time.monotonic() < deadline:
+            try:
+                with open(STATE) as stream:
+                    state = json.load(stream)
+            except FileNotFoundError:
+                state = None  # snapd may not have created its first checkpoint
+            if seed_failed(state):
+                return False
+            status = process.poll()
+            if status is not None:
+                if status != 0:
+                    return False
+                if seeded(state):
+                    return True
+            time.sleep(1)
+        return False
+    finally:
+        if process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=5)
 
 
 def write_stamp(work, disposition):
@@ -118,21 +169,13 @@ def cleanup_owned(socket, record):
 def completion_program(nonce, result):
     # Same actual-state predicate on both sides of the clean shutdown. The
     # seed.loaded API can become ready before final seed tasks finish.
-    return '#!/usr/bin/python3\nimport json,os,subprocess,time\n'+inspect.getsource(seeded)+"""
+    return ('#!/usr/bin/python3\nimport json,os,subprocess,time\nSTATE = '+repr(STATE)+'\n'
+            + inspect.getsource(seeded) + '\n' + inspect.getsource(seed_failed)
+            + '\n' + inspect.getsource(wait_for_seed))+"""
 status = 'failed'
-deadline = time.monotonic()+600
 try:
-    subprocess.run(['/usr/bin/snap','wait','system','seed.loaded'], check=True, timeout=600)
-    while time.monotonic() < deadline:
-        with open('/var/lib/snapd/state.json') as stream:
-            state = json.load(stream)
-        if seeded(state):
-            status = 'seed-loaded'
-            break
-        if any(change.get('kind') == 'seed' and change.get('status') in (6,7,8,9)
-               for change in state.get('changes', {}).values()):
-            break
-        time.sleep(1)
+    if wait_for_seed():
+        status = 'seed-loaded'
 except (OSError,ValueError,subprocess.SubprocessError):
     pass
 finally:
