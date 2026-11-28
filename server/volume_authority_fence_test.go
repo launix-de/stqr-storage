@@ -640,7 +640,7 @@ func TestAuthorityFenceConcurrentStartAndClose(t *testing.T) {
 		close(start)
 		select {
 		case err := <-closed:
-			if err != nil {
+			if err != nil && !errors.Is(err, volume.ErrRetentionRequired) {
 				t.Fatal(err)
 			}
 		case <-time.After(3 * time.Second):
@@ -650,6 +650,11 @@ func TestAuthorityFenceConcurrentStartAndClose(t *testing.T) {
 		case <-done:
 		case <-time.After(3 * time.Second):
 			t.Fatal("authority enqueue survived Close")
+		}
+		// A synthetic server has no restart manager; explicit test disposal must
+		// not turn its unsaved tail into an ordinary successful close.
+		if err := v.Abort(); err != nil {
+			t.Fatal(err)
 		}
 		if extra := v.IOStats().SyncOps - beforeSync; extra != 0 && extra != 4 {
 			t.Fatal("concurrent close started an unexpected extra fence", extra)

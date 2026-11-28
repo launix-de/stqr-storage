@@ -96,20 +96,26 @@ func readRestartRecord(path string, value any) error {
 	if !stat.Mode().IsRegular() || stat.Size() < sha256.Size {
 		return volume.ErrCorrupt
 	}
+	// Authenticate the complete node-owned record using bounded streaming space
+	// BEFORE JSON allocates arrays. Corruption cannot force file-sized decoder
+	// allocation merely by placing a huge malformed value before the checksum.
 	hash := sha256.New()
-	decoder := json.NewDecoder(io.TeeReader(io.NewSectionReader(f, 0, stat.Size()-sha256.Size), hash))
-	decoder.DisallowUnknownFields()
-	if err = decoder.Decode(value); err != nil {
+	if _, err = io.Copy(hash, io.NewSectionReader(f, 0, stat.Size()-sha256.Size)); err != nil {
 		return err
-	}
-	if decoder.Decode(new(any)) != io.EOF {
-		return volume.ErrCorrupt
 	}
 	var seal [sha256.Size]byte
 	if _, err = f.ReadAt(seal[:], stat.Size()-sha256.Size); err != nil {
 		return err
 	}
 	if !bytes.Equal(hash.Sum(nil), seal[:]) {
+		return volume.ErrCorrupt
+	}
+	decoder := json.NewDecoder(io.NewSectionReader(f, 0, stat.Size()-sha256.Size))
+	decoder.DisallowUnknownFields()
+	if err = decoder.Decode(value); err != nil {
+		return err
+	}
+	if decoder.Decode(new(any)) != io.EOF {
 		return volume.ErrCorrupt
 	}
 	return nil

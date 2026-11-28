@@ -26,7 +26,7 @@ func TestAuthorityFenceStartupRepairAndErrorClose(t *testing.T) {
 	}
 	path := n.node.volumes[added.VolumeID].config.Path
 	n.close()
-	disk, err := volume.New(path, 0, volume.HDD)
+	disk, err := openOfflineRetainedAuthorityVolume(t, n.node, path, added.VolumeID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -68,7 +68,7 @@ func TestAuthorityFenceStartupRepairAndErrorClose(t *testing.T) {
 	if err = reopened.Close(); err != nil {
 		t.Fatal(err)
 	}
-	disk, err = volume.New(path, 0, volume.HDD)
+	disk, err = openOfflineRetainedAuthorityVolume(t, n.node, path, added.VolumeID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -95,7 +95,7 @@ func TestAuthorityFenceStartupRepairAndErrorClose(t *testing.T) {
 	}
 	// An immediate Open error closes itself; a returned server is explicitly
 	// closed above after its readiness failure. Either path must release claims.
-	disk, err = volume.New(path, 0, volume.HDD)
+	disk, err = openOfflineRetainedAuthorityVolume(t, n.node, path, added.VolumeID)
 	if err != nil {
 		t.Fatal("constructor error leaked volume lock", err)
 	}
@@ -130,4 +130,36 @@ func TestAuthorityFenceStartupRepairAndErrorClose(t *testing.T) {
 		t.Fatal("repaired authority never became ready", err)
 	}
 	healthy.Close()
+}
+
+// Offline administrative edits must first consume the node's complete accepted
+// image, exactly as startup would. Opening only its older canonical checkpoint
+// would bypass exclusive-owner handoff and lose accepted state/ancestry.
+func openOfflineRetainedAuthorityVolume(t *testing.T, s *Server, path, id string) (*volume.Volume, error) {
+	t.Helper()
+	dev, err := volume.OpenFile(path)
+	if err != nil {
+		return nil, err
+	}
+	var manifest restartManifest
+	if err := readRestartRecord(filepath.Join(s.restart.directory, "current"), &manifest); err != nil {
+		dev.Close()
+		return nil, err
+	}
+	var src *volume.RestartSource
+	for _, receipt := range manifest.Volumes {
+		if receipt.Volume.String() == id {
+			src = &volume.RestartSource{Path: s.restart.imagePath(receipt), Receipt: receipt}
+			break
+		}
+	}
+	if src == nil {
+		dev.Close()
+		t.Fatal("missing offline retained source")
+	}
+	v, err := volume.Open(dev, volume.OpenOptions{Restart: src})
+	if err != nil {
+		dev.Close()
+	}
+	return v, err
 }

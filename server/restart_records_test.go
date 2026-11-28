@@ -145,3 +145,18 @@ func TestRestartRetentionReclaimsOnlyObsoletePrivateImages(t *testing.T) {
 		}
 	}
 }
+
+type restartDecodeProbe struct{ calls int }
+
+func (p *restartDecodeProbe) UnmarshalJSON([]byte) error { p.calls++; return nil }
+func TestRestartRetentionRecordChecksSealBeforeAllocatingJSON(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "record")
+	raw := append([]byte(`{"large":"value"}`), make([]byte, 32)...)
+	if err := os.WriteFile(path, raw, 0600); err != nil {
+		t.Fatal(err)
+	}
+	var probe restartDecodeProbe
+	if err := readRestartRecord(path, &probe); !errors.Is(err, volume.ErrCorrupt) || probe.calls != 0 {
+		t.Fatal("unsealed JSON reached allocating decoder", probe.calls, err)
+	}
+}

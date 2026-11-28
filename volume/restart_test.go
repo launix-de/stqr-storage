@@ -312,6 +312,17 @@ func TestRestartRetentionAccountingUsesBoundAggregatesWithoutScan(t *testing.T) 
 	if w.IsDurableThrough(receipt.Generation) {
 		t.Fatal("aggregate cache asserted physical durability")
 	}
+	if _, err = testPut(w, testKey(801), []byte("later accepted aggregate"), Options{Accepted: true}); err != nil {
+		t.Fatal(err)
+	}
+	later := accountingUsage(t, w)
+	before = w.IOStats()
+	if ready, err := w.ConfigureAccounting(cfg); err != nil || !ready {
+		t.Fatal("repeated identical ownership discarded maintained totals", ready, err)
+	}
+	if !reflect.DeepEqual(accountingUsage(t, w), later) || w.IOStats() != before {
+		t.Fatal("reconfigure reused stale counters or read objects")
+	}
 	// Same data but changed ownership cannot reuse another predicate's totals.
 	cfg.Stamp = cacheOwnershipStamp(2)
 	if ready, err := w.ConfigureAccounting(cfg); err != nil || ready {

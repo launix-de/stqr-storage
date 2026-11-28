@@ -91,10 +91,11 @@ func TestAcceptedSubscriptionReceipt(t *testing.T) {
 func TestAcceptedInvalidIncarnation(t *testing.T) {
 	s := testServer(t)
 	e := client.Encoder{}
-	e.ID(client.NewRequestID())
+	b, _ := createProtocolBucket(t, s, "unknown-incarnation")
+	e.ID(client.ID(b.ID()))
 	e.ID(client.NewRequestID())
 	e.U64(1)
-	_, _, err := s.executeSync(context.Background(), client.Message{Opcode: client.BucketSync, Body: e.B}, nil, principal{})
+	_, _, err := s.executeSync(context.Background(), client.Message{Opcode: client.BucketSync, Body: e.B}, nil, quotaPrincipal(t, s))
 	if statusOf(err) != 410 {
 		t.Fatal(err)
 	}
