@@ -20,9 +20,8 @@ func newSocketOutputPort(conn net.Conn) socketOutputPort {
 	if !ok {
 		return nil
 	}
-	// Linux may cap and double this request. Read the actual kernel accounting
-	// below instead of assuming this amount was granted or preallocated.
-	_ = tcp.SetWriteBuffer(2 << 20)
+	// Preserve TCP autotuning and any administrator-selected buffer size.
+	// Admission uses the actual kernel capacity, never an assumed allocation.
 	raw, err := tcp.SyscallConn()
 	if err != nil {
 		return nil
