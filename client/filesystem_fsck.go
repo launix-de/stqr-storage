@@ -109,6 +109,14 @@ func checkFilesystem(ctx context.Context, store fsCheckStore, opaqueRoots ...Obj
 // bucket or COW snapshot is offline. Unlike crashed open references, they must
 // survive ordinary fsck; releasing them requires global graph knowledge.
 func protectFilesystemDependencies(ctx context.Context, store fsCheckStore, inventory map[ObjectID]ObjectInfo, mark *fsCheckMarker) error {
+	// This operational root is independent of COW dependency pins. Keeping
+	// only its inode (or sweeping its pages before its inode) breaks later
+	// unlink/rename when an offline sweep is interrupted and mounts resume.
+	if _, exists := inventory[filesystemOrphansID]; exists {
+		if err := mark.inode(ctx, filesystemOrphansID, false); err != nil {
+			return err
+		}
+	}
 	reader, ok := store.(interface {
 		ReadObjectDependencies(context.Context) ([]ObjectID, error)
 	})
@@ -139,11 +147,7 @@ func protectFilesystemDependencies(ctx context.Context, store fsCheckStore, inve
 		// The dependency is a lifetime root, not an extra POSIX hard link.
 		mark.references[id]--
 	}
-	if _, exists := inventory[filesystemOrphansID]; exists {
-		if err := mark.inode(ctx, filesystemOrphansID, false); err != nil {
-			return err
-		}
-	}
+
 	return nil
 }
 
