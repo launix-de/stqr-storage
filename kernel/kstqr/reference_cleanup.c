@@ -6,6 +6,15 @@
  * This only retires a known PIN; it never infers an unknown acquisition outcome,
  * releases somebody else's claim, or requests a persistence checkpoint.
  */
+/* Lower connections borrow their containing mount's workqueue. They are not
+ * standalone mounts and deliberately have no separately allocated queue. Keep
+ * the RPC target on the lower, but retain work in its owning mount until drained. */
+static struct workqueue_struct *ks_reference_workqueue(struct ks_fs *f)
+{
+	while (f->parent)
+		f = f->parent;
+	return f->reference_queue;
+}
 struct ks_pin_retirement {
 	struct work_struct work;
 	struct completion done;
@@ -35,7 +44,7 @@ static int ks_retire_pin(struct ks_fs *f, stqr_object_id id, stqr_id token)
 	}
 	INIT_WORK(&job.work, ks_pin_retirement_worker);
 	init_completion(&job.done);
-	queue_work(f->reference_queue, &job.work);
+	queue_work(ks_reference_workqueue(f), &job.work);
 	wait_for_completion(&job.done);
 	flush_work(&job.work);
 	return job.error;
