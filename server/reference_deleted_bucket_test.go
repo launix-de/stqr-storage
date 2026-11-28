@@ -340,3 +340,22 @@ func TestDeletedBucketProvenanceCannotLoseReceiptHistory(t *testing.T) {
 		t.Fatal("system install promoted unknown history")
 	}
 }
+
+func TestDeletedBucketProofDoesNotWaitForReferenceMutation(t *testing.T) {
+	f := newCombiningFixture(t)
+	release, err := f.s.referenceCoordination.acquire(context.Background(), f.b.ID())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	var target client.ObjectID
+	target[0] = 77
+	message := referenceRequest(f.b, target, client.NewRequestID(), nil)
+	message.Body[len(message.Body)-17] = 10
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	body, err := f.s.executeObjectReference(ctx, message, f.ws, f.p)
+	if err != nil || !bytes.Equal(body, []byte{0}) {
+		t.Fatal("readonly proof queued behind ORF1 mutation gate", body, err)
+	}
+}

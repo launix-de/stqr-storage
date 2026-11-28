@@ -188,6 +188,32 @@ func (s *Server) executeObjectReferenceHeld(ctx context.Context, m client.Messag
 			return nil, fail(400, "deleted dependency proof requires a bucket target and a request reply")
 		}
 	}
+	// This proof never reads or edits the reference root. Do not hold its
+	// mutation gate while waiting on catalog peers: unrelated opens/closes on
+	// the dependency-owning bucket must remain available during a peer outage.
+	if action == 10 {
+		account, _, err := s.referenceAccountSnapshot(p)
+		if err != nil || account.Role != "ADMIN" {
+			return nil, ErrBucketForbidden
+		}
+		if _, err := op.bucket.authorize(p, BucketRead); err != nil {
+			return nil, err
+		}
+		if err := s.checkObjectOwner(op.bucket.ID(), op.object); err != nil {
+			return nil, err
+		}
+		var subject volume.ID
+		copy(subject[:], target[:16])
+		safe, err := s.canRetireDeletedBucketDependencies(ctx, subject)
+		if err != nil {
+			return nil, err
+		}
+		if safe {
+			return []byte{1}, nil
+		}
+		return []byte{0}, nil
+	}
+
 	if !held && accepted && (action == 0 || action == 1) {
 		return s.combineObjectReference(ctx, m, ws, p, op.bucket.ID(), token)
 	}
@@ -265,18 +291,6 @@ func (s *Server) executeObjectReferenceHeld(ctx context.Context, m client.Messag
 			return nil, err
 		}
 		return []byte{1}, nil
-	}
-	if action == 10 {
-		var subject volume.ID
-		copy(subject[:], target[:16])
-		safe, err := s.canRetireDeletedBucketDependencies(ctx, subject)
-		if err != nil {
-			return nil, err
-		}
-		if safe {
-			return []byte{1}, nil
-		}
-		return []byte{0}, nil
 	}
 	if action == 9 {
 		return s.pruneAbsentAccountPins(ctx, op.bucket, internal, accepted)
