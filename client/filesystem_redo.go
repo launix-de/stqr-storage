@@ -14,6 +14,10 @@ const fsMaxIntentBytes = 128 << 20
 // fsFreshReadKey bypasses cached ownership observations. It does not request
 // durable mutation acknowledgements; persistence belongs to explicit Sync.
 type fsFreshReadKey struct{}
+
+// Only explicit exclusive fsck sets this: its lease permits CAS and DELETE,
+// while ordinary online REDO retains the native in-place PUT fast path.
+type fsOfflineRecoveryKey struct{}
 type fsExternalWrite struct {
 	owner ObjectID
 	index uint64
@@ -161,6 +165,9 @@ func fsRedoRequest(id ObjectID, index uint64) RequestID {
 	return out
 }
 func (f *Filesystem) applyFSWrite(ctx context.Context, txID ObjectID, index uint64, w fsBlockWrite) error {
+	if offline, _ := ctx.Value(fsOfflineRecoveryKey{}).(bool); offline && !w.remove {
+		return f.applyOfflineFSWrite(ctx, txID, index, w)
+	}
 	opt := MutationOptions{RequestID: fsRedoRequest(txID, index)}
 	if w.absent {
 		opt.Absent = true
@@ -205,6 +212,47 @@ func (f *Filesystem) applyFSWrite(ctx context.Context, txID ObjectID, index uint
 	}
 	copy(raw[w.offset:], w.data)
 	_, err = f.store.CAS(ctx, w.id, 0, before, raw, CASOptions{Scope: CASObject, MutationOptions: opt})
+	return err
+}
+
+// Exclusive maintenance has already excluded other writers, and the decided
+// intent still owns the inode marker. Compare the actual current block rather
+// than relying on a preimage: native online intents deliberately omit it.
+// A separate request domain avoids reusing an online PUT's deduplication key for
+// a CAS body. Already visible REDO is recognized before submitting that CAS.
+func (f *Filesystem) applyOfflineFSWrite(ctx context.Context, txID ObjectID, index uint64, w fsBlockWrite) error {
+	raw, _, err := f.store.Get(ctx, w.id)
+	missing := errors.Is(err, ErrNotFound)
+	if missing && w.absent {
+		raw = nil
+		err = nil
+	}
+	if err != nil {
+		return err
+	}
+	var next []byte
+	if w.full {
+		next = bytes.Clone(w.data)
+	} else {
+		if w.offset > FSObjectSize || uint64(len(w.data)) > FSObjectSize-w.offset {
+			return ErrFSFormat
+		}
+		next = bytes.Clone(raw)
+		end := w.offset + uint64(len(w.data))
+		if end > uint64(len(next)) {
+			next = append(next, make([]byte, end-uint64(len(next)))...)
+		}
+		copy(next[w.offset:], w.data)
+	}
+	if !missing && bytes.Equal(raw, next) {
+		return nil
+	}
+	e := Encoder{B: append([]byte("STQR filesystem offline REDO CAS v1\x00"), txID[:]...)}
+	e.U64(index)
+	sum := sha256.Sum256(e.B)
+	var request RequestID
+	copy(request[:], sum[:16])
+	_, err = f.store.CAS(ctx, w.id, 0, raw, next, CASOptions{Scope: CASObject, MutationOptions: MutationOptions{RequestID: request, Absent: missing, Accepted: true}})
 	return err
 }
 
