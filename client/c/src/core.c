@@ -375,7 +375,10 @@ static int handshake(stqr_client *c) {
         "GET /api/ws HTTP/1.1\r\nHost: %s\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: %s\r\nSec-WebSocket-Protocol: stqr.v2\r\nAuthorization: Basic %s\r\nX-STQR-Bucket: %s\r\nX-STQR-Format: %s\r\n%s\r\n",
         c->authority, key, c->authorization, bucket, c->format, lease);
     if (n >= capacity) { err = -E2BIG; goto out; }
-    if ((err = sq_send(c->socket, request, n))) goto out;
+    if ((err = sq_send(c->socket, request, n))) {
+        if(err==SQ_SEND_NOT_SUBMITTED)err=-EINTR;
+        goto out;
+    }
     for (n = 0; n < 16384; n++) {
         if ((err = sq_recv(c->socket, headers+n, 1))) goto out;
         if (n >= 3 && !memcmp(headers+n-3, "\r\n\r\n", 4)) { n++; break; }

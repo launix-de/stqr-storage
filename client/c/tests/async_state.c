@@ -562,7 +562,13 @@ static void allocation_before_transport(void) {
     assert(!c.durability_lost&&!owner.lost&&!socket.closed&&!socket.calls[0x102]);
     drop(&pending.body);drop(&body);drop(&result);
 }
+static void rejected_handshake(void) {
+    struct stqr_socket socket={.send_error=SQ_SEND_NOT_SUBMITTED};stqr_client c={0};
+    c.socket=&socket;c.authorization="";c.bucket.bytes[0]=1;
+    assert(handshake(&c)==-EINTR&&!c.durability_lost&&!socket.closed);
+}
 int main(void) {
+    rejected_handshake();
     rejected_later_stream_frame(2);rejected_later_stream_frame(3);
     rejected_before_transport(0,SQ_SEND_NOT_SUBMITTED);rejected_before_transport(1,SQ_SEND_NOT_SUBMITTED);
     rejected_before_transport(0,-EINTR);rejected_before_transport(1,-EINTR);allocation_before_transport();
