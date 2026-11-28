@@ -53,6 +53,9 @@ class LoginInstall(unittest.TestCase):
         self.assertEqual(json.loads(config.read_text())['uri'], 'http://192.0.2.1:7419')
         self.assertEqual(config.stat().st_mode & 0o777, 0o600)
         self.assertNotIn('password', config.read_text())
+        self.assertIs(json.loads(config.read_text())['guest_sudo'], True)
+        self.assertIs(json.loads((self.root / 'usr/lib/stqr-networkboot/home-template.json').read_text())['guest_sudo'], True)
+        self.assertFalse((self.root / 'etc/sudoers.d').exists())
 
     def test_local_name_collision_is_rejected_without_changing_passwd(self):
         self.plan['accounts'][0]['name'] = 'launix'

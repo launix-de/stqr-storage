@@ -131,7 +131,9 @@ def install(root, plan, server=None, persist=False):
     save(session, managed(session.read_text(), [
         'session [success=1 default=ignore] pam_succeed_if.so quiet user notingroup ' + GROUP,
         'session required /usr/lib/stqr-networkboot/pam_stqr.so']), 0o644)
-    config = {'uri': urlunsplit(uri), 'accounts': {a['name']: {'id': a['id'], 'bucket': a['bucket']} for a in plan['accounts']}}
+    # This is a prepared guest, not host PAM configuration. Only successfully
+    # authenticated login sessions receive their own UID-scoped sudo rule.
+    config = {'guest_sudo': True, 'uri': urlunsplit(uri), 'accounts': {a['name']: {'id': a['id'], 'bucket': a['bucket']} for a in plan['accounts']}}
     save(root / 'etc/security/stqr-home.json', json.dumps(config) + '\n', 0o600)
     save(statepath, json.dumps(plan) + '\n', 0o600)
     template = dict(config)

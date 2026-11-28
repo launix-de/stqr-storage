@@ -144,6 +144,16 @@ PAM_EXTERN int pam_sm_open_session(pam_handle_t *p, int flags, int argc,
   (void)flags;
   (void)argc;
   (void)argv;
+  /* sudo authenticates the invoking user through common-auth, but its session
+   * belongs to the target user (usually root). sudo-i includes common-session
+   * on Debian/Ubuntu. It must neither mount root's home with another user's
+   * credentials nor acquire/release a login-home reference. The original
+   * authenticated login session remains the owner of that mount. Password
+   * validation still ran normally; pam_end wipes the unused auth state. */
+  const void *service = NULL;
+  if (pam_get_item(p, PAM_SERVICE, &service) == PAM_SUCCESS && service &&
+      (!strcmp(service, "sudo") || !strcmp(service, "sudo-i")))
+    return PAM_SUCCESS;
   const void *data;
   const char *user;
   if (pam_get_user(p, &user, NULL) != PAM_SUCCESS ||
