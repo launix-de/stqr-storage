@@ -358,3 +358,116 @@ func TestRestartRetentionNativeLineageCodecAndVersionExclusion(t *testing.T) {
 		t.Fatal("unsupported newer copy silently ignored", err)
 	}
 }
+
+func TestRestartRetentionCanonicalFenceFailureCannotConfirm(t *testing.T) {
+	d := newCrash(8 << 20)
+	v, err := Format(d, FormatOptions{Class: SSD})
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := testKey(870)
+	if _, err = testPut(v, key, []byte("visible"), Options{Accepted: true}); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "image")
+	receipt, err := v.RetainAccepted(path, testID(870))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = v.Close(); err != nil {
+		t.Fatal(err)
+	}
+	w, err := Open(d, OpenOptions{Restart: &RestartSource{path, receipt}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = w.Sync(); err != nil {
+		t.Fatal(err)
+	}
+	if err = w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	x, err := Open(d, OpenOptions{Restart: &RestartSource{path, receipt}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer x.Abort()
+	generation := x.Header().Generation
+	if x.IsDurableThrough(generation) {
+		t.Fatal("unverified header confirmed old cut")
+	}
+	d.fail = d.steps + 1
+	if err = x.CheckpointThrough(generation); !errors.Is(err, ErrRecovery) {
+		t.Fatal("failed physical fence acknowledged", err)
+	}
+	if x.IsDurableThrough(generation) {
+		t.Fatal("failed canonical fence advanced confirmed cut")
+	}
+}
+
+func TestRestartRetentionCorruptPayloadCannotConfirm(t *testing.T) {
+	d := newCrash(8 << 20)
+	v, err := Format(d, FormatOptions{Class: SSD})
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := testKey(880)
+	if _, err = testPut(v, key, []byte("retained payload"), Options{Accepted: true}); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "image")
+	receipt, err := v.RetainAccepted(path, testID(880))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = v.Close(); err != nil {
+		t.Fatal(err)
+	}
+	w, err := Open(d, OpenOptions{Restart: &RestartSource{path, receipt}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer w.Abort()
+	obj, err := w.loadObject(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := w.deferred.store.retained
+	if r.root.level != 0 {
+		t.Fatal("small fixture unexpectedly multilevel")
+	}
+	page, err := r.node(r.root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	off := obj.Spans[0].Location / PageSize * PageSize
+	var imageOffset uint64
+	for i := 0; i < int(diskOrder.Uint16(page[10:])); i++ {
+		raw := page[32+i*restartIndexRecord:]
+		if diskOrder.Uint64(raw) == off {
+			imageOffset = diskOrder.Uint64(raw[8:])
+			break
+		}
+	}
+	if imageOffset == 0 {
+		t.Fatal("retained payload missing")
+	}
+	f, err := os.OpenFile(path, os.O_RDWR, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = f.WriteAt([]byte{0xff}, int64(imageOffset)); err != nil {
+		f.Close()
+		t.Fatal(err)
+	}
+	f.Close()
+	if _, _, err = testGet(w, key); err == nil {
+		t.Fatal("corrupt payload returned to reader")
+	}
+	if err = w.Sync(); err == nil {
+		t.Fatal("corrupt retained payload physically confirmed")
+	}
+	if w.IsDurableThrough(receipt.Generation) {
+		t.Fatal("corruption advanced confirmed cut")
+	}
+}
