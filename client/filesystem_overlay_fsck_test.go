@@ -34,6 +34,11 @@ func TestOverlayFsckCollectsOnlyUpperObjects(t *testing.T) {
 	if err = o.Rmdir(ctx, FilesystemRootID(), "fop-files"); err != nil {
 		t.Fatal(err)
 	}
+	// The operational orphan queue is retained even when it is empty. Add
+	// actual unreachable garbage so this remains a positive sweep check.
+	if _, err := o.upper.putImmutable(ctx, []byte("offline unreachable object")); err != nil {
+		t.Fatal(err)
+	}
 	want := readOverlayFile(t, o, conf.ID)
 	baseBefore := len(guard.objects)
 	store := &fsckMemory{MemoryFilesystemStore: upper}
