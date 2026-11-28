@@ -22,6 +22,8 @@ type deferredFSPeer struct {
 	memory                                               *MemoryFilesystemStore
 	caps                                                 uint64
 	accepted, durable, refsAccepted, refsDurable, fences atomic.Int64
+	recoverReceipts                                      atomic.Bool
+	receiptFences                                        atomic.Int64
 	boot                                                 ID
 }
 
@@ -80,6 +82,19 @@ func newDeferredFSPeer(t *testing.T, caps uint64) (*deferredFSPeer, *httptest.Se
 				p.fences.Add(1)
 				e.ID(p.boot)
 				e.U64(sequence)
+			} else if op == BucketSync {
+				d.ID()
+				mark, decodeErr := DecodeCommitMark(d.Take(24))
+				if decodeErr != nil {
+					t.Error(decodeErr)
+					return
+				}
+				p.receiptFences.Add(1)
+				if !p.recoverReceipts.Load() || mark.Boot != p.boot {
+					status = 410
+				} else {
+					e.B = mark.MarshalBinary()
+				}
 			} else if op == 7 {
 				continue
 			} else {
@@ -381,7 +396,7 @@ func TestS3PublicationNeverInheritsAcceptedFilesystemMode(t *testing.T) {
 	}
 }
 
-func TestAcceptedReferencesLostConnectionRemainsUnknown(t *testing.T) {
+func TestAcceptedReferencesLostConnectionRequiresExactReceiptProof(t *testing.T) {
 	const caps = CapabilityDurability | CapabilityConnectionSync | CapabilityObjectReferences | CapabilityAcceptedReferences
 	_, host := newDeferredFSPeer(t, caps)
 	c := dialConnectionTest(t, host)
@@ -391,9 +406,9 @@ func TestAcceptedReferencesLostConnectionRemainsUnknown(t *testing.T) {
 		t.Fatal(err)
 	}
 	c.transport.fail(errors.New("test connection lost before explicit Sync"))
-	var unknown *UnknownOutcomeError
-	if err := c.Sync(ctx); !errors.As(err, &unknown) || unknown.RequestID == (ID{}) {
-		t.Fatal("accepted reference outcome silently cleared", err)
+	var status *StatusError
+	if err := c.Sync(ctx); !errors.As(err, &status) || status.Status != 410 {
+		t.Fatal("missing old receipt proof silently cleared", err)
 	}
 }
 

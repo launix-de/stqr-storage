@@ -18,9 +18,15 @@ const CapabilityConnectionSync uint64 = 1 << 19
 type connectionSubmission struct {
 	sequence        uint64
 	noAck, accepted bool
+	acknowledged    bool
 	message         Message // routing reference only; payload ownership stays with send queue
 	err             error
 }
+type connectionReceipt struct {
+	mark     CommitMark
+	sequence uint64
+}
+
 type connectionCut struct{ sequence, readSequence uint64 }
 type connectionCutKey struct{}
 
@@ -36,13 +42,29 @@ func (c *Client) rememberConnection(t *objectTransport) {
 	c.connectionTransports[t] = struct{}{}
 	c.mu.Unlock()
 }
-func (t *objectTransport) noteConnectionDependency(boot ID) {
+func (t *objectTransport) recordConnectionReceiptLocked(mark CommitMark) {
+	if t.connectionReceipts == nil {
+		t.connectionReceipts = map[ID]connectionReceipt{}
+	}
+	old := t.connectionReceipts[mark.Boot]
+	if len(t.connectionReceipts) >= 1024 && old.mark.Sequence == 0 {
+		t.connectionReceiptErr = ErrFull
+		return
+	}
+	if mark.Sequence < old.mark.Sequence {
+		mark = old.mark
+	}
+	t.connectionReceipts[mark.Boot] = connectionReceipt{mark: mark, sequence: t.connectionSequence}
+}
+
+func (t *objectTransport) noteConnectionDependency(mark CommitMark) {
 	t.mu.Lock()
 	t.connectionSequence++
 	t.connectionReadSequence = t.connectionSequence
 	if t.connectionBoot == (ID{}) {
-		t.connectionBoot = boot
+		t.connectionBoot = mark.Boot
 	}
+	t.recordConnectionReceiptLocked(mark)
 	if t.subscriptionClient != nil {
 		t.subscriptionClient.rememberConnection(t)
 	}
@@ -107,6 +129,10 @@ func (t *objectTransport) finishConnectionRequest(id ID, r wireReply, err error)
 	if work := t.connectionWrites[id]; work != nil && !work.noAck {
 		if err != nil || !work.accepted && len(r.headers[DurabilityHeader]) == 0 {
 			delete(t.connectionWrites, id)
+		} else if mark, decodeErr := DecodeCommitMark(r.headers[DurabilityHeader]); decodeErr == nil {
+			// Record the result before delivering it: EOF can race the caller receiving its ACK.
+			work.acknowledged = true
+			t.recordConnectionReceiptLocked(mark)
 		}
 	}
 }
@@ -151,25 +177,24 @@ func (t *objectTransport) syncConnection(ctx context.Context) error {
 	if !t.hasConnectionWork() {
 		return nil
 	}
-	// A replacement socket cannot confirm the prior connection's admission cut.
+	// A new connection's receive cut cannot prove an old connection's writes.
+	// Known accepted results retain their boot-qualified prefix; only explicit
+	// Sync asks the owner to recover and certify that exact prefix.
 	select {
 	case <-t.done:
-		t.mu.Lock()
-		defer t.mu.Unlock()
-		for id, work := range t.connectionWrites {
-			if work.noAck || work.accepted {
-				if work.err != nil {
-					return work.err
-				}
-				return &UnknownOutcomeError{RequestID: id, Cause: t.cause}
-			}
-		}
-		return &UnknownOutcomeError{Cause: t.cause}
+		return t.syncDisconnected(ctx)
 	default:
 	}
 	cut := &connectionCut{}
 	r, err := t.roundTrip(context.WithValue(ctx, connectionCutKey{}, cut), Message{Kind: Request, Opcode: ConnectionSync, ID: NewRequestID()}, false, nil)
 	defer r.close()
+	if err != nil {
+		select {
+		case <-t.done:
+			return t.syncDisconnected(ctx)
+		default:
+		}
+	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	var first *connectionSubmission
@@ -200,6 +225,11 @@ func (t *objectTransport) syncConnection(ctx context.Context) error {
 		return ErrProtocol
 	}
 	t.connectionBoot = boot
+	for boot, receipt := range t.connectionReceipts {
+		if receipt.sequence <= cut.sequence {
+			delete(t.connectionReceipts, boot)
+		}
+	}
 	for id, work := range t.connectionWrites {
 		if work.sequence <= cut.sequence {
 			delete(t.connectionWrites, id)
@@ -213,6 +243,62 @@ func (t *objectTransport) syncConnection(ctx context.Context) error {
 	}
 	return nil
 }
+
+// syncDisconnected never retries mutations or equates readable data with
+// durability. An unanswered/no-ACK mutation remains uncertain even when other
+// accepted writes have recoverable receipts.
+func (t *objectTransport) syncDisconnected(ctx context.Context) error {
+	t.mu.Lock()
+	if t.connectionReceiptErr != nil {
+		err := t.connectionReceiptErr
+		t.mu.Unlock()
+		return err
+	}
+	for id, work := range t.connectionWrites {
+		if !work.acknowledged {
+			err := work.err
+			if err == nil {
+				err = &UnknownOutcomeError{RequestID: id, Cause: t.cause}
+			}
+			t.mu.Unlock()
+			return err
+		}
+	}
+	cut := t.connectionSequence
+	receipts := make([]connectionReceipt, 0, len(t.connectionReceipts))
+	for _, receipt := range t.connectionReceipts {
+		receipts = append(receipts, receipt)
+	}
+	owner := t.subscriptionClient
+	if owner == nil || len(receipts) == 0 {
+		err := &UnknownOutcomeError{Cause: t.cause}
+		t.mu.Unlock()
+		return err
+	}
+	t.mu.Unlock()
+	for _, receipt := range receipts {
+		if err := owner.syncDurabilityPrefix(ctx, pendingDurability{receipt.mark, t.endpoint, t.node}); err != nil {
+			return err
+		}
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	for boot, receipt := range t.connectionReceipts {
+		if receipt.sequence <= cut {
+			delete(t.connectionReceipts, boot)
+		}
+	}
+	for id, work := range t.connectionWrites {
+		if work.sequence <= cut {
+			delete(t.connectionWrites, id)
+		}
+	}
+	if t.connectionReadSynced < cut {
+		t.connectionReadSynced = cut
+	}
+	return nil
+}
+
 func (c *Client) syncConnections(ctx context.Context, except *objectTransport) error {
 	c.mu.Lock()
 	transports := make([]*objectTransport, 0, len(c.connectionTransports))
