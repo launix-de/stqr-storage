@@ -31,11 +31,11 @@ func (s *Server) cowDetachStep(ctx context.Context, bucket volume.ID) (bool, err
 		s.cow.mu.Unlock()
 		return true, nil
 	}
-	g, err := s.cowGraph()
+	g, err := s.cowTopology()
 	if err != nil {
 		return false, err
 	}
-	proof, err := s.cowGraphDigest(g, bucket)
+	proof, err := g.proof(bucket)
 	if err != nil {
 		return false, err
 	}
@@ -45,11 +45,11 @@ func (s *Server) cowDetachStep(ctx context.Context, bucket volume.ID) (bool, err
 	if progress.proof != proof {
 		progress = cowDetachProgress{proof: proof}
 	}
-	endpoints := append([]volume.ID{bucket}, g[bucket]...)
+	endpoints := append([]volume.ID{bucket}, g.graph[bucket]...)
 	if !progress.complete {
 		seen := map[volume.ObjectID]bool{}
 		more := false
-		for _, peer := range g.component(bucket) {
+		for _, peer := range g.graph.component(bucket) {
 			page, extra, err := s.cowPhysicalPage(ctx, peer, progress.after, 32)
 			if err != nil {
 				return false, err
@@ -68,7 +68,7 @@ func (s *Server) cowDetachStep(ctx context.Context, bucket volume.ID) (bool, err
 			ids = ids[:32]
 			more = true
 		}
-		store := cowServerObjects{server: s}
+		store := cowServerObjects{server: s, topology: g}
 		ctx = context.WithValue(ctx, cowProofKey{}, proof)
 		for _, object := range ids {
 			for _, endpoint := range endpoints {
@@ -90,7 +90,7 @@ func (s *Server) cowDetachStep(ctx context.Context, bucket volume.ID) (bool, err
 					own.close()
 					continue
 				}
-				snapshot, err := g.resolve(ctx, store, endpoint, object, map[volume.ID]bool{})
+				snapshot, err := g.graph.resolve(ctx, store, endpoint, object, map[volume.ID]bool{})
 				if err != nil {
 					return false, err
 				}
@@ -118,11 +118,11 @@ func (s *Server) cowDetachStep(ctx context.Context, bucket volume.ID) (bool, err
 		progress.complete = true
 	}
 	build := func(target *Server) error {
-		current, err := target.cowGraph()
+		current, err := target.cowTopology()
 		if err != nil {
 			return err
 		}
-		now, err := target.cowGraphDigest(current, bucket)
+		now, err := current.proof(bucket)
 		if err != nil {
 			return err
 		}

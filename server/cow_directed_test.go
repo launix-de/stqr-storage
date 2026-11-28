@@ -176,11 +176,11 @@ func TestDirectedCOWRecursiveLeafWritesWithoutAncestorSync(t *testing.T) {
 	if got := saved.Describe(); got.Schema != 3 || len(got.ClonePeers) != 2 {
 		t.Fatalf("directed schema lost: %+v", got)
 	}
-	graph, err := s.cowGraph()
+	graph, err := s.cowTopology()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(graph.component(buckets[2].ID())) != 4 {
+	if len(graph.graph.component(buckets[2].ID())) != 4 {
 		t.Fatal("full lifetime graph lost ancestors/siblings")
 	}
 	// A historical symmetric edge can coexist with new directed descendants.

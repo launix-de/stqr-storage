@@ -256,17 +256,29 @@ func (t *transaction) writeObject(o *object) error {
 func (t *transaction) readBytes(dst []byte, off uint64) error {
 	for len(dst) > 0 {
 		page := off / PageSize * PageSize
+		at := int(off - page)
+		n := min(len(dst), PageSize-at)
 		b := t.pages[page]
-		if b == nil {
+		_, spilled := t.spilled[page]
+		if b == nil && (t.acceptedPages != nil || spilled) {
 			var e error
 			b, e = t.page(page)
 			if e != nil {
 				return e
 			}
 		}
-		at := int(off - page)
-		n := min(len(dst), PageSize-at)
-		copy(dst, b[at:at+n])
+		if b != nil {
+			copy(dst, b[at:at+n])
+		} else {
+			// This is a read into an already owned destination, not a page edit.
+			// Borrow the published mmap/RAM/overlay bytes while the enclosing
+			// Volume lock pins them instead of allocating a second 4 KiB copy.
+			// Transaction-local pages/spills above still take precedence; the
+			// visible reader retains all published staging/fence priorities.
+			if err := t.v.readVisibleBytes(dst[:n], off); err != nil {
+				return err
+			}
+		}
 		dst = dst[n:]
 		off += uint64(n)
 	}
