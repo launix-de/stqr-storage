@@ -98,7 +98,7 @@ void stqr_set_readable_handler(stqr_client *c,void (*ready)(void *),void *arg) {
 }
 static int async_send(stqr_client *c,struct sq_async *p) {
     struct buf wrapped={0};struct buf *body=&p->body;
-    int err;
+    int err,submitted=0;
     if(p->mutation && any_lost(c) && !accepted_visibility_after_loss(c,p->op,p->mutation))return -ESTALE;
     if(p->mutation>1 && !(c->capabilities&STQR_CAP_DURABILITY))return -EOPNOTSUPP;
     if(p->op==0x121 && c->accepted_references && !references_accepted(c))return -EOPNOTSUPP;
@@ -118,9 +118,13 @@ static int async_send(stqr_client *c,struct sq_async *p) {
     }
     p->channel=c->active;
     p->channel->submitted=p->sequence;
-    err=message_send(c,p->fire?0:1,p->wire_op,p->id,body);
+    err=message_send_tracked(c,p->fire?0:1,p->wire_op,p->id,body,&submitted);
     drop(&wrapped);save_channel(c);
-    if(err) {if(p->mutation)c->durability_lost=1;return p->mutation?-EINPROGRESS:err;}
+    if(err) {
+        if(!submitted)return err;
+        if(p->mutation)c->durability_lost=1;
+        return p->mutation?-EINPROGRESS:err;
+    }
     return 0;
 }
 static int async_submit(stqr_client *c,unsigned op,struct buf *body,stqr_id id,

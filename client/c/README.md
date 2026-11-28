@@ -228,3 +228,13 @@ never wait for that volume's storage work. Older
 clients ignore tag 49. The C client clears only covered marks from the same boot;
 confirmation cannot clear uncertainty from an unknown in-flight mutation. Legacy peers retain their boot-qualified marks across reconnect and
 confirm them through `SyncThrough` rather than a replacement connection fence.
+
+A local failure before an entire request frame reaches the transport (for example,
+allocation failure or a kernel caller already under fatal cancellation) does not
+invalidate other requests or their accepted durability prefixes. The port may
+return the internal `SQ_SEND_NOT_SUBMITTED` result only when it proves that no
+byte was submitted; the API reports `EINTR` for that cancellation. Ordinary send
+errors, including `EINTR` after transport dispatch, remain uncertain for mutations.
+This proof applies to one frame: failure of a later upload chunk cannot undo an
+already submitted request header or earlier chunks. No cancellation initiates a
+sync, and only explicit caller sync confirms persistence.

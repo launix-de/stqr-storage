@@ -2,12 +2,14 @@
 /* Deterministic protocol-state regressions: no live socket or fault timing. */
 /* A deterministic WebSocket peer counts actual emitted protocol fences.
  * Crypto/allocation/time remain the normal userspace port implementation. */
+#define sq_alloc policy_alloc
 #define sq_send policy_send
 #define sq_recv policy_recv
 #define sq_wait policy_wait
 #define sq_connect policy_connect
 #define sq_disconnect policy_disconnect
 #include "../src/core.c"
+#undef sq_alloc
 #undef sq_send
 #undef sq_recv
 #undef sq_wait
@@ -15,12 +17,17 @@
 #undef sq_disconnect
 #include <assert.h>
 #include <stdio.h>
-struct stqr_socket { struct buf replies,held; unsigned calls[512],pongs; stqr_u64 sequence,reply_length; unsigned boot,read_mark_tag,through_boots;int closed,hold,redirect,hold_through,through_status,fail_send; };
+void *sq_alloc(size_t n);
+static int reject_allocation;
+void *policy_alloc(size_t n) {return reject_allocation?NULL:sq_alloc(n);}
+struct stqr_socket { struct buf replies,held; unsigned calls[512],pongs; stqr_u64 sequence,reply_length; unsigned boot,read_mark_tag,through_boots;int closed,hold,redirect,hold_through,through_status,fail_send,send_error,fail_call;unsigned sends; };
 int policy_connect(struct stqr_socket **out,const char *host,unsigned port,unsigned ms) {
     (void)out;(void)host;(void)port;(void)ms;return -EOPNOTSUPP;
 }
 int policy_send(struct stqr_socket *socket,const void *data,size_t size) {
     if(socket->fail_send)return -EIO;
+    socket->sends++;
+    if(socket->send_error&&(!socket->fail_call||socket->sends==(unsigned)socket->fail_call))return socket->send_error;
     const stqr_u8 *wire=data;size_t at=2,n;struct buf input={0},message={0},headers={0},mark={0};
     if(size==6 && wire[0]==0x8a && wire[1]==0x80) { socket->pongs++; return 0; }
     assert(size>=6 && (wire[0]&15)==2 && (wire[1]&128));
@@ -60,9 +67,11 @@ int policy_send(struct stqr_socket *socket,const void *data,size_t size) {
         stqr_u8 runtime[16]={0};number(&message,socket->reply_length?socket->reply_length:4,8);number(&message,0,1);number(&message,0,4);
         put(&message,runtime,16);number(&message,0,1);number(&message,0,2);
     }else if(op==0x100) {
-        stqr_u8 runtime[16]={0},digest[32];assert(!sq_hash(256,NULL,0,digest));
-        number(&message,0,8);number(&message,0,1);number(&message,0,4);put(&message,runtime,16);number(&message,0,1);number(&message,0,2);
-        number(&message,0,1);number(&message,0,8);put(&message,digest,32);blob(&message,NULL,0);
+        const char *payload=socket->read_mark_tag?NULL:"new!";size_t length=socket->read_mark_tag?0:4;
+        stqr_u8 runtime[16]={0},hash[32];assert(!sq_hash(256,payload,length,hash));
+        number(&message,length,8);number(&message,0,1);number(&message,0,4);
+        put(&message,runtime,16);number(&message,0,1);number(&message,0,2);
+        number(&message,0,1);number(&message,length,8);put(&message,hash,32);blob(&message,payload,length);
     }else if(op==0x11b) {
         number(&message,1024,8);number(&message,4096,8);
         number(&message,3072,8);number(&message,2048,8);
@@ -566,7 +575,11 @@ static void control_without_reply(unsigned opcode,int expected) {
     if(expected>0) assert(!stqr_poll(c,0));
     stqr_close(c);
 }
-static void discarded_coverage(void *arg,const stqr_update *update) {
+/* Fatal cancellation before the transport worker is dispatched must not make
+ * unrelated accepted or in-flight operations permanently uncertain. A generic
+ * EINTR cannot prove zero bytes, so that separate case stays conservative. */
+static void rejected_before_transport(int synchronous, int send_error) {
+    static void discarded_coverage(void *arg,const stqr_update *update) {
  unsigned *lost=arg;assert(!update);(*lost)++;
 }
 static void discard_has_no_pending_or_fence(void) {

@@ -415,7 +415,10 @@ static int handshake(stqr_client *c) {
         "GET /api/ws HTTP/1.1\r\nHost: %s\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: %s\r\nSec-WebSocket-Protocol: stqr.v2\r\nAuthorization: Basic %s\r\nX-STQR-Bucket: %s\r\nX-STQR-Format: %s\r\n%s\r\n",
         c->authority, key, c->authorization, bucket, c->format, lease);
     if (n >= capacity) { err = -E2BIG; goto out; }
-    if ((err = sq_send(c->socket, request, n))) goto out;
+    if ((err = sq_send(c->socket, request, n))) {
+        if(err==SQ_SEND_NOT_SUBMITTED)err=-EINTR;
+        goto out;
+    }
     for (n = 0; n < 16384; n++) {
         if ((err = sq_recv(c->socket, headers+n, 1))) goto out;
         if (n >= 3 && !memcmp(headers+n-3, "\r\n\r\n", 4)) { n++; break; }
@@ -449,10 +452,11 @@ static int handshake(stqr_client *c) {
 out:
     sq_secret_free(request, capacity); sq_free(headers); return err;
 }
-static int frame_send(stqr_client *c, unsigned opcode, const void *data, size_t n) {
+static int frame_send_tracked(stqr_client *c, unsigned opcode, const void *data, size_t n, int *submitted) {
     stqr_u8 header[14], mask[4], *masked;
     const stqr_u8 *p = data;
     size_t h = 2, i; int err;
+    *submitted=0;
     if (n > SQ_WIRE) return -E2BIG;
     if (!c->socket) return -ENOTCONN;
     if ((err = sq_random(mask, 4))) return err;
@@ -466,14 +470,25 @@ static int frame_send(stqr_client *c, unsigned opcode, const void *data, size_t 
     masked = sq_alloc(h+n); if (!masked) return -ENOMEM;
     memcpy(masked, header, h);
     for (i = 0; i < n; i++) masked[h+i] = p[i] ^ mask[i%4];
+    *submitted=1;
     err = sq_send(c->socket, masked, h+n);
+    if(err==SQ_SEND_NOT_SUBMITTED) {*submitted=0;err=-EINTR;}
     sq_free(masked); return err;
 }
-static int message_send(stqr_client *c, unsigned kind, unsigned op, stqr_id id, struct buf *body) {
+static int frame_send(stqr_client *c, unsigned opcode, const void *data, size_t n) {
+    int submitted;
+    return frame_send_tracked(c,opcode,data,n,&submitted);
+}
+static int message_send_tracked(stqr_client *c, unsigned kind, unsigned op, stqr_id id, struct buf *body, int *submitted) {
     struct buf m = {0}; int err;
+    *submitted=0;
     if (body->err) return body->err;
     number(&m, 1, 1); number(&m, kind, 1); number(&m, op, 2); put(&m, id.bytes, 16); put(&m, body->p, body->n);
-    err = m.err ? m.err : frame_send(c, 2, m.p, m.n); drop(&m); return err;
+    err = m.err ? m.err : frame_send_tracked(c, 2, m.p, m.n,submitted); drop(&m); return err;
+}
+static int message_send(stqr_client *c, unsigned kind, unsigned op, stqr_id id, struct buf *body) {
+    int submitted;
+    return message_send_tracked(c,kind,op,id,body,&submitted);
 }
 static int frame_recv(stqr_client *c, struct buf *m, int polling) {
     int fragmented = 0, err; unsigned controls = 0;
@@ -804,7 +819,7 @@ static int request_payload(stqr_client *c, unsigned op, struct buf *body, stqr_i
     if (body->err) return body->err;
     if (zero(id.bytes,16)) { if (mutation) return -EINVAL; if ((err=stqr_request_id(&id))) return err; }
     for (unsigned redirects=0;redirects<16;) {
-        struct buf wrapped={0}; unsigned wire_op=op; struct buf *wire_body=body;
+        struct buf wrapped={0}; unsigned wire_op=op; struct buf *wire_body=body; int submitted=0;
         /* Redirect/reconnect can change the peer's accepted capabilities. */
         if(mutation && any_lost(c) && !accepted_visibility_after_loss(c,op,mutation))return -ESTALE;
         if (mutation>1 && !(c->capabilities&STQR_CAP_DURABILITY)) return -EOPNOTSUPP;
@@ -822,10 +837,14 @@ static int request_payload(stqr_client *c, unsigned op, struct buf *body, stqr_i
             wire_op=0x118; wire_body=&wrapped;
         }
         if(c->active)c->active->submitted=++c->async_sequence;
-        err=message_send(c,1,wire_op,id,wire_body);
+        err=message_send_tracked(c,1,wire_op,id,wire_body,&submitted);
         if (!err && payload) err=send_payload(c,id,payload,size,hash);
         if (!err) err=reply(c,wire_op,id,result,s);
         drop(&wrapped);
+        /* Definite local rejection leaves this socket and unrelated requests
+         * intact. Once the first frame was submitted, every later error can
+         * have an unknown outcome (including streaming payload failures). */
+        if(err && !submitted)return err;
         /* 503 denotes temporary cluster backpressure, including quota-credit
          * transfer and maintenance. It is not a permanent filesystem failure.
          * Retry the identical operation/ID on this connection; never reissue an
