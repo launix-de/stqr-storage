@@ -5,9 +5,13 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/launix-de/stqr-storage/client"
 	"github.com/launix-de/stqr-storage/volume"
@@ -232,5 +236,65 @@ func TestRestartRetentionThreeBootsOldPrefixAndUnknown(t *testing.T) {
 	}
 	if fourth.volumes[added.VolumeID].store.IOStats().SyncOps != 0 {
 		t.Fatal("confirmed proof started fence")
+	}
+}
+
+// Keep the actual client alive across a file-backed owner restart. Reading the
+// retained bytes is independent of explicitly confirming its old boot prefix.
+func TestRestartRetentionClientReconnectAndOldFence(t *testing.T) {
+	var active atomic.Pointer[Server]
+	gateway := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		s := active.Load()
+		if s == nil {
+			http.Error(w, "restarting", 503)
+			return
+		}
+		s.Handler().ServeHTTP(w, r)
+	}))
+	defer gateway.Close()
+	opts := Options{ConfigPath: filepath.Join(t.TempDir(), "node.yaml"), transportOnly: true, values: map[string]string{"advertise": gateway.URL, "system-volume-bytes": "262144"}}
+	first, err := Open(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer first.Close()
+	added := addTestVolume(t, first, "reconnect", "hdd", 16<<20)
+	bucket, _ := createProtocolBucket(t, first, "reconnect")
+	active.Store(first)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	admin := first.cfg.Auth.BootstrapAdmin
+	c, err := client.Dial(ctx, gateway.URL, admin.Username, admin.Password, client.BucketID(bucket.ID()), "fs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	object := client.ObjectID{91}
+	if _, err = c.Put(ctx, object, []byte("retained socket write"), client.PutOptions{Accepted: true, RequestID: client.NewRequestID()}); err != nil {
+		t.Fatal(err)
+	}
+	if err = first.Close(); err != nil {
+		t.Fatal(err)
+	}
+	active.Store(nil)
+	second, err := Open(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer second.Close()
+	active.Store(second)
+	store := second.volumes[added.VolumeID].store
+	got, _, err := c.Get(ctx, object)
+	if err != nil || string(got) != "retained socket write" {
+		t.Fatal("same client did not reconnect to retained bytes", string(got), err)
+	}
+	if store.IOStats().SyncOps != 0 {
+		t.Fatal("reconnection/read implicitly synced")
+	}
+	if err = c.Sync(ctx); err != nil {
+		t.Fatal("same client cannot explicitly confirm old accepted prefix", err)
+	}
+	if store.IOStats().SyncOps == 0 {
+		t.Fatal("explicit client fence did not reach retained volume")
 	}
 }

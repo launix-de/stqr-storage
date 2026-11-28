@@ -482,3 +482,67 @@ func TestRestartRetentionCorruptPayloadCannotConfirm(t *testing.T) {
 		t.Fatal("corruption advanced confirmed cut")
 	}
 }
+
+func TestRestartRetentionCanonicalLineagePreservesExplicitGrowth(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "growing.volume")
+	v, err := New(path, 4<<20, SSD)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := testKey(890)
+	if _, err = testPut(v, key, []byte("before-grow"), Options{Accepted: true}); err != nil {
+		t.Fatal(err)
+	}
+	image := filepath.Join(t.TempDir(), "before-grow.image")
+	receipt, err := v.RetainAccepted(image, testID(890))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = v.Close(); err != nil {
+		t.Fatal(err)
+	}
+	open := func() *Volume {
+		t.Helper()
+		dev, err := OpenFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		w, err := Open(dev, OpenOptions{Restart: &RestartSource{image, receipt}})
+		if err != nil {
+			dev.Close()
+			t.Fatal(err)
+		}
+		return w
+	}
+	w := open()
+	if err = w.Grow(8 << 20); err != nil {
+		t.Fatal(err)
+	}
+	if w.Size() != 8<<20 {
+		t.Fatal("explicit growth not adopted")
+	}
+	if _, err = testPut(w, key, []byte("unconfirmed-after-grow"), Options{Accepted: true}); err != nil {
+		t.Fatal(err)
+	}
+	if err = w.Abort(); err != nil {
+		t.Fatal(err)
+	}
+	if err = os.Remove(image); err != nil {
+		t.Fatal(err)
+	}
+	x := open()
+	defer x.Close()
+	if x.Size() != 8<<20 {
+		t.Fatal("retained old capacity overwrote grown canonical descendant", x.Size())
+	}
+	mustGet(t, x, key, []byte("before-grow"))
+	if x.IOStats().SyncOps != 0 {
+		t.Fatal("grown descendant open implicitly fenced")
+	}
+	if err = x.CheckpointThrough(receipt.Generation); err != nil {
+		t.Fatal("old known cut not confirmable after explicit growth", err)
+	}
+	if !x.IsDurableThrough(receipt.Generation) {
+		t.Fatal("explicit old fence did not confirm grown descendant")
+	}
+}
