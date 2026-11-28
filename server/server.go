@@ -459,7 +459,11 @@ func runNode(ctx context.Context, opts Options, output io.Writer) (restart bool,
 	if e != nil {
 		return false, e
 	}
-	defer s.Close()
+	defer func() {
+		if closeErr := s.Close(); closeErr != nil {
+			err = errors.Join(err, closeErr)
+		}
+	}()
 	s.joinHosted = true
 	s.joinSignal = make(chan struct{}, 1)
 	ln, e := net.Listen("tcp", s.running.Node.Listen)
@@ -492,7 +496,9 @@ func runNode(ctx context.Context, opts Options, output io.Writer) (restart bool,
 		return false, e
 	case <-s.stopRequest:
 		s.cancel()
-		return false, h.Shutdown(context.Background())
+		// A stopped node does not wait for clients to finish HTTP bodies or
+		// consume replies. Storage cleanup runs through Close below.
+		return false, h.Close()
 	case <-ctx.Done():
 		// Stop a cold shared-lock census before waiting on shutdown fences.
 		if s.storageWarming.Load() {
@@ -505,11 +511,8 @@ func runNode(ctx context.Context, opts Options, output io.Writer) (restart bool,
 			return false, err
 		}
 		s.cancel()
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		if e = h.Shutdown(shutdownCtx); e != nil {
-			h.Close()
-		}
-		return false, e
+		// HTTP clients, like WebSocket clients, reconnect after departure.
+		// Waiting for active request bodies here would let a client hold STOP.
+		return false, h.Close()
 	}
 }
