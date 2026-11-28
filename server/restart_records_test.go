@@ -114,3 +114,34 @@ func TestRestartRetentionRecordsMissingTornAndUnavailable(t *testing.T) {
 		t.Fatal("torn required manifest accepted", err)
 	}
 }
+
+func TestRestartRetentionReclaimsOnlyObsoletePrivateImages(t *testing.T) {
+	dir := t.TempDir()
+	current, old, id := volume.ID{1}, volume.ID{2}, volume.ID{3}
+	for _, handoff := range []volume.ID{current, old} {
+		path := filepath.Join(dir, handoff.String())
+		if err := os.Mkdir(path, 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(path, id.String()+".image"), []byte("fixture"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	foreign := filepath.Join(dir, volume.ID{4}.String())
+	if err := os.Mkdir(foreign, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(foreign, "keep"), []byte("unrelated"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	r := &restartState{directory: dir, manifest: &restartManifest{Handoff: current}}
+	r.reclaimObsoleteImages()
+	if _, err := os.Stat(filepath.Join(dir, old.String())); !os.IsNotExist(err) {
+		t.Fatal("obsolete private images not reclaimed", err)
+	}
+	for _, path := range []string{filepath.Join(dir, current.String(), id.String()+".image"), filepath.Join(foreign, "keep")} {
+		if _, err := os.Stat(path); err != nil {
+			t.Fatal("cleanup removed retained or unrelated data", err)
+		}
+	}
+}
