@@ -630,6 +630,9 @@ func (s *Server) dispatchAs(m client.Message, ws *wsSession, p principal) ([]byt
 	}
 	if m.Opcode >= 0x0100 && m.Opcode <= 0x0108 || m.Opcode == client.ObjectAccepted || m.Opcode == client.BucketObjectLease || m.Opcode == client.BucketMaintenanceEnd || m.Opcode == client.BucketMaintenance || m.Opcode == client.BucketScan || m.Opcode == client.BucketObjectList {
 		result, status, err := s.executeObjects(m, ws, p)
+		if errors.Is(err, errObjectResponseSent) {
+			return result, -status
+		}
 		if errors.Is(err, errObjectStaged) {
 			return nil, 0
 		}

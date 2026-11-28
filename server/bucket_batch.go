@@ -35,6 +35,9 @@ func (c *BucketCatalog) saveBatch(changes []BucketDescription) error {
 				return ErrBucketNotFound
 			}
 			old := current[index]
+			if err := validateReferenceLineageEdit(old, d); err != nil {
+				return err
+			}
 			if old.Format != "" && old.Format != d.Format {
 				return ErrBucketInvalid
 			}

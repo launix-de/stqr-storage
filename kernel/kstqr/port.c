@@ -302,7 +302,7 @@ static int sq_transfer(struct stqr_socket *s, void *p, size_t n, bool send)
 {
 	struct sq_transfer_work job = {.socket = s, .data = p, .length = n, .send = send};
 	if (fatal_signal_pending(current))
-		return -EINTR;
+		return send ? SQ_SEND_NOT_SUBMITTED : -EINTR;
 	INIT_WORK(&job.work, sq_transfer_worker);
 	init_completion(&job.done);
 	queue_work(sq_transport_wq, &job.work);

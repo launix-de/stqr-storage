@@ -461,6 +461,69 @@ class Workflows(unittest.TestCase):
             network.assert_not_called()
             ready.assert_not_called()
 
+    def test_named_pxe_boot_owns_overlay_gateway_until_qemu_exits(self):
+        script = load('test-boot')
+        events = []
+        @contextlib.contextmanager
+        def gateway(config, bucket, work):
+            self.assertEqual((config, bucket), ('custom.yaml', 'ubuntu'))
+            self.assertTrue(Path(work).is_dir())
+            events.append('gateway-start')
+            yield 'http://10.0.2.2:43195/boot.ipxe'
+            events.append('gateway-stop')
+        def launch(*command):
+            events.append('qemu')
+            self.assertEqual(command[0], 'qemu-system-x86_64')
+            self.assertIn('bootfile=http://10.0.2.2:43195/boot.ipxe', command[-1])
+            self.assertIn('mac=52:54:00:12:34:56', command[-1])
+            self.assertNotIn('--copy-from=ubuntu', command)
+            self.assertNotIn('-drive', command)
+        with tempfile.TemporaryDirectory() as directory, patch.object(sys, 'argv', ['test-boot', 'ubuntu', '--config', 'custom.yaml', '--work-dir', directory, '--mac', '52:54:00:12:34:56']), patch.object(script.shutil, 'which', return_value='/qemu'), patch.object(script, 'overlay_gateway', side_effect=gateway, create=True), patch.object(script, 'wait_for_gateway') as external, patch.object(script, 'run', side_effect=launch), contextlib.redirect_stdout(io.StringIO()):
+            script.main()
+            self.assertFalse(list(Path(directory).iterdir()))
+        self.assertEqual(events, ['gateway-start', 'qemu', 'gateway-stop'])
+        external.assert_not_called()
+
+    def test_named_gateway_uses_overlay_mode_and_private_listener(self):
+        script = load('test-boot')
+        with tempfile.TemporaryDirectory() as directory, patch.object(script.subprocess, 'Popen') as spawn:
+            process = spawn.return_value
+            process.poll.return_value = None
+            process.wait.return_value = 0
+            Path(directory, 'ready.json').write_text(json.dumps({'url': 'http://10.0.2.2:45678/boot.ipxe'}))
+            with script.overlay_gateway('custom.yaml', 'ubuntu', directory) as url:
+                self.assertEqual(url, 'http://10.0.2.2:45678/boot.ipxe')
+                process.terminate.assert_not_called()
+            command = spawn.call_args.args[0]
+            self.assertIn('ubuntu', command)
+            self.assertNotIn('--edit', command)
+            for flag, value in [('--http-port', '0'), ('--bind', '127.0.0.1'), ('--server', '10.0.2.2'), ('--clients', '127.0.0.1/32')]:
+                self.assertEqual(command[command.index(flag)+1], value)
+            process.terminate.assert_called_once()
+            process.wait.assert_called_once_with(timeout=120)
+
+    def test_named_gateway_keeps_recovery_records_if_upper_cleanup_incomplete(self):
+        script = load('test-boot')
+        with tempfile.TemporaryDirectory() as directory, patch.object(script.subprocess, 'Popen') as spawn:
+            spawn.return_value.poll.return_value = None
+            spawn.return_value.wait.return_value = 0
+            Path(directory, 'ready.json').write_text(json.dumps({'url': 'http://10.0.2.2:45678/boot.ipxe'}))
+            uppers = Path(directory, 'gateway', 'uppers')
+            uppers.mkdir(parents=True)
+            (uppers / 'still-active.json').write_text('{}')
+            with self.assertRaisesRegex(RuntimeError, 'cleanup incomplete'):
+                with script.overlay_gateway('custom.yaml', 'ubuntu', directory):
+                    pass
+            self.assertTrue((uppers / 'still-active.json').exists())
+
+    def test_named_gateway_startup_failure_never_launches_vm(self):
+        script = load('test-boot')
+        with tempfile.TemporaryDirectory() as directory, patch.object(sys, 'argv', ['test-boot', 'ubuntu', '--work-dir', directory]), patch.object(script.shutil, 'which', return_value='/qemu'), patch.object(script.subprocess, 'Popen') as spawn, patch.object(script, 'run') as vm, contextlib.redirect_stderr(io.StringIO()), self.assertRaisesRegex(RuntimeError, 'gateway exited with status 2'):
+            spawn.return_value.poll.return_value = 2
+            spawn.return_value.wait.return_value = 2
+            script.main()
+        vm.assert_not_called()
+
     def test_parallel_pxe_launches_have_distinct_mac_and_explicit_mac_validates(self):
         script=load('test-boot')
         macs=[script.default_mac() for _ in range(20)]

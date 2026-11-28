@@ -148,3 +148,30 @@ for an unlimited number of live holders, clones or unretired APPEND operations.
 
 Disposable volume images and transfer staging require adequate temporary-storage
 quota. EDQUOT is an environment failure, not successful reclamation evidence.
+
+## Explicit absent-account PIN repair
+
+An administrator can call `Client.PruneAbsentAccountPins(ctx)` on a bucket-bound
+connection. This is a bounded repair of the one reference root, not filesystem
+recovery or a volume scan. It removes only plain PINs whose account ID is absent
+from the current authoritative account index. Existing and disabled accounts,
+retirement claims, and durable dependency anchors are preserved. Socket closure
+and elapsed time are never evidence that a holder is gone.
+
+The request uses `OBJECT_REFERENCE` (`0x0121`) action **9**: the usual object
+reference prefix identifies the bucket-local reference root, followed by a zero
+32-byte target, `u8(9)`, and a nonzero 16-byte token. The optional negotiated
+accepted-reference boolean retains its existing meaning. A successful result is
+the existing one-byte `true` response. The operation is idempotent; older servers
+reject the unknown action without modifying the root. Non-admin callers receive
+403 before root data is read. No new filesystem-format interpretation is involved.
+
+Repair requires stable single-copy authority for this exact root. Replicated,
+everywhere, joining, or uncertain ownership is rejected with 503. The repair uses
+the normal reference gate and root CAS admission; account-index continuity and
+absence are checked again while publication is protected. A concurrent account
+recreation or root mutation causes a fresh read and validation instead of removing
+holders under a stale absence proof. Already-prepared distributed mutations are
+excluded. This guard provides the publication boundary; the command does not
+pretend to have drained every cluster connection or grant an offline-maintenance
+lease. Dependency cleanup still requires the owning application's graph proof.

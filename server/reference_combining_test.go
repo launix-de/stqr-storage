@@ -385,7 +385,7 @@ func TestReferenceCombiningAuthorizationAndRetry(t *testing.T) {
 		})
 	}
 }
-func TestReferenceCombiningExternalCASAndLimits(t *testing.T) {
+func TestReferenceCombiningExternalCASAndDynamicAdmission(t *testing.T) {
 	f := newCombiningFixture(t)
 	root := volume.ObjectID(client.ObjectReferenceRootID())
 	raw := f.root(t)
@@ -417,12 +417,19 @@ func TestReferenceCombiningExternalCASAndLimits(t *testing.T) {
 	before := f.mark()
 	ms = []client.Message{f.message(0, client.NewRequestID(), 3), f.message(0, client.NewRequestID(), 4)}
 	for _, e := range f.burst(t, ms, false, nil) {
-		if objectStatus(e) != 429 {
-			t.Fatal("account limit ignored", e)
+		if e != nil {
+			t.Fatal("dynamic admission rejected valid holder", e)
 		}
 	}
-	if f.mark() != before {
-		t.Fatal("rejected requests rewrote root")
+	if f.mark() == before {
+		t.Fatal("accepted holders did not update root")
+	}
+	after, e := decodeObjectReferences(f.root(t), f.b.ID())
+	if e != nil || len(after) != len(got)+2 {
+		t.Fatal("accepted holders lost", len(after), e)
+	}
+	if !bytes.Equal(encodeObjectReferences(after[:len(got)], f.b.ID()), encodeObjectReferences(got, f.b.ID())) {
+		t.Fatal("existing holders changed during growth")
 	}
 }
 func TestReferenceCombiningSelectedCancellationFence(t *testing.T) {

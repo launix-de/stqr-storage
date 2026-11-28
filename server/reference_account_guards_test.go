@@ -26,7 +26,7 @@ func guardIndex(t *testing.T, s *Server, users []account) *accountsIndex {
 	return x
 }
 func guardEntries(owner volume.ID) []objectReferenceEntry {
-	es := make([]objectReferenceEntry, maxObjectReferences)
+	es := make([]objectReferenceEntry, historicalReferenceRootLimit)
 	for i := range es {
 		binary.LittleEndian.PutUint64(es[i].object[:8], uint64(i+1))
 		es[i].proof = sha256.Sum256(es[i].object[:])

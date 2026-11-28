@@ -17,12 +17,9 @@ import (
 // oracle for all seven online/offline actions, rather than testing the new
 // byte operations against their own output.
 func legacyReferenceDecision(entries []objectReferenceEntry, target volume.ObjectID, proof [32]byte, uid volume.ID, admin bool, action byte) ([]objectReferenceEntry, bool, error) {
-	own, count := -1, 0
+	own := -1
 	busy := false
 	for i, r := range entries {
-		if r.account == uid {
-			count++
-		}
 		if action != 6 && r.proof == proof {
 			if !(r.account == uid || admin && (action == 1 || action == 3 || action == 5)) || r.object != target || r.claim != (action == 2 || action == 3) || r.dependency != (action == 4 || action == 5) {
 				return entries, false, ErrBucketForbidden
@@ -54,9 +51,6 @@ func legacyReferenceDecision(entries []objectReferenceEntry, target volume.Objec
 	if busy {
 		return entries, false, fail(409, "object reference is busy")
 	}
-	if len(entries) >= maxObjectReferences || count >= maxAccountReferences {
-		return entries, false, fail(429, "object reference limit reached")
-	}
 	return append(entries, objectReferenceEntry{target, proof, uid, action == 2, action == 4}), true, nil
 }
 func TestReferenceByteDifferential(t *testing.T) {
@@ -81,8 +75,8 @@ func TestReferenceByteDifferential(t *testing.T) {
 		admin := rng.Intn(3) == 0
 		old := append([]objectReferenceEntry(nil), entries...)
 		expected, changed, wantErr := legacyReferenceDecision(old, target, proof, uid, admin, action)
-		full, gotErr := table.apply(target, proof, uid, admin, action, false)
-		if full || objectStatus(gotErr) != objectStatus(wantErr) || table.changed != changed {
+		gotErr := table.apply(target, proof, uid, admin, action)
+		if objectStatus(gotErr) != objectStatus(wantErr) || table.changed != changed {
 			t.Fatalf("step %d action%d changed%v/%v err%v/%v", i, action, table.changed, changed, gotErr, wantErr)
 		}
 		got, e := decodeObjectReferences(table.raw, bucket)
@@ -107,7 +101,7 @@ func TestReferenceByteFormatAndForeignRoot(t *testing.T) {
 			t.Fatal("accepted truncated image", n)
 		}
 	}
-	for _, mutate := range []func([]byte){func(b []byte) { b[0] = 'X' }, func(b []byte) { b[104] = 3 }, func(b []byte) { binary.LittleEndian.PutUint32(b[20:24], maxObjectReferences+1) }} {
+	for _, mutate := range []func([]byte){func(b []byte) { b[0] = 'X' }, func(b []byte) { b[104] = 3 }, func(b []byte) { binary.LittleEndian.PutUint32(b[20:24], historicalReferenceRootLimit+1) }} {
 		bad := bytes.Clone(raw)
 		mutate(bad)
 		for _, id := range []volume.ID{bucket, {9}} {
@@ -121,7 +115,7 @@ func TestReferenceByteFormatAndForeignRoot(t *testing.T) {
 		t.Fatal("clone inherited holders", e)
 	}
 	original := bytes.Clone(raw)
-	if _, e = table.apply(entry.object, entry.proof, entry.account, false, 0, false); e != nil {
+	if e = table.apply(entry.object, entry.proof, entry.account, false, 0); e != nil {
 		t.Fatal(e)
 	}
 	got, e := decodeObjectReferences(table.raw, volume.ID{9})
@@ -129,33 +123,28 @@ func TestReferenceByteFormatAndForeignRoot(t *testing.T) {
 		t.Fatal("foreign edit damaged root", e)
 	}
 }
-func TestReferenceByteLimitsAndReadOnly(t *testing.T) {
+func TestReferenceByteDynamicAdmissionAndReadOnly(t *testing.T) {
 	bucket := volume.ID{8}
 	uid := volume.ID{1}
 	target := volume.ObjectID{3}
 	proof := [32]byte{4}
-	for _, n := range []int{maxAccountReferences, maxObjectReferences} {
+	for _, n := range []int{historicalReferenceAccountLimit, historicalReferenceRootLimit, 2*historicalReferenceRootLimit + 1} {
 		entries := make([]objectReferenceEntry, n)
 		for i := range entries {
 			entries[i].account = uid
-			if n == maxObjectReferences {
-				entries[i].account = volume.ID{2}
-			}
 		}
 		raw := encodeObjectReferences(entries, bucket)
+		saved := bytes.Clone(raw)
 		table, e := borrowReferenceBytes(raw, bucket, 32)
 		if e != nil {
 			t.Fatal(e)
 		}
-		full, e := table.apply(target, proof, uid, false, 0, true)
-		if full != (n == maxObjectReferences) || (n == maxObjectReferences && e != nil) || (n == maxAccountReferences && objectStatus(e) != 429) {
-			t.Fatal("wrong reclamation decision", n, full, e)
-		}
-		_, e = table.apply(target, proof, uid, false, 0, false)
-		if objectStatus(e) != 429 || table.changed {
-			t.Fatal("limit bypassed", e)
+		e = table.apply(target, proof, uid, false, 0)
+		if e != nil || !table.changed || table.count() != n+1 || !bytes.Equal(raw, saved) {
+			t.Fatal("dynamic reference insertion failed", n, e)
 		}
 	}
+
 	entries := []objectReferenceEntry{{target, proof, uid, false, false}}
 	raw := encodeObjectReferences(entries, bucket)
 	for _, action := range []byte{0, 1} {
@@ -168,7 +157,7 @@ func TestReferenceByteLimitsAndReadOnly(t *testing.T) {
 			if e != nil {
 				panic(e)
 			}
-			_, e = table.apply(target, p, uid, false, action, false)
+			e = table.apply(target, p, uid, false, action)
 			if e != nil || table.changed {
 				panic("read-only decision changed")
 			}
@@ -209,7 +198,7 @@ func BenchmarkReferenceByteMutation(b *testing.B) {
 					if e != nil {
 						b.Fatal(e)
 					}
-					_, e = table.apply(target, proof, uid, false, 0, false)
+					e = table.apply(target, proof, uid, false, 0)
 					if e != nil {
 						b.Fatal(e)
 					}
@@ -239,7 +228,7 @@ func TestReferenceByteBatchKeepsOriginalCASImage(t *testing.T) {
 		admin := rng.Intn(2) == 0
 		old := append([]objectReferenceEntry(nil), entries...)
 		expected, changed, wantErr := legacyReferenceDecision(old, target, proof, uid, admin, action)
-		_, gotErr := table.apply(target, proof, uid, admin, action, false)
+		gotErr := table.apply(target, proof, uid, admin, action)
 		everChanged = everChanged || changed
 		if objectStatus(gotErr) != objectStatus(wantErr) || table.changed != everChanged {
 			t.Fatal("batch outcome diverged", i, gotErr, wantErr)

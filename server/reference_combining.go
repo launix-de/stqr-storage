@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"errors"
+	"math"
 
 	"github.com/launix-de/stqr-storage/client"
 	"github.com/launix-de/stqr-storage/volume"
@@ -214,12 +215,9 @@ func (s *Server) validateCombinedReference(q *combinedReferenceRequest) (combine
 // is provisional until the one CAS succeeds; a competing external writer forces
 // all validation and limit/busy decisions to be recomputed from its new root.
 func applyCombinedReference(entries []objectReferenceEntry, c combinedReference) ([]objectReferenceEntry, error) {
-	own, count := -1, 0
+	own := -1
 	busy := false
 	for i, e := range entries {
-		if e.account == c.uid {
-			count++
-		}
 		if e.proof == c.proof {
 			if !(e.account == c.uid || c.internal.User.Role == "ADMIN" && c.unpin) || e.object != c.target || e.claim || e.dependency {
 				return entries, ErrBucketForbidden
@@ -242,8 +240,8 @@ func applyCombinedReference(entries []objectReferenceEntry, c combinedReference)
 	if busy {
 		return entries, fail(409, "object reference is busy")
 	}
-	if len(entries) >= maxObjectReferences || count >= maxAccountReferences {
-		return entries, fail(429, "object reference limit reached")
+	if uint64(len(entries)) == math.MaxUint32 || len(entries) >= (math.MaxInt-referenceHeaderBytes)/referenceEntryBytes {
+		return entries, volume.ErrFull
 	}
 	return append(entries, objectReferenceEntry{object: c.target, proof: c.proof, account: c.uid}), nil
 }
@@ -263,7 +261,6 @@ func (s *Server) executeCombinedReferences(requests []*combinedReferenceRequest)
 	// no selected job may retire before its known observations are retained.
 	defer fanoutCombinedReferenceTouches(ws, collector, requests)
 	ctx := context.WithValue(s.ctx, connectionWorkKey{}, collector)
-referenceBatchRetry:
 	for retry := 0; retry < 128; retry++ {
 		active := make([]combinedReference, 0, len(requests))
 		for _, q := range requests {
@@ -294,52 +291,17 @@ referenceBatchRetry:
 			}
 			return
 		}
-		casCtx := ctx
 		for _, c := range active {
 			action := byte(0)
 			if c.unpin {
 				action = 1
 			}
-			full, e := table.apply(c.target, c.proof, c.uid, c.internal.User.Role == "ADMIN", action, true)
-			c.q.result.err = e
-			if full {
-				entries, e := decodeObjectReferences(table.raw, first.op.bucket.ID())
-				if e != nil {
-					for _, other := range active {
-						other.q.result.err = e
-					}
-					return
-				}
-				filtered, nextCtx, e := s.pruneAbsentPlainReferencePins(casCtx, first.op.bucket, entries)
-				if e != nil {
-					if errors.Is(e, volume.ErrPrecondition) && !errors.Is(e, volume.ErrRecovery) {
-						continue referenceBatchRetry
-					}
-					c.q.result.err = e
-					for _, other := range active {
-						if other.q.result.err == nil {
-							other.q.result.err = e
-						}
-					}
-					return
-				}
-				casCtx = nextCtx
-				if len(filtered) < len(entries) {
-					table, e = borrowReferenceBytes(encodeObjectReferences(filtered, first.op.bucket.ID()), first.op.bucket.ID(), len(active))
-					if e != nil {
-						for _, other := range active {
-							other.q.result.err = e
-						}
-						return
-					}
-					table.changed = true // Guarded reclamation must publish even if a later add fails.
-				}
-				_, c.q.result.err = table.apply(c.target, c.proof, c.uid, c.internal.User.Role == "ADMIN", action, false)
-			}
+			c.q.result.err = table.apply(c.target, c.proof, c.uid, c.internal.User.Role == "ADMIN", action)
 		}
+
 		if table.changed {
 			next := table.raw
-			_, err = first.op.bucket.CAS(casCtx, first.internal, first.op.object, 0, raw, next, volume.Options{RequestID: volume.ID(client.NewRequestID()), CreateOnly: absent, WholeObject: true, Accepted: true})
+			_, err = first.op.bucket.CAS(ctx, first.internal, first.op.object, 0, raw, next, volume.Options{RequestID: volume.ID(client.NewRequestID()), CreateOnly: absent, WholeObject: true, Accepted: true})
 			if errors.Is(err, volume.ErrPrecondition) && !errors.Is(err, volume.ErrRecovery) {
 				continue
 			}
@@ -398,18 +360,3 @@ type prepublicationQuotaFull struct{}
 
 func (*prepublicationQuotaFull) Error() string { return volume.ErrFull.Error() }
 func (*prepublicationQuotaFull) Unwrap() error { return volume.ErrFull }
-
-// A full per-account budget cannot be repaired by discarding another account's
-// stale PINs. This scan is used only after a full-root429, never on the hot path.
-func referenceAccountHasRoom(entries []objectReferenceEntry, uid volume.ID) bool {
-	count := 0
-	for _, entry := range entries {
-		if entry.account == uid {
-			count++
-			if count >= maxAccountReferences {
-				return false
-			}
-		}
-	}
-	return true
-}
