@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/launix-de/stqr-storage/client"
+	"github.com/launix-de/stqr-storage/internal/decay"
 	"github.com/launix-de/stqr-storage/volume"
 )
 
@@ -33,19 +34,18 @@ func lazyFreeWatermarks(capacity, free uint64, poolCapacity, poolFree uint64) (u
 type capacityGoal struct {
 	sampled   time.Time
 	allocated uint64
-	growth    float64 // smoothed net allocation growth in bytes/second
+	growth    decay.Accumulator // discounted application growth
+	halfLives decay.HalfLives
 	target    uint64
 }
 
 func (g *capacityGoal) observe(v rangeDestination, poolCapacity, poolFree uint64, now time.Time, horizon ...time.Duration) uint64 {
 	if !g.sampled.IsZero() && now.Sub(g.sampled) >= time.Second {
-		seconds := now.Sub(g.sampled).Seconds()
 		growth := float64(0)
 		if v.volume.AllocatedPhysical > g.allocated {
-			growth = float64(v.volume.AllocatedPhysical-g.allocated) / seconds
+			growth = float64(v.volume.AllocatedPhysical - g.allocated)
 		}
-		alpha := 1 - math.Exp(-seconds/10)
-		g.growth += alpha * (growth - g.growth)
+		g.growth.AddInterval(g.sampled, now, growth, g.halfLives)
 		g.sampled, g.allocated = now, v.volume.AllocatedPhysical
 	} else if g.sampled.IsZero() {
 		g.sampled, g.allocated = now, v.volume.AllocatedPhysical
@@ -70,7 +70,7 @@ func (g *capacityGoal) observe(v rangeDestination, poolCapacity, poolFree uint64
 	if len(horizon) > 0 {
 		seconds = max(seconds, horizon[0].Seconds())
 	}
-	forecast := uint64(math.Min(float64(ceiling), g.growth*seconds))
+	forecast := uint64(math.Min(float64(ceiling), g.growth.Rates(now, g.halfLives).Peak()*seconds))
 	g.target = min(ceiling, max(g.target, target, forecast))
 	if g.target <= v.free {
 		g.target = 0
@@ -80,6 +80,7 @@ func (g *capacityGoal) observe(v rangeDestination, poolCapacity, poolFree uint64
 }
 
 func (r *rangeManager) capacityNeed(v rangeDestination, destinations []rangeDestination) uint64 {
+	h := r.server.placementHalfLives()
 	var total, free uint64
 	for _, d := range destinations {
 		if d.volume.Class == v.volume.Class {
@@ -95,15 +96,17 @@ func (r *rangeManager) capacityNeed(v rangeDestination, destinations []rangeDest
 	id := volume.ID(v.volume.ID)
 	g := r.capacityGoals[id]
 	if g == nil {
-		g = &capacityGoal{}
+		g = &capacityGoal{halfLives: h}
 		r.capacityGoals[id] = g
 	}
+	g.halfLives = h
 	return g.observe(v, total, free, time.Now(), 4*r.capacityMoveTime)
 }
 
 // Evaluate a whole candidate pool once, rather than summing the same pool for
 // every range/replica. The resulting thresholds are advisory placement input.
 func (r *rangeManager) capacityNeeds(destinations []rangeDestination) map[client.ID]uint64 {
+	h := r.server.placementHalfLives()
 	type totals struct{ capacity, free uint64 }
 	pools := make(map[uint8]totals)
 	for _, d := range destinations {
@@ -123,10 +126,11 @@ func (r *rangeManager) capacityNeeds(destinations []rangeDestination) map[client
 		id := volume.ID(d.volume.ID)
 		g := r.capacityGoals[id]
 		if g == nil {
-			g = &capacityGoal{}
+			g = &capacityGoal{halfLives: h}
 			r.capacityGoals[id] = g
 		}
 		pool := pools[d.volume.Class]
+		g.halfLives = h
 		needs[d.volume.ID] = g.observe(d, pool.capacity, pool.free, now, 4*r.capacityMoveTime)
 	}
 	return needs

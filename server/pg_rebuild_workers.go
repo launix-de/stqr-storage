@@ -49,7 +49,7 @@ func (r *rangeManager) startPGWorkers() {
 				}
 			}
 			s.peerStatsMu.RUnlock()
-			catalog.volumeRates = placementVolumeRates(catalog.snapshots, r.pgCatalog.Load())
+			catalog.volumeRates = placementVolumeRates(catalog.snapshots, r.pgCatalog.Load(), s.placementHalfLives())
 			for _, d := range s.bucketSnapshots() {
 				if d.ID == systemBucket.String() || d.DeletionComplete || d.State == BucketDeleting {
 					continue
@@ -150,13 +150,11 @@ func (r *rangeManager) runPGWorker(group string, worker pgRebuildWorker) {
 			err = r.move(ctx, plan)
 			cancel()
 			if err == nil {
+				h := s.placementHalfLives()
 				r.mu.Lock()
-				elapsed := time.Since(started)
-				if r.capacityMoveTime == 0 {
-					r.capacityMoveTime = elapsed
-				} else {
-					r.capacityMoveTime = (r.capacityMoveTime*3 + elapsed) / 4
-				}
+				finished := time.Now()
+				r.capacityMoveMean.Observe(finished, float64(finished.Sub(started)), 1, h)
+				r.capacityMoveTime = time.Duration(r.capacityMoveMean.Values(finished, h).Peak())
 				r.mu.Unlock()
 				select {
 				case worker.wake <- struct{}{}:

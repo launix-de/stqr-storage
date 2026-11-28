@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/launix-de/stqr-storage/client"
+	"github.com/launix-de/stqr-storage/internal/decay"
 	"github.com/launix-de/stqr-storage/volume"
 )
 
@@ -16,12 +17,12 @@ type rangeMetricKey struct {
 	bits   uint16
 }
 type rangeMetric struct {
-	read, write         atomic.Uint64
-	active              atomic.Int64
-	mu                  sync.Mutex
-	sampled             time.Time
-	lastRead, lastWrite uint64
-	readRate, writeRate float64
+	read, write             atomic.Uint64
+	active                  atomic.Int64
+	mu                      sync.Mutex
+	readWindow, writeWindow decay.Accumulator
+	sampled                 time.Time
+	lastRead, lastWrite     uint64
 }
 
 // Range telemetry is advisory. Keep snapshots comfortably below the existing
@@ -59,22 +60,20 @@ func (r *rangeManager) rangeWorkload(key rangeMetricKey) (float64, float64) {
 		return 0, 0
 	}
 	m := value.(*rangeMetric)
+	h := r.server.placementHalfLives()
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	now := time.Now()
-	read, write := m.read.Load(), m.write.Load()
 	if m.sampled.IsZero() {
 		m.sampled = now
-		m.lastRead, m.lastWrite = read, write
-		return 0, 0
-	}
-	seconds := now.Sub(m.sampled).Seconds()
-	if seconds >= 1 {
-		m.readRate = float64(read-m.lastRead) / seconds
-		m.writeRate = float64(write-m.lastWrite) / seconds
+		m.lastRead, m.lastWrite = m.read.Load(), m.write.Load()
+	} else if now.Sub(m.sampled) >= time.Second {
+		read, write := m.read.Load(), m.write.Load()
+		m.readWindow.AddInterval(m.sampled, now, float64(read-m.lastRead), h)
+		m.writeWindow.AddInterval(m.sampled, now, float64(write-m.lastWrite), h)
 		m.sampled, m.lastRead, m.lastWrite = now, read, write
 	}
-	return m.readRate, m.writeRate
+	return m.readWindow.Rates(now, h).Peak(), m.writeWindow.Rates(now, h).Peak()
 }
 
 func (r *rangeManager) collectRangeTelemetry(snap *client.StatsSnapshot) {

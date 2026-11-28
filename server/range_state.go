@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/launix-de/stqr-storage/client"
+	"github.com/launix-de/stqr-storage/internal/decay"
 	"github.com/launix-de/stqr-storage/volume"
 )
 
@@ -106,6 +107,7 @@ type rangeManager struct {
 	pressures        []rangePressure
 	capacityGoals    map[volume.ID]*capacityGoal
 	capacityMoveTime time.Duration
+	capacityMoveMean decay.Mean
 	mu               sync.Mutex
 	server           *Server
 	journal          *controlJournal

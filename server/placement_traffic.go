@@ -2,12 +2,22 @@
 package server
 
 import (
+	"time"
+
 	"github.com/launix-de/stqr-storage/client"
+	"github.com/launix-de/stqr-storage/internal/decay"
 )
 
-type placementVolumeRate struct{ read, write float64 }
+type placementVolumeRate struct {
+	read, write             float64 // captured forecast; the underlying windows decay on use
+	readWindow, writeWindow decay.Accumulator
+}
 
-func placementVolumeRates(snapshots []client.StatsSnapshot, previous *pgRebuildCatalog) map[client.ID]placementVolumeRate {
+func placementVolumeRates(snapshots []client.StatsSnapshot, previous *pgRebuildCatalog, windows ...decay.HalfLives) map[client.ID]placementVolumeRate {
+	h := (decay.HalfLives{}).Normalized()
+	if len(windows) != 0 {
+		h = windows[0].Normalized()
+	}
 	out := make(map[client.ID]placementVolumeRate)
 	if previous == nil {
 		return out
@@ -30,7 +40,10 @@ func placementVolumeRates(snapshots []client.StatsSnapshot, previous *pgRebuildC
 		if snapshot.CapturedUnixNS <= prior.CapturedUnixNS {
 			continue
 		}
-		seconds := float64(snapshot.CapturedUnixNS-prior.CapturedUnixNS) / 1e9
+		if snapshot.CapturedUnixNS > 1<<63-1 || prior.CapturedUnixNS > 1<<63-1 {
+			continue
+		}
+		start, end := time.Unix(0, int64(prior.CapturedUnixNS)), time.Unix(0, int64(snapshot.CapturedUnixNS))
 		volumes := make(map[client.ID]client.VolumeStats, len(prior.Volumes))
 		for _, v := range prior.Volumes {
 			volumes[v.ID] = v
@@ -40,10 +53,13 @@ func placementVolumeRates(snapshots []client.StatsSnapshot, previous *pgRebuildC
 			if !ok {
 				continue
 			}
-			read := float64(subtractCapacity(v.IO.PhysicalReadBytes, p.IO.PhysicalReadBytes)) / seconds
-			write := float64(subtractCapacity(v.IO.PhysicalWriteBytes, p.IO.PhysicalWriteBytes)) / seconds
+			read := float64(subtractCapacity(v.IO.PhysicalReadBytes, p.IO.PhysicalReadBytes))
+			write := float64(subtractCapacity(v.IO.PhysicalWriteBytes, p.IO.PhysicalWriteBytes))
 			last := previous.volumeRates[v.ID]
-			out[v.ID] = placementVolumeRate{.75*last.read + .25*read, .75*last.write + .25*write}
+			last.readWindow.AddInterval(start, end, read, h)
+			last.writeWindow.AddInterval(start, end, write, h)
+			last.read, last.write = last.readWindow.Rates(end, h).Peak(), last.writeWindow.Rates(end, h).Peak()
+			out[v.ID] = last
 		}
 	}
 	return out
@@ -51,10 +67,11 @@ func placementVolumeRates(snapshots []client.StatsSnapshot, previous *pgRebuildC
 func (r *rangeManager) placementBackground(destinations []rangeDestination) ([]float64, []float64) {
 	read, write := make([]float64, len(destinations)), make([]float64, len(destinations))
 	catalog := r.pgCatalog.Load()
+	h, now := r.server.placementHalfLives(), time.Now()
 	for i, d := range destinations {
 		if catalog != nil {
 			rate := catalog.volumeRates[d.volume.ID]
-			read[i], write[i] = rate.read, rate.write
+			read[i], write[i] = rate.readWindow.Rates(now, h).Peak(), rate.writeWindow.Rates(now, h).Peak()
 		}
 	}
 	return read, write

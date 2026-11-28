@@ -62,25 +62,26 @@ type VolumeConfig struct {
 	OperationID            string   `yaml:"operation_id,omitempty" json:"operation_id,omitempty"`
 }
 type Config struct {
-	RecoveryVolumes        []VolumeConfig `yaml:"recovery_volumes,omitempty" json:"recovery_volumes,omitempty"`
-	Node                   NodeConfig     `yaml:"node" json:"node"`
-	ClusterID              string         `yaml:"cluster_id" json:"cluster_id"`
-	Generation             uint64         `yaml:"generation" json:"generation"`
-	BucketCatalogVersion   uint16         `yaml:"bucket_catalog_version,omitempty" json:"-"`
-	JoinPending            bool           `yaml:"join_pending,omitempty" json:"join_pending"`
-	PeerDirectoryVersion   uint16         `yaml:"peer_directory_version,omitempty" json:"-"`
-	PlacementGroupsVersion uint16         `yaml:"placement_groups_version,omitempty" json:"-"`
-	ControlVersion         uint16         `yaml:"control_version,omitempty" json:"-"`
-	QuotaVersion           uint16         `yaml:"quota_version,omitempty" json:"-"`
-	RangeVersion           uint16         `yaml:"range_version,omitempty" json:"-"`
-	Auth                   AuthConfig     `yaml:"auth" json:"auth"`
-	VolumesDir             string         `yaml:"volumes_dir" json:"volumes_dir"`
-	SystemVolumeBytes      int64          `yaml:"system_volume_bytes" json:"system_volume_bytes"`
-	RAMBytes               int64          `yaml:"ram_bytes" json:"ram_bytes"`
-	RAMCacheBytes          int64          `yaml:"ramcache_bytes" json:"ramcache_bytes"`
-	AllowSubnets           []string       `yaml:"allow_subnets" json:"allow_subnets"`
-	Peers                  []PeerConfig   `yaml:"peers" json:"peers"`
-	Volumes                []VolumeConfig `yaml:"volumes" json:"volumes"`
+	PlacementStatistics    PlacementStatisticsConfig `yaml:"placement_statistics,omitempty" json:"placement_statistics"`
+	RecoveryVolumes        []VolumeConfig            `yaml:"recovery_volumes,omitempty" json:"recovery_volumes,omitempty"`
+	Node                   NodeConfig                `yaml:"node" json:"node"`
+	ClusterID              string                    `yaml:"cluster_id" json:"cluster_id"`
+	Generation             uint64                    `yaml:"generation" json:"generation"`
+	BucketCatalogVersion   uint16                    `yaml:"bucket_catalog_version,omitempty" json:"-"`
+	JoinPending            bool                      `yaml:"join_pending,omitempty" json:"join_pending"`
+	PeerDirectoryVersion   uint16                    `yaml:"peer_directory_version,omitempty" json:"-"`
+	PlacementGroupsVersion uint16                    `yaml:"placement_groups_version,omitempty" json:"-"`
+	ControlVersion         uint16                    `yaml:"control_version,omitempty" json:"-"`
+	QuotaVersion           uint16                    `yaml:"quota_version,omitempty" json:"-"`
+	RangeVersion           uint16                    `yaml:"range_version,omitempty" json:"-"`
+	Auth                   AuthConfig                `yaml:"auth" json:"auth"`
+	VolumesDir             string                    `yaml:"volumes_dir" json:"volumes_dir"`
+	SystemVolumeBytes      int64                     `yaml:"system_volume_bytes" json:"system_volume_bytes"`
+	RAMBytes               int64                     `yaml:"ram_bytes" json:"ram_bytes"`
+	RAMCacheBytes          int64                     `yaml:"ramcache_bytes" json:"ramcache_bytes"`
+	AllowSubnets           []string                  `yaml:"allow_subnets" json:"allow_subnets"`
+	Peers                  []PeerConfig              `yaml:"peers" json:"peers"`
+	Volumes                []VolumeConfig            `yaml:"volumes" json:"volumes"`
 }
 
 // Options describes daemon startup overrides, not a separate administrative CLI.
@@ -287,6 +288,9 @@ func loadConfig(path string, o Options) (Config, error) {
 	return c, nil
 }
 func validateConfig(c Config) error {
+	if err := c.PlacementStatistics.validate(); err != nil {
+		return err
+	}
 	if _, e := parseID(c.Node.ID); e != nil {
 		return e
 	}
