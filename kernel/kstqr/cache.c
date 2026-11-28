@@ -117,8 +117,9 @@ static void update(void *arg, const stqr_update *u)
 out:
 	mutex_unlock(&c->lock);
 }
-/* Caller holds wire; remove the entry before waiting for the unsubscribe
- * barrier, because that wait itself may dispatch a final update. */
+/* Caller holds wire. Forget the unique ID locally before submitting the
+ * no-reply retirement. Late updates find no entry, so cache eviction needs no
+ * unsubscribe barrier and must not wait for a round trip under VFS locks. */
 static void remove_entry(struct ks_cache *c, struct cached_inode *e, bool known_absent)
 {
 	stqr_id sid = e->subscription;
@@ -140,14 +141,9 @@ static void remove_entry(struct ks_cache *c, struct cached_inode *e, bool known_
 	kfree(e);
 	if (invalidate)
 		ks_queue_invalidation(c->fs, &id);
-	if(c->shared) {
-        struct ks_subscribe_result r={0};int err;init_completion(&r.done);
-        err=stqr_unsubscribe_async(c->client,sid,subscribe_completed,&r);
-        mutex_unlock(cache_wire(c));
-        if(!err)wait_for_completion(&r.done);
-        sq_free(r.data);mutex_lock(cache_wire(c));
-    }else stqr_unsubscribe(c->client, sid);
+	(void)stqr_unsubscribe_discard(c->client, sid);
 }
+
 void ks_cache_forget(struct ks_fs *f, stqr_object_id id)
 {
 	struct ks_cache *c = f->cache;

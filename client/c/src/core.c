@@ -1164,6 +1164,22 @@ int stqr_unsubscribe(stqr_client *c, stqr_id sid) {
     drop(&b); drop(&r); return err;
 }
 
+
+int stqr_unsubscribe_discard(stqr_client *c, stqr_id sid) {
+    struct buf body={0}; stqr_id rid={{0}}; int err;
+    if (!c || zero(sid.bytes,16)) return -EINVAL;
+    struct sq_binding *binding=*binding_slot(c,sid);
+    if (binding) { save_channel(c); load_channel(c,binding->channel); }
+    if (!(c->capabilities&STQR_CAP_SUBSCRIPTIONS)) return -EOPNOTSUPP;
+    put(&body,sid.bytes,16);
+    err=message_send(c,0,0x111,rid,&body); drop(&body);
+    if (err) { broken(c); return err; }
+    struct sq_binding **at=binding_slot(c,sid);
+    if (*at) { binding=*at; *at=binding->next; sq_free(binding); }
+    save_channel(c);
+    return 0;
+}
+
 static int pending_active(stqr_client *c, stqr_commit_mark *out) {
     if (!c || !out) return -EINVAL;
     if (c->durability_lost) return -ESTALE;
