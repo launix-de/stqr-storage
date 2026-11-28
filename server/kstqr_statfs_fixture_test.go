@@ -7,9 +7,11 @@ import (
 	"encoding/binary"
 	"errors"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"testing"
 
 	"github.com/launix-de/stqr-storage/client"
 )
@@ -137,4 +139,60 @@ func (g *kernelStatfsGate) timeout() {
 	g.held = false
 	g.enabled.Store(false)
 	g.mu.Unlock()
+}
+
+func TestKernelStatfsGateRequiresSameSocketCompletions(t *testing.T) {
+	var gate kernelStatfsGate
+	control := func(action string) int {
+		w := httptest.NewRecorder()
+		gate.control(w, httptest.NewRequest("GET", "/__kstqr_test/statfs/"+action, nil))
+		return w.Code
+	}
+	wire := func(kind uint8, op uint16, id byte, body []byte) []byte {
+		return client.EncodeMessage(client.Message{Kind: kind, Opcode: op, ID: client.ID{id}, Body: body})
+	}
+	if control("begin") != 200 {
+		t.Fatal("arm")
+	}
+	gate.request(wire(client.Request, client.BucketStatFS, 1, nil), 11)
+	held := gate.response(wire(client.Response, client.BucketStatFS, 1, client.ResponseBody(200, nil, "")), 11)
+	if held == nil || control("seen") != 200 {
+		t.Fatal("STATFS not held")
+	}
+	gate.request(wire(client.Request, 0x0100, 2, nil), 11)
+	if control("verify") != 409 {
+		t.Fatal("requests alone satisfied completion oracle")
+	}
+	gate.response(wire(client.Response, 0x0100, 2, client.ResponseBody(200, nil, "")), 12)
+	if gate.reads != 0 {
+		t.Fatal("another socket counted as progress")
+	}
+	gate.response(wire(client.Response, 0x0100, 2, client.ResponseBody(503, nil, "")), 11)
+	if gate.reads != 0 {
+		t.Fatal("rejected read counted as progress")
+	}
+	gate.request(wire(client.Request, 0x0100, 3, nil), 11)
+	gate.response(wire(client.Response, 0x0100, 3, client.ResponseBody(200, nil, "")), 11)
+	accepted := make([]byte, 82)
+	binary.LittleEndian.PutUint16(accepted[80:], 0x0108)
+	gate.request(wire(client.Request, client.ObjectAccepted, 4, accepted), 11)
+	if control("verify") != 409 {
+		t.Fatal("CAS request alone satisfied oracle")
+	}
+	gate.response(wire(client.Response, client.ObjectAccepted, 4, client.ResponseBody(200, nil, "")), 11)
+	if control("verify") != 200 {
+		t.Fatal("same-socket successful GET/CAS not recognized")
+	}
+	gate.timeout()
+	if control("verify") != 409 {
+		t.Fatal("timed-out original implementation could satisfy oracle")
+	}
+	if control("release") != 200 {
+		t.Fatal("release")
+	}
+	select {
+	case <-held:
+	default:
+		t.Fatal("held reply not released")
+	}
 }
