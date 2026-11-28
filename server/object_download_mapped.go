@@ -33,7 +33,8 @@ type borrowedWriteJob struct {
 
 // Queue only an operation, never a borrowed slice or an acquired read handle.
 // The sole socket writer acquires and releases the volume handle inside run.
-// In-place writes cannot change the borrowed bytes until frame output ends.
+// In-place writes cannot change borrowed bytes until the socket accepts them
+// or the unsent suffix has been captured.
 // Kernel output capacity is admitted before storage acquisition. Nonblocking
 // writes capture any unsent suffix and flush it only after releasing storage.
 // Unsupported transports and fragmented views use bounded owned capture.
