@@ -21,7 +21,8 @@ class PAM(unittest.TestCase):
             module = d / 'pam_stqr.so'
             subprocess.run(['cc', '-std=c11', '-Wall', '-Wextra', '-Werror', '-fPIC', '-shared',
                 *cflags, '-DHELPER="' + str(helper) + '"', '-o', str(module), str(ROOT / 'pam/pam_stqr.c'), '-l:libpam.so.0'], check=True)
-            (d / 'stqr-test').write_text(f'auth required {module}\nsession required {module}\n')
+            for service in ('stqr-test', 'sudo', 'sudo-i'):
+                (d / service).write_text(f'auth required {module}\nsession required {module}\n')
             harness = d / 'test.c'
             harness.write_text(r'''
 #define _GNU_SOURCE
@@ -32,9 +33,12 @@ static int conv(int n,const struct pam_message **m,struct pam_response **r,void 
  (void)m;*r=calloc(n,sizeof(**r));for(int j=0;j<n;j++)(*r)[j].resp=strdup(data);return PAM_SUCCESS;
 }
 int main(int argc,char **argv){
- if(argc!=3&&argc!=4)return 2;struct pam_conv c={conv,argv[2]};pam_handle_t *p=NULL;
- int e=pam_start_confdir("stqr-test",argc==4?argv[3]:"test-user",&c,argv[1],&p);if(e)return 3;
- e=pam_authenticate(p,0);if(!e)e=pam_open_session(p,0);if(!e)e=pam_close_session(p,0);
+ if(argc<3||argc>5)return 2;struct pam_conv c={conv,argv[2]};pam_handle_t *p=NULL;
+ int e=pam_start_confdir(argc==5?argv[4]:"stqr-test",argc>=4?argv[3]:"test-user",&c,argv[1],&p);if(e)return 3;
+ e=pam_authenticate(p,0);
+ /* sudo authenticates its invoking user, then switches PAM_USER for session. */
+ if(!e&&argc==5)e=pam_set_item(p,PAM_USER,"root");
+ if(!e)e=pam_open_session(p,0);if(!e)e=pam_close_session(p,0);
  pam_end(p,e);return e?1:0;
 }
 ''')
@@ -45,3 +49,10 @@ int main(int argc,char **argv){
             self.assertNotEqual(subprocess.run([str(exe), str(d), 'wrong-password']).returncode, 0)
             self.assertNotEqual(subprocess.run([str(exe), str(d), 'test-password', '--help']).returncode, 0)
             self.assertNotIn('password', (d / 'actions').read_text())
+            for service in ('sudo', 'sudo-i'):
+                (d / 'actions').unlink(missing_ok=True)
+                self.assertEqual(subprocess.run([str(exe), str(d), 'test-password', 'test-user', service]).returncode, 0)
+                self.assertEqual((d / 'actions').read_text().splitlines(), ['check'])
+                (d / 'actions').unlink(missing_ok=True)
+                self.assertNotEqual(subprocess.run([str(exe), str(d), 'wrong-password', 'test-user', service]).returncode, 0)
+                self.assertFalse((d / 'actions').exists())

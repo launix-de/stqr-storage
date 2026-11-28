@@ -363,8 +363,12 @@ STQR account IDs. Identity collisions and existing template-account conflicts
 fail preparation instead of silently taking over local accounts. Usernames must
 fit the supported Unix name syntax (32 characters); other STQR names and `root`
 are reported and skipped. Template users remain available for local rescue but
-are hidden from the graphical account list. STQR administrator status does not
-grant Unix root/sudo access.
+are hidden from the graphical account list. A successfully authenticated STQR
+login also enables guest-local `sudo` for that account, using its own STQR
+password. This applies to private PXE overlays and maintenance sessions; the
+UID-scoped policy is removed when the last managed login closes. It grants no
+additional cluster or bucket permissions and installs no administrator secret.
+Ordinary host installation does not enable this prepared-guest option.
 
 The builder installs `pam_stqr`, `stqr-home`, the compatible boot client and a
 credential-free login manifest. The module is enabled in `common-auth` and before
