@@ -197,6 +197,7 @@ func (v *Volume) readOnlyPage(off uint64) ([]byte, error) {
 // physicalReadView follows the same in-progress defragmentation redirection as
 // readBytes, while preserving separate regions at overlay and mapping borders.
 func (v *Volume) physicalReadView(off, length uint64) ([]ReadSegment, error) {
+	start := off
 	var out []ReadSegment
 	for length > 0 {
 		actual, size := off, min(length, uint64(BlockSize))
@@ -220,7 +221,52 @@ func (v *Volume) physicalReadView(off, length uint64) ([]ReadSegment, error) {
 		off += uint64(n)
 		length -= uint64(n)
 	}
+	if !v.sb.Moving {
+		out = v.coalesceMappedSegments(start, out)
+	}
 	return out, nil
+}
+
+// Shadow lookup splits a read into pages even when all of its payload still
+// resides in one mapped extent. Rejoin only slices proven to alias that exact
+// mapping. An intervening accepted/fence page remains a separate segment.
+// The extra borrow just obtains an alias: the original reads already account
+// for these bytes, and no payload is read, copied, or counted again here.
+func (v *Volume) coalesceMappedSegments(off uint64, parts []ReadSegment) []ReadSegment {
+	if len(parts) < 2 {
+		return parts
+	}
+	file, ok := v.dev.(*meteredIO).VolumeIO.(*FileIO)
+	if !ok {
+		return parts
+	}
+	var length uint64
+	for _, part := range parts {
+		if part.Length > BlockSize-length {
+			return parts
+		}
+		length += part.Length
+	}
+	data, n, err := file.borrowAt(off, int(length))
+	if err != nil || uint64(n) != length {
+		return parts
+	}
+	out := parts[:0]
+	at := uint64(0)
+	lastMapped := false
+	for _, part := range parts {
+		mapped := part.Borrowed && len(part.Data) > 0 && &part.Data[0] == &data[at]
+		if mapped && lastMapped {
+			prev := &out[len(out)-1]
+			prev.Length += part.Length
+			prev.Data = data[at+part.Length-prev.Length : at+part.Length : at+part.Length]
+		} else {
+			out = append(out, part)
+		}
+		at += part.Length
+		lastMapped = mapped
+	}
+	return out
 }
 
 func readSegmentsCRC(parts []ReadSegment) uint32 {

@@ -571,11 +571,11 @@ func TestBucketCOWInterruptedMaterializationRecoversAfterPrimaryRestart(t *testi
 	if _, err := primary.node.executeBucketCopy(ctx, client.Message{Kind: client.Request, Opcode: client.BucketClone, ID: client.NewRequestID(), Body: e.B}, actor); err != nil {
 		t.Fatal(err)
 	}
-	g, err := primary.node.cowGraph()
+	g, err := primary.node.cowTopology()
 	if err != nil {
 		t.Fatal(err)
 	}
-	proof, err := primary.node.cowGraphDigest(g, b.ID())
+	proof, err := g.proof(b.ID())
 	if err != nil {
 		t.Fatal(err)
 	}

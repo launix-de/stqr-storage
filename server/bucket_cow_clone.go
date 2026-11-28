@@ -172,11 +172,11 @@ func (s *Server) cloneCow(ctx context.Context, m client.Message, p principal) ([
 		if a.State != BucketActive && a.State != BucketLocked || b.State != BucketActive || a.DesiredPolicy != nil || b.DesiredPolicy != nil || len(b.ClonePeers) > 0 {
 			return fail(409, "clone needs active source and fresh destination")
 		}
-		graph, err := target.cowGraph()
+		graph, err := target.cowTopology()
 		if err != nil {
 			return err
 		}
-		if len(graph.component(source)) >= 4096 {
+		if len(graph.graph.component(source)) >= 4096 {
 			return fail(409, "clone component has reached its traversal limit")
 		}
 		a.ClonePeers = append(a.ClonePeers, BucketClonePeer{Bucket: b.ID, Link: m.ID.String(), Direction: "child"})
