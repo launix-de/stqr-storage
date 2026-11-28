@@ -167,6 +167,13 @@ func (s *Server) referenceLineageCreationAllowed() bool {
 		if remote.semantics(peerControlInfo).Max < 4 || checkPeerOperation(local, remote, peerControlInfo) != nil {
 			return false
 		}
+		// Recheck clone semantics against this same immutable membership cut.
+		// The earlier general gate may have observed a preceding membership.
+		for op := range directedCOWRequiredSemantics() {
+			if checkPeerOperation(local, remote, op) != nil {
+				return false
+			}
+		}
 	}
 	return s.currentSystem.Load() == view
 }
