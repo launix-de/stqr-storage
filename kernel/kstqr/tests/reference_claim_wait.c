@@ -4,6 +4,7 @@
 #include <assert.h>
 #include <errno.h>
 #include <pthread.h>
+#include <stddef.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stddef.h>
@@ -29,6 +30,12 @@ struct completion {
 };
 static struct workqueue_struct reference_queue;
 struct ks_fs { unsigned worker; struct workqueue_struct *reference_queue; };
+static _Thread_local bool fatal_current;
+#define current NULL
+static bool fatal_signal_pending(void *task) { (void)task;return fatal_current; }
+static unsigned cancel_after_pin;
+static bool cancel_on_unpin;
+
 struct buf { u8 *p; size_t n; int err; };
 struct member { stqr_object_id id; struct buf before, after, writes; bool writes_legacy; };
 static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
@@ -95,6 +102,8 @@ static int sq_pause(unsigned ms) { if(persistent_dependency && ++pauses>=3)retur
 static void cond_resched(void) { }
 static int ks_object_reference(struct ks_fs *f,stqr_object_id id,stqr_id token,unsigned action) {
  REQUIRE(eqid(id,intent));unsigned w=f->worker;REQUIRE(w>0&&w<=workers);
+ if(action==1&&cancel_on_unpin){cancel_on_unpin=false;fatal_current=true;}
+ if(fatal_signal_pending(current))return -EINTR;
  pthread_mutex_lock(&lock);int err=0;bool barrier=false;
  switch(action) {
  case 0: pin_calls[w]++;pins++;barrier=pin_calls[w]==1&&workers>1;break;
@@ -115,7 +124,7 @@ static int ks_object_reference(struct ks_fs *f,stqr_object_id id,stqr_id token,u
  return err;
 }
 static int intent_get(struct ks_fs *f,stqr_object_id id,struct buf *raw,struct buf *journal,stqr_info *info) {
- REQUIRE(eqid(id,intent));pthread_mutex_lock(&lock);
+ REQUIRE(eqid(id,intent));if(cancel_after_pin){fatal_current=true;if(cancel_after_pin==1)return -EINTR;}pthread_mutex_lock(&lock);
  if(!intent_exists){pthread_mutex_unlock(&lock);return -ENOENT;}
  if(claim_owner==f->worker&&reject_reread){pthread_mutex_unlock(&lock);return -EIO;}
  u8 bytes[11]="STFT\3\0";bytes[6]=decision;put(raw,bytes,sizeof(bytes));put(journal,bytes,sizeof(bytes));
@@ -144,6 +153,7 @@ static void intent_retire(struct ks_fs *f,stqr_object_id id,struct buf *b,stqr_i
 #ifndef REFERENCE_REDO_SOURCE
 #define REFERENCE_REDO_SOURCE "../reference_redo.c"
 #endif
+#include "../reference_cleanup.c"
 #include REFERENCE_REDO_SOURCE
 struct job { struct ks_fs fs; int result; };
 static void *run(void *p) { struct job *j=p;pauses=0;j->result=help_tx_pinned(&j->fs,intent,NULL);return NULL; }
@@ -163,4 +173,16 @@ static void test(unsigned n,unsigned state,bool dependency,bool reread_error) {
  REQUIRE(!pthread_barrier_destroy(&initial_pins));
  printf("reference-claim-wait: helpers=%u state=%u dependency=%d reread_error=%d pins=%u unpins=%u publish=%u redo=%u\n",n,state,dependency,reread_error,n,unpins,publications,redos);
 }
-int main(void) { alarm(10);test(1,1,false,false);test(32,1,false,false);test(32,2,false,false);test(1,1,true,false);test(1,1,false,true);puts("KSTQR_REFERENCE_CLAIM_WAIT_PASS");return 0; }
+static void test_cancelled_pin(bool origin,unsigned stage) {
+ workers=1;cancel_after_pin=stage==3?0:stage;cancel_on_unpin=stage==3;fatal_current=false;pins=claim_owner=unpins=0;intent_exists=true;decision=1;
+ memset(pin_calls,0,sizeof(pin_calls));memset(unpin_calls,0,sizeof(unpin_calls));
+ struct ks_fs fs={.worker=1,.reference_queue=&reference_queue};stqr_id token={{42}};
+ if(origin)REQUIRE(!ks_object_reference(&fs,intent,token,0));
+ int err=help_tx_pinned(&fs,intent,origin?&token:NULL);
+ REQUIRE(err==-EINTR);
+ if(origin&&!zero(token.bytes,16))REQUIRE(!ks_retire_pin(&fs,intent,token));
+ REQUIRE(pin_calls[1]==1&&unpin_calls[1]==1&&pins==0);
+ fatal_current=false;cancel_after_pin=false;
+ printf("reference-pin-cancel: origin=%d stage=%u acknowledged PIN retired without caller signal\n",origin,stage);
+}
+int main(void) { alarm(10);test_cancelled_pin(false,1);test_cancelled_pin(true,1);test_cancelled_pin(false,2);test_cancelled_pin(true,2);test_cancelled_pin(false,3);test_cancelled_pin(true,3);test(1,1,false,false);test(32,1,false,false);test(32,2,false,false);test(1,1,true,false);test(1,1,false,true);puts("KSTQR_REFERENCE_CLAIM_WAIT_PASS");return 0; }

@@ -818,6 +818,7 @@ static int help_tx_legacy(struct ks_fs *f, stqr_object_id first)
 	sq_free(stack);
 	return err ? err : first_result;
 }
+#include "reference_cleanup.c"
 #include "reference_redo.c"
 static int help_tx(struct ks_fs *f, stqr_object_id first)
 {
@@ -2024,7 +2025,7 @@ static int transact(struct ks_fs *f, struct member *m, unsigned count)
 	if (!err)
 		err = f->references ? help_tx_pinned(f, id, &origin) : help_tx(f, id);
 	if (!zero(origin.bytes, 16)) {
-		int released = ks_object_reference(f, id, origin, 1);
+		int released = ks_retire_pin(f, id, origin);
 		if (!err)
 			err = released;
 	}
