@@ -361,16 +361,9 @@ func (r *rangeManager) buildPlacementTargets(group string, descriptions []Bucket
 			input.Network = append(input.Network, network)
 		}
 	}
-	solution := solvePlacement(demands, resources, options, budgets)
-	// Slot zero is the primary in the transformation graph. Preserve current
-	// authority in the seed whenever that copy still satisfies the new policy.
-	for i, ids := range solution.Assignments {
-		for slot, id := range ids {
-			if resources[options[id].Volume].Node == current[i].Locations[0].Node {
-				ids[0], ids[slot] = ids[slot], ids[0]
-				break
-			}
-		}
+	primaries := make([]client.ID, len(current))
+	for i, entry := range current {
+		primaries[i] = entry.Locations[0].Node
 	}
 	// Client and peer transfers share one immutable distance image and one
 	// Traffic coefficient. Candidate costs are derived from bounded RAM aggregates.
@@ -400,7 +393,8 @@ func (r *rangeManager) buildPlacementTargets(group string, descriptions []Bucket
 	if s.ioPriority.users.Load() > 0 {
 		budget = 5 * time.Millisecond
 	}
-	result.improvement = improvePlacement(s.ctx, demands, resources, options, budgets, &solution, input, budget, mixed)
+	solution, improvement := rebuildPlacement(s.ctx, demands, resources, options, budgets, input, primaries, budget, mixed)
+	result.improvement = improvement
 	result.pending = len(solution.Pending)
 	for _, mandatory := range []bool{true, false} {
 		for _, i := range solution.Order {

@@ -204,8 +204,11 @@ func TestPlacementImproveDeadline(t *testing.T) {
 		clock := time.Unix(0, 0)
 		in.now = func() time.Time { clock = clock.Add(time.Millisecond); return clock }
 		r := improvePlacement(context.Background(), d, v, o, nil, &x, in, budget, 1)
-		if !r.Stopped || r.Elapsed > min(budget, placementImproveBudget)+3*time.Millisecond {
+		if r.Elapsed > min(budget, placementImproveBudget)+3*time.Millisecond || budget <= time.Nanosecond && !r.Stopped {
 			t.Fatal("deadline not enforced", budget, r)
+		}
+		if budget == time.Second && (r.Stopped || r.Attempts != uint64(len(o))) {
+			t.Fatal("single-copy phase did not finish its bounded option pass", r)
 		}
 		assertImprovementValid(t, d, v, o, nil, x)
 	}

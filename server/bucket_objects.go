@@ -247,33 +247,8 @@ func (b *Bucket) selectVolumeProof(d BucketDescription, key volume.Key, request 
 	if !create {
 		return nil, latest, false, volume.ErrNotFound
 	}
-	var target *volume.Volume
-	var bestFree uint64
-	bestScore := -1.0
-	loads := b.server.localPlacementLoads(candidates, time.Now())
-	for _, v := range candidates {
-		allocatable := true
-		if b.server.controller != nil {
-			b.server.mu.RLock()
-			managed := b.server.volumes[v.Identity().VolumeID.String()]
-			allocatable = managed != nil && managed.config.State == "active"
-			b.server.mu.RUnlock()
-		}
-		if allocatable && v.State() == volume.Active && class.Allows(v.Identity().Class) {
-			free := v.AdmissionFreePhysical()
-			score := float64(free)
-			if loads != nil {
-				score = localVolumePlacementScore(free, v.Identity().Size, loads[v.Identity().VolumeID])
-			}
-			if target == nil || score > bestScore || score == bestScore && free > bestFree {
-				target, bestFree, bestScore = v, free, score
-			}
-		}
-	}
-	if target == nil {
-		return nil, latest, false, volume.ErrFull
-	}
-	return target, latest, false, nil
+	target, err := b.server.initialVolumePlacement(client.ID(key.Bucket), class, candidates)
+	return target, latest, false, err
 }
 
 // logicalUsage counts each locally authoritative live object once, regardless

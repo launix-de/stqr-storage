@@ -27,6 +27,7 @@ type placementOption struct {
 	Allocate, Move uint64 // staying costs zero payload movement
 	Quota          uint64 // final additional bucket charge; replacement staging is not growth
 	Existing       bool   // prefer retaining a copy when payload movement ties
+	Preferred      bool   // seed preference only; never a constraint or a cost
 	Current        bool   // preserve the exact existing map, including unpinned cohorts
 }
 type placementSolution struct {
@@ -258,6 +259,9 @@ func solvePlacement(demands []placementDemand, resources []placementResource, op
 			}
 			if a.Allocate != b.Allocate {
 				return a.Allocate < b.Allocate
+			}
+			if a.Preferred != b.Preferred {
+				return a.Preferred
 			}
 			x, y := resources[a.Volume], resources[b.Volume]
 			// Among equally cheap choices prefer relative usable headroom.

@@ -26,8 +26,10 @@ Its A* implementation findings concern that archived version, not this base.
 
 PG workers revisit placement on their existing 750-ms maintenance ticks, even
 without a policy edit. Pending durable work and capacity requests come first.
-Greedy builds the initial target assignment; the improvement phase runs before
-that same target map is returned to the executor. Required policy/replica work
+The shared `rebuildPlacement` phase builds a constrained greedy seed and
+improves it before returning the target assignment. Empty bucket maps and first
+local object placements use this same phase with no migration cost; existing
+objects and receipts retain their authoritative location. Required policy/replica work
 precedes optional target differences. Existing per-PG handoff/ALL barriers and
 live destination reservations remain authoritative.
 Each source owner optimizes its currently authoritative PG ranges; this does

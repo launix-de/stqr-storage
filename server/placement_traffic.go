@@ -80,15 +80,20 @@ func placementVolumeRatesAt(snapshots []client.StatsSnapshot, previous *pgRebuil
 	}
 	return out
 }
-func (r *rangeManager) placementBackground(destinations []rangeDestination) ([]float64, []float64) {
-	read, write := make([]float64, len(destinations)), make([]float64, len(destinations))
-	catalog := r.pgCatalog.Load()
-	h, now := r.server.placementHalfLives(), time.Now()
-	for i, d := range destinations {
-		if catalog != nil {
-			rate := catalog.volumeRates[d.volume.ID]
+func placementBackgroundRates(catalog *pgRebuildCatalog, ids []client.ID, h decay.HalfLives, now time.Time) ([]float64, []float64) {
+	read, write := make([]float64, len(ids)), make([]float64, len(ids))
+	if catalog != nil {
+		for i, id := range ids {
+			rate := catalog.volumeRates[id]
 			read[i], write[i] = rate.readWindow.Rates(now, h).Peak(), rate.writeWindow.Rates(now, h).Peak()
 		}
 	}
 	return read, write
+}
+func (r *rangeManager) placementBackground(destinations []rangeDestination) ([]float64, []float64) {
+	ids := make([]client.ID, len(destinations))
+	for i, d := range destinations {
+		ids[i] = d.volume.ID
+	}
+	return placementBackgroundRates(r.pgCatalog.Load(), ids, r.server.placementHalfLives(), time.Now())
 }

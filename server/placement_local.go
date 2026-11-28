@@ -2,50 +2,73 @@
 package server
 
 import (
-	"math"
+	"context"
 	"time"
 
 	"github.com/launix-de/stqr-storage/client"
 	"github.com/launix-de/stqr-storage/volume"
 )
 
-// Existing unrestricted cohorts already stripe objects over eligible volumes.
-// Add foreground load to their new-object ranking without relocating an existing
-// object, changing a retry receipt's owner or pinning the cohort to one disk.
-// The immutable catalog is maintained by the background worker; this lookup
-// performs no storage I/O and retains no object-specific state.
-func (s *Server) localPlacementLoads(volumes []*volume.Volume, now time.Time) map[volume.ID]float64 {
-	if s.scopes == nil {
-		return nil
-	}
-	catalog := s.scopes.pgCatalog.Load()
-	if catalog == nil {
-		return nil
-	}
-	h := s.placementHalfLives()
-	loads := make(map[volume.ID]float64, len(volumes))
-	total := 0.0
+// initialVolumePlacement compiles an empty local placement into the same phase
+// as a rebuild. The caller has already proved that no object or retry receipt
+// owns a disk. The committed owner/cohort limits eligible destinations; this
+// operation must not pin a whole striped range or create a new replica role.
+func (s *Server) initialVolumePlacement(bucket client.ID, class volume.Class, volumes []*volume.Volume) (*volume.Volume, error) {
+	var eligible []*volume.Volume
+	var resources []placementResource
+	var options []placementOption
+	var ids []client.ID
+	usage := s.quotaUsage.Load()
 	for _, v := range volumes {
-		id := v.Identity().VolumeID
-		rate := catalog.volumeRates[client.ID(id)]
-		load := rate.readWindow.Rates(now, h).Peak() + rate.writeWindow.Rates(now, h).Peak()
-		loads[id] = load
-		total += load
+		identity := v.Identity()
+		active := true
+		if s.controller != nil {
+			s.mu.RLock()
+			managed := s.volumes[identity.VolumeID.String()]
+			active = managed != nil && managed.config.State == "active"
+			s.mu.RUnlock()
+		}
+		if !active || v.State() != volume.Active || !class.Allows(identity.Class) {
+			continue
+		}
+		stats := v.Stats()
+		own := uint64(0)
+		if usage != nil && stats.GuaranteedRemainingPhysical > 0 {
+			if rows, known := usage.volumes[identity.VolumeID]; known {
+				backing := s.bucketVolumeGuarantee(bucket, client.ID(identity.VolumeID), rows)
+				backing = subtractCapacity(backing, s.importReserved(bucket, client.ID(identity.VolumeID)))
+				own = min(stats.GuaranteedRemainingPhysical, backing)
+			}
+		}
+		if stats.AdmissionFreePhysical == 0 && own == 0 {
+			continue
+		}
+		node := identity.NodeID
+		resources = append(resources, placementResource{Node: client.ID(node), Capacity: stats.CapacityPhysical, Free: stats.AdmissionFreePhysical, Reserved: map[client.ID]uint64{bucket: own}})
+		options = append(options, placementOption{Range: 0, Volume: len(eligible), Allocate: 1})
+		eligible = append(eligible, v)
+		ids = append(ids, client.ID(identity.VolumeID))
 	}
-	if total == 0 {
-		return nil
+	if len(eligible) == 0 {
+		return nil, volume.ErrFull
 	}
-	// A tiny isolated request must not outweigh substantial usable headroom.
-	scale := math.Max(1<<20, total/float64(max(1, len(volumes))))
-	for id, load := range loads {
-		loads[id] = load / scale
+	input := inputForInitialPlacement(len(options))
+	var catalog *pgRebuildCatalog
+	if s.scopes != nil {
+		catalog = s.scopes.pgCatalog.Load()
 	}
-	return loads
-}
-
-func localVolumePlacementScore(free, capacity uint64, pressure float64) float64 {
-	if free == 0 {
-		return 0
+	input.BackgroundRead, input.BackgroundWrite = placementBackgroundRates(catalog, ids, s.placementHalfLives(), time.Now())
+	ctx := s.ctx
+	if ctx == nil {
+		ctx = context.Background()
 	}
-	return float64(free) / float64(max(uint64(1), capacity)) / (1 + math.Max(0, pressure))
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	demands := []placementDemand{{Bucket: bucket, Copies: 1, Bytes: 1}}
+	solution, _ := rebuildPlacement(ctx, demands, resources, options, nil, input, nil, initialPlacementBudget, 1)
+	if len(solution.Pending) != 0 || len(solution.Assignments[0]) != 1 {
+		return nil, volume.ErrFull
+	}
+	return eligible[options[solution.Assignments[0][0]].Volume], nil
 }

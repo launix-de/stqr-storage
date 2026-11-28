@@ -212,85 +212,8 @@ func (c *clusterController) patches(membership client.Membership, descriptions [
 		if patch.Bucket == (client.ID{}) {
 			patch = client.MapPatch{Bucket: client.ID(id), ToEnd: true, Entries: []client.RangeEntry{{PolicyVersion: description.Policy.Version, OwnerEpoch: 1, Locations: []client.Location{{Node: c.coordinator.ledger.node, Class: uint8(bucketClass(description.Policy))}}}}}
 			if c.server.scopes != nil {
-				destinations, _ := c.server.scopes.destinations(description)
-				// A new empty bucket need not enter an already pressured volume
-				// only to block its first writes on a capacity handoff. Keep the
-				// ordinary coordinator placement when it has healthy headroom.
-				if description.Policy.StorageStrategy != "ram" && c.server.requiredReplicas(description.Policy, membership) == 1 {
-					foundLocal, healthyLocal := false, false
-					for _, target := range destinations {
-						if target.node == c.coordinator.ledger.node {
-							foundLocal = true
-							healthyLocal = healthyLocal || target.free >= min(target.capacity/10, uint64(4<<20))
-						}
-					}
-					if foundLocal && !healthyLocal {
-						for _, target := range destinations {
-							if target.free >= min(target.capacity/10, uint64(4<<20)) && hasControlNode(membershipIDs(membership), target.node) {
-								patch.Entries[0].Locations = []client.Location{{Node: target.node, Volume: target.volume.ID, Class: target.volume.Class}}
-								break
-							}
-						}
-					}
-				}
-				// A finite limit is a soft sizing hint for an empty bucket, not a
-				// reservation. Prefer a destination that can accommodate that size
-				// if the default owner cannot. If none fits, maximize initial
-				// headroom and let normal extension handle subsequent growth.
-				// Existing maps above are deliberately never changed by this hint.
-				if description.Policy.StorageStrategy != "ram" && !description.Policy.Limits.Unlimited && description.Policy.Limits.Absolute > 0 && c.server.requiredReplicas(description.Policy, membership) == 1 {
-					ownerFits := false
-					owner := patch.Entries[0].Locations[0]
-					for _, target := range destinations {
-						if target.node == owner.Node && (owner.Volume == (client.ID{}) || owner.Volume == target.volume.ID) && target.free >= description.Policy.Limits.Absolute {
-							ownerFits = true
-						}
-					}
-					if !ownerFits {
-						best, fitted := -1, false
-						members := membershipIDs(membership)
-						for i, target := range destinations {
-							if !hasControlNode(members, target.node) {
-								continue
-							}
-							if target.free >= description.Policy.Limits.Absolute {
-								patch.Entries[0].Locations = []client.Location{{Node: target.node, Volume: target.volume.ID, Class: target.volume.Class}}
-								fitted = true
-								break
-							}
-							if best < 0 || target.free > destinations[best].free {
-								best = i
-							}
-						}
-						if !fitted && best >= 0 && destinations[best].free > 0 {
-							// An absolute quota is a cluster-wide maximum, not a
-							// promise that one volume can hold the whole bucket.
-							// Start where growth has the most headroom instead of
-							// stranding an empty bucket on a tiny coordinator disk.
-							target := destinations[best]
-							patch.Entries[0].Locations = []client.Location{{Node: target.node, Volume: target.volume.ID, Class: target.volume.Class}}
-						}
-					}
-				}
-				need := c.server.requiredReplicas(description.Policy, membership)
-				var copies []client.Location
-				seen := map[client.ID]bool{}
-				// Prefer the coordinator when eligible, then distinct failure domains.
-				for pass := 0; pass < 2; pass++ {
-					for _, target := range destinations {
-						if seen[target.node] || (pass == 0) != (target.node == c.coordinator.ledger.node) {
-							continue
-						}
-						if len(copies) >= need {
-							break
-						}
-						copies = append(copies, client.Location{Node: target.node, Volume: target.volume.ID, Class: target.volume.Class, Role: 1})
-						seen[target.node] = true
-					}
-				}
-				if len(copies) == need && need > 1 {
-					copies[0].Role = 0
-					patch.Entries[0].Locations = copies
+				if locations, ok := c.server.scopes.initialBucketLocations(description, membership, c.coordinator.ledger.node); ok {
+					patch.Entries[0].Locations = locations
 				}
 			}
 			if description.Policy.StorageStrategy == "ram" {

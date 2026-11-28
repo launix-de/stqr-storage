@@ -311,6 +311,22 @@ func improvePlacement(ctx context.Context, d []placementDemand, v []placementRes
 		s.score.Traffic += s.roleScore(node)
 	}
 	result.Before, result.After = s.score, s.score
+	// A single unassigned location needs only one pass over its eligible
+	// options. Use the same trial, hard checks and objective as all rebuilds;
+	// avoid randomized repeated trials on the object-creation hot path.
+	if len(d) == 1 && d[0].Copies == 1 {
+		for _, candidate := range byRange[0] {
+			if stop() {
+				break
+			}
+			result.Attempts++
+			if s.trial([]placementEdit{{0, 0, candidate}}, stop) {
+				result.Accepted++
+				result.After = s.score
+			}
+		}
+		return finish()
+	}
 	// Deterministic given seed, with a changing per-PG seed across cycles. Random
 	// trials avoid rescoring all R ranges after every accepted transformation.
 	if seed == 0 {
@@ -384,7 +400,7 @@ func (s *placementImproveState) adjust(r, slot, id int, sign float64) {
 	} else {
 		apply(o.Volume, w.Physical, 1)
 	}
-	if slot == 0 && (s.d[r].Copies > 1 || s.in.PrimaryLoads != nil) {
+	if slot == 0 && s.in.PrimaryLoads != nil {
 		s.roles[s.v[o.Volume].Node] += sign * (1 << 20)
 	}
 	s.score.Move += sign * float64(o.Move)
@@ -433,7 +449,10 @@ func (s *placementImproveState) volumeScore(id int) placementScore {
 }
 func (s *placementImproveState) trafficScore(id int) float64 {
 	read, write := math.Max(0, s.read[id]), math.Max(0, s.write[id])
-	return (read*read + write*write) / math.Max(1, s.loadScale)
+	// Reads and writes contend for the same volume. Keeping independent
+	// squares would make a busy reader invisible to initial write placement.
+	pressure := read + write
+	return pressure * pressure / math.Max(1, s.loadScale)
 }
 func (s *placementImproveState) roleScore(node client.ID) float64 {
 	if s.nodeCapacity[node] == 0 {

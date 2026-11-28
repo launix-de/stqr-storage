@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/launix-de/stqr-storage/client"
-	"github.com/launix-de/stqr-storage/internal/decay"
 	"github.com/launix-de/stqr-storage/volume"
 )
 
@@ -46,22 +45,6 @@ func TestSelectVolumeLoadPreservesExistingStriping(t *testing.T) {
 	got, _, _, err = b.selectVolume(desc, key, volume.ID{}, true)
 	if err != nil || got != vs[2] {
 		t.Fatal("load ranking bypassed allowed pool", err)
-	}
-	// Idle history decays; no object-level bookkeeping is involved.
-	if rates := s.localPlacementLoads(vs, now.Add(100*decay.DefaultLongHalfLife)); rates != nil && rates[vs[0].Identity().VolumeID] > 1e-20 {
-		t.Fatal("stale load remained", rates)
-	}
-}
-
-func TestSelectVolumeLoadScoreBalancesDisks(t *testing.T) {
-	if localVolumePlacementScore(900, 1000, 3) >= localVolumePlacementScore(800, 1000, 0) {
-		t.Fatal("concentrated load preferred")
-	}
-	if localVolumePlacementScore(0, 1000, 0) != 0 {
-		t.Fatal("full volume acquired score")
-	}
-	if localVolumePlacementScore(9000, 10000, 1) != localVolumePlacementScore(900, 1000, 1) {
-		t.Fatal("disk size mistaken for IO bandwidth")
 	}
 }
 

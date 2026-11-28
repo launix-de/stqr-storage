@@ -96,13 +96,29 @@ volume. These semantics remain intact. The planner retains each cohort's
 per-volume occupancy and I/O contributions instead of assuming one physical
 disk or treating local disks as replicas of each other.
 
-New-object selection also considers per-volume read/write pressure from the
-immutable RAM catalog. With observed load it combines usable headroom fraction
-and relative I/O pressure, so a larger disk is not mistaken for a faster disk.
-Without load observations it retains the previous free-byte ordering. Existing
-object/receipt lookup returns before ranking. Class, active state, PG/local
-filters and actual admission/reservation remain mandatory. This change adds no
-new striping or splitting format.
+Initial bucket maps, first local object placement and periodic rebuilds all
+call `rebuildPlacement`: the same constrained greedy seed followed by the same
+bounded optimizer and cost function. Initial placement has zero retained bytes
+and zero migration costs. The coordinator is only a seed preference for a new
+bucket; forecast pressure can improve that seed. Healthy single-owner
+coordinator maps retain `Volume=0` and their existing striping. Empty buckets
+use the existing metadata commit, without a data handoff.
+
+`selectVolumeProof` resolves existing objects and operation receipts first.
+Only a proven absence enters initial local placement. The adapter compiles the
+committed local cohort, class, live capacity and own guarantee backing into the
+same resource problem; it contains no destination ranking. A unit of marginal
+new work supplies a placement hint, not a compressed-size estimate or a quota
+reservation. The unchanged mutation engine performs exact quota and physical
+admission before publication. No object history is retained.
+
+Both phases read volume background rates through the same snapshot helper.
+Read and write bytes contribute to one shared volume-pressure term. Foreground
+initial optimization is limited to 1ms; a single-copy problem examines each
+eligible option once through the normal hard-check/score/rollback path. Greedy
+construction and eligibility compilation remain bounded by the candidate pool.
+Existing-object lookup returns before this work. There is no separate local
+score formula and no new striping or splitting format.
 
 The resource model balances measured byte pressure; it does not yet identify
 shared controller saturation or infer device IOPS capability from mmap counters.
