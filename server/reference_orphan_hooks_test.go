@@ -16,8 +16,8 @@ import (
 	"github.com/launix-de/stqr-storage/volume"
 )
 
-// Full roots model historical/live holders independently of today's per-account
-// admission cap. Existing present or disabled identities must remain untouched.
+// Roots at the former ceiling model historical/live holders. Dynamic growth
+// must preserve present, disabled and absent identities without implicit pruning.
 func fullReferenceRoot(t *testing.T, f *combiningFixture, orphans int) []objectReferenceEntry {
 	t.Helper()
 	index, err := f.s.accountIndex()
@@ -32,7 +32,7 @@ func fullReferenceRoot(t *testing.T, f *combiningFixture, orphans int) []objectR
 	if err = f.s.writeBlob("accounts", image); err != nil {
 		t.Fatal(err)
 	}
-	entries := make([]objectReferenceEntry, maxObjectReferences)
+	entries := make([]objectReferenceEntry, historicalReferenceRootLimit)
 	for i := range entries {
 		var id volume.ObjectID
 		binary.LittleEndian.PutUint64(id[:8], uint64(i))
@@ -41,11 +41,11 @@ func fullReferenceRoot(t *testing.T, f *combiningFixture, orphans int) []objectR
 	for i := 0; i < orphans; i++ {
 		entries[i].account = missing
 	}
-	entries[maxObjectReferences-3].account = missing
-	entries[maxObjectReferences-3].claim = true
-	entries[maxObjectReferences-2].account = missing
-	entries[maxObjectReferences-2].dependency = true
-	entries[maxObjectReferences-1].account = disabled
+	entries[historicalReferenceRootLimit-3].account = missing
+	entries[historicalReferenceRootLimit-3].claim = true
+	entries[historicalReferenceRootLimit-2].account = missing
+	entries[historicalReferenceRootLimit-2].dependency = true
+	entries[historicalReferenceRootLimit-1].account = disabled
 	if _, err = f.b.Put(context.Background(), f.p, volume.ObjectID(client.ObjectReferenceRootID()), encodeObjectReferences(entries, f.b.ID()), volume.Options{Accepted: true, RequestID: volume.ID(client.NewRequestID())}); err != nil {
 		t.Fatal(err)
 	}
@@ -70,7 +70,7 @@ func verifyProtectedReferenceEntries(t *testing.T, before, after []objectReferen
 		}
 	}
 }
-func TestReferenceOrphanHookSingleAcceptedAndLegacy(t *testing.T) {
+func TestReferenceGrowthSingleAcceptedAndLegacy(t *testing.T) {
 	for _, accepted := range []bool{true, false} {
 		t.Run(fmt.Sprint("accepted=", accepted), func(t *testing.T) {
 			f := newCombiningFixture(t)
@@ -84,13 +84,13 @@ func TestReferenceOrphanHookSingleAcceptedAndLegacy(t *testing.T) {
 			}
 			body, err := f.s.executeObjectReference(context.Background(), message, f.ws, f.p)
 			if err != nil || !bytes.Equal(body, []byte{1}) {
-				t.Fatal("full root did not reclaim a safe slot", err)
+				t.Fatal("reference root did not grow", err)
 			}
 			after, err := decodeObjectReferences(f.root(t), f.b.ID())
-			if err != nil || len(after) != maxObjectReferences {
-				t.Fatal("changed cap or failed unchanged-count replacement", len(after), err)
+			if err != nil || len(after) != historicalReferenceRootLimit+1 {
+				t.Fatal("failed dynamic growth", len(after), err)
 			}
-			verifyProtectedReferenceEntries(t, original, after, 1)
+			verifyProtectedReferenceEntries(t, original, after, 0)
 			uid, _ := bucketID(f.p.User.ID)
 			count := 0
 			for _, entry := range after {
@@ -109,7 +109,7 @@ func TestReferenceOrphanHookSingleAcceptedAndLegacy(t *testing.T) {
 		})
 	}
 }
-func TestReferenceOrphanHookCombinedPublishesUnchangedLength(t *testing.T) {
+func TestReferenceGrowthCombinedPublishesOnce(t *testing.T) {
 	f := newCombiningFixture(t)
 	original := fullReferenceRoot(t, f, 2)
 	before := f.mark()
@@ -126,15 +126,15 @@ func TestReferenceOrphanHookCombinedPublishesUnchangedLength(t *testing.T) {
 		}
 	}
 	after, err := decodeObjectReferences(f.root(t), f.b.ID())
-	if err != nil || len(after) != maxObjectReferences {
+	if err != nil || len(after) != historicalReferenceRootLimit+2 {
 		t.Fatal("combined root count", len(after), err)
 	}
-	verifyProtectedReferenceEntries(t, original, after, 2)
+	verifyProtectedReferenceEntries(t, original, after, 0)
 	if f.mark() != before+1 {
-		t.Fatal("combined prune/add did not publish one CAS at unchanged length")
+		t.Fatal("combined growth did not publish one CAS")
 	}
 	if f.v.IOStats().SyncOps != syncs {
-		t.Fatal("pruning added Sync")
+		t.Fatal("dynamic growth added Sync")
 	}
 	f.ws.fenceMu.Lock()
 	defer f.ws.fenceMu.Unlock()
@@ -147,33 +147,37 @@ func TestReferenceOrphanHookCombinedPublishesUnchangedLength(t *testing.T) {
 		generation = g
 	}
 }
-func TestReferenceOrphanHookNoSafeCandidatesKeeps429(t *testing.T) {
+func TestReferenceGrowthPreservesEveryHolderWithoutReclamation(t *testing.T) {
 	for _, combined := range []bool{false, true} {
 		t.Run(fmt.Sprint("combined=", combined), func(t *testing.T) {
 			f := newCombiningFixture(t)
-			fullReferenceRoot(t, f, 0)
-			raw := f.root(t)
+			original := fullReferenceRoot(t, f, 0)
 			before := f.mark()
 			ms := []client.Message{f.message(0, client.NewRequestID(), 1)}
 			if combined {
 				ms = append(ms, f.message(0, client.NewRequestID(), 2))
 			}
 			for _, err := range f.burst(t, ms, false, nil) {
-				if objectStatus(err) != 429 {
-					t.Fatal("live/disabled or claim/dependency references evicted", err)
+				if err != nil {
+					t.Fatal("reference growth rejected", err)
 				}
 			}
-			if !bytes.Equal(raw, f.root(t)) || f.mark() != before {
-				t.Fatal("full live root was rewritten or cap increased")
+			after, err := decodeObjectReferences(f.root(t), f.b.ID())
+			if err != nil || len(after) != len(original)+len(ms) {
+				t.Fatal("wrong dynamic size", len(after), err)
+			}
+			verifyProtectedReferenceEntries(t, original, after, 0)
+			if f.mark() != before+1 {
+				t.Fatal("growth did not publish one combined CAS")
 			}
 		})
 	}
 }
-func TestReferenceOrphanHookOwnAccountCapIsNotEvaded(t *testing.T) {
+func TestReferenceGrowthPastAccountAndBucketCeilings(t *testing.T) {
 	f := newCombiningFixture(t)
 	entries := fullReferenceRoot(t, f, 1)
 	uid, _ := bucketID(f.p.User.ID)
-	for i := 1; i <= maxAccountReferences; i++ {
+	for i := 1; i <= historicalReferenceAccountLimit; i++ {
 		entries[i].account = uid
 	}
 	if _, err := f.b.Put(context.Background(), f.p, volume.ObjectID(client.ObjectReferenceRootID()), encodeObjectReferences(entries, f.b.ID()), volume.Options{Accepted: true, RequestID: volume.ID(client.NewRequestID())}); err != nil {
@@ -181,12 +185,17 @@ func TestReferenceOrphanHookOwnAccountCapIsNotEvaded(t *testing.T) {
 	}
 	before := f.mark()
 	for _, err := range f.burst(t, []client.Message{f.message(0, client.NewRequestID(), 1), f.message(0, client.NewRequestID(), 2)}, false, nil) {
-		if objectStatus(err) != 429 {
-			t.Fatal("own account cap bypassed", err)
+		if err != nil {
+			t.Fatal("dynamic account growth rejected", err)
 		}
 	}
-	if f.mark() != before {
-		t.Fatal("failed own-quota request published unrelated cleanup")
+	after, err := decodeObjectReferences(f.root(t), f.b.ID())
+	if err != nil || len(after) != len(entries)+2 {
+		t.Fatal("wrong reference count", len(after), err)
+	}
+	verifyProtectedReferenceEntries(t, entries, after, 0)
+	if f.mark() != before+1 {
+		t.Fatal("dynamic growth did not publish once")
 	}
 }
 
@@ -215,7 +224,7 @@ func (c *referencePruneRecreateContext) Deadline() (time.Time, bool) {
 	return c.Context.Deadline()
 }
 
-func TestReferenceOrphanHookDerivedContextRechecksRecreatedHolder(t *testing.T) {
+func TestReferenceExplicitPruneRechecksRecreatedHolder(t *testing.T) {
 	for _, accepted := range []bool{true, false} {
 		t.Run(fmt.Sprint("accepted=", accepted), func(t *testing.T) {
 			f := newCombiningFixture(t)
@@ -235,8 +244,8 @@ func TestReferenceOrphanHookDerivedContextRechecksRecreatedHolder(t *testing.T) 
 					t.Fatal(err)
 				}
 			}}
-			message := f.message(0, client.NewRequestID(), 1)
-			message.Body[len(message.Body)-1] = 0
+			message := adminPruneMessage(f)
+			message.Body = append(message.Body, 0)
 			if accepted {
 				message.Body[len(message.Body)-1] = 1
 			}
@@ -244,8 +253,8 @@ func TestReferenceOrphanHookDerivedContextRechecksRecreatedHolder(t *testing.T) 
 			if !ctx.changed.Load() {
 				t.Fatal("test did not race after filtering")
 			}
-			if objectStatus(err) != 429 {
-				t.Fatal("recreated holder was discarded instead of refiltering", err)
+			if err != nil {
+				t.Fatal("explicit repair failed instead of preserving recreated holder", err)
 			}
 			if !bytes.Equal(raw, f.root(t)) || f.mark() != before {
 				t.Fatal("stale absence proof changed reference root")
@@ -286,10 +295,9 @@ func TestReferenceOrphanHookFrontendScopeRejectedNativeInternalAllowed(t *testin
 	}
 }
 
-// A currently one-location map does not override the declared replication or
-// administrative transition policy. Ineligible scopes retain the existing full
-// root response and every holder, including otherwise reclaimable plain PINs.
-func TestReferenceOrphanHookUnsupportedScopeKeepsRoot(t *testing.T) {
+// Explicit administrative repair still requires stable authority even though
+// ordinary reference growth no longer depends on reclaimable slots.
+func TestReferenceExplicitPruneUnsupportedScopeKeepsRoot(t *testing.T) {
 	policies := map[string]func(*BucketDescription){
 		"replicas-two":   func(d *BucketDescription) { d.Policy.Redundancy.Mode = "replication"; d.Policy.Redundancy.Replicas = 2 },
 		"desired-policy": func(d *BucketDescription) { p := d.Policy; d.DesiredPolicy = &p },
@@ -313,18 +321,18 @@ func TestReferenceOrphanHookUnsupportedScopeKeepsRoot(t *testing.T) {
 				f.b.setDescription(d)
 				f.b.mu.Unlock()
 				f.s.opMu.Unlock()
-				messages := []client.Message{f.message(0, client.NewRequestID(), 1)}
+				messages := []client.Message{adminPruneMessage(f)}
 				var results []error
 				if combined {
-					messages = append(messages, f.message(0, client.NewRequestID(), 2))
+					messages = append(messages, adminPruneMessage(f))
 					results = f.burst(t, messages, false, nil)
 				} else {
 					_, err := f.s.executeObjectReference(context.Background(), messages[0], f.ws, f.p)
 					results = []error{err}
 				}
 				for _, err := range results {
-					if objectStatus(err) != 429 {
-						t.Fatal("unsupported scope reclaimed or changed full-root response", err)
+					if objectStatus(err) != 503 {
+						t.Fatal("unsupported scope admitted explicit repair", err)
 					}
 				}
 				if !bytes.Equal(raw, f.root(t)) || mark != f.mark() {
@@ -335,7 +343,7 @@ func TestReferenceOrphanHookUnsupportedScopeKeepsRoot(t *testing.T) {
 	}
 }
 
-func TestReferenceOrphanHookPolicyChangesAfterFiltering(t *testing.T) {
+func TestReferenceExplicitPrunePolicyChangesAfterFiltering(t *testing.T) {
 	for _, accepted := range []bool{true, false} {
 		t.Run(fmt.Sprint("accepted=", accepted), func(t *testing.T) {
 			f := newCombiningFixture(t)
@@ -351,8 +359,8 @@ func TestReferenceOrphanHookPolicyChangesAfterFiltering(t *testing.T) {
 				d.Policy.Redundancy.Replicas = 2
 				f.b.setDescription(d)
 			}}
-			message := f.message(0, client.NewRequestID(), 1)
-			message.Body[len(message.Body)-1] = 0
+			message := adminPruneMessage(f)
+			message.Body = append(message.Body, 0)
 			if accepted {
 				message.Body[len(message.Body)-1] = 1
 			}
@@ -360,8 +368,10 @@ func TestReferenceOrphanHookPolicyChangesAfterFiltering(t *testing.T) {
 			if !ctx.changed.Load() {
 				t.Fatal("test did not change scope after filtering")
 			}
-			if objectStatus(err) != 429 {
-				t.Fatal("stale single-copy scope was not refiltered", err)
+			// A scope change may return a retry error or a conservative no-op.
+			// Either outcome must preserve every original holder and generation.
+			if err != nil && objectStatus(err) != 503 {
+				t.Fatal("unexpected repair scope result", err)
 			}
 			if !bytes.Equal(raw, f.root(t)) || mark != f.mark() {
 				t.Fatal("policy transition published unsafe pruning")

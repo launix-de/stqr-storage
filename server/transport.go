@@ -69,6 +69,7 @@ type wsSession struct {
 	done            chan struct{}
 	once            sync.Once
 	responses       chan []byte
+	borrowedWrites  chan borrowedWriteJob
 	telemetry       *statsSendQueue
 	requests        chan client.Message
 	controlRequests chan client.Message
@@ -92,6 +93,17 @@ func (ws *wsSession) close() {
 		if ws.conn != nil {
 			ws.conn.Close()
 		}
+	})
+}
+
+func (ws *wsSession) invalidateBeforeCloseReply() {
+	reply := ws.conn.CloseHandler()
+	ws.conn.SetCloseHandler(func(code int, text string) error {
+		// A client may acquire an exclusive bucket lease as soon as it sees
+		// this reply. Stop counting this connection before acknowledging its
+		// close; the read-loop defer runs only after the reply is sent.
+		ws.authorization.invalid.Store(true)
+		return reply(code, text)
 	})
 }
 
@@ -176,7 +188,7 @@ func (s *Server) serveWebSocket(w http.ResponseWriter, r *http.Request, p princi
 		authorization.peerProfile = profile
 		responseHeaders.Set(compatibilityHeader, profileHeader(s.protocolVersion()))
 	}
-	conn, e := up.Upgrade(w, r, responseHeaders)
+	conn, e := up.Upgrade(socketOutputResponseWriter{w}, r, responseHeaders)
 	if e != nil {
 		s.opMu.Unlock()
 		return
@@ -186,7 +198,8 @@ func (s *Server) serveWebSocket(w http.ResponseWriter, r *http.Request, p princi
 	p.User.PasswordHash = ""
 	conn.SetReadLimit(client.MaxMessage)
 	sessionCtx, sessionCancel := context.WithCancel(s.ctx)
-	ws := &wsSession{authorization: authorization, ctx: sessionCtx, cancel: sessionCancel, server: s, conn: conn, request: r, principal: p, done: make(chan struct{}), terminal: make(chan terminalFrame, 1), responses: make(chan []byte, sendQueueCapacity), telemetry: newStatsSendQueue(), requests: make(chan client.Message, receiveQueueCapacity)}
+	ws := &wsSession{authorization: authorization, ctx: sessionCtx, cancel: sessionCancel, server: s, conn: conn, request: r, principal: p, done: make(chan struct{}), terminal: make(chan terminalFrame, 1), responses: make(chan []byte, sendQueueCapacity), borrowedWrites: make(chan borrowedWriteJob), telemetry: newStatsSendQueue(), requests: make(chan client.Message, receiveQueueCapacity)}
+	ws.invalidateBeforeCloseReply()
 	if p.isPeer() {
 		ws.controlRequests = make(chan client.Message, receiveQueueCapacity)
 		ws.leaseRequests = make(chan client.Message, receiveQueueCapacity)
@@ -235,6 +248,17 @@ func (s *Server) serveWebSocket(w http.ResponseWriter, r *http.Request, p princi
 		}
 		if m.Kind != client.Request && m.Kind != client.FireAndForget {
 			return
+		}
+		if isObjectSubscriptionControl(m.Opcode) {
+			// These controls touch only RAM, never payload storage. Retire the
+			// descriptor before admitting the next SUBSCRIBE frame, so a client
+			// at its subscription ceiling can replace an entry without an ACK.
+			p, ok := ws.principalNow()
+			if !ok {
+				return
+			}
+			ws.executeRequest(m, p)
+			continue
 		}
 		if isLeaseCoordinatorRequest(m) && ws.leaseRequests != nil && authorization.peerVerified.Load() {
 			select {
@@ -302,6 +326,9 @@ func (ws *wsSession) writeLoop() {
 			_ = ws.conn.WriteMessage(websocket.BinaryMessage, terminal.wire)
 			close(terminal.done)
 			return
+		case job := <-ws.borrowedWrites:
+			job.done <- job.run()
+			continue
 		case b := <-ws.responses:
 			batch = [][]byte{b}
 		case <-ws.telemetry.wake:
@@ -386,6 +413,18 @@ func (ws *wsSession) requestLoop() {
 				})
 				continue
 			}
+			// Gate new object operations before they acquire storage or spawn work.
+			// Transfer continuations above must remain able to complete uploads.
+			if m.Opcode >= 0x100 && m.Opcode <= 0x108 {
+				if output := ws.socketOutput(); output != nil {
+					ctx, cancel := context.WithTimeout(ws.ctx, 10*time.Second)
+					_, err := output.wait(ctx, inlineObjectDownload+objectDownloadHeader, false)
+					cancel()
+					if err != nil {
+						return
+					}
+				}
+			}
 			if ws.server.launchPGRequest(ws.ctx, m, p, func(body []byte) {
 				defer ws.completeConnectionMessage(m, 200, body)
 				wire := client.EncodeMessage(client.Message{Kind: client.Response, Opcode: m.Opcode, ID: m.ID, Body: body})
@@ -409,14 +448,25 @@ func (ws *wsSession) requestLoop() {
 	}
 }
 func (ws *wsSession) executeRequest(m client.Message, p principal) {
-	defer ws.connectionHeaderReady(m.ID)
+	if !isObjectSubscriptionControl(m.Opcode) {
+		defer ws.connectionHeaderReady(m.ID)
+	}
 	body, status := ws.server.dispatchAs(m, ws, p)
 	if status == 0 {
 		return
 	}
+	// A negative private dispatch status means the sole writer already emitted
+	// the frame. Retire contexts/fence jobs normally without a duplicate reply.
+	alreadySent := status < 0
+	if alreadySent {
+		status = -status
+	}
 	defer ws.completeConnectionMessage(m, status, body)
 	if usesObjectRequestContext(m.Opcode) {
 		ws.releaseObjectContext(m.ID)
+	}
+	if alreadySent {
+		return
 	}
 	if m.Kind == client.Request || m.Kind == client.FireAndForget && ws.connectionFenceCap.Load() && (status >= 300 || m.Opcode == 0x0100 || m.Opcode == 0x0101 || m.Opcode == 0x0107 || m.Opcode == client.ConnectionSync) {
 		b := client.EncodeMessage(client.Message{Kind: client.Response, Opcode: m.Opcode, ID: m.ID, Body: body})

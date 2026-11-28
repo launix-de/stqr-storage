@@ -4,16 +4,18 @@ package server
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"fmt"
 	"github.com/launix-de/stqr-storage/client"
 	"github.com/launix-de/stqr-storage/volume"
+	"math"
 	"runtime"
 	"testing"
 )
 
-func TestReferenceDecodeSpareSlotKeepsLimits(t *testing.T) {
+func TestReferenceDecodeDynamicSpareAndExactLength(t *testing.T) {
 	bucket := volume.ID{1}
-	for _, n := range []int{0, 1, 3218, maxObjectReferences} {
+	for _, n := range []int{0, 1, 3218, historicalReferenceRootLimit, historicalReferenceRootLimit + 1, 2*historicalReferenceRootLimit + 1} {
 		entries := make([]objectReferenceEntry, n)
 		for i := range entries {
 			entries[i].object[0] = byte(i)
@@ -24,10 +26,10 @@ func TestReferenceDecodeSpareSlotKeepsLimits(t *testing.T) {
 		if err != nil || len(got) != n {
 			t.Fatal("length changed", n, len(got), err)
 		}
-		if cap(got) > maxObjectReferences {
-			t.Fatal("unbounded capacity", cap(got))
+		if cap(got) > n+1 {
+			t.Fatal("capacity does not match actual validated image", cap(got), n)
 		}
-		if n < maxObjectReferences && cap(got) < n+1 {
+		if cap(got) < n+1 {
 			t.Fatal("missing spare slot", n, cap(got))
 		}
 		for i := range entries {
@@ -36,10 +38,12 @@ func TestReferenceDecodeSpareSlotKeepsLimits(t *testing.T) {
 			}
 		}
 	}
-	raw := encodeObjectReferences(make([]objectReferenceEntry, maxObjectReferences+1), bucket)
+	raw := encodeObjectReferences(nil, bucket)
+	binary.LittleEndian.PutUint32(raw[20:24], math.MaxUint32)
 	if _, err := decodeObjectReferences(raw, bucket); err == nil {
-		t.Fatal("encoded global limit relaxed")
+		t.Fatal("forged count accepted before allocation")
 	}
+
 }
 
 var referenceDecodeAppendSink []objectReferenceEntry
@@ -86,7 +90,7 @@ func BenchmarkReferenceDecodePinAppend(b *testing.B) {
 	}
 }
 
-func TestReferenceDecodeSpareSlotDoesNotRelaxAdmission(t *testing.T) {
+func TestReferenceAdmissionGrowsBeyondHistoricalLimits(t *testing.T) {
 	for _, global := range []bool{false, true} {
 		t.Run(fmt.Sprint(global), func(t *testing.T) {
 			s := testServer(t)
@@ -97,13 +101,13 @@ func TestReferenceDecodeSpareSlotDoesNotRelaxAdmission(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			count := maxAccountReferences
+			count := historicalReferenceAccountLimit + 113
 			if global {
-				count = maxObjectReferences
+				count = historicalReferenceRootLimit + 257
 			}
 			if global {
-				// A full root owned by an absent account is intentionally reclaimed.
-				// Use a present owner to test the global admission limit instead.
+				// Preserve a distinct, present owner while growing beyond the
+				// historical global boundary; admission must not prune holders.
 				image := cloneAccountsImage(s.accounts.Load().image)
 				image.Users = append(image.Users, account{ID: (volume.ID{9}).String(), Name: "capacity-owner", Role: "USER"})
 				index, err := newAccountsIndex(image)
@@ -134,12 +138,16 @@ func TestReferenceDecodeSpareSlotDoesNotRelaxAdmission(t *testing.T) {
 			ws.connectionFenceCap.Store(true)
 			accepted := true
 			m := referenceRequest(b, client.ObjectID{0xfe, 0xff}, client.NewRequestID(), &accepted)
-			if _, err = s.executeObjectReference(context.Background(), m, ws, p); statusOf(err) != 429 {
-				t.Fatal("reference limit changed", global, err)
+			if _, err = s.executeObjectReference(context.Background(), m, ws, p); err != nil {
+				t.Fatal("valid reference rejected beyond historical quota", global, err)
 			}
 			after, _, err := b.Get(context.Background(), p, root)
-			if err != nil || !bytes.Equal(after, raw) {
-				t.Fatal("rejected reference changed root", err)
+			if err != nil || len(after) != len(raw)+referenceEntryBytes || !bytes.Equal(after[24:len(raw)], raw[24:]) {
+				t.Fatal("growth changed existing holders", err, len(after))
+			}
+			decoded, err := decodeObjectReferences(after, b.ID())
+			if err != nil || len(decoded) != count+1 {
+				t.Fatal("grown root invalid", err, len(decoded))
 			}
 		})
 	}

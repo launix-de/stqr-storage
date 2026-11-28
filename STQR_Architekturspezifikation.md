@@ -346,6 +346,14 @@ Opcode 0x0121 und Capability-Bit 18 (262144); die Formatbindung nutzt Bit 17
 (131072). Auch Referenzzugriffe benötigen den explizit geöffneten Bucket.
 Diese Koordination legt kein Anwendungsformat fest und führt keine entfernte
 Dashboard-Diskverwaltung wieder ein.
+Die explizite Admin-Reparatur `OBJECT_REFERENCE` Aktion 9 entfernt ausschließlich
+normale PINs gelöschter Accounts aus genau dem angegebenen Referenzwurzelobjekt.
+Lebende/deaktivierte Accounts, Claims und dauerhafte Dependencies bleiben erhalten.
+Die Account-Abwesenheit wird beim geschützten CAS erneut gegen denselben aktuellen
+RAM-Index geprüft; unklare oder replizierte Zuständigkeit wird mit 503 abgelehnt.
+Nicht-Admins werden vor dem Lesen der Referenzdaten mit 403 abgewiesen. Es gibt
+keinen normalen Volume-Scan und keine zeitbasierte Freigabe. Binärformat und
+Software-Contract sind in `docs/reclamation.md` beschrieben.
 
 ### 5.2 Bucket-Konfiguration und zentrale PG-Storage-Policy
 

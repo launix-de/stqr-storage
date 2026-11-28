@@ -110,11 +110,15 @@ type BucketDescription struct {
 	DesiredPolicy *BucketPolicy `json:"desired_policy,omitempty"`
 	// Grants is the bucket-local user sub-array. It stores stable account IDs
 	// and per-user permissions; account/password records stay in the user list.
-	Grants           []BucketGrant     `json:"grants"`
-	Receipts         []BucketReceipt   `json:"receipts,omitempty"`
-	DeletionComplete bool              `json:"deletion_complete,omitempty"`
-	ClonePeers       []BucketClonePeer `json:"clone_peers,omitempty"`
-	CloneDetach      bool              `json:"clone_detach,omitempty"`
+	Grants []BucketGrant `json:"grants"`
+	// ReferenceLineageComplete is server-issued creation provenance. It is set
+	// only for a fresh namespace under the clone receipt contract, retained in
+	// tombstones, and never inferred for preexisting/legacy descriptions.
+	ReferenceLineageComplete bool              `json:"reference_lineage_complete,omitempty"`
+	Receipts                 []BucketReceipt   `json:"receipts,omitempty"`
+	DeletionComplete         bool              `json:"deletion_complete,omitempty"`
+	ClonePeers               []BucketClonePeer `json:"clone_peers,omitempty"`
+	CloneDetach              bool              `json:"clone_detach,omitempty"`
 	// LocalVolumes is the committed single-node placement until range maps own it.
 	LocalVolumes []string `json:"local_volumes,omitempty"`
 }
@@ -629,6 +633,9 @@ func (c *BucketCatalog) Save(d BucketDescription, expectedRevision uint64) (*Buc
 				}
 				if current.State != BucketDeleting && candidate.State == BucketDeleting {
 					candidate.Name = unusedDeletedBucketName(current.Name, descriptions)
+				}
+				if err := validateReferenceLineageEdit(current, candidate); err != nil {
+					return nil, err
 				}
 				if current.Format != "" && current.Format != d.Format {
 					return nil, ErrBucketInvalid

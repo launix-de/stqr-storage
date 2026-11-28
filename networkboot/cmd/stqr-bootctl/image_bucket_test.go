@@ -288,7 +288,7 @@ func TestPublishedRootfsAndArtifactsUseNamedBucket(t *testing.T) {
 	if session.Lower != lower || session.Upper == lower {
 		t.Fatal("invalid upper/lower scope")
 	}
-	if err = removeBootSession(ctx, cfg, session.User, session.Upper, session.Lower); err != nil {
+	if err = removeBootSession(ctx, cfg, session.User, session.Upper, session.Lower, filepath.Join(t.TempDir(), "retirement.json")); err != nil {
 		t.Fatal(err)
 	}
 	// Session deletion must never delete or revoke the actual published image.
@@ -428,7 +428,7 @@ func TestNativeImageEditorAndRecursiveCOW(t *testing.T) {
 		t.Fatal("editor allocated an upper bucket", *creates)
 	}
 	// A misclassified cleanup must be rejected before revoking the editor.
-	if err = removeBootSession(ctx, cfg, session.User, session.Upper, session.Lower); err == nil {
+	if err = removeBootSession(ctx, cfg, session.User, session.Upper, session.Lower, filepath.Join(t.TempDir(), "retirement.json")); err == nil {
 		t.Fatal("overlay cleanup accepted image as disposable upper")
 	}
 	editor, err := client.Dial(ctx, session.URI, session.Username, session.Password, session.Upper, "fs")
@@ -493,7 +493,7 @@ func TestNativeImageEditorAndRecursiveCOW(t *testing.T) {
 	if len(*creates) != 4 || (*creates)[3] != "ubuntu-"+boot.Upper.String() {
 		t.Fatal("session upper not named [image]-UUID", *creates)
 	}
-	if err = removeBootSession(ctx, cfg, boot.User, boot.Upper, boot.Lower); err != nil {
+	if err = removeBootSession(ctx, cfg, boot.User, boot.Upper, boot.Lower, filepath.Join(t.TempDir(), "retirement.json")); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -513,6 +513,7 @@ func TestBootctlCleanupProcess(t *testing.T) {
 }
 
 func TestBootCleanupRetainsMountedUpperUntilStorageConnectionCloses(t *testing.T) {
+	record := filepath.Join(t.TempDir(), "retirement.json")
 	cfg, _, _ := imageTestNode(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
@@ -543,7 +544,7 @@ func TestBootCleanupRetainsMountedUpperUntilStorageConnectionCloses(t *testing.T
 	// Repeated failed collectors must release their own sockets and keep the
 	// mounted guest usable. Otherwise every later attempt would see a leak.
 	for attempt := 0; attempt < 8; attempt++ {
-		if err = removeBootSession(ctx, cfg, session.User, session.Upper, session.Lower); !errors.Is(err, errSessionActive) {
+		if err = removeBootSession(ctx, cfg, session.User, session.Upper, session.Lower, record); !errors.Is(err, errSessionActive) {
 			t.Fatalf("expected typed active deferral, got %v", err)
 		}
 	}
@@ -556,7 +557,7 @@ func TestBootCleanupRetainsMountedUpperUntilStorageConnectionCloses(t *testing.T
 		t.Fatal(err)
 	}
 	child := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestBootctlCleanupProcess$", "--",
-		"--config", configPath, "boot-session-delete", session.User.String(), session.Upper.String(), session.Lower.String())
+		"--config", configPath, "--session-record", record, "boot-session-delete", session.User.String(), session.Upper.String(), session.Lower.String())
 	child.Env = append(os.Environ(), "STQR_BOOTCTL_CLEANUP_TEST_CHILD=1")
 	output, childErr := child.CombinedOutput()
 	var exit *exec.ExitError
@@ -574,7 +575,7 @@ func TestBootCleanupRetainsMountedUpperUntilStorageConnectionCloses(t *testing.T
 	defer cleanupCancel()
 	cleanupStarted := time.Now()
 	for {
-		err = removeBootSession(cleanupCtx, cfg, session.User, session.Upper, session.Lower)
+		err = removeBootSession(cleanupCtx, cfg, session.User, session.Upper, session.Lower, record)
 		if err == nil {
 			break
 		}
@@ -599,7 +600,7 @@ func TestBootCleanupRetainsMountedUpperUntilStorageConnectionCloses(t *testing.T
 	}
 	conn.Close()
 	// Replaying cleanup after a lost result is safe once the namespace is gone.
-	if err = removeBootSession(ctx, cfg, session.User, session.Upper, session.Lower); err != nil {
+	if err = removeBootSession(ctx, cfg, session.User, session.Upper, session.Lower, record); err != nil {
 		t.Fatal("cleanup not retryable", err)
 	}
 }
