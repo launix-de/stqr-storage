@@ -9,13 +9,15 @@ import (
 	"io"
 	"math"
 	"sync"
+	"sync/atomic"
 
 	"github.com/launix-de/stqr-storage/client"
 	"github.com/launix-de/stqr-storage/volume"
 )
 
 // Retention is deliberately bounded. A slow subscriber is told to resnapshot;
-// a full socket queue closes the socket, invalidating every dependent cache.
+// a full socket queue retains a bounded, payload-free resnapshot notice without
+// disconnecting unrelated object operations on that socket.
 const maxObjectSubscriptions = 16384
 const maxSessionObjectSubscriptions = 2048
 const maxSubscriptionJournalBytes = 64 << 20
@@ -43,6 +45,7 @@ type objectSubscriptionRegistry struct {
 	objects       map[volume.Key]map[*objectSubscription]struct{}
 	sessions      map[*wsSession]map[client.ID]*objectSubscription
 	count, bytes  int
+	resyncCount   atomic.Int64
 	snapshotBytes uint64
 }
 
@@ -83,6 +86,7 @@ func (r *objectSubscriptionRegistry) removeLocked(sub *objectSubscription) {
 func (r *objectSubscriptionRegistry) closeSession(ws *wsSession) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	ws.subscriptionResync.clear()
 	for _, sub := range r.sessions[ws] {
 		r.removeLocked(sub)
 	}
@@ -105,7 +109,14 @@ func (r *objectSubscriptionRegistry) add(sub *objectSubscription) error {
 	if old := r.sessions[sub.ws][sub.id]; old != nil {
 		return fail(409, "subscription ID is already active; unsubscribe before reusing it")
 	}
-	if r.count >= maxObjectSubscriptions || len(r.sessions[sub.ws]) >= maxSessionObjectSubscriptions {
+	pending, conflict, closed := sub.ws.subscriptionResync.registration(sub.id)
+	if closed {
+		return context.Canceled
+	}
+	if conflict {
+		return fail(409, "subscription ID is awaiting resnapshot; unsubscribe before reusing it")
+	}
+	if r.count+int(r.resyncCount.Load()) >= maxObjectSubscriptions || len(r.sessions[sub.ws])+pending >= maxSessionObjectSubscriptions {
 		return fail(507, "object subscription budget exhausted")
 	}
 	if r.objects[sub.key] == nil {
@@ -136,8 +147,7 @@ func (r *objectSubscriptionRegistry) sendLocked(sub *objectSubscription, u clien
 			select {
 			case sub.ws.responses <- notice:
 			default:
-				sub.ws.close()
-				return false
+				return r.deferResyncLocked(sub, u)
 			}
 		}
 	}
@@ -146,8 +156,7 @@ func (r *objectSubscriptionRegistry) sendLocked(sub *objectSubscription, u clien
 	case sub.ws.responses <- frame:
 		return true
 	default:
-		sub.ws.close()
-		return false
+		return r.deferResyncLocked(sub, u)
 	}
 }
 
@@ -222,8 +231,9 @@ func (r *objectSubscriptionRegistry) publishCaptured(key volume.Key, info volume
 			n = 0
 		}
 		if len(sub.ws.responses) == cap(sub.ws.responses) {
-			sub.ws.close()
-			r.removeLocked(sub)
+			sub.cursor++
+			u.Cursor = sub.cursor
+			r.deferResyncLocked(sub, u)
 			continue
 		}
 		var temporary uint64
@@ -314,6 +324,9 @@ func (s *Server) executeObjectSubscription(m client.Message, ws *wsSession, p pr
 		}
 		r.mu.Lock()
 		defer r.mu.Unlock()
+		if m.Opcode == client.ObjectUnsubscribe {
+			ws.subscriptionResync.cancel(id)
+		}
 		sub := r.sessions[ws][id]
 		if sub == nil {
 			return nil, 200, nil
@@ -554,7 +567,7 @@ func (r *objectSubscriptionRegistry) resyncWhere(match func(volume.Key) bool) {
 func (s *Server) endRevokedSubscriptions(ws *wsSession) {
 	r := &s.objectSubscriptions
 	r.mu.Lock()
-	active := len(r.sessions[ws]) != 0
+	active := len(r.sessions[ws]) != 0 || ws.subscriptionResync.count() != 0
 	r.mu.Unlock()
 	if active {
 		ws.close()
