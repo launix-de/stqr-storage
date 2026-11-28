@@ -922,6 +922,7 @@ func TestKSTQRVirtualMachine(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	var referenceLimitSeed []objectReferenceEntry
 	if os.Getenv("STQR_KERNEL_REFERENCE_LIMIT") == "1" {
 		// Seed the historical global boundary with protected dependency holders.
 		// Ordinary opens must still succeed without erasing any existing roots.
@@ -939,6 +940,7 @@ func TestKSTQRVirtualMachine(t *testing.T) {
 		if _, err = conn.Put(ctx, client.ObjectReferenceRootID(), encodeObjectReferences(entries, b.ID()), client.MutationOptions{RequestID: client.NewRequestID()}); err != nil {
 			t.Fatal(err)
 		}
+		referenceLimitSeed = append([]objectReferenceEntry(nil), entries...)
 		t.Logf("seeded %d-entry historical reference boundary", len(entries))
 	}
 
@@ -1831,6 +1833,25 @@ poweroff -f
 		if !strings.Contains(string(output), "KSTQR_REFERENCE_LIMIT_PASS") {
 			t.Fatal("dynamic reference admission probe did not complete")
 		}
+		// Admission must not make space by dropping or changing protected roots.
+		raw, _, readErr := conn.Get(ctx, client.ObjectReferenceRootID())
+		if readErr != nil {
+			t.Fatal("read protected reference holders after VM", readErr)
+		}
+		entries, decodeErr := decodeObjectReferences(raw, b.ID())
+		if decodeErr != nil {
+			t.Fatal("decode protected reference holders after VM", decodeErr)
+		}
+		retained := make(map[objectReferenceEntry]int, len(entries))
+		for _, entry := range entries {
+			retained[entry]++
+		}
+		for i, entry := range referenceLimitSeed {
+			if retained[entry] != 1 {
+				t.Fatalf("protected dependency holder %d changed or disappeared: exact matches=%d", i, retained[entry])
+			}
+		}
+		t.Logf("protected dependency holders unchanged after VM: %d", len(referenceLimitSeed))
 		for _, line := range strings.Split(string(output), "\n") {
 			if strings.Contains(line, "reference-limit:") || strings.Contains(line, "KSTQR_REFERENCE_LIMIT_PASS") {
 				t.Log(strings.TrimSpace(line))
