@@ -39,6 +39,12 @@ static int hex(const char *p, size_t n) {
       return 0;
   return 1;
 }
+/* The mode comes only from the authenticated, validated gateway claim. */
+static int claim_edit_mode(const char *mode, const char *upper, const char *lower) {
+  int edit = !strcmp(mode, "edit");
+  return ((!edit && strcmp(mode, "overlay")) || (!strcmp(upper, lower)) != edit) ? -1 : edit;
+}
+
 static void mounted(const char *uri, const char *upper, const char *lower,
                     int lifetime, const char *target, int edit) {
   char life[32];
@@ -178,8 +184,8 @@ int main(int argc, char **argv) {
     errno = EPROTO;
     fail("claim credentials");
   }
-  int edit = !strcmp(mode, "edit");
-  if ((!edit && strcmp(mode, "overlay")) || (!strcmp(upper, lower)) != edit) {
+  int edit = claim_edit_mode(mode, upper, lower);
+  if (edit < 0) {
     errno = EPROTO;
     fail("claim mount mode");
   }
@@ -195,5 +201,7 @@ int main(int argc, char **argv) {
   unlink("/run/stqr/credentials");
   explicit_bzero(body, sizeof body);
   close(fd);
+  /* Machine-readable result after successful mount; never emit credentials. */
+  puts(edit ? "edit" : "overlay");
   return 0;
 }

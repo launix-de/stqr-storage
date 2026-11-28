@@ -628,3 +628,12 @@ editor user; their image bucket is never deleted. The same maintenance guard
 retains an orphan editor account while any client still has its image open;
 automatic retries finish that cleanup once the image becomes idle. Stop the gateway and keep its
 private cache if a member is unavailable; remaining records allow later retry.
+
+Temporary overlay boots disable automatic APT/unattended upgrades and apply a
+system-wide Snap auto-refresh hold before PID1 starts. Snap seeding, installation
+and explicit `snap refresh`/APT commands remain available. `edit-image` (including
+`test-boot --no-overlay` on its private writable copy) uses the authenticated edit
+claim and leaves automatic updates available; if its image inherited our overlay
+policy, it restores the previous Snap hold and removes only STQR's policy files.
+The shared published lower is never modified by an overlay boot. Snap requires
+2.58 or newer, including support for the global `refresh.hold=forever` setting.
