@@ -54,13 +54,18 @@ int policy_send(struct stqr_socket *socket,const void *data,size_t size) {
         if(op==0x121)assert(input.p[input.n-1]==1); /* accepted reference trailer */
         stqr_u8 boot[16]={1};boot[0]=(stqr_u8)(socket->boot?socket->boot:1);put(&mark,boot,16);number(&mark,++socket->sequence,8);
         varint(&headers,1);varint(&headers,48);blob(&headers,mark.p,mark.n);
-    }else { assert(op==0x122 || op==0x119 || op==0x11b);varint(&headers,0); }
+    }else { assert(op==0x122 || op==0x119 || op==0x11b || op==0x100);varint(&headers,0); }
     blob(&message,headers.p,headers.n);
     if(redirected) { /* A rejected original owner publishes no object result. */ }
     else if(op==0x121)number(&message,1,1);
     else if(op==0x118) {
         stqr_u8 runtime[16]={0};number(&message,socket->reply_length?socket->reply_length:4,8);number(&message,0,1);number(&message,0,4);
         put(&message,runtime,16);number(&message,0,1);number(&message,0,2);
+    }else if(op==0x100) {
+        stqr_u8 runtime[16]={0},hash[32];assert(!sq_hash(256,"new!",4,hash));
+        number(&message,4,8);number(&message,0,1);number(&message,0,4);
+        put(&message,runtime,16);number(&message,0,1);number(&message,0,2);
+        number(&message,0,1);number(&message,4,8);put(&message,hash,32);blob(&message,"new!",4);
     }else if(op==0x11b) {
         number(&message,1024,8);number(&message,4096,8);
         number(&message,3072,8);number(&message,2048,8);
@@ -531,6 +536,9 @@ static void rejected_before_transport(int synchronous, int send_error) {
         socket.send_error=0;
         assert(stqr_poll(c,0)>0&&first.called==1&&!first.error);
         stqr_space space;assert(!stqr_bucket_space(c,&space));
+        void *data=NULL;size_t size=0;stqr_info info;
+        assert(!stqr_get(c,object,&data,&size,&info));
+        assert(size==4&&!memcmp(data,"new!",4));stqr_free(data);
         struct result fence={0};assert(!stqr_connection_sync_async(c,completed,&fence));
         for(unsigned i=0;i<8&&!fence.called;i++)assert(stqr_poll(c,0)>=0);
         assert(fence.called&&!fence.error);
