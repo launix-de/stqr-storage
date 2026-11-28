@@ -28,7 +28,9 @@ struct completion {
  bool done;
 };
 static struct workqueue_struct reference_queue;
-struct ks_fs { unsigned worker; struct workqueue_struct *reference_queue; };
+struct ks_fs { unsigned worker; struct workqueue_struct *reference_queue; struct ks_fs *parent; };
+static struct ks_fs mount_owner={.reference_queue=&reference_queue};
+static bool lower_context;
 static _Thread_local bool fatal_current;
 #define current NULL
 static bool fatal_signal_pending(void *task) { (void)task;return fatal_current; }
@@ -163,7 +165,7 @@ static void test(unsigned n,unsigned state,bool dependency,bool reread_error) {
  memcpy(head,"STFL\1\0",6);memcpy(head+6,intent.bytes,32);head_len=38;
  REQUIRE(!pthread_barrier_init(&initial_pins,NULL,n));
  pthread_t threads[33];struct job jobs[33];
- for(unsigned i=1;i<=n;i++){jobs[i]=(struct job){.fs={.worker=i,.reference_queue=&reference_queue}};REQUIRE(!pthread_create(&threads[i],NULL,run,&jobs[i]));}
+ for(unsigned i=1;i<=n;i++){jobs[i]=(struct job){.fs={.worker=i,.reference_queue=lower_context?NULL:&reference_queue,.parent=lower_context?&mount_owner:NULL}};REQUIRE(!pthread_create(&threads[i],NULL,run,&jobs[i]));}
  for(unsigned i=1;i<=n;i++){REQUIRE(!pthread_join(threads[i],NULL));REQUIRE(jobs[i].result==(dependency?-EINTR:reread_error?-EIO:state==1?0:-EAGAIN));REQUIRE(pin_calls[i]==1);REQUIRE(unpin_calls[i]==1);REQUIRE(claim_calls[i]>=1);REQUIRE(release_calls[i]==(dependency?0:1));}
  REQUIRE(pins==0&&claim_owner==0);
  REQUIRE(queued==(dependency?0:n)&&completed==queued&&flushed==queued);
@@ -184,4 +186,4 @@ static void test_cancelled_pin(bool origin,unsigned stage) {
  fatal_current=false;cancel_after_pin=false;
  printf("reference-pin-cancel: origin=%d stage=%u acknowledged PIN retired without caller signal\n",origin,stage);
 }
-int main(void) { alarm(10);test_cancelled_pin(false,1);test_cancelled_pin(true,1);test_cancelled_pin(false,2);test_cancelled_pin(true,2);test_cancelled_pin(false,3);test_cancelled_pin(true,3);test(1,1,false,false);test(32,1,false,false);test(32,2,false,false);test(1,1,true,false);test(1,1,false,true);puts("KSTQR_REFERENCE_CLAIM_WAIT_PASS");return 0; }
+int main(void) { alarm(10);test_cancelled_pin(false,1);test_cancelled_pin(true,1);test_cancelled_pin(false,2);test_cancelled_pin(true,2);test_cancelled_pin(false,3);test_cancelled_pin(true,3);test(1,1,false,false);test(32,1,false,false);test(32,2,false,false);test(1,1,true,false);test(1,1,false,true);lower_context=true;test(1,1,false,false);test(1,2,false,false);puts("KSTQR_REFERENCE_CLAIM_WAIT_PASS");return 0; }

@@ -127,7 +127,7 @@ static int complete_claimed_intent(struct ks_fs *f, stqr_object_id id, stqr_id c
 	struct ks_claimed_completion job = {.fs = f, .id = id, .claim = claim};
 	INIT_WORK(&job.work, claimed_completion_worker);
 	init_completion(&job.done);
-	queue_work(f->reference_queue, &job.work);
+	queue_work(ks_reference_workqueue(f), &job.work);
 	wait_for_completion(&job.done);
 	flush_work(&job.work);
 	return job.error;
