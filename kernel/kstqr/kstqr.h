@@ -164,6 +164,8 @@ int ks_snapshot_cached(struct ks_fs *, stqr_object_id, struct ks_snapshot *);
 int ks_cache_get(struct ks_fs *, stqr_object_id, void **, size_t *, stqr_info *);
 bool ks_cache_proof(struct ks_fs *, stqr_object_id, stqr_proof *);
 void ks_cache_forget(struct ks_fs *, stqr_object_id);
+int ks_cache_directory_get(struct ks_fs *, const struct ks_node *, struct ks_entry **, size_t *);
+void ks_cache_directory_put(struct ks_fs *, const struct ks_node *, const struct ks_entry *, size_t);
 void ks_queue_invalidation(struct ks_fs *, const stqr_object_id *);
 extern const stqr_object_id ks_root_id;
 void ks_snapshot_free(struct ks_snapshot *s);
