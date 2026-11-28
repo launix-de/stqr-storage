@@ -62,9 +62,18 @@ func (r *rangeManager) executeMove(ctx context.Context, p rangePlan, foreground 
 	r.mu.Lock()
 	t := r.txns[id]
 	finished := t != nil && t.sourceDone.RecordSequence != 0
-	cancelled := t != nil && (t.aborted || t.forceRetired)
+	aborted := t != nil && t.aborted
+	retired := t != nil && t.forceRetired
 	r.mu.Unlock()
-	if cancelled {
+	if retired {
+		return errControlConflict
+	}
+	if aborted {
+		// The range stays aborted. Retry only its durable PG cancellation handshake:
+		// a lost completion reply must not leave the generation blocking shutdown.
+		if err := r.abortPG(ctx, p); err != nil {
+			return err
+		}
 		return errControlConflict
 	}
 	if finished {

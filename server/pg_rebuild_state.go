@@ -41,6 +41,10 @@ type pgRebuildRound struct {
 type pgRebuildWork struct {
 	Round   pgRebuildRound
 	Started bool
+	// First durable source cancellation, retained across journal replay. Older
+	// writers could append duplicates; the first proof may already be accepted
+	// by another participant and must not be replaced on a retry.
+	Cancellation client.Proof
 }
 type pgRebuildState struct {
 	Generation uint64
@@ -216,7 +220,7 @@ func validPGCompletion(a pgRebuildRound) bool {
 	return (&rangeManager{}).validCommit(&rangeTxn{plan: p}, *a.Commit, true)
 }
 
-func (r *rangeManager) replayPG(kind uint16, a *pgRebuildRound) error {
+func (r *rangeManager) replayPG(kind uint16, a *pgRebuildRound, proof client.Proof) error {
 	if a == nil || !validPGRound(*a) {
 		return volume.ErrCorrupt
 	}
@@ -230,6 +234,12 @@ func (r *rangeManager) replayPG(kind uint16, a *pgRebuildRound) error {
 		r.pgStates[a.Group] = state
 	}
 	if kind == rangePGSourceCancelled {
+		if state.Active == nil || !samePGRound(state.Active.Round, *a) || proof.Node != mustDecodePGPlan(a.Plan).Source || proof.RecordSequence == 0 {
+			return volume.ErrCorrupt
+		}
+		if state.Active.Cancellation.RecordSequence == 0 {
+			state.Active.Cancellation = proof
+		}
 		return nil
 	}
 	if kind == rangePGPrepared {
@@ -754,6 +764,9 @@ func (s *Server) catchupRangePeer(p *peerConnection) {
 // Persist cancellation before asking participants to close a generation whose
 // range never fenced, or was durably aborted. Late activations cannot revive it.
 func (r *rangeManager) abortPG(ctx context.Context, p rangePlan) error {
+	if p.Source != r.node {
+		return errControlConflict
+	}
 	group, members, _, err := r.server.pgForPlan(p)
 	if err != nil || group == (client.ID{}) {
 		return err
@@ -766,7 +779,10 @@ func (r *rangeManager) abortPG(ctx context.Context, p rangePlan) error {
 		return nil
 	}
 	round := state.Active.Round
-	proof, err := r.persist(rangePGSourceCancelled, rangeEvent{PG: &round})
+	proof := state.Active.Cancellation
+	if proof.RecordSequence == 0 {
+		proof, err = r.persist(rangePGSourceCancelled, rangeEvent{PG: &round})
+	}
 	r.mu.Unlock()
 	if err != nil {
 		return err
