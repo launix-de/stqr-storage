@@ -53,32 +53,33 @@ type wsSession struct {
 	versionsSubscribed bool   // guarded by subMu
 	versionSent        string // guarded by subMu
 
-	terminal        chan terminalFrame
-	server          *Server
-	ctx             context.Context
-	cancel          context.CancelFunc
-	uploadMu        sync.Mutex
-	uploads         map[client.ID]*serverObjectUpload
-	stagedBytes     uint64
-	objectMu        sync.Mutex
-	objectContexts  map[client.ID]objectRequestContext
-	conn            *websocket.Conn
-	request         *http.Request
-	principal       principal
-	authorization   *connectionAuthorization
-	done            chan struct{}
-	once            sync.Once
-	responses       chan []byte
-	borrowedWrites  chan borrowedWriteJob
-	telemetry       *statsSendQueue
-	requests        chan client.Message
-	controlRequests chan client.Message
-	leaseRequests   chan client.Message
-	subMu           sync.Mutex
-	subscription    client.ID
-	filter          client.StatsFilter
-	peerMu          sync.Mutex
-	peerPending     map[client.ID]peerPending
+	terminal           chan terminalFrame
+	server             *Server
+	ctx                context.Context
+	cancel             context.CancelFunc
+	uploadMu           sync.Mutex
+	uploads            map[client.ID]*serverObjectUpload
+	stagedBytes        uint64
+	objectMu           sync.Mutex
+	objectContexts     map[client.ID]objectRequestContext
+	conn               *websocket.Conn
+	request            *http.Request
+	principal          principal
+	authorization      *connectionAuthorization
+	done               chan struct{}
+	once               sync.Once
+	responses          chan []byte
+	borrowedWrites     chan borrowedWriteJob
+	subscriptionResync subscriptionResyncMailbox
+	telemetry          *statsSendQueue
+	requests           chan client.Message
+	controlRequests    chan client.Message
+	leaseRequests      chan client.Message
+	subMu              sync.Mutex
+	subscription       client.ID
+	filter             client.StatsFilter
+	peerMu             sync.Mutex
+	peerPending        map[client.ID]peerPending
 }
 
 func (ws *wsSession) close() {
@@ -87,6 +88,7 @@ func (ws *wsSession) close() {
 			ws.authorization.invalid.Store(true)
 		}
 		close(ws.done)
+		ws.subscriptionResync.clear()
 		if ws.cancel != nil {
 			ws.cancel()
 		}
@@ -316,7 +318,22 @@ func (s *Server) serveWebSocket(w http.ResponseWriter, r *http.Request, p princi
 }
 func (ws *wsSession) writeLoop() {
 	defer ws.close()
+	write := func(wire []byte) bool {
+		ws.conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
+		return ws.conn.WriteMessage(websocket.BinaryMessage, wire) == nil
+	}
+	resyncReady := ws.subscriptionResync.ready()
 	for {
+		// A busy stream of borrowed reads or normal replies must not starve
+		// invalidation. Each selected mailbox still drains only a finite cut.
+		select {
+		case <-resyncReady:
+			if !ws.writeSubscriptionResync(write) {
+				return
+			}
+			continue
+		default:
+		}
 		var batch [][]byte
 		select {
 		case <-ws.done:
@@ -331,12 +348,16 @@ func (ws *wsSession) writeLoop() {
 			continue
 		case b := <-ws.responses:
 			batch = [][]byte{b}
+		case <-resyncReady:
+			if !ws.writeSubscriptionResync(write) {
+				return
+			}
+			continue
 		case <-ws.telemetry.wake:
 			batch = ws.telemetry.take()
 		}
 		for _, b := range batch {
-			ws.conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
-			if ws.conn.WriteMessage(websocket.BinaryMessage, b) != nil {
+			if !write(b) {
 				return
 			}
 		}
