@@ -18,6 +18,7 @@ coverage/
 /control.stqr
 /quota.stqr
 /ranges.stqr
+/writeback/
 
 # CI dependencies, reports and disposable artifacts.
 node_modules/

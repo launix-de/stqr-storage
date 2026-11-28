@@ -58,6 +58,8 @@ type objectTransport struct {
 	connectionReadSynced   uint64
 	connectionBoot         ID
 	connectionWrites       map[ID]*connectionSubmission
+	connectionReceipts     map[ID]connectionReceipt
+	connectionReceiptErr   error
 
 	capabilities uint64
 	endpoint     string
@@ -95,7 +97,7 @@ func (t *objectTransport) fail(e error) {
 		for id, work := range t.connectionWrites {
 			if !work.noAck && !work.accepted {
 				delete(t.connectionWrites, id)
-			} else if work.err == nil {
+			} else if work.err == nil && !work.acknowledged {
 				work.err = &UnknownOutcomeError{RequestID: id, Cause: e}
 			}
 		}

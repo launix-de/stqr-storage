@@ -57,6 +57,7 @@ func warmupFixture(t *testing.T) (string, client.ID, client.ObjectID, string, st
 	}
 	c.Close()
 	accountingDir := d.node.accountingDir
+	forceColdAccountingOnTestStop(t, d.node)
 	d.close()
 	// A legacy/unclean deployment may lack this derived sidecar. Its absence
 	// must not prevent the real daemon listener from becoming available.
@@ -385,6 +386,7 @@ func TestStorageWarmupReplaysSourceFenceBeforeReads(t *testing.T) {
 	}
 	r.mu.Unlock()
 	dir := s.accountingDir
+	forceColdAccountingOnTestStop(t, s)
 	if e := s.Close(); err == nil {
 		err = e
 	}
@@ -497,6 +499,32 @@ func TestStorageWarmupReadonlyCOWDoesNotWriteStorage(t *testing.T) {
 	for _, op := range []uint16{peerCowMaterialize, peerCowSync, client.ObjectReference, client.ObjectAccepted, client.VolumeGrow, client.BucketCreate, client.ConnectionSync, peerPGRebuildRequest} {
 		if storageWarmReadMessage(client.Message{Opcode: op}) {
 			t.Fatalf("mutation %04x admitted", op)
+		}
+	}
+}
+
+// These tests exercise genuinely cold/legacy recovery. A clean modern stop also
+// retains exact O(bucket) aggregates inside its image, so removing only the
+// separate advisory cache no longer makes the next process cold. Cancel this
+// owned fixture's background jobs and replace its accounting hooks with an
+// explicitly unkeyed equivalent predicate before stopping it; no image/canonical
+// payload is edited and no accounting census or persistence fence is started.
+func forceColdAccountingOnTestStop(t *testing.T, s *Server) {
+	t.Helper()
+	s.cancel()
+	s.opMu.Lock()
+	defer s.opMu.Unlock()
+	s.mu.RLock()
+	var stores []*volume.Volume
+	for _, managed := range s.volumes {
+		if managed.store != s.system {
+			stores = append(stores, managed.store)
+		}
+	}
+	s.mu.RUnlock()
+	for _, store := range stores {
+		if _, err := store.ConfigureAccounting(volume.AccountingOptions{Include: func(volume.Key, bool) bool { return true }}); err != nil {
+			t.Fatal(err)
 		}
 	}
 }

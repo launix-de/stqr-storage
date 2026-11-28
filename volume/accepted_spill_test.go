@@ -108,7 +108,12 @@ func TestAcceptedSpillOversizedReadAfterWriteAndCloseWithoutSync(t *testing.T) {
 				}
 			}
 			beforeClose := v.IOStats()
-			if err = v.Close(); err != nil {
+			if explicit {
+				err = v.Close()
+			} else {
+				err = v.Abort()
+			}
+			if err != nil {
 				t.Fatal(err)
 			}
 			if v.IOStats().SyncOps != beforeClose.SyncOps {
@@ -415,7 +420,7 @@ func TestAcceptedSpillReadersAndLaterTailDuringExplicitFence(t *testing.T) {
 		t.Fatal(err)
 	}
 	beforeClose := v.IOStats()
-	if err = v.Close(); err != nil {
+	if err = v.Abort(); err != nil {
 		t.Fatal(err)
 	}
 	if v.IOStats().SyncOps != beforeClose.SyncOps {

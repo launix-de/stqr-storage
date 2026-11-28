@@ -64,6 +64,7 @@ func TestStorageWarmupProductionOrdinaryCOWClientAndRoleBoundaries(t *testing.T)
 		t.Fatal("grant reader", status, reply)
 	}
 	accountingDir := setup.node.accountingDir
+	forceColdAccountingOnTestStop(t, setup.node)
 	setup.close()
 	if err := os.RemoveAll(accountingDir); err != nil {
 		t.Fatal(err)

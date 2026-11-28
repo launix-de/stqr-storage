@@ -48,7 +48,7 @@ func (c *Client) observeDurability(t *objectTransport, b []byte) error {
 		return err
 	}
 	if t.capabilities&CapabilityConnectionSync != 0 {
-		t.noteConnectionDependency(m.Boot)
+		t.noteConnectionDependency(m)
 		return nil
 	}
 	c.mu.Lock()
@@ -99,33 +99,41 @@ func (c *Client) syncExcept(ctx context.Context, except *objectTransport) error 
 		return err
 	}
 	for _, p := range pending {
-		t, err := c.connectionFor(ctx, p.endpoint, p.node)
-		if err != nil {
+		if err := c.syncDurabilityPrefix(ctx, p); err != nil {
 			return err
-		}
-		e := Encoder{}
-		e.ID(c.bucket)
-		e.B = append(e.B, p.mark.MarshalBinary()...)
-		r, err := t.roundTrip(ctx, Message{Kind: Request, Opcode: BucketSync, ID: NewRequestID(), Body: e.B}, false, nil)
-		if err != nil {
-			return err
-		}
-		durable, err := DecodeCommitMark(r.result)
-		r.close()
-		if err != nil {
-			return err
-		}
-		if durable.Boot != p.mark.Boot || durable.Sequence < p.mark.Sequence {
-			return ErrGone
 		}
 		c.mu.Lock()
-		if current := c.durability[p.mark.Boot]; current.mark.Sequence <= durable.Sequence {
+		if current := c.durability[p.mark.Boot]; current.mark.Sequence <= p.mark.Sequence {
 			delete(c.durability, p.mark.Boot)
 		}
 		c.mu.Unlock()
 	}
 	return nil
 }
+func (c *Client) syncDurabilityPrefix(ctx context.Context, p pendingDurability) error {
+	t, err := c.connectionFor(ctx, p.endpoint, p.node)
+	if err != nil {
+		return err
+	}
+	e := Encoder{}
+	e.ID(c.bucket)
+	e.B = append(e.B, p.mark.MarshalBinary()...)
+	r, err := t.roundTrip(ctx, Message{Kind: Request, Opcode: BucketSync, ID: NewRequestID(), Body: e.B}, false, nil)
+	if err != nil {
+		r.close()
+		return err
+	}
+	durable, err := DecodeCommitMark(r.result)
+	r.close()
+	if err != nil {
+		return err
+	}
+	if durable.Boot != p.mark.Boot || durable.Sequence < p.mark.Sequence {
+		return ErrGone
+	}
+	return nil
+}
+
 func acceptedMessage(m Message) Message {
 	b := make([]byte, 0, len(m.Body)+2)
 	b = append(b, m.Body[:80]...)

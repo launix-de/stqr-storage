@@ -110,7 +110,7 @@ func TestAcceptedGroupCrashAtEveryStep(t *testing.T) {
 		}
 	}
 }
-func TestAcceptedAbortAndCleanClose(t *testing.T) {
+func TestAcceptedAbortAndRetainedCloseContract(t *testing.T) {
 	d := newCrash(16 << 20)
 	v, err := Format(d, FormatOptions{Class: SSD})
 	if err != nil {
@@ -131,18 +131,22 @@ func TestAcceptedAbortAndCleanClose(t *testing.T) {
 	}
 	mustGet(t, v, testKey(1), []byte("keep"))
 	generation := v.Header().Generation
-	if err = v.Close(); err != nil {
+	if err = v.Close(); !errors.Is(err, ErrRetentionRequired) {
+		t.Fatal("ordinary close discarded accepted state", err)
+	}
+	mustGet(t, v, testKey(1), []byte("keep"))
+	if err = v.Abort(); err != nil {
 		t.Fatal(err)
 	}
 	if err = v.CheckpointThrough(generation); !errors.Is(err, ErrClosed) {
-		t.Fatal("discarded tail became confirmed after Close", err)
+		t.Fatal("discarded tail became confirmed after Abort", err)
 	}
 	recovered, err := Open(d.crash(), OpenOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if _, _, err = testGet(recovered, testKey(1)); !errors.Is(err, ErrNotFound) {
-		t.Fatal("Close persisted an unrequested tail", err)
+		t.Fatal("Abort persisted an unrequested tail", err)
 	}
 }
 

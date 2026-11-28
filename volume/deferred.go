@@ -149,6 +149,11 @@ func (v *Volume) CheckpointThrough(generation uint64) error {
 	for generation == 0 && v.checkpointing {
 		v.prepareCond.Wait()
 	}
+	if generation > v.durableGeneration && v.restartCanonicalPending {
+		if err := v.confirmRestartCanonicalLocked(); err != nil {
+			return err
+		}
+	}
 	if generation <= v.durableGeneration {
 		return nil
 	}
@@ -212,6 +217,11 @@ func (v *Volume) flushDeferred() (err error) {
 	if err = v.check(false); err != nil {
 		return err
 	}
+	if v.restartCanonicalPending {
+		if err = v.confirmRestartCanonicalLocked(); err != nil {
+			return err
+		}
+	}
 	if v.deferred == nil {
 		return nil
 	}
@@ -233,6 +243,14 @@ func (v *Volume) syncVisible() error {
 	}
 	if err := v.check(false); err != nil {
 		return err
+	}
+	if v.restartCanonicalPending {
+		if err := v.confirmRestartCanonicalLocked(); err != nil {
+			return err
+		}
+		if v.deferred == nil {
+			return nil
+		}
 	}
 	if v.deferred != nil {
 		return v.flushDeferred()

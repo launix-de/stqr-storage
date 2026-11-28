@@ -63,7 +63,7 @@ func TestAcceptedWriteDoesNotSyncOtherOwners(t *testing.T) {
 	}
 }
 
-func TestAcceptedDisconnectedOwnerRemainsUnknownAfterAnotherOwnerWrite(t *testing.T) {
+func TestAcceptedDisconnectedOwnerRequiresProofAfterAnotherOwnerWrite(t *testing.T) {
 	const caps = CapabilityDurability | CapabilityConnectionSync
 	first, host := newDeferredFSPeer(t, caps)
 	second, otherHost := newDeferredFSPeer(t, caps)
@@ -83,9 +83,12 @@ func TestAcceptedDisconnectedOwnerRemainsUnknownAfterAnotherOwnerWrite(t *testin
 	if first.fences.Load() != 0 || second.fences.Load() != 0 {
 		t.Fatal("owner change implicitly fenced")
 	}
-	var unknown *UnknownOutcomeError
-	if err := c.Sync(ctx); !errors.As(err, &unknown) {
-		t.Fatal("disconnected owner dependency silently vanished", err)
+	var status *StatusError
+	if err := c.Sync(ctx); !errors.As(err, &status) || status.Status != 410 {
+		t.Fatal("disconnected owner proof requirement silently vanished", err)
+	}
+	if second.receiptFences.Load() != 1 {
+		t.Fatal("old owner prefix was not checked")
 	}
 	if first.fences.Load() != 1 || second.fences.Load() != 0 {
 		t.Fatal("explicit Sync did not retain owner cut", first.fences.Load(), second.fences.Load())

@@ -44,15 +44,19 @@ import (
 // Cluster placement, authentication, quotas across volumes, and UI are outside
 // this package. They may reserve physical capacity and manage the lifecycle.
 type Volume struct {
-	identity           atomic.Pointer[Identity]
-	keyMembership      atomic.Pointer[keyMembership]
-	keyMembershipEpoch atomic.Uint64
-	keyMembershipBuild sync.Mutex
-	deferred           *deferredGroup
-	fence              *writeFence
-	staging            map[uint64][]byte
-	stageStore         *dirtyStore
-	durableGeneration  uint64
+	identity                   atomic.Pointer[Identity]
+	keyMembership              atomic.Pointer[keyMembership]
+	keyMembershipEpoch         atomic.Uint64
+	keyMembershipBuild         sync.Mutex
+	deferred                   *deferredGroup
+	fence                      *writeFence
+	staging                    map[uint64][]byte
+	stageStore                 *dirtyStore
+	durableGeneration          uint64
+	restartCanonicalGeneration uint64
+	restartCanonicalPending    bool
+	retainedGeneration         uint64
+	restartAccounting          []byte
 
 	mu                sync.RWMutex
 	preparing         bool
@@ -275,6 +279,18 @@ func Open(dev VolumeIO, o OpenOptions) (*Volume, error) {
 		return nil, ErrIdentity
 	}
 	v := newVolume(dev, s, o)
+	restored := false
+	defer func() {
+		if !restored && v.deferred != nil {
+			v.deferred.store.close()
+		}
+	}()
+	if o.Restart != nil {
+		if e = v.restoreRestartLocked(o.Restart.Path, o.Restart.Receipt); e != nil {
+			return nil, fmt.Errorf("%w: %v", ErrRecovery, e)
+		}
+		s = v.sb
+	}
 	if _, e = v.node(s.ObjectRoot); e != nil {
 		return nil, e
 	}
@@ -289,6 +305,7 @@ func Open(dev VolumeIO, o OpenOptions) (*Volume, error) {
 			return nil, e
 		}
 	}
+	restored = true
 	return v, nil
 }
 func (v *Volume) publish(s Superblock) error {
@@ -393,7 +410,18 @@ func (v *Volume) Sync() error {
 	}
 	return v.syncVisible()
 }
-func (v *Volume) Close() error {
+
+// Close releases the device without implying a persistence fence. Published
+// persistent dirty pages must first be exported by RetainAccepted (or explicitly
+// synced). Otherwise it fails without releasing ownership or discarding data.
+func (v *Volume) Close() error { return v.close(false) }
+
+// Abort explicitly abandons unretained volatile state. It is for failed startup
+// cleanup and process/power-loss simulations, never an ordinary node shutdown.
+// Previously published immutable restart images remain available to recovery.
+func (v *Volume) Abort() error { return v.close(true) }
+
+func (v *Volume) close(abort bool) error {
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	if v.closed {
@@ -407,16 +435,21 @@ func (v *Volume) Close() error {
 	if v.closed {
 		return nil
 	}
-	// Closing is NOT a durability request. Only a client's explicit fence may
-	// confirm accepted bytes; discard any unrequested tail after waiting for the
-	// already-running fence above.
+	if !abort && v.deferred != nil && v.sb.Identity.Class != RAM && v.sb.Identity.Class != RAMCache && v.retainedGeneration < v.sb.Generation {
+		v.closing = false
+		return ErrRetentionRequired
+	}
+	// Only a successful explicit export permits ordinary Close to release private
+	// pages. Abort is the separately named deliberate-loss path.
 	if v.deferred != nil {
 		v.deferred.store.close()
 	}
 	if v.stageStore != nil {
 		v.stageStore.close()
 	}
-	_ = v.saveAccountingCacheLocked()
+	if !abort {
+		_ = v.saveAccountingCacheLocked()
+	}
 	v.closed = true
 	v.state = Detached
 	e := v.dev.Close()

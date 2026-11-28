@@ -210,7 +210,12 @@ func TestAcceptedSpillFileOverwriteCASAndAppendRetry(t *testing.T) {
 				}
 			}
 			beforeClose := v.IOStats()
-			if err = v.Close(); err != nil {
+			if explicit {
+				err = v.Close()
+			} else {
+				err = v.Abort()
+			}
+			if err != nil {
 				t.Fatal(err)
 			}
 			if after := v.IOStats(); after.WriteOps != beforeClose.WriteOps || after.SyncOps != beforeClose.SyncOps {

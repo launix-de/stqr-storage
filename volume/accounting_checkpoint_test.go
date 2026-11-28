@@ -59,7 +59,7 @@ func TestAccountingCheckpointCachesConfirmedCutWithConcurrentAcceptedTail(t *tes
 			if after.SyncOps-before.SyncOps != 4 {
 				t.Fatal("cache added physical fences", before, after)
 			}
-			if err := v.Close(); err != nil {
+			if err := v.Abort(); err != nil {
 				t.Fatal(err)
 			}
 			v = reopenAccountingFile(t, name)
@@ -151,7 +151,7 @@ func TestAccountingCheckpointCacheFailureDoesNotFailExplicitSync(t *testing.T) {
 	if got := v.IOStats(); got.SyncOps-before.SyncOps != 4 {
 		t.Fatal("sidecar introduced additional Sync", before, got)
 	}
-	if err := v.Close(); err != nil {
+	if err := v.Abort(); err != nil {
 		t.Fatal(err)
 	}
 	v = reopenAccountingFile(t, name)

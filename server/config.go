@@ -63,6 +63,7 @@ type VolumeConfig struct {
 	OperationID            string   `yaml:"operation_id,omitempty" json:"operation_id,omitempty"`
 }
 type Config struct {
+	RestartVersion         uint16         `yaml:"restart_retention_version,omitempty" json:"-"`
 	PlacementStatsHalfLife time.Duration  `yaml:"placement_stats_half_life,omitempty" json:"placement_stats_half_life,omitempty"`
 	FormatPluginsDir       string         `yaml:"format_plugins_dir,omitempty" json:"format_plugins_dir,omitempty"`
 	BrowserOrigins         []string       `yaml:"browser_origins,omitempty" json:"browser_origins,omitempty"`
@@ -315,6 +316,9 @@ func validateConfig(c Config) error {
 		if e = validateURL(c.Node.Advertise); e != nil {
 			return e
 		}
+	}
+	if c.RestartVersion > 1 {
+		return errors.New("unsupported restart retention version")
 	}
 	if c.Node.DataDir == "" || c.VolumesDir == "" {
 		return errors.New("data and volume directories cannot be empty")

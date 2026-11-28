@@ -45,7 +45,9 @@ func replaceTestVolumeIO(t *testing.T, s *Server, name string, wrap func(volume.
 	old := managed.store
 	identity := old.Identity()
 	size := identity.Size
-	if err := old.Close(); err != nil {
+	// This fixture deliberately replaces all contents with a freshly formatted
+	// backend, so abandon private accepted pages explicitly.
+	if err := old.Abort(); err != nil {
 		t.Fatal(err)
 	}
 	mem, err := volume.NewMemory(int64(size))
