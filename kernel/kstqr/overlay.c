@@ -766,7 +766,7 @@ static int ov_dir(struct ks_fs *f, struct ks_overlay_state *s, stqr_object_id id
 		goto fail;
 	}
 	if (pinned)
-		ks_object_reference(f->lower, id, temporary, 1);
+		ks_retire_pin(f->lower, id, temporary);
 	drop(&attrs);
 	*out = d;
 	return 0;
@@ -774,7 +774,7 @@ fail:
 	ks_snapshot_free(&base);
 	drop(&attrs);
 	if (pinned)
-		ks_object_reference(f->lower, id, temporary, 1);
+		ks_retire_pin(f->lower, id, temporary);
 	return err;
 }
 static int ov_inode_match(struct inode *, void *);
@@ -1341,9 +1341,11 @@ static int ov_copy_inode(struct ks_fs *f, stqr_object_id id, const char *path, b
 		err = 0;
 done:
 	/* An inherited token may have been copied into bucket COW snapshots.
-	 * Keep published anchor pins until graph-aware offline recovery. */
+	 * Keep published anchor pins until graph-aware offline recovery. The
+	 * acknowledged temporary PIN is different: retire its original token even
+	 * if this copy-up's task is now exiting with a fatal signal. */
 	if (pinned)
-		ks_object_reference(f->lower, id, temporary, 1);
+		ks_retire_pin(f->lower, id, temporary);
 	drop(&raw);
 	drop(&attrs);
 	ks_snapshot_free(base);
