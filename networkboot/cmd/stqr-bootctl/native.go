@@ -129,7 +129,7 @@ func newImageSession(ctx context.Context, c config, lowerName, imageName string,
 		if err != nil {
 			cleanupCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
-			if removeImageSession(cleanupCtx, c, s.User, s.Upper, s.Lower, edit) == nil && record != "" {
+			if removeImageSession(cleanupCtx, c, s.User, s.Upper, s.Lower, edit, record) == nil && record != "" {
 				_ = os.Remove(record)
 			}
 		}
@@ -187,12 +187,30 @@ func newImageSession(ctx context.Context, c config, lowerName, imageName string,
 // It never means that revocation or deletion has occurred.
 var errSessionActive = errors.New("temporary upper still active; retained")
 
-func removeBootSession(ctx context.Context, c config, user, upper, lower client.ID) error {
-	return removeImageSession(ctx, c, user, upper, lower, false)
+func removeBootSession(ctx context.Context, c config, user, upper, lower client.ID, records ...string) error {
+	return removeImageSession(ctx, c, user, upper, lower, false, records...)
 }
-func removeImageSession(ctx context.Context, c config, user, upper, lower client.ID, edit bool) error {
+func removeImageSession(ctx context.Context, c config, user, upper, lower client.ID, edit bool, records ...string) error {
 	if upper == (client.ID{}) || lower == (client.ID{}) || user == (client.ID{}) || (upper == lower) != edit {
 		return errors.New("session mode does not match bucket identities; refusing cleanup")
+	}
+	record := ""
+	if len(records) > 0 {
+		record = records[0]
+	}
+	var retirement *sessionDependencyRetirement
+	var err error
+	if !edit {
+		if record == "" {
+			return errors.New("session record required for recoverable overlay retirement; use --session-record")
+		}
+		retirement, err = loadSessionRetirement(record, user, upper, lower)
+		if err != nil {
+			return err
+		}
+		if retirement != nil && retirement.Complete {
+			return nil
+		}
 	}
 	// Claim EOF or gateway death does not prove that a guest has stopped:
 	// the mounted filesystem may still own live storage sockets. Existing
@@ -211,8 +229,20 @@ func removeImageSession(ctx context.Context, c config, user, upper, lower client
 			return fmt.Errorf("temporary upper maintenance failed; retained: %w", err)
 		}
 		defer idle.Close()
-	} else if !errors.Is(err, client.ErrNotFound) {
+		if !edit && retirement == nil {
+			plan, readErr := client.ReadOverlayDependencyRetirementPlan(ctx, idle, upper, lower)
+			if readErr != nil {
+				return fmt.Errorf("capture upper dependency ledger before deletion; retained: %w", readErr)
+			}
+			retirement = &sessionDependencyRetirement{Plan: plan}
+			if err = saveSessionRetirement(record, user, upper, lower, retirement); err != nil {
+				return err
+			}
+		}
+	} else if !errors.Is(err, client.ErrNotFound) && !(retirement != nil && errors.Is(err, client.ErrUnauthorized)) {
 		return err
+	} else if !edit && retirement == nil {
+		return errors.New("deleted upper has no recorded dependency plan; retain record for explicit graph-aware repair")
 	}
 	// Delete the account while maintenance excludes reconnect. Revoke its
 	// stale ACL entry only after releasing the lease: a bucket's configuration
@@ -244,10 +274,27 @@ func removeImageSession(ctx context.Context, c config, user, upper, lower client
 	// Clearing object-by-object first is unnecessary and much more expensive.
 	err = byID(ctx, c, client.BucketDelete, upper)
 	var api *apiError
-	if errors.As(err, &api) && api.Status == 404 {
+	if err != nil && !(errors.As(err, &api) && api.Status == 404) {
+		return err
+	}
+	if retirement == nil {
 		return nil
 	}
-	return err
+	if len(retirement.Plan.Anchors) == 0 {
+		retirement.Complete = true
+		return saveSessionRetirement(record, user, upper, lower, retirement)
+	}
+	lowerConn, err := client.Dial(ctx, c.URI, c.Username, c.Password, lower, "fs")
+	if err != nil {
+		return err
+	}
+	defer lowerConn.Close()
+	// The generic post-deletion proof must be supported; old servers retain
+	// this durable journal rather than guessing that a missing upper is safe.
+	if err = retireSessionDependencies(ctx, record, user, upper, lower, retirement, lowerConn); err != nil {
+		return fmt.Errorf("upper deleted; dependency retirement journal retained: %w", err)
+	}
+	return nil
 
 }
 
@@ -373,7 +420,7 @@ func nativeCommand(ctx context.Context, c config, cmd string, args []string, siz
 		if err != nil {
 			return err
 		}
-		return removeImageSession(ctx, c, user, upper, lower, cmd == "edit-session-delete")
+		return removeImageSession(ctx, c, user, upper, lower, cmd == "edit-session-delete", record)
 	}
 	return errors.New("unknown native command")
 }
