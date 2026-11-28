@@ -14,6 +14,11 @@
 /* The core has no OS socket, allocator, crypto or threading dependencies.
  * Userspace and kernel supply these operations. I/O returns exact bytes or errno.
  */
+/* Reserved internal result: sq_send rejected the complete frame before any
+ * byte could reach the transport. Only a port that proves this may return it.
+ * Ordinary errno (including EINTR) can follow partial delivery and is ambiguous.
+ * Never return this from recv, or after a transport worker has been dispatched. */
+#define SQ_SEND_NOT_SUBMITTED (-4096)
 struct stqr_socket;
 void *sq_alloc(size_t n);
 void sq_free(void *p);

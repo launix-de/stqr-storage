@@ -2,12 +2,14 @@
 /* Deterministic protocol-state regressions: no live socket or fault timing. */
 /* A deterministic WebSocket peer counts actual emitted protocol fences.
  * Crypto/allocation/time remain the normal userspace port implementation. */
+#define sq_alloc policy_alloc
 #define sq_send policy_send
 #define sq_recv policy_recv
 #define sq_wait policy_wait
 #define sq_connect policy_connect
 #define sq_disconnect policy_disconnect
 #include "../src/core.c"
+#undef sq_alloc
 #undef sq_send
 #undef sq_recv
 #undef sq_wait
@@ -15,11 +17,16 @@
 #undef sq_disconnect
 #include <assert.h>
 #include <stdio.h>
-struct stqr_socket { struct buf replies,held; unsigned calls[512],pongs; stqr_u64 sequence,reply_length; unsigned boot;int closed,hold,redirect,hold_through,through_status; };
+void *sq_alloc(size_t n);
+static int reject_allocation;
+void *policy_alloc(size_t n) {return reject_allocation?NULL:sq_alloc(n);}
+struct stqr_socket { struct buf replies,held; unsigned calls[512],pongs; stqr_u64 sequence,reply_length; unsigned boot;int closed,hold,redirect,hold_through,through_status,send_error,fail_call;unsigned sends; };
 int policy_connect(struct stqr_socket **out,const char *host,unsigned port,unsigned ms) {
     (void)out;(void)host;(void)port;(void)ms;return -EOPNOTSUPP;
 }
 int policy_send(struct stqr_socket *socket,const void *data,size_t size) {
+    socket->sends++;
+    if(socket->send_error&&(!socket->fail_call||socket->sends==(unsigned)socket->fail_call))return socket->send_error;
     const stqr_u8 *wire=data;size_t at=2,n;struct buf input={0},message={0},headers={0},mark={0};
     if(size==6 && wire[0]==0x8a && wire[1]==0x80) { socket->pongs++; return 0; }
     assert(size>=6 && (wire[0]&15)==2 && (wire[1]&128));
@@ -498,7 +505,67 @@ static void control_without_reply(unsigned opcode,int expected) {
     if(expected>0) assert(!stqr_poll(c,0));
     stqr_close(c);
 }
+/* Fatal cancellation before the transport worker is dispatched must not make
+ * unrelated accepted or in-flight operations permanently uncertain. A generic
+ * EINTR cannot prove zero bytes, so that separate case stays conservative. */
+static void rejected_before_transport(int synchronous, int send_error) {
+    struct stqr_socket socket={0};stqr_client *c=sq_alloc(sizeof(*c));
+    struct sq_channel *owner=sq_alloc(sizeof(*owner));struct result first={0},second={0};
+    stqr_options options={.accepted=1};stqr_object_id object={{7}};
+    assert(c&&owner);c->bucket.bytes[0]=1;c->channels=owner;c->channel_count=1;
+    owner->socket=&socket;owner->capabilities=STQR_CAP_DURABILITY|STQR_CAP_CONNECTION_SYNC;
+    load_channel(c,owner);options.request_id.bytes[0]=21;
+    assert(!stqr_cas_async(c,object,1,0,"old!",4,"new!",4,&options,completed,&first));
+    assert(c->async_count==1&&socket.calls[0x118]==1);
+    socket.send_error=send_error;options.request_id.bytes[0]=22;
+    int error;
+    if(synchronous) {
+        struct buf body={0},result={0};stqr_id id={{22}};stqr_u8 zeroes[80]={0};put(&body,zeroes,sizeof(zeroes));
+        error=request(c,0x102,&body,id,1,&result,NULL);drop(&body);drop(&result);
+    } else error=stqr_cas_async(c,object,1,0,"old!",4,"next",4,&options,completed,&second);
+    assert(error==(send_error==SQ_SEND_NOT_SUBMITTED?-EINTR:-EINPROGRESS));
+    assert(socket.calls[0x118]==1&&!second.called);
+    if(send_error==SQ_SEND_NOT_SUBMITTED) {
+        assert(c->socket==&socket&&!socket.closed&&!c->durability_lost&&!owner->lost);
+        assert(c->async_count==1&&!first.called);
+        socket.send_error=0;
+        assert(stqr_poll(c,0)>0&&first.called==1&&!first.error);
+        stqr_space space;assert(!stqr_bucket_space(c,&space));
+        struct result fence={0};assert(!stqr_connection_sync_async(c,completed,&fence));
+        for(unsigned i=0;i<8&&!fence.called;i++)assert(stqr_poll(c,0)>=0);
+        assert(fence.called&&!fence.error);
+        assert(!c->durability_lost&&!owner->lost&&!c->async_count);
+    } else assert(c->durability_lost);
+    stqr_close(c);
+}
+static void rejected_later_stream_frame(unsigned fail_call) {
+    struct stqr_socket socket={.send_error=SQ_SEND_NOT_SUBMITTED,.fail_call=(int)fail_call};
+    stqr_client *c=sq_alloc(sizeof(*c));struct sq_channel *owner=sq_alloc(sizeof(*owner));
+    struct buf body={0},result={0};stqr_id id={{25}};stqr_u8 zeroes[80]={0},hash[32]={0};
+    assert(c&&owner);c->channels=owner;c->channel_count=1;c->bucket.bytes[0]=1;
+    owner->socket=&socket;owner->capabilities=STQR_CAP_DURABILITY|STQR_CAP_ACCEPTED_STREAMS;
+    load_channel(c,owner);put(&body,zeroes,sizeof(zeroes));
+    assert(request_payload(c,0x102,&body,id,2,&result,NULL,"abc",3,hash)==-EINPROGRESS);
+    assert(c->durability_lost&&socket.closed&&socket.sends==fail_call);
+    drop(&body);drop(&result);stqr_close(c);
+}
+static void allocation_before_transport(void) {
+    struct stqr_socket socket={0};stqr_client c={0};struct sq_channel owner={0};
+    struct sq_async pending={0};struct buf body={0},result={0};stqr_id id={{23}};
+    c.socket=&socket;c.active=&owner;owner.socket=&socket;
+    pending.mutation=1;pending.id=id;pending.op=0x102;
+    stqr_u8 zeroes[80]={0};put(&pending.body,zeroes,sizeof(zeroes));put(&body,zeroes,sizeof(zeroes));
+    reject_allocation=1;
+    assert(async_send(&c,&pending)==-ENOMEM);
+    assert(request(&c,0x102,&body,id,1,&result,NULL)==-ENOMEM);
+    reject_allocation=0;
+    assert(!c.durability_lost&&!owner.lost&&!socket.closed&&!socket.calls[0x102]);
+    drop(&pending.body);drop(&body);drop(&result);
+}
 int main(void) {
+    rejected_later_stream_frame(2);rejected_later_stream_frame(3);
+    rejected_before_transport(0,SQ_SEND_NOT_SUBMITTED);rejected_before_transport(1,SQ_SEND_NOT_SUBMITTED);
+    rejected_before_transport(0,-EINTR);rejected_before_transport(1,-EINTR);allocation_before_transport();
     control_before_cas_reply(9);control_before_cas_reply(10);
     control_without_reply(0x89,1);control_without_reply(0x8a,1);
     control_without_reply(0x88,-ECONNRESET);control_without_reply(0x09,-EPROTO);
