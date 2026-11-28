@@ -55,10 +55,14 @@ static void async_fail(stqr_client *c,struct sq_channel *channel,int error) {
      * whether those operations were admitted, so their uncertainty stays
      * latched even if normal filesystem visibility can subsequently recover. */
     if (channel==c->active) {
-        if ((c->capabilities&STQR_CAP_CONNECTION_SYNC) && c->pending_mark.sequence)
-            c->detached_mark=c->pending_mark;
-    } else if (channel && (channel->capabilities&STQR_CAP_CONNECTION_SYNC) && channel->pending.sequence)
-        channel->detached=channel->pending;
+        if ((c->capabilities&STQR_CAP_CONNECTION_SYNC) && c->pending_mark.sequence) {
+            if(prefix_retain(&c->detached_mark,&c->detached_extra,&c->detached_count,&c->pending_mark))c->durability_lost=1;
+            memset(&c->pending_mark,0,sizeof(c->pending_mark));
+        }
+    } else if (channel && (channel->capabilities&STQR_CAP_CONNECTION_SYNC) && channel->pending.sequence) {
+        if(prefix_retain(&channel->detached,&channel->detached_extra,&channel->detached_count,&channel->pending))channel->lost=1;
+        memset(&channel->pending,0,sizeof(channel->pending));
+    }
     for (i=0;i<64;i++)
         for (struct sq_async *p=c->async[i];p;p=p->next)
             if (p->channel==channel && (p->mutation || p->fire)) {
@@ -132,7 +136,10 @@ static int async_submit(stqr_client *c,unsigned op,struct buf *body,stqr_id id,
     p->offset=off;p->length=len;p->complete=cb;p->arg=arg;
     p->sequence=++c->async_sequence;p->cut=p->sequence-1;
     if(op==0x122)p->mark=c->pending_mark;
-    if(op==0x119)p->mark=c->detached_mark;
+    if(op==0x119){
+        struct buf mark=*body;mark.pos=16;
+        err=decode_mark(&mark,&p->mark);if(err){async_free(p);return err;}
+    }
     put(&p->body,body->p,body->n);
     if(p->body.err){err=p->body.err;async_free(p);return err;}
     h=async_hash(id.bytes);p->next=c->async[h];c->async[h]=p;c->async_count++;
@@ -241,22 +248,26 @@ static int async_dispatch(stqr_client *c,unsigned kind,unsigned op,const stqr_u8
         if(!err)note_active(c,&durable);
     }
     else if(p->op==0x122){
+        stqr_id boot={{0}};
         if(!err){
-            const stqr_u8 *boot=take(m,16);readnum(m,8);
-            if(done(m)||!boot||zero(boot,16))err=-EPROTO;
-            else if(p->mark.sequence&&memcmp(p->mark.boot.bytes,boot,16)) {
-                /* A new server boot cannot certify an older accepted prefix,
-                 * even if no fresh receipt has exposed that mismatch yet. */
-                c->durability_lost=1;err=-ESTALE;
+            const stqr_u8 *raw=take(m,16);readnum(m,8);
+            if(done(m)||!raw||zero(raw,16))err=-EPROTO;
+            else memcpy(boot.bytes,raw,16);
+            /* A different incarnation cannot certify the captured prefix, but
+             * this is known ACK state, not an unknown mutation. Keep it for
+             * explicit boot-qualified proof instead of poisoning the client. */
+            if(!err&&p->mark.sequence&&memcmp(p->mark.boot.bytes,boot.bytes,16))err=-ESTALE;
+        }
+        if(!err){
+            stqr_commit_mark covered=p->channel->submitted==p->sequence?c->pending_mark:p->mark;
+            if(covered.sequence&&!memcmp(covered.boot.bytes,boot.bytes,16)){
+                /* ConnectionSync covers this socket only. It must not retire
+                 * a different socket's old prefix, even from the same boot. */
+                if(!memcmp(c->pending_mark.boot.bytes,covered.boot.bytes,16)&&c->pending_mark.sequence<=covered.sequence)
+                    memset(&c->pending_mark,0,sizeof(c->pending_mark));
+                if(!prefix_contains(c->detached_mark,c->detached_extra,covered.boot.bytes))note_active(c,&covered);
             }
         }
-        /* Notices already queued before this ACK are covered too. If another
-         * request was submitted meanwhile retain its potentially newer mark. */
-        if(!err && !c->detached_mark.sequence && p->channel->submitted==p->sequence) {
-            stqr_commit_mark covered=c->pending_mark;
-            if(covered.sequence)note_active(c,&covered);
-        }
-        else if(!err && !c->detached_mark.sequence && p->mark.sequence)note_active(c,&p->mark);
         async_retire_fire(c,p,!err,&err,&status);
     }
     async_finish(c,p,err,status,data,n,(p->op==0x100||p->op==0x101||p->op==0x107||p->op==0x108||p->op==0x110||p->op==0x102||p->op==0x103)?&info:NULL);
@@ -371,20 +382,22 @@ static void async_sync_start(struct async_sync_group *g) {
     for(s=c->channels;s;s=s->next) {
         struct buf b={0};stqr_id rid={{0}};
         if(!s->socket) {
-            if(s->pending.sequence&&!g->error)g->error=-ENOTCONN;
+            if((s->pending.sequence||s->detached.sequence)&&!g->error)g->error=-ENOTCONN;
             continue;
         }
         load_channel(c,s);
-        if ((c->capabilities&STQR_CAP_CONNECTION_SYNC) && c->detached_mark.sequence) {
-            /* Join the old acknowledged prefix and this socket's new work.
-             * Both requests are asynchronous and owner-local; only an explicit
-             * client sync reaches this path. A failed old-prefix confirmation
-             * leaves its mark intact even if the new ConnectionSync succeeds. */
-            put(&b,c->bucket.bytes,16);put(&b,c->detached_mark.boot.bytes,16);number(&b,c->detached_mark.sequence,8);
-            g->pending++;
-            err=async_submit(c,0x119,&b,rid,(stqr_object_id){{0}},0,0,0,0,async_sync_done,g);
-            drop(&b);
-            if(err){g->pending--;if(!g->error){g->error=err;g->status=0;}}
+        if(c->capabilities&STQR_CAP_CONNECTION_SYNC){
+            struct sq_prefix *extra=c->detached_extra;
+            stqr_commit_mark mark=c->detached_mark;
+            while(mark.sequence){
+                put(&b,c->bucket.bytes,16);put(&b,mark.boot.bytes,16);number(&b,mark.sequence,8);
+                g->pending++;
+                err=async_submit(c,0x119,&b,rid,(stqr_object_id){{0}},0,0,0,0,async_sync_done,g);
+                drop(&b);
+                if(err){g->pending--;if(!g->error){g->error=err;g->status=0;}}
+                if(!extra)break;
+                mark=extra->mark;extra=extra->next;
+            }
         }
         g->pending++;
         if(c->capabilities&STQR_CAP_CONNECTION_SYNC)err=async_submit(c,0x122,&b,rid,(stqr_object_id){{0}},0,0,0,0,async_sync_done,g);
