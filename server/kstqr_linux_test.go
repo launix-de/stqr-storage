@@ -1252,6 +1252,17 @@ rmmod kstqr
 		if _, err := fs.Create(ctx, client.FilesystemRootID(), "live-directory", 0755, 0, 0, true); err != nil {
 			t.Fatal(err)
 		}
+		if os.Getenv("STQR_KERNEL_OVERLAY_ATTRS") == "1" {
+			dir, err := fs.Lookup(ctx, client.FilesystemRootID(), "live-directory")
+			if err != nil {
+				t.Fatal(err)
+			}
+			for n := 0; n < 1024; n++ {
+				if _, err = fs.Create(ctx, dir.ID, fmt.Sprintf("entry-%04d", n), 0644, 0, 0, false); err != nil {
+					t.Fatal(err)
+				}
+			}
+		}
 		source, e := fs.Create(ctx, client.FilesystemRootID(), "overlay-source", 0644, 0, 0, false)
 		if e != nil {
 			t.Fatal(e)
@@ -1519,6 +1530,12 @@ echo KSTQR_VM_PASS
 trap - EXIT
 poweroff -f
 `, endpoint, nativeUpperID.String(), client.ID(b.ID()).String())
+		if os.Getenv("STQR_KERNEL_OVERLAY_ATTRS") == "1" {
+			run("cc", "-static", "-O2", "-Wall", "-Wextra", "-Werror", "-o", filepath.Join(initrdRoot, "overlay-attrs"), filepath.Join(root, "tests/overlay_attrs.c"))
+			start := strings.Index(init, "/overlay-proof warm\n")
+			end := strings.Index(init[start:], "umount /mnt\n") + start
+			init = init[:start] + "/overlay-attrs " + endpoint + "\n" + init[end:]
+		}
 		// Individual cases let the original predicate serve as an independent
 		// failing control for cursor changes and subscription replacement.
 		switch os.Getenv("STQR_KERNEL_OVERLAY_PROOF_CASE") {
@@ -1817,6 +1834,17 @@ poweroff -f
 		return
 	}
 
+	if os.Getenv("STQR_KERNEL_OVERLAY_ATTRS") == "1" {
+		if !strings.Contains(string(output), "KSTQR_OVERLAY_ATTRS_PASS") {
+			t.Fatal("overlay attrs oracle failed")
+		}
+		for _, line := range strings.Split(string(output), "\n") {
+			if strings.Contains(line, "overlay-attrs") {
+				t.Log(strings.TrimSpace(line))
+			}
+		}
+		return
+	}
 	if os.Getenv("STQR_KERNEL_OVERLAY_PROOF") == "1" {
 		if !strings.Contains(string(output), "KSTQR_OVERLAY_PROOF_PASS") {
 			t.Fatal("overlay proof regression did not finish")

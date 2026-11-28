@@ -6,6 +6,7 @@
 static int ov_lower_reference_attr(struct ks_node *, stqr_id, struct buf *);
 struct ov_dir {
 	stqr_object_id id, lower;
+	u8 row_digest[32];
 	bool opaque, metadata;
 	struct ks_node node;
 	struct buf image;
@@ -192,6 +193,7 @@ static int ov_decode(const void *raw, size_t length, struct ks_overlay_state **o
 		goto fail;
 	}
 	for (unsigned i = 0; i < count; i++) {
+		size_t row_start = b.pos;
 		struct ov_dir *d = sq_alloc(sizeof(*d));
 		const u8 *p;
 		size_t n;
@@ -255,6 +257,11 @@ static int ov_decode(const void *raw, size_t length, struct ks_overlay_state **o
 			if (p)
 				memcpy(d->entries[j].id.bytes, p, 32);
 		}
+		/* Hash the already validated canonical row once, including its exact
+		 * metadata, lower identity, flags and name bindings. No old map is pinned. */
+		err = sq_hash(256, b.p + row_start, b.pos - row_start, d->row_digest);
+		if (err)
+			goto fail;
 	}
 	if (done(&b) || !ov_find(s, ks_root_id) || ov_find(s, ks_root_id)->node.removed) {
 		err = -EUCLEAN;
@@ -418,6 +425,36 @@ static int ov_state(struct ks_fs *f, struct ks_overlay_state **out)
 	}
 	return -EAGAIN;
 }
+/* A sibling edit replaces the global STOM head but does not change this
+ * directory's attributes or encoded size when its own row and lower directory
+ * remain identical. Upgrade only the inode attribute proof; lookup/readdir
+ * retain the existing complete namespace and cross-directory alias checks. */
+int ks_overlay_refresh_directory_attrs(struct ks_fs *f, stqr_object_id id,
+	const struct ks_directory_proof *before, struct ks_directory_proof *after)
+{
+	struct ks_overlay_state *state;
+	struct ov_dir *d;
+	int err;
+	if (!before->valid || !before->attrs_valid)
+		return 0;
+	err = ov_state(f, &state);
+	if (err)
+		return err;
+	d = ov_find(state, id);
+	if (before->row_present != (d != NULL) ||
+	    (d && (d->node.removed || memcmp(before->row_digest, d->row_digest, 32))) ||
+	    (before->has_lower &&
+	     (!eqid(before->lower_id, d ? d->lower : id) ||
+	      !ks_cache_stamp_current(f->lower, before->lower_id, &before->lower)))) {
+		ov_put(state);
+		return 0;
+	}
+	*after = *before;
+	err = ks_cache_stamp(f, ks_root_id, &state->info, &after->root) ? 1 : 0;
+	ov_put(state);
+	return err;
+}
+
 static int ov_edit(struct ks_fs *f, struct ks_overlay_state **out)
 {
 	struct ks_overlay_state *base, *s = NULL;
@@ -895,6 +932,10 @@ static int ov_snapshot(struct ks_fs *f, struct ks_overlay_state *state, stqr_obj
 		     ks_cache_stamp(f->lower, directory_proof.lower_id, &lower_info,
 				    &directory_proof.lower));
 		if (directory_proof.valid) {
+			directory_proof.attrs_valid = true;
+			directory_proof.row_present = d != NULL;
+			if (d)
+				memcpy(directory_proof.row_digest, d->row_digest, 32);
 			out->directory_proof =
 			    kmemdup(&directory_proof, sizeof(directory_proof), GFP_NOFS);
 			out->node.directory_proof = out->directory_proof;

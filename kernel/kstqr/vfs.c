@@ -152,12 +152,28 @@ static int refresh_inode(struct inode *i)
 	struct ks_fs *f = i->i_sb->s_fs_info;
 	bool attrs_current = false;
 	if (f->lower && S_ISDIR(i->i_mode)) {
-		struct ks_directory_proof *p = &KS_I(i)->directory_proof;
+		struct ks_directory_proof before, after;
 		mutex_lock(&KS_I(i)->metadata_lock);
-		attrs_current = overlay_proof_current(f, p);
+		before = KS_I(i)->directory_proof;
+		attrs_current = overlay_proof_current(f, &before);
 		mutex_unlock(&KS_I(i)->metadata_lock);
 		if (attrs_current)
 			return 0;
+		int cached = ks_overlay_refresh_directory_attrs(f, KS_I(i)->id, &before, &after);
+		if (cached < 0)
+			return cached;
+		if (cached) {
+			mutex_lock(&KS_I(i)->metadata_lock);
+			/* A concurrent metadata refresh may already describe a different
+			 * row. Never certify those attributes using our earlier cut. */
+			if (!memcmp(&KS_I(i)->directory_proof, &before, sizeof(before))) {
+				KS_I(i)->directory_proof = after;
+				attrs_current = true;
+			}
+			mutex_unlock(&KS_I(i)->metadata_lock);
+			if (attrs_current)
+				return 0;
+		}
 	}
 	struct ks_snapshot s;
 	int err = ks_snapshot(i->i_sb->s_fs_info, KS_I(i)->id, &s);
