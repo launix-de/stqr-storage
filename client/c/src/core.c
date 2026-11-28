@@ -1171,6 +1171,10 @@ int stqr_unsubscribe_discard(stqr_client *c, stqr_id sid) {
     struct sq_binding *binding=*binding_slot(c,sid);
     if (binding) { save_channel(c); load_channel(c,binding->channel); }
     if (!(c->capabilities&STQR_CAP_SUBSCRIPTIONS)) return -EOPNOTSUPP;
+    /* Older nodes account FF controls by message ID. Keep that ID unique
+     * without retaining a response waiter or persistence dependency here. */
+    err=stqr_request_id(&rid);
+    if (err) { broken(c); return err; }
     put(&body,sid.bytes,16);
     err=message_send(c,0,0x111,rid,&body); drop(&body);
     if (err) { broken(c); return err; }

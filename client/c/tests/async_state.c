@@ -34,7 +34,7 @@ int policy_send(struct stqr_socket *socket,const void *data,size_t size) {
     socket->calls[op]++;
     if(kind==0){
         assert(op==5 || op==6 || op==0x111 || op==0x114);
-        if(op==0x111){assert(zero(id,16));assert(input.n-input.pos==16);}
+        if(op==0x111){assert(!zero(id,16));assert(input.n-input.pos==16);}
         drop(&input);return 0;
     }
     assert(kind==1);

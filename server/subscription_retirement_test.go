@@ -186,3 +186,78 @@ func TestSubscriptionCapturePressureAvoidsPayloadIO(t *testing.T) {
 		t.Fatal("capture bounds changed", r.snapshotBytes, r.count)
 	}
 }
+
+func TestSubscriptionPublicationWindowCredits(t *testing.T) {
+	for _, distinct := range []bool{false, true} {
+		t.Run(map[bool]string{false: "shared-window", true: "five-windows"}[distinct], func(t *testing.T) {
+			s, ws, first := publicationFixture(t)
+			r := &s.objectSubscriptions
+			r.mu.Lock()
+			first.ranged = true
+			first.length = 3
+			r.mu.Unlock()
+			for i := 1; i < 5; i++ {
+				sub := *first
+				sub.id = client.ID{byte(i + 1)}
+				if distinct {
+					sub.offset = uint64(i)
+				}
+				if err := r.add(&sub); err != nil {
+					t.Fatal(err)
+				}
+			}
+			captures := 0
+			r.publishCaptured(first.key, volume.Info{Length: 8}, 0, func(off, n uint64) ([]byte, error) {
+				if !r.mu.TryLock() {
+					t.Fatal("capture holds registry lock")
+				}
+				if r.snapshotBytes < 3 || r.snapshotBytes > 15 {
+					t.Fatal("window capture not reserved", r.snapshotBytes)
+				}
+				r.mu.Unlock()
+				captures++
+				return []byte("abc"), nil
+			})
+			expected := 1
+			if distinct {
+				expected = 5
+			}
+			if captures != expected {
+				t.Fatal("window reuse changed", captures, expected)
+			}
+			if len(ws.responses) != 5 || r.snapshotBytes != 0 || r.bytes != 5*131 {
+				t.Fatal("window/journal credits", len(ws.responses), r.snapshotBytes, r.bytes)
+			}
+		})
+	}
+}
+func TestSubscriptionControlDoesNotFinishStorageHeader(t *testing.T) {
+	s, ws, _ := publicationFixture(t)
+	storage := client.Message{Kind: client.Request, Opcode: 0x0100}
+	if !ws.admitConnectionMessage(storage) {
+		t.Fatal("storage admission")
+	}
+	job := ws.connectionJobs[storage.ID]
+	for _, op := range []uint16{client.ObjectUnsubscribe, client.SubscriptionAck} {
+		e := client.Encoder{}
+		e.ID(client.ID{99})
+		if op == client.SubscriptionAck {
+			e.U64(0)
+		}
+		ws.executeRequest(client.Message{Kind: client.FireAndForget, Opcode: op, Body: e.B}, principal{})
+		select {
+		case <-job.headerReady:
+			t.Fatal("RAM control completed another request header")
+		default:
+		}
+		select {
+		case <-job.done:
+			t.Fatal("RAM control completed another request")
+		default:
+		}
+	}
+	if len(ws.responses) != 0 || len(ws.connectionJobs) != 1 {
+		t.Fatal("RAM controls retained replies/jobs")
+	}
+	s.objectSubscriptions.closeSession(ws)
+}
