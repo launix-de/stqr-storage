@@ -149,6 +149,13 @@ func (f *Filesystem) helpPinnedTransaction(ctx context.Context, id ObjectID, dep
 					return false, err
 				}
 			}
+			// The claimed decision now owns admitted in-place writes. Caller
+			// cancellation cannot prove that a submitted REDO did not execute:
+			// releasing here would let a later writer race its delayed completion.
+			// Keep this goroutine and its context values until the critical phase
+			// settles. Cancellation before the claim remains interruptible; this
+			// completion requests visibility only, never an implicit Sync.
+			ctx = context.WithoutCancel(ctx)
 			defer fsDetachedCleanup(ctx, func(clean context.Context) error { return refs.ReleaseObjectRetirement(clean, id, claim) })
 			current, _, decisionRaw, err := f.loadIntent(ctx, id)
 			if errors.Is(err, ErrNotFound) {
