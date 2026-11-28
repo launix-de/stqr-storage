@@ -7,6 +7,7 @@
 #include <linux/mutex.h>
 #include <linux/spinlock.h>
 #include <linux/workqueue.h>
+#include "invalidation_queue.h"
 int ks_transport_start(void);
 void ks_transport_stop(void);
 void ks_queue_fence_work(struct work_struct *);
@@ -97,9 +98,7 @@ struct ks_fs {
 	spinlock_t inode_lock;
 	struct list_head inodes;
 	struct work_struct invalidation_work;
-	stqr_object_id invalidations[128];
-	unsigned invalidation_count;
-	bool invalidate_all;
+	struct ks_invalidation_queue invalidations;
 	u64 invalidation_generation;
 	char *url;
 	stqr_id bucket;
