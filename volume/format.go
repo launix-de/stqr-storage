@@ -19,6 +19,7 @@ const dataStart = treeStart + 2*PageSize
 // Superblock contains only roots, configuration and physical counters. Tree
 // pages are updated in place through the redo WAL; no index directory snapshots.
 type Superblock struct {
+	RestartLineage                                                                                                         ID // accepted handoff ancestry, never an object content version
 	Identity                                                                                                               Identity
 	Generation, Sequence, ObjectRoot, FreeRoot, Objects, LogicalBytes, FreeBytes, MetadataBytes, PayloadBytes, ArenaUnused uint64
 	LocalMetadataRoot, LocalMetadataSize                                                                                   uint64
@@ -63,6 +64,7 @@ func (s Superblock) MarshalBinary() ([]byte, error) {
 	for i, x := range []uint64{s.MoveFrom, s.MoveTo, s.MoveLength, s.MoveDone, s.MoveSpan} {
 		diskOrder.PutUint64(b[312+i*8:], x)
 	}
+	copy(b[384:400], s.RestartLineage[:])
 	diskOrder.PutUint32(b[PageSize-4:], checksum(b[:PageSize-4]))
 	return b, nil
 }
@@ -84,8 +86,11 @@ func DecodeSuperblock(b []byte) (Superblock, error) {
 		return s, ErrCorrupt
 	}
 	version := diskOrder.Uint16(b[8:])
-	if version != FormatVersion && version != 4 && version != 3 && version != 2 || version == 2 && string(b[:8]) != "STQRVOL2" {
+	if version != FormatVersion && version != 5 && version != 4 && version != 3 && version != 2 || version == 2 && string(b[:8]) != "STQRVOL2" {
 		return s, ErrVersion
+	}
+	if version >= 6 {
+		copy(s.RestartLineage[:], b[384:400])
 	}
 	s.Identity.Class = Class(b[10])
 	copy(s.Identity.ClusterID[:], b[16:32])

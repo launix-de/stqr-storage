@@ -20,6 +20,7 @@ import (
 // Owning Volume/transaction locking serializes puts; immutable checkpoint views
 // permit concurrent gets/iteration. Returned pages are immutable after publish.
 type dirtyStore struct {
+	retained         *restartIndexReader // immutable restart base; RAM/spill pages shadow it
 	pages            map[uint64][]byte
 	flags            map[uint64]byte
 	order            []uint64
@@ -57,6 +58,10 @@ func (s *dirtyStore) close() {
 		}
 	}
 	s.data, s.index, s.log = nil, nil, nil
+	if s.retained != nil && s.retained.close != nil {
+		_ = s.retained.close()
+	}
+	s.retained = nil
 }
 func (s *dirtyStore) openSpill() error {
 	if s.closed {
@@ -163,6 +168,13 @@ func (s *dirtyStore) growIndexLocked(at uint64) error {
 }
 
 func (s *dirtyStore) flag(off uint64) (byte, error) {
+	flag, err := s.ownFlag(off)
+	if err != nil || flag != 0 || s == nil || s.retained == nil {
+		return flag, err
+	}
+	return s.retained.flag(off)
+}
+func (s *dirtyStore) ownFlag(off uint64) (byte, error) {
 	if s != nil {
 		if s.closed {
 			return 0, ErrClosed
@@ -215,9 +227,16 @@ func (s *dirtyStore) get(off uint64) ([]byte, bool, error) {
 	if p, ok := s.pages[off]; ok {
 		return p, true, nil
 	}
-	flag, err := s.flag(off)
-	if err != nil || flag == 0 {
+	flag, err := s.ownFlag(off)
+	if err != nil {
 		return nil, false, err
+	}
+	if flag == 0 {
+		if s.retained != nil {
+			p, _, ok, err := s.retained.get(off)
+			return p, ok, err
+		}
+		return nil, false, nil
 	}
 	p := make([]byte, PageSize)
 	_, err = io.ReadFull(io.NewSectionReader(s.data, int64(off), PageSize), p)
@@ -246,9 +265,18 @@ func (s *dirtyStore) put(off uint64, p []byte, flag byte) (resultErr error) {
 		s.flags[off] = flag
 		return nil
 	}
-	prior, err := s.flag(off)
+	prior, err := s.ownFlag(off)
 	if err != nil {
 		return err
+	}
+	if prior == 0 && s.retained != nil {
+		old, err := s.retained.flag(off)
+		if err != nil {
+			return err
+		}
+		if old != 0 && old != flag {
+			return ErrCorrupt
+		}
 	}
 	if len(s.pages) >= s.limit {
 		if err = s.openSpill(); err != nil {
@@ -281,6 +309,9 @@ func (s *dirtyStore) put(off uint64, p []byte, flag byte) (resultErr error) {
 	return nil
 }
 func (s *dirtyStore) each(fn func(uint64, byte, []byte) error) error {
+	if s != nil && s.retained != nil {
+		return s.eachSorted(fn)
+	}
 	if s != nil {
 		if s.closed {
 			return ErrClosed
@@ -326,7 +357,7 @@ func (s *dirtyStore) each(fn func(uint64, byte, []byte) error) error {
 
 // eachSorted keeps checkpoint writes in physical order without an all-dirty-page
 // heap directory. Sort bounded runs, then merge at most 32 streams per pass.
-func (s *dirtyStore) eachSorted(fn func(uint64, byte, []byte) error) error {
+func (s *dirtyStore) eachOwnSorted(fn func(uint64, byte, []byte) error) error {
 	if s != nil {
 		if s.closed {
 			return ErrClosed
@@ -494,4 +525,70 @@ func mergeDirtyRuns(name func(int, uint64) string, pass int, start, stop, out ui
 			return err
 		}
 	}
+}
+
+// Merge two sorted streams with one buffered page. The immutable retained image
+// is never copied into a heap directory, and a changed page shadows its old
+// image exactly once. Cancellation joins the producer before any file closes.
+func (s *dirtyStore) eachSorted(fn func(uint64, byte, []byte) error) error {
+	if s == nil || s.retained == nil {
+		return s.eachOwnSorted(fn)
+	}
+	type item struct {
+		off  uint64
+		flag byte
+		page []byte
+	}
+	rows := make(chan item, 1)
+	done := make(chan error, 1)
+	cancel := make(chan struct{})
+	go func() {
+		err := s.eachOwnSorted(func(off uint64, flag byte, p []byte) error {
+			select {
+			case rows <- item{off, flag, p}:
+				return nil
+			case <-cancel:
+				return io.ErrClosedPipe
+			}
+		})
+		close(rows)
+		done <- err
+	}()
+	joined := false
+	defer func() {
+		close(cancel)
+		if !joined {
+			<-done
+		}
+	}()
+	current, ok := <-rows
+	emit := func() error {
+		if err := fn(current.off, current.flag, current.page); err != nil {
+			return err
+		}
+		current, ok = <-rows
+		return nil
+	}
+	err := s.retained.each(func(off uint64, flag byte, p []byte) error {
+		for ok && current.off < off {
+			if err := emit(); err != nil {
+				return err
+			}
+		}
+		if ok && current.off == off {
+			return emit()
+		}
+		return fn(off, flag, p)
+	})
+	if err != nil {
+		return err
+	}
+	for ok {
+		if err := emit(); err != nil {
+			return err
+		}
+	}
+	err = <-done
+	joined = true
+	return err
 }

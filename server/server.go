@@ -28,6 +28,8 @@ type managedVolume struct {
 // its shared side pins their lifetime for independently admitted object writes.
 // It is not a distributed lock or a substitute for placement/Volume authority.
 type Server struct {
+	restart                 *restartState
+	closeErr                error
 	storageWarming          atomic.Bool
 	storageAccountingWarmed atomic.Bool
 	storageWarmDone         chan struct{}
@@ -157,6 +159,9 @@ func Open(opts Options) (s *Server, err error) {
 	if e != nil {
 		return s, e
 	}
+	// Reuse the existing startup config publication. Older KnownFields readers
+	// must reject this node rather than ignore its required accepted images.
+	c.RestartVersion = 1
 	s.storageWarming.Store(!opts.transportOnly)
 	s.storageWarmDone = make(chan struct{})
 	s.cfg = c
@@ -179,6 +184,13 @@ func Open(opts Options) (s *Server, err error) {
 	cluster, _ := parseID(c.ClusterID)
 	boot, _ := volume.NewID()
 	s.boot = client.ID(boot)
+	s.restart, e = loadRestartState(dataDir, cluster, node)
+	if e != nil {
+		return s, e
+	}
+	if e = s.restart.validateConfigured(c.Volumes); e != nil {
+		return s, e
+	}
 	for i := range s.cfg.Volumes {
 		vc := &s.cfg.Volumes[i]
 		if vc.Name == "" {
@@ -218,7 +230,7 @@ func Open(opts Options) (s *Server, err error) {
 			if !vc.System && opts.wrapDataVolumeIO != nil {
 				backend = opts.wrapDataVolumeIO(dev)
 			}
-			v, e = volume.Open(backend, volume.OpenOptions{})
+			v, e = volume.Open(backend, volume.OpenOptions{Restart: s.restart.source(expected)})
 			if e != nil {
 				dev.Close()
 			}
@@ -268,6 +280,9 @@ func Open(opts Options) (s *Server, err error) {
 			vc.State = "active"
 			s.volumes[vc.ID].config = *vc
 		}
+	}
+	if e = s.restart.bindStores(s.volumes); e != nil {
+		return s, e
 	}
 	newSystem := s.system == nil
 	if newSystem {
@@ -400,11 +415,13 @@ func Open(opts Options) (s *Server, err error) {
 		s.startPeerContactsLocked([]PeerConfig{{URL: hint}})
 		s.mu.Unlock()
 	}
+	s.restart.ready = true
 	return s, nil
 }
 func (s *Server) Close() error {
 	var result error
 	s.closeOnce.Do(func() {
+		defer func() { s.closeErr = result }()
 		s.mu.Lock()
 		s.closed = true
 		s.mu.Unlock()
@@ -417,15 +434,30 @@ func (s *Server) Close() error {
 		s.workers.Wait()
 		s.opMu.Lock()
 		defer s.opMu.Unlock()
+		if s.restart != nil && s.restart.ready {
+			if err := s.retainRestartLocked(s.restart); err != nil {
+				result = errors.Join(result, err)
+				return
+			}
+		}
 		s.mu.Lock()
 		defer s.mu.Unlock()
 		for _, v := range s.volumes {
-			if e := v.store.Close(); e != nil {
+			var e error
+			if s.restart != nil && !s.restart.ready {
+				e = v.store.Abort()
+			} else {
+				e = v.store.Close()
+			}
+			if e != nil {
 				result = errors.Join(result, e)
 			}
 		}
 		for _, staged := range s.recoveryVolumes {
 			result = errors.Join(result, staged.store.Close())
+		}
+		if result == nil && s.restart != nil && s.restart.ready {
+			s.restart.reclaimObsoleteImages()
 		}
 		if s.control != nil {
 			result = errors.Join(result, s.control.ledger.journal.close())
@@ -440,7 +472,7 @@ func (s *Server) Close() error {
 			result = errors.Join(result, s.lock.Close())
 		}
 	})
-	return result
+	return s.closeErr
 }
 func Run(ctx context.Context, opts Options, output io.Writer) error {
 	for {

@@ -63,8 +63,12 @@ func (v *Volume) ConfigureAccounting(o AccountingOptions) (bool, error) {
 	// same predicate. Configure is a startup operation; ownership changes use the
 	// existing incremental SetOwnershipFilter after readiness.
 	v.accounting, v.owned = nil, nil
-	if v.sb.Identity.Class != RAM && v.sb.Identity.Class != RAMCache && o.CachePath != "" && v.sb.Generation == v.durableGeneration && v.deferred == nil && !v.checkpointing {
-		all, owned, ok := v.loadAccountingCacheLocked()
+	if v.sb.Identity.Class != RAM && v.sb.Identity.Class != RAMCache && !v.checkpointing {
+		all, owned, ok := v.decodeAccountingCacheLocked(v.restartAccounting)
+		if !ok && o.CachePath != "" {
+			all, owned, ok = v.loadAccountingCacheLocked()
+		}
+		v.restartAccounting = nil
 		v.accounting, v.owned = all, owned
 		if ok {
 			v.accountReady.Store(true)
@@ -338,6 +342,15 @@ func (v *Volume) loadAccountingCacheLocked() (map[ID]bucketAllocation, map[ID]bu
 	}
 	b, err := io.ReadAll(io.LimitReader(f, accountingCacheLimit+1))
 	if err != nil || len(b) > accountingCacheLimit || len(b) < accountingCacheHeader+sha256.Size {
+		return nil, nil, false
+	}
+	return v.decodeAccountingCacheLocked(b)
+}
+
+// The same exact-header and ownership checks apply to retained-cut counters.
+// These O(buckets) aggregates never assert physical durability or cache objects.
+func (v *Volume) decodeAccountingCacheLocked(b []byte) (map[ID]bucketAllocation, map[ID]bucketAllocation, bool) {
+	if len(b) < accountingCacheHeader+sha256.Size || len(b) > accountingCacheLimit {
 		return nil, nil, false
 	}
 	sum := sha256.Sum256(b[:len(b)-sha256.Size])

@@ -411,8 +411,14 @@ func TestMmapCloseDoesNotStartFailedSyncAndStillUnmaps(t *testing.T) {
 	}
 	dev.fail.Store(true)
 	beforeClose := v.IOStats()
-	if err = v.Close(); err != nil {
-		t.Fatal("Close initiated forbidden Sync", err)
+	if err = v.Close(); !errors.Is(err, ErrRetentionRequired) {
+		t.Fatal("Close abandoned private pages", err)
+	}
+	if file.mapping == nil {
+		t.Fatal("rejected Close released live mapping")
+	}
+	if err = v.Abort(); err != nil {
+		t.Fatal("explicit abort failed", err)
 	}
 	if v.IOStats().SyncOps != beforeClose.SyncOps {
 		t.Fatal("Close synced an accepted tail")

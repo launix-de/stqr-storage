@@ -15,28 +15,29 @@ const (
 	PageSize        = 4096
 	BlockSize       = 1 << 20
 	MinVolumeSize   = 256 << 10
-	FormatVersion   = 5
+	FormatVersion   = 6
 	pageHeaderSize  = 64
 	pagePayload     = PageSize - pageHeaderSize
 	superblockBytes = 2 * PageSize
 )
 
 var (
-	ErrCorrupt      = errors.New("volumes: corrupt storage")
-	ErrUnformatted  = errors.New("volumes: unformatted device")
-	ErrVersion      = errors.New("volumes: unsupported format version")
-	ErrIdentity     = errors.New("volumes: identity mismatch")
-	ErrFull         = errors.New("volumes: insufficient physical storage")
-	ErrClosed       = errors.New("volumes: closed")
-	ErrReadOnly     = errors.New("volumes: read-only handle")
-	ErrRecovery     = errors.New("volumes: reopen required after I/O failure")
-	ErrNotFound     = errors.New("volumes: object not found")
-	ErrPrecondition = errors.New("volumes: precondition failed")
-	ErrRequestID    = errors.New("volumes: request ID reused with different parameters")
-	ErrRange        = errors.New("volumes: invalid range")
-	ErrBusy         = errors.New("volumes: busy")
-	ErrDraining     = errors.New("volumes: draining")
-	ErrUnsupported  = errors.New("volumes: unsupported operation")
+	ErrCorrupt           = errors.New("volumes: corrupt storage")
+	ErrUnformatted       = errors.New("volumes: unformatted device")
+	ErrVersion           = errors.New("volumes: unsupported format version")
+	ErrIdentity          = errors.New("volumes: identity mismatch")
+	ErrFull              = errors.New("volumes: insufficient physical storage")
+	ErrClosed            = errors.New("volumes: closed")
+	ErrReadOnly          = errors.New("volumes: read-only handle")
+	ErrRetentionRequired = errors.New("volumes: accepted pages require retention before close")
+	ErrRecovery          = errors.New("volumes: reopen required after I/O failure")
+	ErrNotFound          = errors.New("volumes: object not found")
+	ErrPrecondition      = errors.New("volumes: precondition failed")
+	ErrRequestID         = errors.New("volumes: request ID reused with different parameters")
+	ErrRange             = errors.New("volumes: invalid range")
+	ErrBusy              = errors.New("volumes: busy")
+	ErrDraining          = errors.New("volumes: draining")
+	ErrUnsupported       = errors.New("volumes: unsupported operation")
 )
 
 type ID [16]byte
@@ -112,7 +113,15 @@ type FormatOptions struct {
 	ClusterID, NodeID, VolumeID ID
 	Class                       Class
 }
+
+// RestartSource names a node-manifest-bound immutable accepted image.
+// Missing/corrupt required images fail Open before ordinary index access.
+type RestartSource struct {
+	Path    string
+	Receipt RestartReceipt
+}
 type OpenOptions struct {
+	Restart                     *RestartSource
 	ClusterID, NodeID, VolumeID ID
 	CacheEntries                int
 	CacheBytes                  uint64

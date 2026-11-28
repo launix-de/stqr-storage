@@ -129,9 +129,6 @@ func (s *Server) executeSync(ctx context.Context, m client.Message, ws *wsSessio
 	if d.Done() != nil || seq == 0 || boot == (client.ID{}) {
 		return nil, 0, fail(400, "invalid durability mark")
 	}
-	if boot != s.boot {
-		return nil, 410, fail(410, "durability mark belongs to another server incarnation")
-	}
 	b, err := s.Bucket(bucket)
 	if err != nil {
 		return nil, 0, err
@@ -150,6 +147,9 @@ func (s *Server) executeSync(ctx context.Context, m client.Message, ws *wsSessio
 	}
 	if _, err = b.authorize(p, permission); err != nil {
 		return nil, 0, err
+	}
+	if boot != s.boot {
+		return s.syncRestartPrefix(ctx, bucket, boot, seq)
 	}
 	s.opMu.Lock()
 	s.durability.mu.Lock()
