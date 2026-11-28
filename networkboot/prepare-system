@@ -3,6 +3,7 @@
 import argparse
 import subprocess
 from pathlib import Path
+from firstboot import prepare_first_boot
 from common import (cli, ctl, extract, nbd, qemu, require, staging,
                     prepared_release, remember_preparation, forget_preparation,
                     installed_disk, remember_installation, forget_installation,
@@ -20,7 +21,7 @@ def main():
     p.add_argument('--cpus', type=int, default=2)
     p.add_argument('--uefi', help='optional OVMF firmware file; also pass it when editing')
     p.add_argument('--kernel-version')
-    p.add_argument('--publish-only', action='store_true', help='prepare and publish the existing installation disk without starting QEMU or needing an ISO')
+    p.add_argument('--publish-only', action='store_true', help='skip the installer ISO; finish a pending installed-system first boot before publishing')
     p.add_argument('--resume', action='store_true', help='reuse an unpublished installation disk after an interrupted installation')
     p.add_argument('--work-dir', default='/var/tmp', help='local archive staging directory; needs disk space')
     args = p.parse_args()
@@ -65,6 +66,7 @@ def main():
             with nbd(args.config, disk, work) as socket:
                 if not args.publish_only:
                     qemu(socket, args, args.install_image)
+                prepare_first_boot(socket, work, args)
                 print('Preparing networkboot release from the installed disk...', flush=True)
                 extract(socket, work, args.kernel_version, args.config)
             remember_preparation(args.config, args.bucket, work)
