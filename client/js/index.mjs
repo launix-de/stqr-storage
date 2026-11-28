@@ -1603,7 +1603,9 @@ export class Client {
     invariant(new TextDecoder().decode(r.take(4)) === "ORF1");
     const bucket = r.id(),
       n = r.u32();
-    invariant(n <= 8192 && data.length === 24 + n * 81);
+    // The object bytes bound the count. Reference capacity is not a fixed
+    // protocol limit; u32 * 81 is exact within JavaScript's safe integer range.
+    invariant(data.length === 24 + n * 81);
     const ids = new Set();
     for (let i = 0; i < n; i++) {
       const id = hex(r.take(32));

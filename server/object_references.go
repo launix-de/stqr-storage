@@ -6,14 +6,12 @@ import (
 	"context"
 	"crypto/sha256"
 	"errors"
+	"math"
 	"sync"
 
 	"github.com/launix-de/stqr-storage/client"
 	"github.com/launix-de/stqr-storage/volume"
 )
-
-const maxObjectReferences = 8192
-const maxAccountReferences = 1024
 
 // referenceCoordination contains only running/waiting requests, never object
 // metadata or cached ownership. The registry mutex covers lifetimes only;
@@ -53,13 +51,14 @@ func decodeObjectReferences(raw []byte, bucket volume.ID) ([]objectReferenceEntr
 	}
 	owner := volume.ID(d.ID())
 	n := d.U32()
-	if n > maxObjectReferences || uint64(n)*81 != uint64(len(raw)-24) {
+	if len(raw) < referenceHeaderBytes || uint64(n)*referenceEntryBytes != uint64(len(raw)-referenceHeaderBytes) {
 		return nil, volume.ErrCorrupt
 	}
 	// PIN commonly appends one entry immediately after decoding. Reserve that
-	// slot without relaxing the encoded length or global reference limit.
+	// slot without relaxing the encoded length. No account/object count quota
+	// exists; the existing ORF1 uint32 and address-space bounds still apply.
 	capacity := n
-	if capacity < maxObjectReferences {
+	if capacity < math.MaxUint32 && uint64(capacity)+1 <= uint64((math.MaxInt-referenceHeaderBytes)/referenceEntryBytes) {
 		capacity++
 	}
 	entries := make([]objectReferenceEntry, 0, capacity)
@@ -86,8 +85,8 @@ func decodeObjectReferences(raw []byte, bucket volume.ID) ([]objectReferenceEntr
 	return entries, nil
 }
 func encodeObjectReferences(entries []objectReferenceEntry, bucket volume.ID) []byte {
-	// Entries are bounded by maxObjectReferences. Reserve the exact encoded
-	// size so whole-root updates do not repeatedly grow and copy the buffer.
+	// Reserve the validated representation's exact encoded size, avoiding
+	// repeated buffer growth. Admission has no artificial reference quota.
 	e := client.Encoder{B: make([]byte, 4, 24+81*len(entries))}
 	copy(e.B, "ORF1")
 	e.ID(client.ID(bucket))
@@ -172,13 +171,53 @@ func (s *Server) executeObjectReferenceHeld(ctx context.Context, m client.Messag
 			return nil, fail(501, "accepted reference capability was not negotiated")
 		}
 	}
-	if d.Done() != nil || action > 8 || token == (client.ID{}) || target == op.object {
+	if d.Done() != nil || action > 10 || token == (client.ID{}) || target == op.object {
 		return nil, fail(400, "invalid object reference")
 	}
+	// Administrative repair is deliberately rejected before reading the root.
+	// It may remove only absent-account plain PINs, never abandoned claims or
+	// dependencies; it does not confer offline maintenance on the caller.
+	if action == 9 || action == 10 {
+		if action == 9 && target != (volume.ObjectID{}) {
+			return nil, fail(400, "reference repair requires an empty target")
+		}
+		if err := s.requireAdmin(p); err != nil {
+			return nil, err
+		}
+		if action == 10 && (target == (volume.ObjectID{}) || !bytes.Equal(target[16:], make([]byte, 16)) || accepted) {
+			return nil, fail(400, "deleted dependency proof requires a bucket target and a request reply")
+		}
+	}
+	// This proof never reads or edits the reference root. Do not hold its
+	// mutation gate while waiting on catalog peers: unrelated opens/closes on
+	// the dependency-owning bucket must remain available during a peer outage.
+	if action == 10 {
+		account, _, err := s.referenceAccountSnapshot(p)
+		if err != nil || account.Role != "ADMIN" {
+			return nil, ErrBucketForbidden
+		}
+		if _, err := op.bucket.authorize(p, BucketRead); err != nil {
+			return nil, err
+		}
+		if err := s.checkObjectOwner(op.bucket.ID(), op.object); err != nil {
+			return nil, err
+		}
+		var subject volume.ID
+		copy(subject[:], target[:16])
+		safe, err := s.canRetireDeletedBucketDependencies(ctx, subject)
+		if err != nil {
+			return nil, err
+		}
+		if safe {
+			return []byte{1}, nil
+		}
+		return []byte{0}, nil
+	}
+
 	if !held && accepted && (action == 0 || action == 1) {
 		return s.combineObjectReference(ctx, m, ws, p, op.bucket.ID(), token)
 	}
-	if action <= 8 && !held {
+	if !held {
 		release, err := s.referenceCoordination.acquire(ctx, op.bucket.ID())
 		if err != nil {
 			return nil, err
@@ -253,8 +292,10 @@ func (s *Server) executeObjectReferenceHeld(ctx context.Context, m client.Messag
 		}
 		return []byte{1}, nil
 	}
+	if action == 9 {
+		return s.pruneAbsentAccountPins(ctx, op.bucket, internal, accepted)
+	}
 	proof := sha256.Sum256(token[:])
-referenceRetry:
 	for retry := 0; retry < 128; retry++ {
 		if err := ctx.Err(); err != nil {
 			return nil, err
@@ -270,29 +311,7 @@ referenceRetry:
 		if err != nil {
 			return nil, err
 		}
-		casCtx := ctx
-		full, err := table.apply(target, proof, uid, account.Role == "ADMIN", action, true)
-		if full {
-			entries, e := decodeObjectReferences(raw, op.bucket.ID())
-			if e != nil {
-				return nil, e
-			}
-			filtered, nextCtx, e := s.pruneAbsentPlainReferencePins(casCtx, op.bucket, entries)
-			if e != nil {
-				if errors.Is(e, volume.ErrPrecondition) && !errors.Is(e, volume.ErrRecovery) {
-					continue referenceRetry
-				}
-				return nil, e
-			}
-			casCtx = nextCtx
-			if len(filtered) < len(entries) {
-				table, e = borrowReferenceBytes(encodeObjectReferences(filtered, op.bucket.ID()), op.bucket.ID(), 1)
-				if e != nil {
-					return nil, e
-				}
-			}
-			_, err = table.apply(target, proof, uid, account.Role == "ADMIN", action, false)
-		}
+		err = table.apply(target, proof, uid, account.Role == "ADMIN", action)
 		if err != nil {
 			return nil, err
 		}
@@ -300,7 +319,7 @@ referenceRetry:
 			return []byte{1}, nil
 		}
 		next := table.raw
-		_, err = op.bucket.CAS(casCtx, internal, op.object, 0, raw, next, volume.Options{RequestID: volume.ID(client.NewRequestID()), CreateOnly: absent, WholeObject: true, Accepted: accepted})
+		_, err = op.bucket.CAS(ctx, internal, op.object, 0, raw, next, volume.Options{RequestID: volume.ID(client.NewRequestID()), CreateOnly: absent, WholeObject: true, Accepted: accepted})
 		if errors.Is(err, volume.ErrPrecondition) && !errors.Is(err, volume.ErrRecovery) {
 			continue
 		}
@@ -357,6 +376,17 @@ func (s *Server) canReclaimDependencyAnchors(bucket volume.ID) bool {
 }
 
 func validateNewCloneReferenceEvidence(before, after []BucketDescription) error {
+	prior := make(map[string]BucketDescription, len(before))
+	for _, d := range before {
+		prior[d.ID] = d
+	}
+	for _, d := range after {
+		if old, exists := prior[d.ID]; exists {
+			if err := validateReferenceLineageEdit(old, d); err != nil {
+				return err
+			}
+		}
+	}
 	old := map[string]bool{}
 	for _, d := range before {
 		for _, edge := range d.ClonePeers {

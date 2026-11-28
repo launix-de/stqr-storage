@@ -78,6 +78,15 @@ func (c *Client) CanReclaimDependencies(ctx context.Context) (bool, error) {
 	return err == nil, err
 }
 
+// PruneAbsentAccountPins is an explicit administrative repair of this bucket's
+// bounded reference root. It removes only plain PINs whose account no longer
+// exists in authoritative cluster state. Live/disabled accounts, claims and
+// durable dependencies remain protected. Uncertain or replicated authority is
+// rejected; older servers reject the unsupported action without changing data.
+func (c *Client) PruneAbsentAccountPins(ctx context.Context) error {
+	return c.objectReference(ctx, ObjectID{}, NewRequestID(), 9)
+}
+
 // ReadObjectDependencies names durable application roots, not abandoned open
 // handles. An offline collector must keep these targets until their owning
 // application graph explicitly retires them.
@@ -95,7 +104,7 @@ func (c *Client) ReadObjectDependencies(ctx context.Context) ([]ObjectID, error)
 	}
 	bucket := d.ID()
 	n := d.U32()
-	if n > 8192 || len(raw) != 24+int(n)*81 {
+	if len(raw) < 24 || uint64(n)*81 != uint64(len(raw)-24) {
 		return nil, ErrProtocol
 	}
 	var out []ObjectID
@@ -151,4 +160,22 @@ func (c *Client) objectReference(ctx context.Context, id ObjectID, token ID, act
 		return ErrWouldBlock
 	}
 	return nil
+}
+
+// CanRetireDeletedBucketDependencies proves a deleted namespace and its entire
+// clone lineage no longer have surviving users of external dependency tokens.
+// The caller must be an administrator connected to the dependency-owning bucket.
+// It does not unpin anything. Missing/legacy evidence returns false; old servers
+// reject the unsupported action, and callers must retain their cleanup journal.
+func (c *Client) CanRetireDeletedBucketDependencies(ctx context.Context, subject BucketID) (bool, error) {
+	if subject == (BucketID{}) {
+		return false, ErrRange
+	}
+	var target ObjectID
+	copy(target[:16], subject[:])
+	err := c.objectReference(ctx, target, NewRequestID(), 10)
+	if errors.Is(err, ErrWouldBlock) {
+		return false, nil
+	}
+	return err == nil, err
 }

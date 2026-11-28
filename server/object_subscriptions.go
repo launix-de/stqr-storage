@@ -158,39 +158,66 @@ func (r *objectSubscriptionRegistry) publish(key volume.Key, info volume.Info, h
 	if h != nil {
 		generation, _ = h.Generation()
 	}
+	r.publishCaptured(key, info, generation, func(off, n uint64) ([]byte, error) {
+		data, _, err := h.GetRange(key, off, n)
+		return data, err
+	}, volumes...)
+}
+
+// The caller retains its native write handle across capture and publication.
+// Registration takes the corresponding read handle, preserving snapshot/listen
+// ordering. The registry mutex protects RAM only: payload capture runs outside
+// it, so UNSUBSCRIBE and ACK never wait for storage through this lock.
+// Capture tickets bind the initial descriptor, cursor and placement. If another
+// publisher wins while capture is pending, force resnapshot instead of sending
+// an older replacement after that winner. Removal/re-registration is a different
+// descriptor even when a barrier client deliberately reuses its subscription ID.
+func (r *objectSubscriptionRegistry) publishCaptured(key volume.Key, info volume.Info, generation uint64, capture func(uint64, uint64) ([]byte, error), volumes ...*volume.Volume) {
 	r.mu.Lock()
-	defer r.mu.Unlock()
+	var reserved uint64
+	defer func() { r.snapshotBytes -= reserved; r.mu.Unlock() }()
+	type ticket struct {
+		sub           *objectSubscription
+		cursor, epoch uint64
+		runtime       client.ID
+	}
+	targets := make([]ticket, 0, len(r.objects[key]))
+	for sub := range r.objects[key] {
+		targets = append(targets, ticket{sub, sub.cursor, sub.epoch, sub.runtime})
+	}
 	type window struct{ off, length uint64 }
 	type snapshot struct {
 		data []byte
 		err  error
 	}
 	snapshots := map[window]snapshot{}
-	for sub := range r.objects[key] {
+	for _, target := range targets {
+		sub := target.sub
+		if r.sessions[sub.ws][sub.id] != sub {
+			continue
+		}
 		if sub.ws.authorization == nil || sub.ws.authorization.invalid.Load() {
 			r.removeLocked(sub)
 			sub.ws.close()
 			continue
 		}
-		sub.cursor++
-		u := client.ObjectUpdate{Subscription: sub.id, Cursor: sub.cursor, Parts: 1, Change: client.UpdateReplace, NewLength: info.Length}
+		u := client.ObjectUpdate{Subscription: sub.id, Parts: 1, Change: client.UpdateReplace, NewLength: info.Length}
 		off, n := uint64(0), info.Length
 		if sub.ranged {
 			off = sub.offset
 			n = min(sub.length, info.Length-min(off, info.Length))
 			u.Offset = off
 		}
+		stale := sub.cursor != target.cursor || sub.epoch != target.epoch || sub.runtime != target.runtime
 		if info.Deleted {
 			u.Change = client.UpdateDelete
 			n = 0
-		} else if n > maxSubscriptionEntryBytes {
+		} else if stale || n > maxSubscriptionEntryBytes {
 			u.Change = client.UpdateResyncRequired
 			n = 0
 		}
-		// Check pressure before reading any payload. Slow clients must not cause
-		// object-sized copies which will immediately be discarded for resync.
 		cost := int(n) + 128
-		if sub.cursor == 0 || len(sub.journal) >= maxSubscriptionJournalEvents || sub.bytes+cost > maxSubscriptionEntryBytes || r.bytes+cost > maxSubscriptionJournalBytes {
+		if sub.cursor == math.MaxUint64 || len(sub.journal) >= maxSubscriptionJournalEvents || sub.bytes+cost > maxSubscriptionEntryBytes || r.bytes+cost > maxSubscriptionJournalBytes {
 			u.Change = client.UpdateResyncRequired
 			n = 0
 		}
@@ -199,34 +226,77 @@ func (r *objectSubscriptionRegistry) publish(key volume.Key, info volume.Info, h
 			r.removeLocked(sub)
 			continue
 		}
+		var temporary uint64
 		if n > 0 {
-			keyWindow := window{off, n}
-			snap, ok := snapshots[keyWindow]
+			w := window{off, n}
+			snap, ok := snapshots[w]
 			if !ok {
-				snap.data, _, snap.err = h.GetRange(key, off, n)
-				if len(snapshots) < 4 {
-					snapshots[keyWindow] = snap
+				if n > maxObjectStagingBytes-r.snapshotBytes {
+					snap.err = fail(507, "subscription publication memory budget exhausted")
+				} else {
+					// Reserve before allocation. Cached windows retain their reservation
+					// until this publisher exits; uncached bytes transfer to journal credits.
+					r.snapshotBytes += n
+					reserved += n
+					temporary = n
+					r.mu.Unlock()
+					snap.data, snap.err = capture(off, n)
+					r.mu.Lock()
+					if len(snapshots) < 4 {
+						snapshots[w] = snap
+						temporary = 0
+					}
 				}
 			}
-			if snap.err != nil {
+			if r.sessions[sub.ws][sub.id] != sub {
+				r.snapshotBytes -= temporary
+				reserved -= temporary
+				continue
+			}
+			stale = sub.cursor != target.cursor || sub.epoch != target.epoch || sub.runtime != target.runtime
+			if sub.ws.authorization == nil || sub.ws.authorization.invalid.Load() {
+				r.snapshotBytes -= temporary
+				reserved -= temporary
+				r.removeLocked(sub)
+				sub.ws.close()
+				continue
+			}
+			if snap.err != nil || stale {
 				u.Change = client.UpdateResyncRequired
 			} else {
 				u.Data = snap.data
 			}
 		}
+		// ACKs and other publications may have changed credits during capture.
 		cost = len(u.Data) + 128
+		if sub.cursor == math.MaxUint64 || len(sub.journal) >= maxSubscriptionJournalEvents || sub.bytes+cost > maxSubscriptionEntryBytes || r.bytes+cost > maxSubscriptionJournalBytes {
+			u.Change = client.UpdateResyncRequired
+			u.Data = nil
+			cost = 128
+		}
+		sub.cursor++
+		u.Cursor = sub.cursor
 		if len(volumes) > 0 {
 			sub.ws.observeConnectionVolume(volumes[0], generation)
 		}
 		if !r.sendLocked(sub, u) || u.Change == client.UpdateResyncRequired {
 			r.removeLocked(sub)
-			continue
+		} else {
+			sub.journal = append(sub.journal, subscriptionJournalEntry{sub.cursor, cost, u})
+			sub.bytes += cost
+			r.bytes += cost
 		}
-		sub.journal = append(sub.journal, subscriptionJournalEntry{sub.cursor, cost, u})
-		sub.bytes += cost
-		r.bytes += cost
+		r.snapshotBytes -= temporary
+		reserved -= temporary
 	}
 }
+
+// Both operations are connection-local RAM controls. This classification also
+// excludes their no-reply messages from durability admission bookkeeping.
+func isObjectSubscriptionControl(op uint16) bool {
+	return op == client.ObjectUnsubscribe || op == client.SubscriptionAck
+}
+
 func (s *Server) executeObjectSubscription(m client.Message, ws *wsSession, p principal) ([]byte, int, error) {
 	if ws == nil || ws.authorization == nil || ws.authorization.bucket == nil {
 		return nil, 0, fail(400, "subscriptions require a bucket WebSocket")

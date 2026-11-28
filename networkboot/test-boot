@@ -1,15 +1,58 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-3.0-only
-"""Open a diskless QEMU PXE client for an already running STQR boot gateway."""
+"""Boot a named image with a temporary overlay, or use an existing PXE gateway."""
 import argparse
+import contextlib
 import ipaddress
+import json
+from pathlib import Path
 import shutil
 import re
 import secrets
+import subprocess
 import time
 import urllib.error
 import urllib.request
-from common import HERE, boot_network, cli, run
+from common import HERE, boot_network, cli, run, staging
+
+
+@contextlib.contextmanager
+def overlay_gateway(config, bucket, work):
+    """Own a loopback gateway and its normal per-boot upper/user lifecycle.
+
+    Omitting --edit is intentional: the named image remains the read-only
+    lower. Only --no-overlay delegates to the writable image editor.
+    Failed cleanup retains the private recovery records through staging().
+    """
+    ready = Path(work) / 'ready.json'
+    command = [str(HERE / 'serve'), '--config', str(Path(config).resolve()),
+               bucket, '--no-dhcp', '--http-port', '0', '--interface', 'lo',
+               '--bind', '127.0.0.1', '--server', '10.0.2.2',
+               '--clients', '127.0.0.1/32', '--cache', str(Path(work) / 'gateway'),
+               '--ready-file', str(ready)]
+    process = subprocess.Popen(command)
+    try:
+        deadline = time.monotonic() + 900
+        while not ready.exists():
+            if process.poll() is not None:
+                raise RuntimeError('test boot gateway failed')
+            if time.monotonic() >= deadline:
+                raise RuntimeError('test boot gateway startup timed out')
+            time.sleep(.1)
+        yield json.loads(ready.read_text())['url']
+    finally:
+        if process.poll() is None:
+            process.terminate()
+        try:
+            status = process.wait(timeout=120)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait()
+            raise RuntimeError('test boot gateway cleanup timed out; recovery records retained in ' + str(work))
+        if list((Path(work) / 'gateway' / 'uppers').glob('*.json')):
+            raise RuntimeError('test boot cleanup incomplete; recovery records retained in ' + str(work))
+        if status:
+            raise RuntimeError(f'test boot gateway exited with status {status}; cache retained in {work}')
 
 
 def wait_for_gateway(url, timeout=900):
@@ -47,9 +90,10 @@ def default_mac():
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('bucket', nargs='?', help='source image for --no-overlay (default: ubuntu)')
+    parser.add_argument('bucket', nargs='?', help='published image for a private test gateway (default with --no-overlay: ubuntu)')
     parser.add_argument('--no-overlay', action='store_true', help='boot a private writable image copy without a client overlay')
-    parser.add_argument('--config', default='stqr.yaml', help='STQR configuration for --no-overlay')
+    parser.add_argument('--config', default='stqr.yaml', help='STQR configuration for a named image or --no-overlay')
+    parser.add_argument('--work-dir', default='/var/tmp', help='private named-image gateway cache directory')
     parser.add_argument('--server', help='gateway IPv4 address (default: this host on its default-route interface)')
     parser.add_argument('--http-port', type=int, default=8088)
     parser.add_argument('--memory', type=int, default=4096, help='VM memory in MiB')
@@ -68,15 +112,23 @@ def main():
         run(str(HERE / 'edit-image'), target, '--copy-from=' + source,
             '--config', args.config, '--memory', str(args.memory), '--cpus', str(args.cpus))
         return
+    if args.bucket and (args.server or args.http_port != 8088):
+        parser.error('a named image uses its own private gateway; omit the bucket to use --server or --http-port')
+    if not shutil.which('qemu-system-x86_64'):
+        raise RuntimeError('Missing dependency: qemu-system-x86_64')
+    mac = args.mac or default_mac()
     if args.bucket:
-        parser.error('a bucket argument requires --no-overlay; normal PXE uses the gateway image')
+        with staging(args.work_dir, 'stqr-test-boot-') as work:
+            with overlay_gateway(args.config, args.bucket, work) as url:
+                print(f'PXE boot of {args.bucket} with a temporary overlay.', flush=True)
+                run('qemu-system-x86_64', '-name', 'STQR PXE test: ' + args.bucket,
+                    '-machine', 'accel=kvm:tcg', '-m', args.memory, '-smp', args.cpus,
+                    '-boot', 'n', '-nic', f'user,model=virtio-net-pci,mac={mac},bootfile={url}')
+        return
     try:
         server = str(ipaddress.IPv4Address(args.server)) if args.server else boot_network()[1]
     except ValueError as error:
         parser.error(str(error))
-    if not shutil.which('qemu-system-x86_64'):
-        raise RuntimeError('Missing dependency: qemu-system-x86_64')
-    mac = args.mac or default_mac()
     url = f'http://{server}:{args.http_port}/boot.ipxe'
     wait_for_gateway(url)
     print(f'PXE boot from {url}; the gateway selects the published base bucket.', flush=True)

@@ -45,7 +45,7 @@ class Sessions(unittest.TestCase):
                 self.assertNotIn('test-secret',item['marker'].read_text())
                 with self.assertRaises(RuntimeError):sessions.claim(token,'192.0.2.2',Mock())
                 sessions.release(item)
-                ctl.assert_called_with('config','boot-session-delete','01'*16,'03'*16,'02'*16,timeout=15)
+                ctl.assert_called_with('config','--session-record',str(item['marker']),'boot-session-delete','01'*16,'03'*16,'02'*16,timeout=15)
                 self.assertFalse(list(Path(directory).glob('*.json')))
                 self.assertEqual(item['password'],'')
             finally:sessions.close()
@@ -83,7 +83,7 @@ class Sessions(unittest.TestCase):
                 item,payload=sessions.claim(token,'192.0.2.2',Mock())
                 self.assertIn(b'mode=edit\n',payload)
                 sessions.release(item)
-                ctl.assert_called_with('config','edit-session-delete','01'*16,'02'*16,'02'*16,timeout=15)
+                ctl.assert_called_with('config','--session-record',str(item['marker']),'edit-session-delete','01'*16,'02'*16,'02'*16,timeout=15)
                 self.assertFalse(any('boot-session-delete' in c.args for c in ctl.call_args_list))
             finally:sessions.close()
 
@@ -101,7 +101,8 @@ class Sessions(unittest.TestCase):
             foreign=marker('someone-else.json',user='08'*16,upper='09'*16,lower='02'*16)
             public=marker('boot-public.json',user='0a'*16,upper='0b'*16,lower='02'*16)
             public.chmod(0o644)
-            def cleanup(config,command,user,upper,lower,**kwargs):
+            def cleanup(config,option,record_path,command,user,upper,lower,**kwargs):
+                self.assertEqual(option,'--session-record')
                 if user=='04'*16:
                     raise RuntimeError('upper still active')
             with patch('native_sessions.ctl',side_effect=cleanup) as ctl:
@@ -115,7 +116,7 @@ class Sessions(unittest.TestCase):
                     self.assertTrue(foreign.exists())
                     self.assertTrue(public.exists())
                     self.assertEqual(ctl.call_count,3)
-                    ctl.assert_any_call('config','edit-session-delete','06'*16,'02'*16,'02'*16,timeout=15)
+                    ctl.assert_any_call('config','--session-record',str(edit),'edit-session-delete','06'*16,'02'*16,'02'*16,timeout=15)
                     ctl.side_effect=None
                     with patch("native_sessions.time.monotonic", return_value=10**12):
                         sessions.recover()

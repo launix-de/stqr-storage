@@ -48,7 +48,7 @@ var referenceEncodingSink []byte
 
 func TestObjectReferenceEncodingExactBytesAndAllocation(t *testing.T) {
 	bucket := volume.ID{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16}
-	for _, n := range []int{0, 1, 512, maxObjectReferences} {
+	for _, n := range []int{0, 1, 512, historicalReferenceRootLimit} {
 		t.Run(fmt.Sprint(n), func(t *testing.T) {
 			entries := referenceEncodingEntries(n)
 			want := legacyReferenceEncoding(entries, bucket)
@@ -78,7 +78,7 @@ func TestObjectReferenceEncodingExactBytesAndAllocation(t *testing.T) {
 	}
 }
 func BenchmarkObjectReferenceEncoding(b *testing.B) {
-	for _, n := range []int{0, 1, 512, maxObjectReferences} {
+	for _, n := range []int{0, 1, 512, historicalReferenceRootLimit} {
 		for _, old := range []bool{false, true} {
 			name := fmt.Sprint(n)
 			encode := encodeObjectReferences

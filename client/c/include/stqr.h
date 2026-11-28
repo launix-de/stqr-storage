@@ -126,6 +126,11 @@ typedef struct {
     int quota_limited;
 } stqr_space;
 int stqr_bucket_space(stqr_client *, stqr_space *);
+/* Advisory capacity over the existing owner session, without blocking other
+ * requests. `out` remains owned by the caller until its completion callback;
+ * it is written only for a validated successful reply. No data/info payload
+ * is transferred to the callback. Submission itself never receives replies. */
+int stqr_bucket_space_async(stqr_client *, stqr_space *out, stqr_completion, void *);
 int stqr_put(stqr_client *, stqr_object_id, const void *, size_t,
              const stqr_options *, stqr_info *);
 int stqr_put_range(stqr_client *, stqr_object_id, stqr_u64, const void *, size_t,
@@ -218,6 +223,12 @@ int stqr_subscribe(stqr_client *, stqr_object_id, stqr_id subscription,
                    const stqr_u64 *resume, void **data, size_t *actual,
                    stqr_info *, stqr_u64 *cursor);
 int stqr_unsubscribe(stqr_client *, stqr_id subscription);
+/* Retire a unique, never-reused subscription ID without a reply barrier.
+ * Only the existing owner socket is used. The caller must ignore late pushes
+ * for that ID; no callback or pending request is retained. A framing failure
+ * disconnects the owner and invalidates its subscription coverage. No sync.
+ * Use stqr_unsubscribe[_async] instead when a confirmed barrier is required. */
+int stqr_unsubscribe_discard(stqr_client *, stqr_id subscription);
 /* 0: no event before timeout, 1: event(s) processed, negative errno on loss.
  * WebSocket Ping/Pong frames count as progress even without a result callback;
  * an event-driven reader must keep draining until this returns zero.

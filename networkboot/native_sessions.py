@@ -146,7 +146,7 @@ class NativeSessions:
         try:
             mode = record.get('mode', 'overlay')
             command = 'edit-session-delete' if mode == 'edit' else 'boot-session-delete'
-            ctl(self.config, command, record['user'], record['upper'], record['lower'], timeout=15)
+            ctl(self.config, '--session-record', str(marker), command, record['user'], record['upper'], record['lower'], timeout=15)
             marker.unlink(missing_ok=True)
         except subprocess.CalledProcessError as error:
             outcome = 'active' if error.returncode == 75 else 'failed'

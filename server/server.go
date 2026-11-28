@@ -35,15 +35,16 @@ type Server struct {
 	storageWarmError        atomic.Pointer[storageWarmFailure]
 	accountingDir           string
 
-	joinHosted      bool
-	joinRequested   atomic.Bool
-	joinSignal      chan struct{}
-	leaseGate       chan struct{}
-	copyCoordinator sync.Mutex
-	cow             cowTransfers
-	leaseMu         sync.Mutex
-	activeLeases    map[volume.ID]*Bucket
-	durability      durabilityState
+	joinHosted       bool
+	joinRequested    atomic.Bool
+	joinSignal       chan struct{}
+	leaseGate        chan struct{}
+	copyCoordinator  sync.Mutex
+	cow              cowTransfers
+	cowTopologyCache cowTopologyCache
+	leaseMu          sync.Mutex
+	activeLeases     map[volume.ID]*Bucket
+	durability       durabilityState
 
 	requestCoordination   requestIDCoordination
 	membershipJobs        map[*volume.Volume]*membershipJob
@@ -106,6 +107,7 @@ type Server struct {
 	placementGroups        atomic.Pointer[placementGroupImage]
 	accounts               atomic.Pointer[accountsIndex]
 	control                *controlRuntime // initialized before accepting control RPCs
+	lineageCreationProof   bool            // private draft: creator verified receipt semantics on every member
 	metadataPreview        bool            // isolated metadata draft; never owns data volumes
 	controller             *clusterController
 	currentSystem          atomic.Pointer[systemView]
