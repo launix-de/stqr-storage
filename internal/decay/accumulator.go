@@ -15,11 +15,11 @@ import (
 // establishes the start of measurement; pending additions are retained until a
 // later Tick closes the first interval. Call Tick even during idle intervals.
 //
-// All integer fields use raw atomic operations to allow a quiescent value copy
-// for advisory forecasts. Never copy an accumulator concurrently with any use.
-// The sequence comes first for 64-bit atomic alignment on 32-bit architectures.
+// Do not copy an accumulator after use. Forecast windows retain immutable
+// snapshots instead. The typed sequence atomic enforces 8-byte alignment for all
+// 64-bit fields, including when embedded in another struct on 32-bit systems.
 type Accumulator struct {
-	sequence  uint64
+	sequence  atomic.Uint64
 	average   uint64 // float64 bits, units/second
 	last      int64
 	interval  int64 // nanoseconds in the last completed interval
@@ -74,14 +74,14 @@ func (a *Accumulator) Add(amount int64) bool {
 
 func (a *Accumulator) lock() uint64 {
 	for {
-		sequence := atomic.LoadUint64(&a.sequence)
-		if sequence&1 == 0 && atomic.CompareAndSwapUint64(&a.sequence, sequence, sequence+1) {
+		sequence := a.sequence.Load()
+		if sequence&1 == 0 && a.sequence.CompareAndSwap(sequence, sequence+1) {
 			return sequence
 		}
 		runtime.Gosched()
 	}
 }
-func (a *Accumulator) unlock(sequence uint64) { atomic.StoreUint64(&a.sequence, sequence+2) }
+func (a *Accumulator) unlock(sequence uint64) { a.sequence.Store(sequence + 2) }
 
 // Tick closes the current interval and updates its exponentially weighted mean
 // using alpha = 1-exp(-ln(2)*elapsed/halfLife). The first completed measured rate
@@ -129,7 +129,7 @@ func (a *Accumulator) Tick(now time.Time, halfLife time.Duration) bool {
 // Current is an atomic observation from within the snapshot's read interval.
 func (a *Accumulator) Snapshot() Snapshot {
 	for {
-		sequence := atomic.LoadUint64(&a.sequence)
+		sequence := a.sequence.Load()
 		if sequence&1 != 0 {
 			runtime.Gosched()
 			continue
@@ -144,7 +144,7 @@ func (a *Accumulator) Snapshot() Snapshot {
 		if flags&accumulatorStarted != 0 {
 			s.Switched = time.Unix(0, atomic.LoadInt64(&a.switched))
 		}
-		if atomic.LoadUint64(&a.sequence) == sequence {
+		if a.sequence.Load() == sequence {
 			return s
 		}
 	}
@@ -159,16 +159,20 @@ func (a *Accumulator) LastPerSecond() float64 {
 }
 func (a *Accumulator) AveragePerSecond() float64 { return a.Snapshot().Average }
 
-// seedRate is reserved for importing an already-measured advisory rate. Event
-// counters should establish their first interval with Tick/Add/Tick instead.
-func (a *Accumulator) seedRate(now time.Time, rate float64) {
-	sequence := a.lock()
-	defer a.unlock(sequence)
-	atomic.StoreUint64(&a.average, math.Float64bits(rate))
-	atomic.StoreInt64(&a.last, 0)
-	atomic.StoreInt64(&a.interval, 0)
-	atomic.StoreInt64(&a.current, 0)
-	atomic.StoreInt64(&a.switched, now.UnixNano())
-	atomic.StoreUint32(&a.saturated, 0)
-	atomic.StoreUint32(&a.flags, accumulatorStarted|accumulatorKnown)
+// restore initializes a private, unused working counter from advisory history.
+// No live counter is copied. Callers own the new counter exclusively until its
+// immutable snapshot has been extracted.
+func (a *Accumulator) restore(s Snapshot) {
+	a.average = math.Float64bits(s.Average)
+	a.last, a.interval, a.current = s.Last, int64(s.Interval), s.Current
+	if !s.Switched.IsZero() {
+		a.switched = s.Switched.UnixNano()
+		a.flags |= accumulatorStarted
+	}
+	if s.Known {
+		a.flags |= accumulatorKnown
+	}
+	if s.Saturated {
+		a.saturated = 1
+	}
 }

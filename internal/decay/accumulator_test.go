@@ -7,7 +7,29 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+	"unsafe"
 )
+
+func TestAccumulatorEmbeddedAlignment(t *testing.T) {
+	type embedded struct {
+		prefix  byte
+		counter Accumulator
+	}
+	if offset := unsafe.Offsetof(embedded{}.counter); offset%8 != 0 {
+		t.Fatalf("embedded 64-bit atomics are not aligned: offset %d", offset)
+	}
+	var counters [2]embedded
+	start := time.Unix(100, 0)
+	for i := range counters {
+		c := &counters[i].counter
+		c.Tick(start, time.Second)
+		c.Add(17)
+		c.Tick(start.Add(time.Second), time.Second)
+		if c.Snapshot().Last != 17 {
+			t.Fatal("embedded accumulator lost events")
+		}
+	}
+}
 
 func closeValue(t *testing.T, got, want float64) {
 	t.Helper()

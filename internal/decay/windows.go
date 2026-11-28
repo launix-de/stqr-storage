@@ -32,9 +32,9 @@ func (v Values) Peak() float64 { return math.Max(v.Short, v.Long) }
 
 // Windows applies two half-lives to the same integer interval observations.
 // Both windows use Accumulator's Tick implementation. Callers synchronize all
-// access; quiescent value copies allow pure forecast reads without allocations.
+// access. Only immutable frame snapshots are copied, never live atomics.
 type Windows struct {
-	short, long Accumulator
+	short, long Snapshot
 	halfLives   HalfLives
 }
 
@@ -51,8 +51,8 @@ func (w *Windows) SeedRate(now time.Time, rate float64, h HalfLives) {
 		return
 	}
 	w.configure(h.Normalized())
-	w.short.seedRate(now, rate)
-	w.long.seedRate(now, rate)
+	w.short = Snapshot{Average: rate, Switched: now, Known: true}
+	w.long = w.short
 }
 
 // AddInterval records integer events distributed over [start,end]. Replayed or
@@ -65,7 +65,7 @@ func (w *Windows) AddInterval(start, end time.Time, amount int64, h HalfLives) {
 	}
 	h = h.Normalized()
 	w.configure(h)
-	at := w.short.Snapshot().Switched
+	at := w.short.Switched
 	if !at.IsZero() {
 		if !end.After(at) {
 			return
@@ -77,12 +77,8 @@ func (w *Windows) AddInterval(start, end time.Time, amount int64, h HalfLives) {
 			start = at
 		}
 	}
-	w.short.Tick(start, h.Short)
-	w.long.Tick(start, h.Long)
-	w.short.Add(amount)
-	w.long.Add(amount)
-	w.short.Tick(end, h.Short)
-	w.long.Tick(end, h.Long)
+	w.short = intervalFrame(w.short, start, end, amount, h.Short)
+	w.long = intervalFrame(w.long, start, end, amount, h.Long)
 }
 
 // Rates previews idle decay on a value copy. Querying later than the next real
@@ -90,9 +86,24 @@ func (w *Windows) AddInterval(start, end time.Time, amount int64, h HalfLives) {
 func (w Windows) Rates(now time.Time, h HalfLives) Values {
 	h = h.Normalized()
 	w.configure(h)
-	w.short.Tick(now, h.Short)
-	w.long.Tick(now, h.Long)
-	return Values{w.short.AveragePerSecond(), w.long.AveragePerSecond()}
+	return Values{previewFrame(w.short, now, h.Short), previewFrame(w.long, now, h.Long)}
+}
+
+// Working counters are private to this call. Snapshot import/export preserves
+// value semantics for immutable placement catalogs and speculative forecasts.
+func intervalFrame(frame Snapshot, start, end time.Time, amount int64, half time.Duration) Snapshot {
+	var counter Accumulator
+	counter.restore(frame)
+	counter.Tick(start, half)
+	counter.Add(amount)
+	counter.Tick(end, half)
+	return counter.Snapshot()
+}
+func previewFrame(frame Snapshot, now time.Time, half time.Duration) float64 {
+	var counter Accumulator
+	counter.restore(frame)
+	counter.Tick(now, half)
+	return counter.AveragePerSecond()
 }
 
 func valid(v float64) bool { return v >= 0 && !math.IsNaN(v) && !math.IsInf(v, 0) }

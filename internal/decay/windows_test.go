@@ -54,7 +54,7 @@ func TestWindowsIntegerProratingAndSeed(t *testing.T) {
 	w.AddInterval(now, now.Add(time.Second), 1, h)
 	// Exercise multiplication above 64-bit range without a float conversion.
 	w.AddInterval(now, now.Add(2*time.Second), math.MaxInt64, h)
-	if got := w.short.Snapshot().Last; got != math.MaxInt64/2 {
+	if got := w.short.Last; got != math.MaxInt64/2 {
 		t.Fatalf("integer prorating lost precision: %d", got)
 	}
 	var seeded Windows
