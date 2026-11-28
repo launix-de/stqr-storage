@@ -779,8 +779,15 @@ func TestTicket32FilesystemUnlinkLifetimeAndDeleteLoop(t *testing.T) {
 			t.Fatal("unreferenced inode survived offline collection", err)
 		}
 		count, _ := ticket32LiveObjects(store.MemoryFilesystemStore)
-		if count != 1 {
-			t.Fatal("delete loop left live objects beyond the root", i, count)
+		// The namespace root and its valid empty operational orphan queue
+		// remain; neither queue metadata nor pages may be partially swept.
+		if count != 2 {
+			t.Fatal("delete loop left live objects beyond roots", i, count)
+		}
+		queue, _, queueErr := store.Get(ctx, filesystemOrphansID)
+		queueNode, decodeErr := decodeFSNode(queue)
+		if queueErr != nil || decodeErr != nil || !bytes.Equal(queueNode.blob.inline, encodeFSOrphans(nil)) {
+			t.Fatal("operational orphan queue did not remain valid and empty", queueErr, decodeErr)
 		}
 		f, err = OpenFilesystem(ctx, store, FSOptions{})
 		if err != nil {
