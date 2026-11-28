@@ -115,7 +115,7 @@ func mappedSocket(t *testing.T, s *Server) (*wsSession, *websocket.Conn, *mapped
 	ready := make(chan *wsSession, 1)
 	accepted := make(chan *mappedBlockedConn, 1)
 	host := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		conn, err := (&websocket.Upgrader{}).Upgrade(w, r, nil)
+		conn, err := (&websocket.Upgrader{}).Upgrade(socketOutputResponseWriter{w}, r, nil)
 		if err != nil {
 			return
 		}
@@ -147,7 +147,8 @@ func TestMappedDownloadWireAndCancellation(t *testing.T) {
 	}
 	p := userPrincipal(t, s)
 	for _, ranged := range []bool{false, true} {
-		ws, c, _ := mappedSocket(t, s)
+		ws, c, blocked := mappedSocket(t, s)
+		ws.socketOutput().port = &testSocketOutputPort{conn: blocked.Conn, capacity: 8 << 20, partial: true}
 		op := &objectMutation{bucket: b, object: volume.ObjectID(id)}
 		m := client.Message{Kind: client.Request, Opcode: 0x100, ID: client.NewRequestID()}
 		length := uint64(math.MaxUint64)

@@ -177,7 +177,7 @@ func (s *Server) serveWebSocket(w http.ResponseWriter, r *http.Request, p princi
 		authorization.peerProfile = profile
 		responseHeaders.Set(compatibilityHeader, profileHeader(s.protocolVersion()))
 	}
-	conn, e := up.Upgrade(w, r, responseHeaders)
+	conn, e := up.Upgrade(socketOutputResponseWriter{w}, r, responseHeaders)
 	if e != nil {
 		s.opMu.Unlock()
 		return
@@ -389,6 +389,18 @@ func (ws *wsSession) requestLoop() {
 					}
 				})
 				continue
+			}
+			// Gate new object operations before they acquire storage or spawn work.
+			// Transfer continuations above must remain able to complete uploads.
+			if m.Opcode >= 0x100 && m.Opcode <= 0x108 {
+				if output := ws.socketOutput(); output != nil {
+					ctx, cancel := context.WithTimeout(ws.ctx, 10*time.Second)
+					_, err := output.wait(ctx, inlineObjectDownload+objectDownloadHeader, false)
+					cancel()
+					if err != nil {
+						return
+					}
+				}
 			}
 			if ws.server.launchPGRequest(ws.ctx, m, p, func(body []byte) {
 				defer ws.completeConnectionMessage(m, 200, body)

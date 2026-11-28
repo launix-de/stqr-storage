@@ -34,9 +34,9 @@ type borrowedWriteJob struct {
 // Queue only an operation, never a borrowed slice or an acquired read handle.
 // The sole socket writer acquires and releases the volume handle inside run.
 // In-place writes cannot change the borrowed bytes until frame output ends.
-// The tradeoff is that a slow socket blocks this volume's writers for at most the
-// write deadline. Fragmented views release the handle after bounded capture;
-// larger reads and missing inherited objects retain the existing captured path.
+// Kernel output capacity is admitted before storage acquisition. Nonblocking
+// writes capture any unsent suffix and flush it only after releasing storage.
+// Unsupported transports and fragmented views use bounded owned capture.
 func (ws *wsSession) directObjectDownload(ctx context.Context, m client.Message, p principal, op *objectMutation, length uint64, condition *volume.Options, runtime client.ID) (bool, int, error) {
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
@@ -58,9 +58,28 @@ func (ws *wsSession) directObjectDownload(ctx context.Context, m client.Message,
 	return result.sent, result.status, result.err
 }
 
-func (ws *wsSession) writeMappedObject(ctx context.Context, m client.Message, p principal, op *objectMutation, length uint64, condition *volume.Options, runtime client.ID) (bool, int, error) {
+func (ws *wsSession) writeMappedObject(ctx context.Context, m client.Message, p principal, op *objectMutation, length uint64, condition *volume.Options, runtime client.ID) (sent bool, responseStatus int, resultErr error) {
 	if err := ctx.Err(); err != nil {
 		return false, 0, err
+	}
+	borrow := false
+	if output := ws.socketOutput(); output != nil {
+		var err error
+		borrow, err = output.beginBorrow(ctx, inlineObjectDownload+objectDownloadHeader)
+		if err != nil {
+			return false, 0, err
+		}
+		if borrow {
+			// Registered before h.Close so storage guards unwind first.
+			defer func() {
+				if err := output.finishBorrow(ctx); err != nil {
+					ws.close()
+					if resultErr == nil {
+						resultErr, responseStatus = err, objectStatus(err)
+					}
+				}
+			}()
+		}
 	}
 	b := op.bucket
 	// Match checked copies: local physical records remain authoritative even
@@ -137,7 +156,7 @@ func (ws *wsSession) writeMappedObject(ctx context.Context, m client.Message, p 
 			return err
 		}
 		hash := sha256.New()
-		if len(view.Segments) > maxMappedDownloadSegments {
+		if !borrow || len(view.Segments) > maxMappedDownloadSegments {
 			// Keep this already checked snapshot. Do not release the handle and
 			// ask dispatch to read/check it a second time. One owned segment also
 			// stays within the native WebSocket fragmentation bound.
