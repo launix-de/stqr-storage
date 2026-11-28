@@ -426,6 +426,9 @@ func (s *Server) pgRebuildPeer(ctx context.Context, m client.Message, actor clie
 		return nil, ErrBucketForbidden
 	}
 	if req.Action == 2 {
+		if req.Commit != nil {
+			return nil, client.ErrProtocol
+		}
 		return r.requestPGCancellation(ctx, p, req.Done)
 	}
 	group, members, mask, err := s.pgForPlan(p)

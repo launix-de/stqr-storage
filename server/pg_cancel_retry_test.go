@@ -3,6 +3,7 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"path/filepath"
 	"testing"
@@ -13,12 +14,15 @@ import (
 )
 
 func TestAbortedRangeRetriesPGCancellationWithoutNewProofOrMove(t *testing.T) {
-	testAbortedPGCancellation(t, false)
+	testAbortedPGCancellation(t, false, false)
 }
 func TestAbortedRangeCancellationSurvivesBucketDeletion(t *testing.T) {
-	testAbortedPGCancellation(t, true)
+	testAbortedPGCancellation(t, true, false)
 }
-func testAbortedPGCancellation(t *testing.T, deleteBucket bool) {
+func TestPreparedPGCancellationSurvivesBucketDeletionWithoutStarting(t *testing.T) {
+	testAbortedPGCancellation(t, true, true)
+}
+func testAbortedPGCancellation(t *testing.T, deleteBucket, preparedOnly bool) {
 	node := startDaemonTestNode(t, filepath.Join(t.TempDir(), "node.yaml"), nil, false)
 	s := node.node
 	addReplicaDataVolume(t, s, "source", "hdd", 8<<20)
@@ -35,14 +39,31 @@ func testAbortedPGCancellation(t *testing.T, deleteBucket bool) {
 	r := s.scopes
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	if err = r.beginPG(ctx, p); err != nil {
-		t.Fatal(err)
-	}
-	if err = r.reserve(p); err != nil {
-		t.Fatal(err)
-	}
-	if err = r.abort(p); err != nil {
-		t.Fatal(err)
+	if preparedOnly {
+		group, members, mask, e := s.pgForPlan(p)
+		if e != nil {
+			t.Fatal(e)
+		}
+		round := pgRebuildRound{Group: group, ID: p.id(), Generation: 1, Membership: p.Before.Membership, Mask: mask, Members: members, Plan: mustRangeWire(p)}
+		r.mu.Lock()
+		if state := r.pgStates[group]; state != nil {
+			round.Generation = state.Generation + 1
+			round.Parent = state.Head
+		}
+		r.mu.Unlock()
+		if _, err = r.pgCall(ctx, members[0], peerPGRebuildState, pgRebuildStateRequest{Action: 0, Round: round}); err != nil {
+			t.Fatal(err)
+		}
+	} else {
+		if err = r.beginPG(ctx, p); err != nil {
+			t.Fatal(err)
+		}
+		if err = r.reserve(p); err != nil {
+			t.Fatal(err)
+		}
+		if err = r.abort(p); err != nil {
+			t.Fatal(err)
+		}
 	}
 	group, _, _, err := s.pgForPlan(p)
 	if err != nil {
@@ -106,6 +127,10 @@ func testAbortedPGCancellation(t *testing.T, deleteBucket bool) {
 			t.Fatal("deleted bucket lookup unexpectedly usable", err)
 		}
 	}
+	invalid, _ := json.Marshal(pgRebuildRequest{Action: 2, Plan: mustRangeWire(p), Done: proof, Commit: &rangeCommit{}})
+	if _, err = s.pgRebuildPeer(ctx, client.Message{Kind: client.Request, Opcode: peerPGRebuildRequest, Body: invalid}, p.Source); !errors.Is(err, client.ErrProtocol) {
+		t.Fatal("cancel request accepted a commit", err)
+	}
 	forged := round
 	forged.Cancelled = true
 	forged.Done = proof
@@ -118,8 +143,14 @@ func testAbortedPGCancellation(t *testing.T, deleteBucket bool) {
 	if _, err = r.requestPGCancellation(ctx, unknown, proof); !errors.Is(err, errControlConflict) {
 		t.Fatal("cancellation created an unaccepted generation", err)
 	}
-	if err = r.executeMove(ctx, p, false); !errors.Is(err, errControlConflict) {
-		t.Fatal("aborted range retry", err)
+	if preparedOnly {
+		if err = r.abortPG(ctx, p); err != nil {
+			t.Fatal(err)
+		}
+	} else {
+		if err = r.executeMove(ctx, p, false); !errors.Is(err, errControlConflict) {
+			t.Fatal("aborted range retry", err)
+		}
 	}
 	r.mu.Lock()
 	state := r.pgStates[group]
@@ -130,15 +161,27 @@ func testAbortedPGCancellation(t *testing.T, deleteBucket bool) {
 	if state.Active != nil || !found || !completed.Cancelled || completed.Done != proof {
 		t.Fatal("PG cancellation remained pending or changed proof", state, completed)
 	}
-	if !txn.aborted || txn.decision != nil || txn.sourceDone.RecordSequence != 0 || txn.snapshot != nil {
-		t.Fatal("aborted handoff was restarted")
+	if preparedOnly {
+		if txn != nil {
+			t.Fatal("prepared cancellation created a range transaction")
+		}
+	} else {
+		if !txn.aborted || txn.decision != nil || txn.sourceDone.RecordSequence != 0 || txn.snapshot != nil {
+			t.Fatal("aborted handoff was restarted")
+		}
 	}
 	// Exactly the normal completion record may follow the retained cancellation.
 	if after != sequence+1 {
 		t.Fatal("retry manufactured another cancellation proof", sequence, after)
 	}
-	if err = r.executeMove(ctx, p, false); !errors.Is(err, errControlConflict) {
-		t.Fatal(err)
+	if preparedOnly {
+		if err = r.abortPG(ctx, p); err != nil {
+			t.Fatal(err)
+		}
+	} else {
+		if err = r.executeMove(ctx, p, false); !errors.Is(err, errControlConflict) {
+			t.Fatal(err)
+		}
 	}
 	r.mu.Lock()
 	final := r.journal.sequence
