@@ -50,6 +50,7 @@ func (c *Client) scanFilesystemObjects(ctx context.Context, after *ObjectID, lim
 }
 
 func checkFilesystem(ctx context.Context, store fsCheckStore, opaqueRoots ...ObjectID) (FSCheckResult, error) {
+	ctx = context.WithValue(ctx, fsOfflineRecoveryKey{}, true)
 	var result FSCheckResult
 	if reset, ok := store.(interface{ ResetAbandonedObjectReferences(context.Context) error }); ok {
 		if err := reset.ResetAbandonedObjectReferences(ctx); err != nil {
