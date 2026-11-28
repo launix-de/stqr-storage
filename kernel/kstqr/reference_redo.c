@@ -86,7 +86,7 @@ static int help_tx_pinned(struct ks_fs *f, stqr_object_id first, stqr_id *origin
 			} else
 				depth--;
 			if (own) {
-				err = ks_object_reference(f, id, pin, 1);
+				err = ks_retire_pin(f, id, pin);
 				if (!err) {
 					memset(origin, 0, sizeof(*origin));
 					pinned = false;
@@ -102,7 +102,7 @@ static int help_tx_pinned(struct ks_fs *f, stqr_object_id first, stqr_id *origin
 				result = state == 1 ? 0 : -EAGAIN;
 				observed = true;
 			}
-			err = ks_object_reference(f, id, pin, 1);
+			err = ks_retire_pin(f, id, pin);
 			if (err)
 				goto cleanup;
 			pinned = false;
@@ -250,7 +250,7 @@ cleanup:
 				err = released;
 		}
 		if (pinned && !own) {
-			int released = ks_object_reference(f, id, pin, 1);
+			int released = ks_retire_pin(f, id, pin);
 			if (!err)
 				err = released;
 		}
